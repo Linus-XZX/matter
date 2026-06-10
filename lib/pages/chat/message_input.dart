@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
@@ -25,6 +27,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   bool _isSending = false;
   Timer? _typingTimer;
   bool _isTyping = false;
+  final _imagePicker = ImagePicker();
 
   @override
   void initState() {
@@ -111,6 +114,43 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     }
   }
 
+  Future<void> _pickImage() async {
+    if (_isSending) return;
+
+    try {
+      final pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+      );
+      if (pickedFile == null) return;
+
+      setState(() => _isSending = true);
+
+      final file = File(pickedFile.path);
+      final bytes = await file.readAsBytes();
+      final filename = pickedFile.name;
+
+      await rust.sendImageMessage(
+        roomId: widget.roomId,
+        imageData: bytes,
+        filename: filename,
+      );
+
+      ref.invalidate(messagesProvider(widget.roomId));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('发送图片失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final replyTo = ref.watch(replyingToProvider(widget.roomId));
@@ -138,11 +178,11 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                 children: [
                   IconButton(
                     icon: const Icon(
-                      Icons.add_circle_outline_rounded,
+                      Icons.image_outlined,
                       color: AppColors.onSurfaceVariant,
                       size: 26,
                     ),
-                    onPressed: () {},
+                    onPressed: _isSending ? null : _pickImage,
                     padding: EdgeInsets.zero,
                     constraints: const BoxConstraints(
                       minWidth: 40,

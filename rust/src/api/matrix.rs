@@ -1653,6 +1653,63 @@ pub async fn send_message(room_id: String, message: String) -> Result<(), String
     Ok(())
 }
 
+/// Send an image message to a room.
+/// `image_data` is the raw bytes of the image file.
+/// `filename` is the original file name (e.g. "photo.jpg").
+#[frb]
+pub async fn send_image_message(
+    room_id: String,
+    image_data: Vec<u8>,
+    filename: String,
+) -> Result<(), String> {
+    let client = get_client()
+        .await
+        .ok_or("No client created.")?;
+
+    let room = client.rooms()
+        .into_iter()
+        .find(|r| r.room_id().to_string() == room_id)
+        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+
+    // Detect MIME type from filename extension
+    let mime_type: mime::Mime = if filename.ends_with(".png") {
+        mime::IMAGE_PNG
+    } else if filename.ends_with(".gif") {
+        mime::IMAGE_GIF
+    } else if filename.ends_with(".webp") {
+        "image/webp".parse().unwrap_or(mime::IMAGE_JPEG)
+    } else {
+        mime::IMAGE_JPEG
+    };
+
+    app_log("info", "media", format!("Uploading image: {} ({} bytes, mime: {})", filename, image_data.len(), mime_type));
+
+    // Upload image to homeserver
+    let upload_response = client
+        .media()
+        .upload(&mime_type, image_data, None)
+        .await
+        .map_err(|e| format!("Image upload failed: {e}"))?;
+
+    let content_uri = upload_response.content_uri;
+    app_log("info", "media", format!("Image uploaded: {}", content_uri));
+
+    // Build image message content
+    use matrix_sdk::ruma::events::room::message::{ImageMessageEventContent, MessageType, RoomMessageEventContent};
+
+    let image_content = ImageMessageEventContent::plain(filename.clone(), content_uri);
+    let content = RoomMessageEventContent::new(MessageType::Image(image_content));
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Send image message failed: {e}"))?;
+
+    app_log("info", "rooms", format!("Image message sent to {}", room_id));
+    info!("Image message sent to {}", room_id);
+    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    Ok(())
+}
+
 /// Create a new direct chat room with a user.
 #[frb]
 pub async fn create_dm(user_id: String) -> Result<String, String> {

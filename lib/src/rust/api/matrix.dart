@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `app_log`, `build_sdk_data_dir`, `finalize_pending`, `format_timestamp`, `get_client`, `get_last_message_info`, `notify_sync_event`, `sanitize_for_path`, `set_connection_status`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`
+// These functions are ignored because they are not marked as `pub`: `app_log`, `build_sdk_data_dir`, `finalize_pending`, `format_timestamp`, `get_client`, `get_last_message_info`, `notify_sync_event`, `sanitize_for_path`, `set_connection_status`, `strip_reply_fallback`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `PendingEntry`, `SyncNotification`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -139,15 +139,20 @@ ConnectionStatus getConnectionStatus() =>
 
 Future<void> initClient() => RustLib.instance.api.crateApiMatrixInitClient();
 
-/// Convert an mxc:// URI to an HTTP URL for display.
-/// Format: `{homeserver}/_matrix/client/v1/media/thumbnail/{server_name}/{media_id}?width=800&height=600&method=scale`
-/// Returns None if the mxc:// URI is malformed.
+/// Convert an mxc:// URI to a thumbnail HTTP URL for chat bubbles.
+/// Format: `{homeserver}/_matrix/client/v1/media/thumbnail/{server}/{mediaId}?width=800&height=600&method=scale`
 Future<String?> mxcToHttp({required String mxcUrl}) =>
     RustLib.instance.api.crateApiMatrixMxcToHttp(mxcUrl: mxcUrl);
 
-/// Convert an mxc:// URI to a download HTTP URL (full quality).
+/// Convert an mxc:// URI to a full-quality download HTTP URL.
+/// Used for "原图" (original quality) preview.
 Future<String?> mxcToHttpFull({required String mxcUrl}) =>
     RustLib.instance.api.crateApiMatrixMxcToHttpFull(mxcUrl: mxcUrl);
+
+/// Download media content as raw bytes using the Matrix SDK's HTTP client.
+/// This is more reliable than constructing URLs and loading from Flutter.
+Future<Uint8List?> downloadMediaBytes({required String mxcUrl}) =>
+    RustLib.instance.api.crateApiMatrixDownloadMediaBytes(mxcUrl: mxcUrl);
 
 /// Get the current access token for authenticated media requests.
 Future<String?> getAccessToken() =>
@@ -166,6 +171,19 @@ Future<void> sendMessage({required String roomId, required String message}) =>
       roomId: roomId,
       message: message,
     );
+
+/// Send an image message to a room.
+/// `image_data` is the raw bytes of the image file.
+/// `filename` is the original file name (e.g. "photo.jpg").
+Future<void> sendImageMessage({
+  required String roomId,
+  required List<int> imageData,
+  required String filename,
+}) => RustLib.instance.api.crateApiMatrixSendImageMessage(
+  roomId: roomId,
+  imageData: imageData,
+  filename: filename,
+);
 
 /// Create a new direct chat room with a user.
 Future<String> createDm({required String userId}) =>

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1803612970;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1494476021;
 
 // Section: executor
 
@@ -151,6 +151,44 @@ fn wire__crate__api__matrix__create_group_room_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::matrix::create_group_room(api_name, api_topic).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__matrix__download_media_bytes_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "download_media_bytes",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_mxc_url = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let output_ok = Result::<_, ()>::Ok(
+                            crate::api::matrix::download_media_bytes(api_mxc_url).await,
+                        )?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1258,6 +1296,49 @@ fn wire__crate__api__matrix__search_rooms_impl(
         },
     )
 }
+fn wire__crate__api__matrix__send_image_message_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "send_image_message",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_room_id = <String>::sse_decode(&mut deserializer);
+            let api_image_data = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_filename = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::matrix::send_image_message(
+                            api_room_id,
+                            api_image_data,
+                            api_filename,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__matrix__send_message_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1878,6 +1959,17 @@ impl SseDecode for Option<crate::api::matrix::StoredSession> {
     }
 }
 
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::api::matrix::Space {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1960,48 +2052,50 @@ fn pde_ffi_dispatcher_primary_impl(
         1 => wire__crate__api__matrix__create_client_impl(port, ptr, rust_vec_len, data_len),
         2 => wire__crate__api__matrix__create_dm_impl(port, ptr, rust_vec_len, data_len),
         3 => wire__crate__api__matrix__create_group_room_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__matrix__get_access_token_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__matrix__get_active_user_id_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__matrix__get_chat_rooms_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__matrix__get_contacts_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__matrix__get_current_user_id_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__matrix__get_messages_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__matrix__get_messages_before_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__matrix__get_room_avatar_url_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__matrix__get_room_members_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__matrix__get_session_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__matrix__get_spaces_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__matrix__init_client_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__matrix__is_connected_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__matrix__is_logged_in_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__matrix__list_accounts_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__matrix__login_with_password_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__matrix__login_with_token_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__matrix__logout_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__matrix__mxc_to_http_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__matrix__mxc_to_http_full_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__matrix__redact_message_impl(port, ptr, rust_vec_len, data_len),
-        29 => {
+        4 => wire__crate__api__matrix__download_media_bytes_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__matrix__get_access_token_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__matrix__get_active_user_id_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__matrix__get_chat_rooms_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__matrix__get_contacts_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__matrix__get_current_user_id_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__matrix__get_messages_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__matrix__get_messages_before_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__matrix__get_room_avatar_url_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__matrix__get_room_members_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__matrix__get_session_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__matrix__get_spaces_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__matrix__init_client_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__matrix__is_connected_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__matrix__is_logged_in_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__matrix__list_accounts_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__matrix__login_with_password_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__matrix__login_with_token_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__matrix__logout_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__matrix__mxc_to_http_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__matrix__mxc_to_http_full_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__matrix__redact_message_impl(port, ptr, rust_vec_len, data_len),
+        30 => {
             wire__crate__api__matrix__register_complete_uiaa_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => wire__crate__api__matrix__register_get_uiaa_session_impl(
+        31 => wire__crate__api__matrix__register_get_uiaa_session_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        31 => wire__crate__api__matrix__remove_account_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__matrix__restore_session_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__matrix__search_rooms_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__matrix__send_message_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__matrix__send_reply_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__matrix__send_typing_notice_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__matrix__start_sync_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__matrix__switch_account_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__matrix__sync_once_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__matrix__watch_app_logs_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__matrix__watch_sync_events_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__matrix__remove_account_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__matrix__restore_session_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__matrix__search_rooms_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__matrix__send_image_message_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__matrix__send_message_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__matrix__send_reply_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__matrix__send_typing_notice_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__matrix__start_sync_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__matrix__switch_account_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__matrix__sync_once_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__matrix__watch_app_logs_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__matrix__watch_sync_events_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2014,9 +2108,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        7 => wire__crate__api__matrix__get_connection_status_impl(ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__matrix__get_recent_logs_impl(ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__simple__greet_impl(ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__matrix__get_connection_status_impl(ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__matrix__get_recent_logs_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__simple__greet_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2523,6 +2617,16 @@ impl SseEncode for Option<crate::api::matrix::StoredSession> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::matrix::StoredSession>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
         }
     }
 }
