@@ -5,13 +5,26 @@
 
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
+part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_sdk_data_dir`, `format_timestamp`, `get_client`, `get_last_message_info`, `store_client`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `uiaa_to_auth_result`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `SyncNotification`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `app_log`, `build_sdk_data_dir`, `finalize_pending`, `format_timestamp`, `get_client`, `get_last_message_info`, `notify_sync_event`, `sanitize_for_path`, `set_connection_status`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `PendingEntry`, `SyncNotification`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// Stream app log entries from Rust → Dart (live).
+Stream<AppLogEntry> watchAppLogs() =>
+    RustLib.instance.api.crateApiMatrixWatchAppLogs();
+
+/// Retrieve all buffered logs (up to 500 entries).
+/// Call this once after connecting the stream to show historical logs.
+List<AppLogEntry> getRecentLogs() =>
+    RustLib.instance.api.crateApiMatrixGetRecentLogs();
 
 /// Create a Matrix client for the given homeserver URL.
 /// Must be called before any registration / login attempt.
+/// The client is stored as "pending" until a login succeeds,
+/// after which it is automatically migrated to a per-user store.
 Future<void> createClient({
   required String homeserverUrl,
   required String dataDir,
@@ -20,8 +33,7 @@ Future<void> createClient({
   dataDir: dataDir,
 );
 
-/// Step 1 of registration: send a register request without auth to discover
-/// the UIAA session and flows. The server will respond with 401 + UIAA info.
+/// Step 1 of registration: discover UIAA flows.
 Future<AuthResult> registerGetUiaaSession({
   required String username,
   required String password,
@@ -30,8 +42,7 @@ Future<AuthResult> registerGetUiaaSession({
   password: password,
 );
 
-/// Step 2 of registration: complete registration by providing the registration
-/// token and the UIAA session obtained from register_get_uiaa_session.
+/// Step 2 of registration: complete with token + session.
 Future<AuthResult> registerCompleteUiaa({
   required String username,
   required String password,
@@ -71,14 +82,31 @@ Future<bool> isLoggedIn() => RustLib.instance.api.crateApiMatrixIsLoggedIn();
 Future<String?> getCurrentUserId() =>
     RustLib.instance.api.crateApiMatrixGetCurrentUserId();
 
-/// Logout the current user.
+/// Get the currently active user ID (the account being used).
+Future<String?> getActiveUserId() =>
+    RustLib.instance.api.crateApiMatrixGetActiveUserId();
+
+/// List all logged-in accounts.
+Future<List<AccountInfo>> listAccounts() =>
+    RustLib.instance.api.crateApiMatrixListAccounts();
+
+/// Switch the active account. Returns true if the account exists and was activated.
+Future<bool> switchAccount({required String userId}) =>
+    RustLib.instance.api.crateApiMatrixSwitchAccount(userId: userId);
+
+/// Logout the active user and remove its data.
 Future<void> logout() => RustLib.instance.api.crateApiMatrixLogout();
+
+/// Remove a specific account by user_id (logout + delete data).
+Future<void> removeAccount({required String userId}) =>
+    RustLib.instance.api.crateApiMatrixRemoveAccount(userId: userId);
 
 /// Get the current session if logged in, for persisting to disk.
 Future<StoredSession?> getSession() =>
     RustLib.instance.api.crateApiMatrixGetSession();
 
-/// Restore a previously saved session.
+/// Restore a previously saved session (used on app startup).
+/// Uses a per-user store directory so multiple accounts coexist.
 Future<void> restoreSession({
   required StoredSession session,
   required String dataDir,
@@ -87,17 +115,21 @@ Future<void> restoreSession({
   dataDir: dataDir,
 );
 
-/// Perform an initial sync and then start a background sync loop.
-/// Returns immediately after the initial sync. The background sync
-/// runs forever via `client.sync()` which uses long-polling (30s timeout).
-/// When new events arrive, we notify via the sync_state stream.
+/// Perform an initial sync with a 30-second timeout.
+/// Uses traditional /sync for the initial load (Sliding Sync needs
+/// this data in the state store first).
 Future<void> syncOnce() => RustLib.instance.api.crateApiMatrixSyncOnce();
 
-/// Start a background sync loop. This uses long-polling (the server holds
-/// the connection for up to 30s waiting for new events, then responds).
-/// After each response, it immediately starts the next poll.
-/// This is the standard approach for Matrix clients — NOT polling.
+/// Start a Sliding Sync loop for real-time updates.
+/// Falls back to traditional sync_once loop if Sliding Sync is unavailable.
 Future<void> startSync() => RustLib.instance.api.crateApiMatrixStartSync();
+
+/// Stream real-time sync events from Rust → Dart.
+/// Call this once on app start and listen for updates.
+/// When a `SyncCompleted` event arrives, refresh the room list.
+/// When a `MessageSent` event arrives, refresh that room's messages.
+Stream<SyncEvent> watchSyncEvents() =>
+    RustLib.instance.api.crateApiMatrixWatchSyncEvents();
 
 /// Check if background sync is alive.
 Future<bool> isConnected() => RustLib.instance.api.crateApiMatrixIsConnected();
@@ -107,7 +139,20 @@ ConnectionStatus getConnectionStatus() =>
 
 Future<void> initClient() => RustLib.instance.api.crateApiMatrixInitClient();
 
-/// Get all joined rooms (must sync first).
+/// Convert an mxc:// URI to an HTTP URL for display.
+/// Format: `{homeserver}/_matrix/client/v1/media/thumbnail/{server_name}/{media_id}?width=800&height=600&method=scale`
+/// Returns None if the mxc:// URI is malformed.
+Future<String?> mxcToHttp({required String mxcUrl}) =>
+    RustLib.instance.api.crateApiMatrixMxcToHttp(mxcUrl: mxcUrl);
+
+/// Convert an mxc:// URI to a download HTTP URL (full quality).
+Future<String?> mxcToHttpFull({required String mxcUrl}) =>
+    RustLib.instance.api.crateApiMatrixMxcToHttpFull(mxcUrl: mxcUrl);
+
+/// Get the current access token for authenticated media requests.
+Future<String?> getAccessToken() =>
+    RustLib.instance.api.crateApiMatrixGetAccessToken();
+
 Future<List<ChatRoom>> getChatRooms() =>
     RustLib.instance.api.crateApiMatrixGetChatRooms();
 
@@ -123,12 +168,10 @@ Future<void> sendMessage({required String roomId, required String message}) =>
     );
 
 /// Create a new direct chat room with a user.
-/// Returns the new room ID.
 Future<String> createDm({required String userId}) =>
     RustLib.instance.api.crateApiMatrixCreateDm(userId: userId);
 
 /// Create a group room with a name and optional topic.
-/// Returns the new room ID.
 Future<String> createGroupRoom({required String name, String? topic}) => RustLib
     .instance
     .api
@@ -139,6 +182,120 @@ Future<List<Space>> getSpaces() =>
 
 Future<List<Contact>> getContacts() =>
     RustLib.instance.api.crateApiMatrixGetContacts();
+
+/// Send a reply to a specific message in a room.
+Future<void> sendReply({
+  required String roomId,
+  required String message,
+  required String replyToEventId,
+}) => RustLib.instance.api.crateApiMatrixSendReply(
+  roomId: roomId,
+  message: message,
+  replyToEventId: replyToEventId,
+);
+
+/// Redact (delete) a message from a room.
+Future<void> redactMessage({
+  required String roomId,
+  required String eventId,
+  String? reason,
+}) => RustLib.instance.api.crateApiMatrixRedactMessage(
+  roomId: roomId,
+  eventId: eventId,
+  reason: reason,
+);
+
+/// Send a typing notice to a room.
+Future<void> sendTypingNotice({required String roomId, required bool typing}) =>
+    RustLib.instance.api.crateApiMatrixSendTypingNotice(
+      roomId: roomId,
+      typing: typing,
+    );
+
+/// Get members of a room.
+Future<List<Contact>> getRoomMembers({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomMembers(roomId: roomId);
+
+/// Get the avatar URL for a room.
+Future<String?> getRoomAvatarUrl({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomAvatarUrl(roomId: roomId);
+
+/// Search rooms by name.
+Future<List<ChatRoom>> searchRooms({required String query}) =>
+    RustLib.instance.api.crateApiMatrixSearchRooms(query: query);
+
+/// Load more messages (paginated) from before a given event.
+Future<List<ChatMessage>> getMessagesBefore({
+  required String roomId,
+  required String fromEventId,
+  required int limit,
+}) => RustLib.instance.api.crateApiMatrixGetMessagesBefore(
+  roomId: roomId,
+  fromEventId: fromEventId,
+  limit: limit,
+);
+
+/// Info about a logged-in account (for listing / switching).
+class AccountInfo {
+  final String userId;
+  final String deviceId;
+  final String homeserverUrl;
+
+  const AccountInfo({
+    required this.userId,
+    required this.deviceId,
+    required this.homeserverUrl,
+  });
+
+  @override
+  int get hashCode =>
+      userId.hashCode ^ deviceId.hashCode ^ homeserverUrl.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountInfo &&
+          runtimeType == other.runtimeType &&
+          userId == other.userId &&
+          deviceId == other.deviceId &&
+          homeserverUrl == other.homeserverUrl;
+}
+
+/// A single log entry visible to the user.
+class AppLogEntry {
+  /// Milliseconds since Unix epoch
+  final PlatformInt64 timestamp;
+
+  /// log / warn / error
+  final String level;
+
+  /// What subsystem: sync, auth, rooms, media, etc.
+  final String tag;
+
+  /// The actual message
+  final String message;
+
+  const AppLogEntry({
+    required this.timestamp,
+    required this.level,
+    required this.tag,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      timestamp.hashCode ^ level.hashCode ^ tag.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AppLogEntry &&
+          runtimeType == other.runtimeType &&
+          timestamp == other.timestamp &&
+          level == other.level &&
+          tag == other.tag &&
+          message == other.message;
+}
 
 /// Result of a registration or login attempt
 class AuthResult {
@@ -202,6 +359,9 @@ class ChatMessage {
   final MessageType msgType;
   final String? imageUrl;
 
+  /// Event ID this message is replying to, if any.
+  final String? inReplyTo;
+
   const ChatMessage({
     required this.id,
     required this.senderId,
@@ -211,6 +371,7 @@ class ChatMessage {
     required this.isMe,
     required this.msgType,
     this.imageUrl,
+    this.inReplyTo,
   });
 
   @override
@@ -222,7 +383,8 @@ class ChatMessage {
       timestamp.hashCode ^
       isMe.hashCode ^
       msgType.hashCode ^
-      imageUrl.hashCode;
+      imageUrl.hashCode ^
+      inReplyTo.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -236,7 +398,8 @@ class ChatMessage {
           timestamp == other.timestamp &&
           isMe == other.isMe &&
           msgType == other.msgType &&
-          imageUrl == other.imageUrl;
+          imageUrl == other.imageUrl &&
+          inReplyTo == other.inReplyTo;
 }
 
 class ChatRoom {
@@ -249,6 +412,9 @@ class ChatRoom {
   final bool isPinned;
   final bool isMuted;
 
+  /// "dm", "group", or "space"
+  final String roomType;
+
   const ChatRoom({
     required this.id,
     required this.name,
@@ -258,6 +424,7 @@ class ChatRoom {
     required this.unreadCount,
     required this.isPinned,
     required this.isMuted,
+    required this.roomType,
   });
 
   @override
@@ -269,7 +436,8 @@ class ChatRoom {
       lastMessageTime.hashCode ^
       unreadCount.hashCode ^
       isPinned.hashCode ^
-      isMuted.hashCode;
+      isMuted.hashCode ^
+      roomType.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -283,7 +451,8 @@ class ChatRoom {
           lastMessageTime == other.lastMessageTime &&
           unreadCount == other.unreadCount &&
           isPinned == other.isPinned &&
-          isMuted == other.isMuted;
+          isMuted == other.isMuted &&
+          roomType == other.roomType;
 }
 
 enum ConnectionStatus { connected, connecting, updating, disconnected }
@@ -316,7 +485,13 @@ class Contact {
           status == other.status;
 }
 
-enum MessageType { text, image }
+enum MessageType {
+  text,
+  image,
+
+  /// State/member change event (join, leave, etc.)
+  event,
+}
 
 class Space {
   final String id;
@@ -368,4 +543,16 @@ class StoredSession {
           accessToken == other.accessToken &&
           userId == other.userId &&
           deviceId == other.deviceId;
+}
+
+@freezed
+sealed class SyncEvent with _$SyncEvent {
+  const SyncEvent._();
+
+  /// A sync cycle completed (rooms may have new messages).
+  const factory SyncEvent.syncCompleted() = SyncEvent_SyncCompleted;
+
+  /// A message was sent (room list should refresh).
+  const factory SyncEvent.messageSent({required String roomId}) =
+      SyncEvent_MessageSent;
 }

@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
-import '../../theme/app_theme.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../widgets/app_avatar.dart';
 
-class ImagePreviewPage extends StatelessWidget {
+/// Full-screen image preview with authentication support.
+class ImagePreviewPage extends ConsumerWidget {
   final String imageUrl;
 
   const ImagePreviewPage({super.key, required this.imageUrl});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -18,18 +20,9 @@ class ImagePreviewPage extends StatelessWidget {
               maxScale: 4.0,
               child: Hero(
                 tag: imageUrl,
-                child: Image.network(
-                  imageUrl,
+                child: AuthenticatedImageMessage(
+                  imageUrl: imageUrl,
                   fit: BoxFit.contain,
-                  loadingBuilder: (context, child, progress) {
-                    if (progress == null) return child;
-                    return const Center(
-                      child: CircularProgressIndicator(
-                        color: AppColors.primary,
-                        strokeWidth: 2,
-                      ),
-                    );
-                  },
                 ),
               ),
             ),
@@ -40,7 +33,11 @@ class ImagePreviewPage extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.all(8),
                 child: IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28),
+                  icon: const Icon(
+                    Icons.close_rounded,
+                    color: Colors.white,
+                    size: 28,
+                  ),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
               ),

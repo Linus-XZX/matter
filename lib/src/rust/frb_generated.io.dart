@@ -20,7 +20,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<AppLogEntry> dco_decode_StreamSink_app_log_entry_Sse(
+    dynamic raw,
+  );
+
+  @protected
+  RustStreamSink<SyncEvent> dco_decode_StreamSink_sync_event_Sse(dynamic raw);
+
+  @protected
   String dco_decode_String(dynamic raw);
+
+  @protected
+  AccountInfo dco_decode_account_info(dynamic raw);
+
+  @protected
+  AppLogEntry dco_decode_app_log_entry(dynamic raw);
 
   @protected
   AuthResult dco_decode_auth_result(dynamic raw);
@@ -45,6 +62,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  List<AccountInfo> dco_decode_list_account_info(dynamic raw);
+
+  @protected
+  List<AppLogEntry> dco_decode_list_app_log_entry(dynamic raw);
 
   @protected
   List<ChatMessage> dco_decode_list_chat_message(dynamic raw);
@@ -77,13 +103,38 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredSession dco_decode_stored_session(dynamic raw);
 
   @protected
+  SyncEvent dco_decode_sync_event(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
 
   @protected
   void dco_decode_unit(dynamic raw);
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<AppLogEntry> sse_decode_StreamSink_app_log_entry_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<SyncEvent> sse_decode_StreamSink_sync_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  AccountInfo sse_decode_account_info(SseDeserializer deserializer);
+
+  @protected
+  AppLogEntry sse_decode_app_log_entry(SseDeserializer deserializer);
 
   @protected
   AuthResult sse_decode_auth_result(SseDeserializer deserializer);
@@ -110,6 +161,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  List<AccountInfo> sse_decode_list_account_info(SseDeserializer deserializer);
+
+  @protected
+  List<AppLogEntry> sse_decode_list_app_log_entry(SseDeserializer deserializer);
 
   @protected
   List<ChatMessage> sse_decode_list_chat_message(SseDeserializer deserializer);
@@ -144,13 +204,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredSession sse_decode_stored_session(SseDeserializer deserializer);
 
   @protected
+  SyncEvent sse_decode_sync_event(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer);
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_app_log_entry_Sse(
+    RustStreamSink<AppLogEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_sync_event_Sse(
+    RustStreamSink<SyncEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_account_info(AccountInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_app_log_entry(AppLogEntry self, SseSerializer serializer);
 
   @protected
   void sse_encode_auth_result(AuthResult self, SseSerializer serializer);
@@ -181,6 +271,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_account_info(
+    List<AccountInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_app_log_entry(
+    List<AppLogEntry> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_chat_message(
@@ -220,6 +325,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_stored_session(StoredSession self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sync_event(SyncEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);

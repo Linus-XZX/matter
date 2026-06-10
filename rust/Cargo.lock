@@ -2888,6 +2888,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "flutter_rust_bridge",
+ "futures-util",
  "log",
  "matrix-sdk",
  "once_cell",

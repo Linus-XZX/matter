@@ -53,6 +53,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   }
 
   void _onAuthSuccess(String userId, String displayName) {
+    // Mark connected immediately — background sync handles the rest
     ref.read(isLoggedInProvider.notifier).state = true;
     ref.read(currentUserProvider.notifier).state = CurrentUser(
       id: userId,
@@ -60,24 +61,41 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       homeserver: _homeserverController.text,
     );
     ref.read(homeserverProvider.notifier).state = _homeserverController.text;
+    ref.read(connectionProvider.notifier).state = AppConnectionState.connecting;
 
     // Persist session + sync in background
     _persistAndSync(userId, displayName);
   }
 
   Future<void> _initialSync() async {
-    try {
-      await rust.syncOnce();
-      ref.invalidate(chatRoomsProvider);
-      // Start background sync for real-time updates
-      await rust.startSync();
-      // Mark connected after successful sync
-      if (mounted) {
-        ref.read(connectionProvider.notifier).state = AppConnectionState.connected;
+    // Retry sync up to 3 times with increasing delay
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await rust.syncOnce();
+        // Sync succeeded — refresh room list and mark connected
+        ref.invalidate(chatRoomsProvider);
+        if (mounted) {
+          ref.read(connectionProvider.notifier).state =
+              AppConnectionState.connected;
+        }
+        break;
+      } catch (e) {
+        debugPrint('Initial sync attempt ${attempt + 1} failed: $e');
+        if (attempt < 2) {
+          await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
+        }
       }
-    } catch (e) {
-      debugPrint('Initial sync failed: $e');
     }
+    // Start background sync regardless of initial sync result
+    try {
+      await rust.startSync();
+    } catch (e) {
+      debugPrint('startSync failed: $e');
+    }
+    // Initialize the sync event listener so UI auto-refreshes
+    ref.read(syncStreamProvider);
+    // Refresh room list
+    ref.invalidate(chatRoomsProvider);
   }
 
   Future<void> _persistAndSync(String userId, String displayName) async {
@@ -91,6 +109,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         deviceId: session.deviceId,
         displayName: displayName,
       );
+      // Update multi-account providers
+      ref.read(activeUserIdProvider.notifier).state = session.userId;
+      ref.read(sessionsProvider.notifier).state = await loadAllSessions();
     }
     await _initialSync();
   }
@@ -109,7 +130,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
     setState(() => _isLoading = true);
     try {
-      await rust.createClient(homeserverUrl: _homeserverController.text, dataDir: await _getDataDir());
+      await rust.createClient(
+        homeserverUrl: _homeserverController.text,
+        dataDir: await _getDataDir(),
+      );
       final result = await rust.loginWithPassword(
         username: _usernameController.text,
         password: _passwordController.text,
@@ -142,7 +166,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
     setState(() => _isLoading = true);
     try {
-      await rust.createClient(homeserverUrl: _homeserverController.text, dataDir: await _getDataDir());
+      await rust.createClient(
+        homeserverUrl: _homeserverController.text,
+        dataDir: await _getDataDir(),
+      );
 
       rust.AuthResult result;
 
@@ -192,7 +219,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
     setState(() => _isLoading = true);
     try {
-      await rust.createClient(homeserverUrl: _homeserverController.text, dataDir: await _getDataDir());
+      await rust.createClient(
+        homeserverUrl: _homeserverController.text,
+        dataDir: await _getDataDir(),
+      );
       final result = await rust.loginWithToken(
         accessToken: _accessTokenController.text,
         userId: _userIdController.text,

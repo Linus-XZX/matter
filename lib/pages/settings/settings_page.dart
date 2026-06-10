@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/auth_provider.dart';
+import '../../providers/chat_provider.dart';
+import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 
 import '../../theme/app_theme.dart';
 import '../../widgets/app_card.dart';
+import 'log_viewer_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -14,9 +17,157 @@ class SettingsPage extends ConsumerStatefulWidget {
 }
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
+  List<rust.AccountInfo> _accounts = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAccounts();
+  }
+
+  Future<void> _loadAccounts() async {
+    try {
+      final accounts = await rust.listAccounts();
+      if (mounted) {
+        setState(() {
+          _accounts = accounts;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to load accounts: $e');
+    }
+  }
+
+  Future<void> _switchAccount(String userId) async {
+    final activeId = ref.read(activeUserIdProvider);
+    if (userId == activeId) return;
+
+    try {
+      final success = await rust.switchAccount(userId: userId);
+      if (success && mounted) {
+        final sessions = await loadAllSessions();
+        final session = sessions.cast<rust.StoredSession?>().firstWhere(
+          (s) => s?.userId == userId,
+          orElse: () => null,
+        );
+        if (session != null) {
+          final displayName = await loadDisplayName(userId);
+          ref.read(activeUserIdProvider.notifier).state = userId;
+          ref.read(currentUserProvider.notifier).state = CurrentUser(
+            id: userId,
+            displayName: displayName,
+            homeserver: session.homeserverUrl,
+          );
+          ref.read(homeserverProvider.notifier).state = session.homeserverUrl;
+
+          // Re-sync with new account
+          ref.read(connectionProvider.notifier).state =
+              AppConnectionState.connecting;
+          try {
+            await rust.syncOnce();
+            ref.invalidate(chatRoomsProvider);
+            ref.read(connectionProvider.notifier).state =
+                AppConnectionState.connected;
+          } catch (e) {
+            debugPrint('syncOnce after switch failed: $e');
+            ref.read(connectionProvider.notifier).state =
+                AppConnectionState.disconnected;
+          }
+          try {
+            await rust.startSync();
+          } catch (e) {
+            debugPrint('startSync after switch failed: $e');
+          }
+          ref.read(syncStreamProvider);
+          ref.invalidate(chatRoomsProvider);
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('切换账号失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _removeAccount(String userId) async {
+    final activeId = ref.read(activeUserIdProvider);
+    final isCurrentAccount = userId == activeId;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Text(
+          isCurrentAccount ? '退出登录' : '移除账号',
+          style: const TextStyle(color: AppColors.onBackground),
+        ),
+        content: Text(
+          isCurrentAccount ? '确定要退出当前账号吗？' : '确定要移除这个账号吗？',
+          style: const TextStyle(color: AppColors.onSurfaceVariant),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      if (isCurrentAccount) {
+        await rust.logout();
+      } else {
+        await rust.removeAccount(userId: userId);
+      }
+      await removeSession(userId);
+      await _loadAccounts();
+
+      if (isCurrentAccount) {
+        // Check if there are other accounts
+        final remaining = await loadAllSessions();
+        if (remaining.isNotEmpty) {
+          // Switch to the first remaining account
+          final nextSession = remaining.first;
+          await _switchAccount(nextSession.userId);
+        } else {
+          // No accounts left, go to login
+          ref.read(isLoggedInProvider.notifier).state = false;
+          ref.read(currentUserProvider.notifier).state = null;
+          ref.read(activeUserIdProvider.notifier).state = null;
+        }
+      }
+
+      ref.read(sessionsProvider.notifier).state = await loadAllSessions();
+    } catch (e) {
+      debugPrint('Failed to remove account: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('操作失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentUser = ref.watch(currentUserProvider);
+    final activeUserId = ref.watch(activeUserIdProvider);
 
     return Scaffold(
       body: CustomScrollView(
@@ -113,6 +264,39 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       ],
                     ),
                   ),
+
+                  // ── Account switcher ────────────────────────────────
+                  if (_accounts.length > 1) ...[
+                    const SizedBox(height: 20),
+                    _buildGroup(
+                      title: '账号切换',
+                      items: _accounts.map((account) {
+                        final isActive = account.userId == activeUserId;
+                        return _SettingItem(
+                          icon: Icons.person_outline_rounded,
+                          iconColor: isActive
+                              ? AppColors.primary
+                              : AppColors.onSurfaceVariant,
+                          title: _formatUserId(account.userId),
+                          subtitle: account.homeserverUrl.replaceAll(
+                            RegExp(r'https?://'),
+                            '',
+                          ),
+                          trailing: isActive
+                              ? const Icon(
+                                  Icons.check_circle_rounded,
+                                  color: AppColors.primary,
+                                  size: 20,
+                                )
+                              : null,
+                          onTap: isActive
+                              ? null
+                              : () => _switchAccount(account.userId),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+
                   const SizedBox(height: 20),
                   // Settings groups
                   _buildGroup(
@@ -170,7 +354,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         icon: Icons.account_tree_rounded,
                         iconColor: AppColors.primary,
                         title: 'Homeserver',
-                        subtitle: 'matrix.org',
+                        subtitle:
+                            currentUser?.homeserver.replaceAll(
+                              RegExp(r'https?://'),
+                              '',
+                            ) ??
+                            'matrix.org',
                         onTap: () {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
@@ -237,24 +426,69 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           showLicensePage(context: context);
                         },
                       ),
+                      _SettingItem(
+                        icon: Icons.terminal_rounded,
+                        iconColor: AppColors.warning,
+                        title: '查看日志',
+                        subtitle: '调试连接、同步问题',
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const LogViewerPage(),
+                            ),
+                          );
+                        },
+                      ),
                     ],
                   ),
                   if (currentUser != null) ...[
                     const SizedBox(height: 20),
+                    // Remove other accounts (not current)
+                    ..._accounts
+                        .where((a) => a.userId != activeUserId)
+                        .map(
+                          (account) => Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: AppCard(
+                              color: AppColors.onSurfaceVariant.withValues(
+                                alpha: 0.06,
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 10,
+                              ),
+                              onTap: () => _removeAccount(account.userId),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.remove_circle_outline_rounded,
+                                    color: AppColors.onSurfaceVariant,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    '移除 ${_formatUserId(account.userId)}',
+                                    style: TextStyle(
+                                      color: AppColors.onSurfaceVariant,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                    const SizedBox(height: 8),
+                    // Logout current account
                     AppCard(
                       color: AppColors.error.withValues(alpha: 0.12),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 14,
                       ),
-                      onTap: () async {
-                        try {
-                          await rust.logout();
-                        } catch (_) {}
-                        await clearPersistedSession();
-                        ref.read(isLoggedInProvider.notifier).state = false;
-                        ref.read(currentUserProvider.notifier).state = null;
-                      },
+                      onTap: () =>
+                          _removeAccount(activeUserId ?? currentUser.id),
                       child: const Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -283,6 +517,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ],
       ),
     );
+  }
+
+  String _formatUserId(String userId) {
+    // @aka:matrix.local -> aka (matrix.local)
+    final parts = userId.split(':');
+    final local = parts.first.replaceFirst('@', '');
+    final server = parts.length > 1 ? parts.sublist(1).join(':') : '';
+    return server.isNotEmpty ? '$local ($server)' : local;
   }
 
   Widget _buildGroup({required String title, required List<Widget> items}) {
@@ -314,14 +556,16 @@ class _SettingItem extends StatelessWidget {
   final Color iconColor;
   final String title;
   final String subtitle;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final Widget? trailing;
 
   const _SettingItem({
     required this.icon,
     required this.iconColor,
     required this.title,
     required this.subtitle,
-    required this.onTap,
+    this.onTap,
+    this.trailing,
   });
 
   @override
@@ -348,10 +592,12 @@ class _SettingItem extends StatelessWidget {
                 children: [
                   Text(
                     title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: AppColors.onBackground,
                       fontSize: 15,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: onTap != null
+                          ? FontWeight.w600
+                          : FontWeight.w500,
                     ),
                   ),
                   if (subtitle.isNotEmpty)
@@ -365,11 +611,14 @@ class _SettingItem extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: AppColors.onSurfaceVariant,
-              size: 20,
-            ),
+            if (trailing != null)
+              trailing!
+            else if (onTap != null)
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppColors.onSurfaceVariant,
+                size: 20,
+              ),
           ],
         ),
       ),

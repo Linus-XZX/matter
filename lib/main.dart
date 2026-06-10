@@ -30,11 +30,7 @@ Future<void> main() async {
     DeviceOrientation.portraitDown,
   ]);
 
-  runApp(
-    const ProviderScope(
-      child: _AppRoot(),
-    ),
-  );
+  runApp(const ProviderScope(child: _AppRoot()));
 }
 
 class _AppRoot extends ConsumerStatefulWidget {
@@ -50,38 +46,104 @@ class _AppRootState extends ConsumerState<_AppRoot> {
   @override
   void initState() {
     super.initState();
-    _tryRestoreSession();
+    _tryRestoreSessions();
   }
 
-  Future<void> _tryRestoreSession() async {
+  Future<void> _tryRestoreSessions() async {
     try {
-      final session = await loadPersistedSession();
-      if (session != null) {
-        final dataDir = (await getApplicationSupportDirectory()).path;
-        await rust.restoreSession(session: session, dataDir: dataDir);
-        final displayName = await loadPersistedDisplayName() ?? session.userId.split(':').first.replaceFirst('@', '');
+      // Migrate legacy single-session format if present
+      await migrateLegacySession();
+
+      final sessions = await loadAllSessions();
+      final activeId = await loadActiveUserId();
+
+      if (sessions.isEmpty) {
+        debugPrint('No sessions found');
+        return;
+      }
+
+      final dataDir = (await getApplicationSupportDirectory()).path;
+      String? restoredActiveId;
+      String? restoredDisplayName;
+      String? restoredHomeserver;
+
+      // Restore all sessions, starting with the active one
+      final orderedSessions = List<rust.StoredSession>.from(sessions);
+      if (activeId != null) {
+        // Move active session to front
+        final activeIdx = orderedSessions.indexWhere(
+          (s) => s.userId == activeId,
+        );
+        if (activeIdx > 0) {
+          final active = orderedSessions.removeAt(activeIdx);
+          orderedSessions.insert(0, active);
+        }
+      }
+
+      for (final session in orderedSessions) {
+        try {
+          await rust.restoreSession(session: session, dataDir: dataDir);
+          debugPrint('Restored session for ${session.userId}');
+
+          if (restoredActiveId == null || session.userId == activeId) {
+            restoredActiveId = session.userId;
+            restoredHomeserver = session.homeserverUrl;
+            restoredDisplayName = await loadDisplayName(session.userId);
+          }
+        } catch (e) {
+          debugPrint('Failed to restore session for ${session.userId}: $e');
+          // Remove corrupted session
+          await removeSession(session.userId);
+        }
+      }
+
+      // If we restored at least one session, set it as active
+      if (restoredActiveId != null) {
+        // Switch to the active account in Rust
+        await rust.switchAccount(userId: restoredActiveId);
 
         ref.read(isLoggedInProvider.notifier).state = true;
         ref.read(currentUserProvider.notifier).state = CurrentUser(
-          id: session.userId,
-          displayName: displayName,
-          homeserver: session.homeserverUrl,
+          id: restoredActiveId,
+          displayName:
+              restoredDisplayName ??
+              restoredActiveId.split(':').first.replaceFirst('@', ''),
+          homeserver: restoredHomeserver ?? '',
         );
-        ref.read(homeserverProvider.notifier).state = session.homeserverUrl;
+        ref.read(homeserverProvider.notifier).state = restoredHomeserver ?? '';
+        ref.read(activeUserIdProvider.notifier).state = restoredActiveId;
+        ref.read(sessionsProvider.notifier).state = await loadAllSessions();
+        // Mark as connecting while we sync
+        ref.read(connectionProvider.notifier).state =
+            AppConnectionState.connecting;
 
-        // Sync + start background sync
-        await rust.syncOnce();
-        ref.invalidate(chatRoomsProvider);
-        await rust.startSync();
-        // Connected now
-        if (mounted) {
-          ref.read(connectionProvider.notifier).state = AppConnectionState.connected;
+        // Sync with retry
+        for (var attempt = 0; attempt < 3; attempt++) {
+          try {
+            await rust.syncOnce();
+            ref.invalidate(chatRoomsProvider);
+            // Sync succeeded — mark connected
+            ref.read(connectionProvider.notifier).state =
+                AppConnectionState.connected;
+            break;
+          } catch (e) {
+            debugPrint('Restore sync attempt ${attempt + 1} failed: $e');
+            if (attempt < 2) {
+              await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
+            }
+          }
         }
+        try {
+          await rust.startSync();
+        } catch (e) {
+          debugPrint('startSync after restore failed: $e');
+        }
+        // Initialize sync event listener for auto-refresh
+        ref.read(syncStreamProvider);
+        ref.invalidate(chatRoomsProvider);
       }
     } catch (e) {
       debugPrint('Session restore failed: $e');
-      // Clear corrupted session
-      await clearPersistedSession();
     } finally {
       if (mounted) {
         setState(() => _isRestoring = false);

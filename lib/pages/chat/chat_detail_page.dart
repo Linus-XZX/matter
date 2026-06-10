@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../providers/message_provider.dart';
+import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
@@ -14,6 +13,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final String roomName;
   final String? avatarUrl;
   final String subtitle;
+  final bool isDm;
 
   const ChatDetailPage({
     super.key,
@@ -21,6 +21,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     required this.roomName,
     this.avatarUrl,
     this.subtitle = '在线',
+    this.isDm = false,
   });
 
   @override
@@ -31,6 +32,38 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   final _scrollController = ScrollController();
   final Map<int, double> _heights = {};
   final Map<int, GlobalKey> _keys = {};
+  int _prevGroupCount = 0;
+
+  /// senderId → avatar HTTP URL, populated from room members.
+  Map<String, String?> _avatarMap = {};
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(replyingToProvider(widget.roomId).notifier).state = null;
+      ref.read(currentRoomIdProvider.notifier).state = widget.roomId;
+    });
+  }
+
+  void _buildAvatarMap(List<ChatMessage> messages, List<Contact> members) {
+    final map = <String, String?>{};
+    for (final m in members) {
+      map[m.id] = m.avatarUrl;
+    }
+    // Also cover senders not in members (edge case)
+    for (final msg in messages) {
+      if (!msg.isMe && !map.containsKey(msg.senderId)) {
+        map[msg.senderId] = null;
+      }
+    }
+    _avatarMap = map;
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
 
   List<MessageGroup> _groupMessages(List<ChatMessage> messages) {
     final groups = <MessageGroup>[];
@@ -60,6 +93,13 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     return groups;
   }
 
+  @override
+  void deactivate() {
+    // Clear current room when leaving
+    ref.read(currentRoomIdProvider.notifier).state = null;
+    super.deactivate();
+  }
+
   void _measureHeights() {
     for (final entry in _keys.entries) {
       final box = entry.value.currentContext?.findRenderObject() as RenderBox?;
@@ -69,24 +109,19 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     }
   }
 
-  Widget _buildAvatar(String name) {
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: AppColors.surfaceElevated,
-        borderRadius: BorderRadius.circular(AppRadii.tag),
-      ),
-      child: Center(
-        child: Text(
-          name.isNotEmpty ? name[0] : '?',
-          style: const TextStyle(
-            color: AppColors.primary,
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
+  /// Default height for unmeasured groups: use the median of already-measured heights.
+  double get _defaultHeight {
+    if (_heights.isEmpty) return 80.0;
+    final vals = _heights.values.toList()..sort();
+    return vals[vals.length ~/ 2];
+  }
+
+  Widget _buildAvatar(String name, String? avatarUrl) {
+    return AppAvatar(
+      fallback: name,
+      size: 48,
+      radius: AppRadii.content,
+      url: avatarUrl,
     );
   }
 
@@ -114,6 +149,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
               fallback: widget.roomName,
               size: 36,
               radius: AppRadii.content,
+              url: widget.avatarUrl,
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -156,7 +192,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
               Icons.more_vert_rounded,
               color: AppColors.onBackground,
             ),
-            onPressed: () {},
+            onPressed: () {
+              _showRoomDetails(context);
+            },
           ),
         ],
       ),
@@ -167,32 +205,47 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
               data: (messages) {
                 final groups = _groupMessages(messages);
 
-                // 按时间正序排列，reverse:true 会把列表末尾（最新消息）显示在屏幕底部
-                _keys.clear();
+                // Resolve member avatars
+                final membersAsync = ref.read(
+                  roomMembersProvider(widget.roomId),
+                );
+                membersAsync.whenData(
+                  (members) => _buildAvatarMap(messages, members),
+                );
+
+                // Lazily create keys only for new indices; remove stale ones.
                 for (int i = 0; i < groups.length; i++) {
                   if (!groups[i].isMe) {
-                    _keys[i] = GlobalKey();
+                    _keys.putIfAbsent(i, () => GlobalKey());
                   }
                 }
-                WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => _measureHeights(),
-                );
+                // Remove keys for indices that no longer exist
+                _keys.removeWhere((i, _) => i >= groups.length);
+                // Schedule a height measurement if group count changed
+                if (groups.length != _prevGroupCount) {
+                  _prevGroupCount = groups.length;
+                  WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => _measureHeights(),
+                  );
+                }
 
                 return CustomScrollView(
                   reverse: true,
                   controller: _scrollController,
                   slivers: [
                     const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
-                    // sliver 顺序：最新在前 → reverse:true 把它显示在底部
                     for (int i = groups.length - 1; i >= 0; i--)
                       if (groups[i].isMe)
                         SliverToBoxAdapter(
-                          child: MessageGroupWidget(group: groups[i]),
+                          child: MessageGroupWidget(
+                            group: groups[i],
+                            roomId: widget.roomId,
+                          ),
                         )
                       else
                         SliverLayoutBuilder(
                           builder: (context, constraints) {
-                            final height = _heights[i] ?? 80.0;
+                            final height = _heights[i] ?? _defaultHeight;
                             final so = constraints.scrollOffset;
                             final dy = (-so).clamp(39.5 - height, 0.0);
 
@@ -203,29 +256,30 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                                 children: [
                                   MessageGroupWidget(
                                     group: groups[i],
+                                    roomId: widget.roomId,
                                     showAvatar: false,
+                                    compact: widget.isDm,
                                   ),
-                                  Positioned(
-                                    left: 12,
-                                    bottom: 4.5,
-                                    child: Transform.translate(
-                                      offset: Offset(0, dy),
-                                      child: SizedBox(
-                                        width: 32,
-                                        height: 32,
+                                  if (!widget.isDm)
+                                    Positioned(
+                                      left: 12,
+                                      bottom: 4.5,
+                                      child: Transform.translate(
+                                        offset: Offset(0, dy),
                                         child: _buildAvatar(
                                           groups[i].senderName,
+                                          _avatarMap[groups[i].senderId],
                                         ),
                                       ),
                                     ),
-                                  ),
                                 ],
                               ),
                             );
                           },
                         ),
-                    // DateSeparator 在 sliver 列表末尾 → reverse 后显示在最顶部（最旧消息上方）
-                    const SliverToBoxAdapter(child: DateSeparator(dateLabel: '今天')),
+                    const SliverToBoxAdapter(
+                      child: DateSeparator(dateLabel: '今天'),
+                    ),
                     const SliverPadding(padding: EdgeInsets.only(top: 8)),
                   ],
                 );
@@ -237,15 +291,171 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                 ),
               ),
               error: (err, _) => Center(
-                child: Text(
-                  '加载失败: $err',
-                  style: const TextStyle(color: AppColors.onSurfaceVariant),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: SelectableText(
+                    '加载失败: $err',
+                    style: const TextStyle(color: AppColors.onSurfaceVariant),
+                  ),
                 ),
               ),
             ),
           ),
-          MessageInput(roomId: widget.roomId),
+          MessageInput(
+            key: ValueKey('msg_input_${widget.roomId}'),
+            roomId: widget.roomId,
+          ),
         ],
+      ),
+    );
+  }
+
+  void _showRoomDetails(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        margin: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadii.surface),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    AppAvatar(
+                      fallback: widget.roomName,
+                      size: 56,
+                      url: widget.avatarUrl,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.roomName,
+                            style: const TextStyle(
+                              color: AppColors.onBackground,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            widget.roomId,
+                            style: const TextStyle(
+                              color: AppColors.onSurfaceVariant,
+                              fontSize: 12,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(color: AppColors.surfaceVariant, height: 0.5),
+              // Room members preview
+              Consumer(
+                builder: (context, ref, _) {
+                  final membersAsync = ref.watch(
+                    roomMembersProvider(widget.roomId),
+                  );
+                  return membersAsync.when(
+                    data: (members) {
+                      return Column(
+                        children: [
+                          _DetailMenuItem(
+                            icon: Icons.people_rounded,
+                            label: '成员 (${members.length})',
+                            onTap: () => Navigator.of(context).pop(),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            child: SizedBox(
+                              height: 44,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: members.length > 10
+                                    ? 10
+                                    : members.length,
+                                separatorBuilder: (_, _) =>
+                                    const SizedBox(width: 8),
+                                itemBuilder: (context, index) {
+                                  final member = members[index];
+                                  return AppAvatar(
+                                    fallback: member.name,
+                                    size: 40,
+                                    radius: 20,
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                    loading: () => const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: CircularProgressIndicator(
+                        color: AppColors.primary,
+                        strokeWidth: 2,
+                      ),
+                    ),
+                    error: (_, _) => const SizedBox.shrink(),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DetailMenuItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _DetailMenuItem({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            Icon(icon, color: AppColors.onSurface, size: 22),
+            const SizedBox(width: 14),
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppColors.onBackground,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

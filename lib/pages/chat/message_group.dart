@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../src/rust/api/matrix.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../providers/chat_provider.dart';
+import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
+import '../../widgets/app_avatar.dart';
 import 'image_message_bubble.dart';
+import 'message_input.dart';
 
 class MessageGroup {
   final String senderId;
@@ -18,18 +22,24 @@ class MessageGroup {
   });
 }
 
-class MessageGroupWidget extends StatelessWidget {
+class MessageGroupWidget extends ConsumerWidget {
   final MessageGroup group;
   final bool showAvatar;
+  final String roomId;
+  final String? senderAvatarUrl;
+  final bool compact;
 
   const MessageGroupWidget({
     super.key,
     required this.group,
+    required this.roomId,
     this.showAvatar = true,
+    this.senderAvatarUrl,
+    this.compact = false,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isMe = group.isMe;
 
     if (isMe) {
@@ -38,7 +48,17 @@ class MessageGroupWidget extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: group.messages
-              .map((m) => _buildMessage(context, m, true))
+              .asMap()
+              .entries
+              .map(
+                (e) => _buildMessage(
+                  context,
+                  ref,
+                  e.value,
+                  true,
+                  isFirst: e.key == 0,
+                ),
+              )
               .toList(),
         ),
       );
@@ -46,7 +66,7 @@ class MessageGroupWidget extends StatelessWidget {
 
     return Padding(
       padding: EdgeInsets.only(
-        left: showAvatar ? 12 : 52,
+        left: compact ? 12 : (showAvatar ? 12 : 68),
         right: 12,
         top: 3,
         bottom: 3,
@@ -54,13 +74,23 @@ class MessageGroupWidget extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          if (showAvatar) _buildAvatar(group.senderName),
+          if (showAvatar) _buildAvatar(group.senderName, senderAvatarUrl),
           if (showAvatar) const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: group.messages
-                  .map((m) => _buildMessage(context, m, false))
+                  .asMap()
+                  .entries
+                  .map(
+                    (e) => _buildMessage(
+                      context,
+                      ref,
+                      e.value,
+                      false,
+                      isFirst: e.key == 0,
+                    ),
+                  )
                   .toList(),
             ),
           ),
@@ -69,23 +99,37 @@ class MessageGroupWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildMessage(BuildContext context, ChatMessage message, bool isMe) {
+  Widget _buildMessage(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+    bool isMe, {
+    bool isFirst = false,
+  }) {
     return GestureDetector(
-      onLongPress: () => _showContextMenu(context, message),
+      onLongPress: () => _showContextMenu(context, ref, message),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 1.5),
-        child: message.msgType == MessageType.image && message.imageUrl != null
+        child: message.msgType == MessageType.event
+            ? _buildEventMessage(message)
+            : message.msgType == MessageType.image && message.imageUrl != null
             ? ImageMessageBubble(
                 imageUrl: message.imageUrl!,
                 timestamp: message.timestamp,
                 isMe: isMe,
               )
-            : _buildTextBubble(message, isMe),
+            : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst),
       ),
     );
   }
 
-  Widget _buildTextBubble(ChatMessage message, bool isMe) {
+  Widget _buildTextBubble(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+    bool isMe, {
+    bool isFirst = false,
+  }) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -101,7 +145,7 @@ class MessageGroupWidget extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isMe)
+          if (!isMe && isFirst)
             Padding(
               padding: const EdgeInsets.only(bottom: 3),
               child: Text(
@@ -113,6 +157,9 @@ class MessageGroupWidget extends StatelessWidget {
                 ),
               ),
             ),
+          // Reply preview
+          if (message.inReplyTo != null)
+            _buildReplyPreview(context, ref, message, isMe),
           Text(
             message.content,
             style: TextStyle(
@@ -140,28 +187,97 @@ class MessageGroupWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildAvatar(String name) {
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: AppColors.surfaceElevated,
-        borderRadius: BorderRadius.circular(AppRadii.tag),
-      ),
+  Widget _buildReplyPreview(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+    bool isMe,
+  ) {
+    return FutureBuilder<String?>(
+      future: _getReplyContent(ref, message.inReplyTo!),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox.shrink();
+        final replyContent = snapshot.data!;
+        return Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: (isMe ? Colors.white : AppColors.primary).withValues(
+              alpha: 0.1,
+            ),
+            borderRadius: BorderRadius.circular(AppRadii.tag),
+            border: Border(
+              left: BorderSide(
+                color: isMe ? Colors.white : AppColors.primary,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Text(
+            replyContent,
+            style: TextStyle(
+              color: isMe
+                  ? Colors.white.withValues(alpha: 0.7)
+                  : AppColors.onSurfaceVariant,
+              fontSize: 12,
+              height: 1.3,
+            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        );
+      },
+    );
+  }
+
+  Future<String> _getReplyContent(WidgetRef ref, String replyToId) async {
+    // Look for the replied-to message in current messages
+    final messages = await ref.read(messagesProvider(roomId).future);
+    final found = messages.where((m) => m.id == replyToId).firstOrNull;
+    if (found != null) {
+      return '${found.senderName}: ${found.content}';
+    }
+    return '...';
+  }
+
+  Widget _buildEventMessage(ChatMessage message) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Center(
-        child: Text(
-          name.isNotEmpty ? name[0] : '?',
-          style: const TextStyle(
-            color: AppColors.primary,
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceVariant.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(AppRadii.tag),
+          ),
+          child: Text(
+            message.content,
+            style: const TextStyle(
+              color: AppColors.onSurfaceVariant,
+              fontSize: 12,
+              fontWeight: FontWeight.w400,
+            ),
+            textAlign: TextAlign.center,
           ),
         ),
       ),
     );
   }
 
-  void _showContextMenu(BuildContext context, ChatMessage message) {
+  Widget _buildAvatar(String name, String? avatarUrl) {
+    return AppAvatar(
+      fallback: name,
+      size: 48,
+      radius: AppRadii.content,
+      url: avatarUrl,
+    );
+  }
+
+  void _showContextMenu(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -193,21 +309,41 @@ class MessageGroupWidget extends StatelessWidget {
               _MenuItem(
                 icon: Icons.reply_rounded,
                 label: '回复',
-                onTap: () => Navigator.of(context).pop(),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  // Set the reply target
+                  ref.read(replyingToProvider(roomId).notifier).state = message;
+                },
               ),
               _MenuItem(
                 icon: Icons.forward_rounded,
                 label: '转发',
                 onTap: () => Navigator.of(context).pop(),
               ),
-              const Divider(color: AppColors.surfaceVariant, height: 0.5),
-              _MenuItem(
-                icon: Icons.delete_outline_rounded,
-                label: '删除',
-                iconColor: AppColors.error,
-                textColor: AppColors.error,
-                onTap: () => Navigator.of(context).pop(),
-              ),
+              if (message.isMe) ...[
+                const Divider(color: AppColors.surfaceVariant, height: 0.5),
+                _MenuItem(
+                  icon: Icons.delete_outline_rounded,
+                  label: '撤回',
+                  iconColor: AppColors.error,
+                  textColor: AppColors.error,
+                  onTap: () async {
+                    Navigator.of(context).pop();
+                    try {
+                      await redactMessage(ref, roomId, message.id);
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('撤回失败: $e'),
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ],
             ],
           ),
         ),
