@@ -128,12 +128,14 @@ class _AuthenticatedImage extends StatefulWidget {
   final String? token;
   final Widget fallback;
   final BoxFit? fit;
+  final VoidCallback? onLoaded;
 
   const _AuthenticatedImage({
     required this.url,
     required this.token,
     required this.fallback,
     this.fit,
+    this.onLoaded,
   });
 
   @override
@@ -187,6 +189,7 @@ class _AuthenticatedImageState extends State<_AuthenticatedImage> {
           _imageBytes = cached;
           _loading = false;
         });
+        widget.onLoaded?.call();
       }
       return;
     }
@@ -210,6 +213,7 @@ class _AuthenticatedImageState extends State<_AuthenticatedImage> {
             _imageBytes = bytes;
             _loading = false;
           });
+          widget.onLoaded?.call();
         }
       } else {
         if (mounted) {
@@ -256,12 +260,14 @@ class AuthenticatedImageMessage extends ConsumerWidget {
   final String imageUrl;
   final VoidCallback? onTap;
   final BoxFit? fit;
+  final VoidCallback? onLoaded;
 
   const AuthenticatedImageMessage({
     super.key,
     required this.imageUrl,
     this.onTap,
     this.fit,
+    this.onLoaded,
   });
 
   @override
@@ -292,6 +298,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
         token: token,
         fallback: brokenIcon,
         fit: fit ?? BoxFit.cover,
+        onLoaded: onLoaded,
       ),
       loading: () => const Center(
         child: CircularProgressIndicator(

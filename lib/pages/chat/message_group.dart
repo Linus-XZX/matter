@@ -28,6 +28,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final String roomId;
   final String? senderAvatarUrl;
   final bool compact;
+  final VoidCallback? onImageLoaded;
 
   const MessageGroupWidget({
     super.key,
@@ -36,6 +37,7 @@ class MessageGroupWidget extends ConsumerWidget {
     this.showAvatar = true,
     this.senderAvatarUrl,
     this.compact = false,
+    this.onImageLoaded,
   });
 
   @override
@@ -121,6 +123,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 imageUrl: message.imageUrl!,
                 timestamp: message.timestamp,
                 isMe: isMe,
+                onLoaded: onImageLoaded,
               )
             : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst),
       ),

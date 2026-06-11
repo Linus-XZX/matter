@@ -8,12 +8,14 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final String imageUrl;
   final String timestamp;
   final bool isMe;
+  final VoidCallback? onLoaded;
 
   const ImageMessageBubble({
     super.key,
     required this.imageUrl,
     required this.timestamp,
     required this.isMe,
+    this.onLoaded,
   });
 
   @override
@@ -46,10 +48,12 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       final url = await resolveMxcUrl(ref, widget.imageUrl);
       if (mounted && url != null) {
         setState(() => _resolvedUrl = url);
+        widget.onLoaded?.call();
       }
       // If null, _resolvedUrl stays null → shows broken; retried on next rebuild
     } else {
       _resolvedUrl = widget.imageUrl;
+      widget.onLoaded?.call();
     }
   }
 
@@ -98,7 +102,10 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
           child: Stack(
             alignment: Alignment.bottomRight,
             children: [
-              AuthenticatedImageMessage(imageUrl: url),
+              AuthenticatedImageMessage(
+                imageUrl: url,
+                onLoaded: widget.onLoaded,
+              ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(

@@ -32,10 +32,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   final _scrollController = ScrollController();
   final Map<int, double> _heights = {};
   final Map<int, GlobalKey> _keys = {};
-  int _prevGroupCount = 0;
 
   /// senderId → avatar HTTP URL, populated from room members.
   Map<String, String?> _avatarMap = {};
+
+  // ── Sticky avatar constants ─────────────────────────────────────────
+  //
+  // The sticky offset limit is: avatar size + bottom padding + top gap.
+  static const double _avatarSize = 48.0;
+  static const double _avatarBottom = 4.5;
+  static const double _stickyLimit =
+      _avatarSize + _avatarBottom; // avatar slides all the way to the group top
 
   @override
   void initState() {
@@ -92,11 +99,19 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   }
 
   void _measureHeights() {
+    bool changed = false;
     for (final entry in _keys.entries) {
       final box = entry.value.currentContext?.findRenderObject() as RenderBox?;
       if (box != null && box.hasSize) {
-        _heights[entry.key] = box.size.height;
+        final newHeight = box.size.height;
+        if (_heights[entry.key] != newHeight) {
+          _heights[entry.key] = newHeight;
+          changed = true;
+        }
       }
+    }
+    if (changed && mounted) {
+      setState(() {});
     }
   }
 
@@ -110,7 +125,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   Widget _buildAvatar(String name, String? avatarUrl) {
     return AppAvatar(
       fallback: name,
-      size: 48,
+      size: _avatarSize,
       radius: AppRadii.content,
       url: avatarUrl,
     );
@@ -212,13 +227,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                 }
                 // Remove keys for indices that no longer exist
                 _keys.removeWhere((i, _) => i >= groups.length);
-                // Schedule a height measurement if group count changed
-                if (groups.length != _prevGroupCount) {
-                  _prevGroupCount = groups.length;
-                  WidgetsBinding.instance.addPostFrameCallback(
-                    (_) => _measureHeights(),
-                  );
-                }
+                // Schedule height measurement after every build so that async
+                // image loads are picked up even when the group count doesn't change.
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _measureHeights(),
+                );
 
                 return CustomScrollView(
                   reverse: true,
@@ -238,7 +251,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                           builder: (context, constraints) {
                             final height = _heights[i] ?? _defaultHeight;
                             final so = constraints.scrollOffset;
-                            final dy = (-so).clamp(39.5 - height, 0.0);
+
+                            // Slide the avatar from its resting position at the
+                            // message group's bottom up to the top gap, then
+                            // hold it there. Because each group's avatar is
+                            // clipped to its own Stack, it cannot follow the
+                            // viewport bottom across groups; a full Telegram-
+                            // style sticky header would need a global sliver
+                            // header instead.
+                            final dy = (-so).clamp(
+                              _stickyLimit - height,
+                              0.0,
+                            );
 
                             return SliverToBoxAdapter(
                               child: Stack(
@@ -250,11 +274,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                                     roomId: widget.roomId,
                                     showAvatar: false,
                                     compact: widget.isDm,
+                                    onImageLoaded: _measureHeights,
                                   ),
                                   if (!widget.isDm)
                                     Positioned(
                                       left: 12,
-                                      bottom: 4.5,
+                                      bottom: _avatarBottom,
                                       child: Transform.translate(
                                         offset: Offset(0, dy),
                                         child: _buildAvatar(
