@@ -126,15 +126,20 @@ Future<void> redactMessage(
 final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
   final stream = rust.watchSyncEvents();
   DateTime? lastMessageRefresh;
+  DateTime? lastRoomRefresh;
   final subscription = stream.listen((event) {
     switch (event) {
       case rust.SyncEvent_SyncCompleted():
-        // A sync round completed — refresh room list always
-        ref.invalidate(chatRoomsProvider);
+        // Debounce room-list refreshes to avoid flooding during rapid syncs
+        final now = DateTime.now();
+        if (lastRoomRefresh == null ||
+            now.difference(lastRoomRefresh!).inMilliseconds >= 2000) {
+          lastRoomRefresh = now;
+          ref.invalidate(chatRoomsProvider);
+        }
         // Refresh messages for the currently open room, but debounce to avoid flicker
         final currentRoomId = ref.read(currentRoomIdProvider);
         if (currentRoomId != null) {
-          final now = DateTime.now();
           if (lastMessageRefresh == null ||
               now.difference(lastMessageRefresh!).inMilliseconds >= 500) {
             lastMessageRefresh = now;

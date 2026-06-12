@@ -54,6 +54,14 @@ tasks.register<Exec>("buildRust") {
     }
 }
 
-tasks.named("preBuild").configure {
+tasks.register<Exec>("stripRustSo") {
     dependsOn("buildRust")
+    val soFile = file("src/main/jniLibs/arm64-v8a/librust_lib_matter.so")
+    val llvmStrip = file("${android.ndkDirectory}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip")
+    commandLine(llvmStrip, "--strip-all", soFile.absolutePath)
+    onlyIf { soFile.exists() }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("stripRustSo")
 }

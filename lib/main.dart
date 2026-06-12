@@ -76,7 +76,10 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       final sessions = await loadAllSessions();
       final activeId = await loadActiveUserId();
 
-      if (sessions.isEmpty) return;
+      if (sessions.isEmpty) {
+        ref.read(sessionReadyProvider.notifier).state = true;
+        return;
+      }
 
       final dataDir = (await getApplicationSupportDirectory()).path;
       String? restoredDisplayName;
@@ -130,6 +133,8 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       }
     } catch (e) {
       debugPrint('Session restore failed: $e');
+      // Still mark ready so providers unblock — user can retry from UI.
+      ref.read(sessionReadyProvider.notifier).state = true;
     }
 
     // Run the potentially slow sync in the background.

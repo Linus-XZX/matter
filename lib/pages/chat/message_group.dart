@@ -43,6 +43,32 @@ class MessageGroupWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isMe = group.isMe;
+    final isEventGroup = group.messages.every(
+      (m) => m.msgType == MessageType.event,
+    );
+
+    if (isEventGroup) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: group.messages
+              .asMap()
+              .entries
+              .map(
+                (e) => _buildMessage(
+                  context,
+                  ref,
+                  e.value,
+                  false,
+                  isFirst: e.key == 0,
+                  isLast: e.key == group.messages.length - 1,
+                ),
+              )
+              .toList(),
+        ),
+      );
+    }
 
     if (isMe) {
       return Padding(
@@ -112,12 +138,9 @@ class MessageGroupWidget extends ConsumerWidget {
     return GestureDetector(
       onLongPress: () => _showContextMenu(context, ref, message),
       child: Padding(
-        padding: EdgeInsets.only(
-          top: isFirst ? 2 : 1,
-          bottom: isLast ? 10 : 1,
-        ),
+        padding: EdgeInsets.only(top: isFirst ? 2 : 1, bottom: isLast ? 10 : 1),
         child: message.msgType == MessageType.event
-            ? _buildEventMessage(message)
+            ? _buildEventMessage(context, message)
             : message.msgType == MessageType.image && message.imageUrl != null
             ? ImageMessageBubble(
                 imageUrl: message.imageUrl!,
@@ -233,7 +256,9 @@ class MessageGroupWidget extends ConsumerWidget {
           return Container(
             decoration: const BoxDecoration(
               color: AppColors.surface,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadii.surface)),
+              borderRadius: BorderRadius.vertical(
+                top: Radius.circular(AppRadii.surface),
+              ),
             ),
             child: Column(
               children: [
@@ -264,7 +289,10 @@ class MessageGroupWidget extends ConsumerWidget {
                 Expanded(
                   child: ListView.builder(
                     controller: scrollController,
-                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 16,
+                    ),
                     itemCount: message.editHistory.length,
                     itemBuilder: (context, index) {
                       final isOriginal = index == 0;
@@ -275,7 +303,7 @@ class MessageGroupWidget extends ConsumerWidget {
                       } else if (isLatest) {
                         label = '最新';
                       } else {
-                        label = '第 ${index} 次编辑';
+                        label = '第 $index 次编辑';
                       }
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -285,17 +313,28 @@ class MessageGroupWidget extends ConsumerWidget {
                             Row(
                               children: [
                                 Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: isLatest
-                                        ? AppColors.primary.withValues(alpha: 0.15)
-                                        : AppColors.surfaceVariant.withValues(alpha: 0.5),
-                                    borderRadius: BorderRadius.circular(AppRadii.tag),
+                                        ? AppColors.primary.withValues(
+                                            alpha: 0.15,
+                                          )
+                                        : AppColors.surfaceVariant.withValues(
+                                            alpha: 0.5,
+                                          ),
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadii.tag,
+                                    ),
                                   ),
                                   child: Text(
                                     label,
                                     style: TextStyle(
-                                      color: isLatest ? AppColors.primary : AppColors.onSurfaceVariant,
+                                      color: isLatest
+                                          ? AppColors.primary
+                                          : AppColors.onSurfaceVariant,
                                       fontSize: 11,
                                       fontWeight: FontWeight.w600,
                                     ),
@@ -380,24 +419,65 @@ class MessageGroupWidget extends ConsumerWidget {
     return '...';
   }
 
-  Widget _buildEventMessage(ChatMessage message) {
+  IconData _eventIcon(ChatMessage message) {
+    final content = message.content;
+    if (content.contains('加入') || content.contains('邀请')) {
+      return Icons.person_add_rounded;
+    }
+    if (content.contains('退出') ||
+        content.contains('离开') ||
+        content.contains('踢出') ||
+        content.contains('移出')) {
+      return Icons.person_remove_rounded;
+    }
+    if (content.contains('创建')) {
+      return Icons.add_circle_outline_rounded;
+    }
+    if (content.contains('修改') ||
+        content.contains('更改') ||
+        content.contains('设置')) {
+      return Icons.edit_rounded;
+    }
+    return Icons.info_outline_rounded;
+  }
+
+  Widget _buildEventMessage(BuildContext context, ChatMessage message) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Center(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.82,
+            minHeight: 24,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
             color: AppColors.surfaceVariant.withValues(alpha: 0.4),
             borderRadius: BorderRadius.circular(AppRadii.tag),
           ),
-          child: Text(
-            message.content,
-            style: const TextStyle(
-              color: AppColors.onSurfaceVariant,
-              fontSize: 12,
-              fontWeight: FontWeight.w400,
-            ),
-            textAlign: TextAlign.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(
+                _eventIcon(message),
+                size: 13,
+                color: AppColors.onSurfaceVariant,
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  message.content,
+                  style: const TextStyle(
+                    color: AppColors.onSurfaceVariant,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    height: 1.2,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
           ),
         ),
       ),

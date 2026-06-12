@@ -69,6 +69,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -93,8 +94,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   @override
   void deactivate() {
-    // Clear current room when leaving
-    ref.read(currentRoomIdProvider.notifier).state = null;
+    // Clear current room when leaving — defer to avoid modifying provider during build.
+    Future.microtask(() {
+      try {
+        ref.read(currentRoomIdProvider.notifier).state = null;
+      } catch (_) {}
+    });
     super.deactivate();
   }
 
@@ -111,7 +116,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       }
     }
     if (changed && mounted) {
-      setState(() {});
+      // Defer to after the current frame to avoid calling setState during build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
     }
   }
 
@@ -129,6 +137,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       radius: AppRadii.content,
       url: avatarUrl,
     );
+  }
+
+  /// Check if a message group consists entirely of event-type messages.
+  bool _isEventGroup(MessageGroup group) {
+    return group.messages.every((m) => m.msgType == MessageType.event);
+  }
+
+  bool _needsStickyAvatar(MessageGroup group) {
+    return !group.isMe && !_isEventGroup(group);
   }
 
   @override
@@ -221,12 +238,19 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
                 // Lazily create keys only for new indices; remove stale ones.
                 for (int i = 0; i < groups.length; i++) {
-                  if (!groups[i].isMe) {
+                  if (_needsStickyAvatar(groups[i])) {
                     _keys.putIfAbsent(i, () => GlobalKey());
                   }
                 }
                 // Remove keys for indices that no longer exist
-                _keys.removeWhere((i, _) => i >= groups.length);
+                _keys.removeWhere(
+                  (i, _) =>
+                      i >= groups.length || !_needsStickyAvatar(groups[i]),
+                );
+                _heights.removeWhere(
+                  (i, _) =>
+                      i >= groups.length || !_needsStickyAvatar(groups[i]),
+                );
                 // Schedule height measurement after every build so that async
                 // image loads are picked up even when the group count doesn't change.
                 WidgetsBinding.instance.addPostFrameCallback(
@@ -239,7 +263,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                   slivers: [
                     const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
                     for (int i = groups.length - 1; i >= 0; i--)
-                      if (groups[i].isMe)
+                      if (!_needsStickyAvatar(groups[i]))
                         SliverToBoxAdapter(
                           child: MessageGroupWidget(
                             group: groups[i],
@@ -260,14 +284,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                             // style sticky header would need a global sliver
                             // header instead.
                             final dy = (-so).clamp(
-                              _stickyLimit - height,
+                              (_stickyLimit - height).clamp(
+                                double.negativeInfinity,
+                                0.0,
+                              ),
                               0.0,
                             );
 
                             return SliverToBoxAdapter(
                               child: Stack(
                                 key: _keys[i],
-                                clipBehavior: Clip.hardEdge,
+                                clipBehavior: Clip.none,
                                 children: [
                                   MessageGroupWidget(
                                     group: groups[i],

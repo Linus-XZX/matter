@@ -19,6 +19,9 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
   "sync",
+  "net",
+  "io-util",
+  "time",
 ] }
 anyhow = "1"
 url = "2"
@@ -29,6 +32,13 @@ log = "0.4"
 dirs = "6"
 futures-util = "0.3"
 mime = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = "symbols"
+codegen-units = 1
+panic = "abort"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

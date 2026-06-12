@@ -113,7 +113,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       ref.read(activeUserIdProvider.notifier).state = session.userId;
       ref.read(sessionsProvider.notifier).state = await loadAllSessions();
     }
-    await _initialSync();
+    try {
+      await _initialSync();
+    } catch (e) {
+      debugPrint('Initial sync after login failed: $e');
+    }
+    // Signal that Rust APIs are safe to call — mirrors the restore path.
+    ref.read(sessionReadyProvider.notifier).state = true;
   }
 
   Future<String> _getDataDir() async {

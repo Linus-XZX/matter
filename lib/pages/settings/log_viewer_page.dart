@@ -28,7 +28,8 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
   @override
   void initState() {
     super.initState();
-    _connectLogStream();
+    // Defer to avoid modifying providers during build.
+    Future.microtask(() => _connectLogStream());
   }
 
   void _connectLogStream() {
@@ -57,7 +58,6 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
   @override
   void dispose() {
     _logSubscription?.cancel();
-    ref.read(logStreamActiveProvider.notifier).state = false;
     _scrollController.dispose();
     super.dispose();
   }
