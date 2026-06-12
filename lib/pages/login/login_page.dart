@@ -52,9 +52,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     if (_error != null) setState(() => _error = null);
   }
 
-  void _onAuthSuccess(String userId, String displayName) {
-    // Mark connected immediately — background sync handles the rest
-    ref.read(isLoggedInProvider.notifier).state = true;
+  Future<void> _onAuthSuccess(String userId, String displayName) async {
+    // Keep API-backed providers gated until the new crypto store has completed
+    // its first sync. Querying rooms while that sync initializes can leave the
+    // first room-list request waiting on the store until the app is restarted.
+    ref.read(sessionReadyProvider.notifier).state = false;
     ref.read(currentUserProvider.notifier).state = CurrentUser(
       id: userId,
       displayName: displayName,
@@ -63,8 +65,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     ref.read(homeserverProvider.notifier).state = _homeserverController.text;
     ref.read(connectionProvider.notifier).state = AppConnectionState.connecting;
 
-    // Persist session + sync in background
-    _persistAndSync(userId, displayName);
+    try {
+      await _persistAndSync(userId, displayName);
+    } catch (_) {
+      ref.read(sessionReadyProvider.notifier).state = true;
+      rethrow;
+    }
+    if (!mounted) return;
+    ref.read(isLoggedInProvider.notifier).state = true;
   }
 
   Future<void> _initialSync() async {
@@ -118,7 +126,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     } catch (e) {
       debugPrint('Initial sync after login failed: $e');
     }
-    // Signal that Rust APIs are safe to call — mirrors the restore path.
+    // Signal that Rust APIs are safe to call before building the main app.
     ref.read(sessionReadyProvider.notifier).state = true;
   }
 
@@ -145,7 +153,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         password: _passwordController.text,
       );
       if (result.success) {
-        _onAuthSuccess(result.userId ?? '', _usernameController.text);
+        await _onAuthSuccess(result.userId ?? '', _usernameController.text);
       } else if (mounted) {
         setState(() => _error = result.error ?? '登录失败');
       }
@@ -205,7 +213,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       }
 
       if (result.success) {
-        _onAuthSuccess(result.userId ?? '', _usernameController.text);
+        await _onAuthSuccess(result.userId ?? '', _usernameController.text);
       } else if (mounted) {
         setState(() => _error = result.error ?? '注册失败');
       }
@@ -238,7 +246,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       );
       if (result.success) {
         final userId = result.userId ?? _userIdController.text;
-        _onAuthSuccess(userId, userId.split(':').first.replaceFirst('@', ''));
+        await _onAuthSuccess(
+          userId,
+          userId.split(':').first.replaceFirst('@', ''),
+        );
       } else if (mounted) {
         setState(() => _error = result.error ?? 'Token 登录失败');
       }

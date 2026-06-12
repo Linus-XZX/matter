@@ -1166,6 +1166,13 @@ async fn clear_verification_session() {
     *VERIFICATION_SESSION.write().await = None;
 }
 
+async fn clear_verification_session_if(flow_id: &str) {
+    let mut active = VERIFICATION_SESSION.write().await;
+    if active.as_ref().is_some_and(|session| session.flow_id == flow_id) {
+        *active = None;
+    }
+}
+
 #[frb]
 pub async fn list_own_devices() -> Result<Vec<VerificationDevice>, String> {
     let client = get_client().await.ok_or("No active client")?;
@@ -1274,11 +1281,12 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
         }
     }
 
-    if let Some(Verification::SasV1(sas)) = client
+    let verification = client
         .encryption()
         .get_verification(&user_id, &session.flow_id)
-        .await
-    {
+        .await;
+
+    if let Some(Verification::SasV1(sas)) = verification {
         if session.accepted && !sas.can_be_presented() && !sas.is_done() && sas.cancel_info().is_none() {
             sas.accept()
                 .await
@@ -1295,6 +1303,7 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
             }));
         }
         if let Some(cancel) = sas.cancel_info() {
+            clear_verification_session_if(&session.flow_id).await;
             return Ok(Some(DeviceVerificationStatus {
                 phase: "cancelled".into(),
                 device_id: session.device_id,
@@ -1335,8 +1344,18 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
         Some(VerificationRequestState::Transitioned { .. }) => {
             ("starting", "Preparing emoji comparison")
         }
-        Some(VerificationRequestState::Done) => ("done", "Verification completed"),
+        Some(VerificationRequestState::Done) => {
+            return Ok(Some(DeviceVerificationStatus {
+                phase: "done".into(),
+                device_id: session.device_id,
+                flow_id: session.flow_id,
+                incoming: session.incoming,
+                emojis: vec![],
+                message: "Verification completed".into(),
+            }));
+        }
         Some(VerificationRequestState::Cancelled(cancel)) => {
+            clear_verification_session_if(&session.flow_id).await;
             return Ok(Some(DeviceVerificationStatus {
                 phase: "cancelled".into(),
                 device_id: session.device_id,
@@ -1345,6 +1364,12 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
                 emojis: vec![],
                 message: cancel.reason().to_string(),
             }));
+        }
+        None => {
+            // The SDK no longer knows this flow. Keeping the local session here
+            // creates a permanent ghost verification that cannot be cancelled.
+            clear_verification_session_if(&session.flow_id).await;
+            return Ok(None);
         }
         _ => ("waiting", "Waiting for verification events"),
     };
@@ -1372,7 +1397,18 @@ pub async fn confirm_device_verification() -> Result<(), String> {
         .ok_or("Emoji verification is not ready")?;
     sas.confirm()
         .await
-        .map_err(|e| format!("Failed to confirm verification: {e}"))
+        .map_err(|e| format!("Failed to confirm verification: {e}"))?;
+
+    // Confirmation is sent before the other device's MAC/done event arrives.
+    // Wait briefly so callers can refresh the verified-device state immediately.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !sas.is_done() && sas.cancel_info().is_none() {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
 }
 
 #[frb]
@@ -1402,6 +1438,7 @@ pub async fn cancel_device_verification(mismatch: bool) -> Result<(), String> {
             .await
             .map_err(|e| format!("Failed to cancel verification: {e}"))?;
     }
+    clear_verification_session_if(&session.flow_id).await;
     Ok(())
 }
 

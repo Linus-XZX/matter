@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'pages/chat/chat_page.dart';
 import 'pages/contacts/contacts_page.dart';
+import 'pages/settings/encryption_page.dart';
 import 'pages/settings/settings_page.dart';
+import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/navigation_provider.dart';
+import 'src/rust/api/matrix.dart' as rust;
 import 'theme/app_theme.dart';
 import 'widgets/liquid_glass.dart';
 
@@ -17,17 +22,100 @@ class MatterApp extends ConsumerStatefulWidget {
 
 class _MatterAppState extends ConsumerState<MatterApp> {
   final _pageController = PageController();
+  Timer? _verificationTimer;
+  bool _checkingVerification = false;
+  bool _verificationDialogOpen = false;
+  final Set<String> _handledVerificationFlows = {};
 
-  static const _pages = [
-    ChatPage(),
-    ContactsPage(),
-    SettingsPage(),
-  ];
+  static const _pages = [ChatPage(), ContactsPage(), SettingsPage()];
+
+  @override
+  void initState() {
+    super.initState();
+    _verificationTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _checkIncomingVerification(),
+    );
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _checkIncomingVerification(),
+    );
+  }
 
   @override
   void dispose() {
+    _verificationTimer?.cancel();
     _pageController.dispose();
     super.dispose();
+  }
+
+  Future<void> _checkIncomingVerification() async {
+    if (_checkingVerification ||
+        _verificationDialogOpen ||
+        !mounted ||
+        !ref.read(sessionReadyProvider)) {
+      return;
+    }
+
+    _checkingVerification = true;
+    try {
+      final status = await rust.getDeviceVerificationStatus();
+      if (!mounted ||
+          status == null ||
+          !status.incoming ||
+          status.phase != 'requested' ||
+          _handledVerificationFlows.contains(status.flowId)) {
+        return;
+      }
+      _handledVerificationFlows.add(status.flowId);
+      await _showVerificationRequest(status);
+    } catch (_) {
+      // The active client can be temporarily unavailable during account changes.
+    } finally {
+      _checkingVerification = false;
+    }
+  }
+
+  Future<void> _showVerificationRequest(
+    rust.DeviceVerificationStatus status,
+  ) async {
+    _verificationDialogOpen = true;
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('设备验证请求'),
+        content: Text('设备 ${status.deviceId} 正在请求验证当前设备。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('拒绝'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('接受'),
+          ),
+        ],
+      ),
+    );
+    _verificationDialogOpen = false;
+    if (!mounted) return;
+
+    try {
+      if (accepted == true) {
+        await rust.acceptDeviceVerification();
+        if (!mounted) return;
+        await Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const EncryptionPage()));
+      } else {
+        await rust.cancelDeviceVerification(mismatch: false);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('处理设备验证失败：$error')));
+    }
   }
 
   void _onItemTapped(int index) {
@@ -125,11 +213,7 @@ class _NavItem extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Icon(
-              isActive ? activeIcon : icon,
-              color: color,
-              size: 22,
-            ),
+            Icon(isActive ? activeIcon : icon, color: color, size: 22),
             const SizedBox(height: 3),
             Text(
               label,

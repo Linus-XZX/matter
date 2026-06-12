@@ -16,25 +16,21 @@ class EncryptionPage extends StatefulWidget {
 
 class _EncryptionPageState extends State<EncryptionPage> {
   final _recoveryController = TextEditingController();
-  Timer? _pollTimer;
   List<rust.VerificationDevice> _devices = [];
-  rust.DeviceVerificationStatus? _verification;
   rust.EncryptionRecoveryInfo? _recoveryInfo;
   bool _loading = true;
   bool _busy = false;
-  bool _polling = false;
+  bool _verificationDialogOpen = false;
   bool _hideRecoveryValue = true;
 
   @override
   void initState() {
     super.initState();
     _loadAll();
-    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _poll());
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
     _recoveryController.dispose();
     super.dispose();
   }
@@ -50,9 +46,16 @@ class _EncryptionPageState extends State<EncryptionPage> {
       setState(() {
         _devices = results[0] as List<rust.VerificationDevice>;
         _recoveryInfo = results[1] as rust.EncryptionRecoveryInfo;
-        _verification = results[2] as rust.DeviceVerificationStatus?;
         _loading = false;
       });
+      final verification = results[2] as rust.DeviceVerificationStatus?;
+      if (verification != null &&
+          verification.phase != 'done' &&
+          verification.phase != 'cancelled') {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _showVerificationDialog(verification),
+        );
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -60,32 +63,21 @@ class _EncryptionPageState extends State<EncryptionPage> {
     }
   }
 
-  Future<void> _poll() async {
-    if (_polling || !mounted) return;
-    _polling = true;
-    try {
-      final status = await rust.getDeviceVerificationStatus();
-      if (!mounted) return;
-      final wasDone = _verification?.phase == 'done';
-      setState(() => _verification = status);
-      if (!wasDone && status?.phase == 'done') {
-        await _refreshDevicesAndRecovery();
-      }
-    } catch (_) {
-      // Sync may briefly be unavailable while switching accounts.
-    } finally {
-      _polling = false;
-    }
-  }
-
   Future<void> _refreshDevicesAndRecovery() async {
-    final devices = await rust.listOwnDevices();
-    final recovery = await rust.getEncryptionRecoveryInfo();
-    if (!mounted) return;
-    setState(() {
-      _devices = devices;
-      _recoveryInfo = recovery;
-    });
+    // Device trust can be committed just after the verification reaches Done.
+    // Retry briefly so the success state is visible without a manual refresh.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final devices = await rust.listOwnDevices();
+      final recovery = await rust.getEncryptionRecoveryInfo();
+      if (!mounted) return;
+      setState(() {
+        _devices = devices;
+        _recoveryInfo = recovery;
+      });
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   Future<void> _run(Future<void> Function() action) async {
@@ -93,7 +85,6 @@ class _EncryptionPageState extends State<EncryptionPage> {
     setState(() => _busy = true);
     try {
       await action();
-      await _poll();
     } catch (error) {
       _showError(error);
     } finally {
@@ -117,18 +108,6 @@ class _EncryptionPageState extends State<EncryptionPage> {
     };
   }
 
-  String _verificationLabel(String phase) {
-    return switch (phase) {
-      'requested' => '另一台设备请求验证',
-      'waiting' => '等待另一台设备接受',
-      'starting' => '正在建立 Emoji 验证',
-      'comparing' => '请比较两台设备上的 Emoji',
-      'done' => '设备验证完成',
-      'cancelled' => '验证已取消',
-      _ => '正在处理验证',
-    };
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -143,10 +122,6 @@ class _EncryptionPageState extends State<EncryptionPage> {
                 children: [
                   _buildOverview(),
                   const SizedBox(height: 16),
-                  if (_verification != null) ...[
-                    _buildVerificationCard(_verification!),
-                    const SizedBox(height: 16),
-                  ],
                   _buildDevices(),
                   const SizedBox(height: 16),
                   _buildRecovery(),
@@ -255,132 +230,40 @@ class _EncryptionPageState extends State<EncryptionPage> {
           : TextButton(
               onPressed: _busy
                   ? null
-                  : () => _run(
-                      () => rust.startDeviceVerification(
-                        deviceId: device.deviceId,
-                      ),
-                    ),
+                  : () => _startVerification(device.deviceId),
               child: const Text('验证'),
             ),
     );
   }
 
-  Widget _buildVerificationCard(rust.DeviceVerificationStatus status) {
-    final comparing = status.phase == 'comparing';
-    final finished = status.phase == 'done' || status.phase == 'cancelled';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SectionTitle('设备验证'),
-        AppCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                _verificationLabel(status.phase),
-                style: const TextStyle(
-                  color: AppColors.onBackground,
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '设备 ${status.deviceId}',
-                style: const TextStyle(color: AppColors.onSurfaceVariant),
-              ),
-              if (comparing) ...[
-                const SizedBox(height: 18),
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: status.emojis.length,
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 4,
-                    mainAxisSpacing: 10,
-                    crossAxisSpacing: 10,
-                    childAspectRatio: 0.9,
-                  ),
-                  itemBuilder: (context, index) {
-                    final emoji = status.emojis[index];
-                    return Container(
-                      decoration: BoxDecoration(
-                        color: AppColors.surfaceVariant,
-                        borderRadius: BorderRadius.circular(AppRadii.button),
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            emoji.symbol,
-                            style: const TextStyle(fontSize: 32),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '第 ${index + 1} 个',
-                            style: const TextStyle(
-                              color: AppColors.onSurfaceVariant,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(rust.confirmDeviceVerification),
-                  icon: const Icon(Icons.check_rounded),
-                  label: const Text('相同，完成验证'),
-                ),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(
-                          () => rust.cancelDeviceVerification(mismatch: true),
-                        ),
-                  child: const Text(
-                    '不相同，立即取消',
-                    style: TextStyle(color: AppColors.error),
-                  ),
-                ),
-              ] else if (status.phase == 'requested') ...[
-                const SizedBox(height: 16),
-                FilledButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(rust.acceptDeviceVerification),
-                  child: const Text('接受并开始 Emoji 验证'),
-                ),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(
-                          () => rust.cancelDeviceVerification(mismatch: false),
-                        ),
-                  child: const Text('拒绝'),
-                ),
-              ] else if (!finished) ...[
-                const SizedBox(height: 16),
-                const LinearProgressIndicator(),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _run(
-                          () => rust.cancelDeviceVerification(mismatch: false),
-                        ),
-                  child: const Text('取消验证'),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
+  Future<void> _startVerification(String deviceId) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await rust.startDeviceVerification(deviceId: deviceId);
+      final status = await rust.getDeviceVerificationStatus();
+      if (status != null && mounted) {
+        await _showVerificationDialog(status);
+      }
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _showVerificationDialog(
+    rust.DeviceVerificationStatus status,
+  ) async {
+    if (_verificationDialogOpen || !mounted) return;
+    _verificationDialogOpen = true;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _VerificationDialog(initialStatus: status),
     );
+    _verificationDialogOpen = false;
+    if (mounted) await _refreshDevicesAndRecovery();
   }
 
   Widget _buildRecovery() {
@@ -542,6 +425,226 @@ class _EncryptionPageState extends State<EncryptionPage> {
         ),
       );
     });
+  }
+}
+
+class _VerificationDialog extends StatefulWidget {
+  const _VerificationDialog({required this.initialStatus});
+
+  final rust.DeviceVerificationStatus initialStatus;
+
+  @override
+  State<_VerificationDialog> createState() => _VerificationDialogState();
+}
+
+class _VerificationDialogState extends State<_VerificationDialog> {
+  Timer? _timer;
+  late rust.DeviceVerificationStatus _status;
+  bool _busy = false;
+  bool _polling = false;
+
+  bool get _finished => _status.phase == 'done' || _status.phase == 'cancelled';
+
+  @override
+  void initState() {
+    super.initState();
+    _status = widget.initialStatus;
+    if (!_finished) {
+      _timer = Timer.periodic(
+        const Duration(milliseconds: 500),
+        (_) => _poll(),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String get _title => switch (_status.phase) {
+    'requested' => '设备验证请求',
+    'waiting' => '等待另一台设备',
+    'starting' => '正在建立验证',
+    'comparing' => '比较 Emoji',
+    'done' => '验证完成',
+    'cancelled' => '验证已取消',
+    _ => '设备验证',
+  };
+
+  String get _description => switch (_status.phase) {
+    'requested' => '设备 ${_status.deviceId} 请求验证当前设备。',
+    'waiting' => '已向设备 ${_status.deviceId} 发送请求，请在另一台设备上接受。',
+    'starting' => '正在与设备 ${_status.deviceId} 建立 Emoji 验证。',
+    'comparing' => '请确认两台设备上的 Emoji 完全相同。',
+    'done' => '设备 ${_status.deviceId} 已成功验证。',
+    'cancelled' => '本次设备验证已取消，不会更改任何信任状态。',
+    _ => _status.message,
+  };
+
+  Future<void> _poll() async {
+    if (_polling || _finished || !mounted) return;
+    _polling = true;
+    try {
+      final status = await rust.getDeviceVerificationStatus();
+      if (!mounted || status == null) return;
+      setState(() => _status = status);
+      if (_finished) _timer?.cancel();
+    } catch (_) {
+      // Sync can briefly be unavailable while verification events are applied.
+    } finally {
+      _polling = false;
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await action();
+      await _poll();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('验证操作失败：$error')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _cancel({required bool mismatch}) async {
+    await _run(() async {
+      await rust.cancelDeviceVerification(mismatch: mismatch);
+      if (!mounted) return;
+      _timer?.cancel();
+      setState(() {
+        _status = rust.DeviceVerificationStatus(
+          phase: 'cancelled',
+          deviceId: _status.deviceId,
+          flowId: _status.flowId,
+          incoming: _status.incoming,
+          emojis: const [],
+          message: 'Verification cancelled',
+        );
+      });
+    });
+  }
+
+  Future<void> _close() async {
+    if (_status.phase == 'done') {
+      try {
+        await rust.cancelDeviceVerification(mismatch: false);
+      } catch (_) {
+        // The SDK may already have discarded the completed flow.
+      }
+    }
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final comparing = _status.phase == 'comparing';
+    final color = switch (_status.phase) {
+      'done' => AppColors.success,
+      'cancelled' => AppColors.error,
+      _ => AppColors.primary,
+    };
+    final icon = switch (_status.phase) {
+      'done' => Icons.verified_rounded,
+      'cancelled' => Icons.cancel_rounded,
+      _ => Icons.phonelink_lock_rounded,
+    };
+
+    return AlertDialog(
+      icon: Icon(icon, color: color, size: 40),
+      title: Text(_title, textAlign: TextAlign.center),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _description,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.onSurfaceVariant),
+              ),
+              if (comparing) ...[
+                const SizedBox(height: 20),
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _status.emojis.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                    childAspectRatio: 0.9,
+                  ),
+                  itemBuilder: (context, index) => Container(
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(AppRadii.button),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      _status.emojis[index].symbol,
+                      style: const TextStyle(fontSize: 30),
+                    ),
+                  ),
+                ),
+              ] else if (!_finished && _status.phase != 'requested') ...[
+                const SizedBox(height: 20),
+                const LinearProgressIndicator(),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actionsAlignment: MainAxisAlignment.center,
+      actions: _buildActions(comparing),
+    );
+  }
+
+  List<Widget> _buildActions(bool comparing) {
+    if (_finished) {
+      return [
+        FilledButton(onPressed: _busy ? null : _close, child: const Text('关闭')),
+      ];
+    }
+    if (_status.phase == 'requested') {
+      return [
+        TextButton(
+          onPressed: _busy ? null : () => _cancel(mismatch: false),
+          child: const Text('拒绝'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : () => _run(rust.acceptDeviceVerification),
+          child: const Text('接受'),
+        ),
+      ];
+    }
+    if (comparing) {
+      return [
+        TextButton(
+          onPressed: _busy ? null : () => _cancel(mismatch: true),
+          child: const Text('不相同'),
+        ),
+        FilledButton.icon(
+          onPressed: _busy ? null : () => _run(rust.confirmDeviceVerification),
+          icon: const Icon(Icons.check_rounded),
+          label: const Text('完全相同'),
+        ),
+      ];
+    }
+    return [
+      TextButton(
+        onPressed: _busy ? null : () => _cancel(mismatch: false),
+        child: const Text('取消验证'),
+      ),
+    ];
   }
 }
 
