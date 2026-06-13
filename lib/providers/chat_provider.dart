@@ -202,3 +202,47 @@ final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
 
   return subscription;
 });
+
+// ── Typing notifications ─────────────────────────────────────────────
+//
+// `typingUsersProvider(roomId)` exposes the set of user ids currently typing
+// in that room. A single subscription to `watchTypingNotifications` fans out
+// updates by room id; each room auto-clears after 5s of silence (Matrix typing
+// events are ephemeral and may not always send an explicit "stopped" event).
+
+final typingUsersProvider =
+    NotifierProvider.family<MutableState<Set<String>>, Set<String>, String>(
+  (_) => MutableState({}),
+);
+
+/// Per-room timeout timers so typing status clears after inactivity.
+final _typingTimers = <String, Timer>{};
+
+/// Start the global typing-notification listener. Initialize once after login
+/// (alongside `syncStreamProvider`). Returns the subscription.
+final typingStreamProvider = Provider<StreamSubscription<rust.TypingNotification>>((
+  ref,
+) {
+  final stream = rust.watchTypingNotifications();
+  final subscription = stream.listen((event) {
+    final roomId = event.roomId;
+    ref.read(typingUsersProvider(roomId).notifier).value =
+        event.userIds.toSet();
+    // (Re)arm the auto-clear timer for this room.
+    _typingTimers[roomId]?.cancel();
+    _typingTimers[roomId] = Timer(const Duration(seconds: 5), () {
+      ref.read(typingUsersProvider(roomId).notifier).value = {};
+      _typingTimers.remove(roomId);
+    });
+  });
+
+  ref.onDispose(() {
+    subscription.cancel();
+    for (final t in _typingTimers.values) {
+      t.cancel();
+    }
+    _typingTimers.clear();
+  });
+
+  return subscription;
+});

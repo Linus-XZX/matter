@@ -56,6 +56,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
       ref.read(currentRoomIdProvider.notifier).value = widget.roomId;
+      // Keep the global typing listener alive and subscribe to this room.
+      ref.read(typingStreamProvider);
+      subscribeTypingForRoom(roomId: widget.roomId).catchError((_) {});
     });
   }
 
@@ -165,10 +168,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   @override
   void deactivate() {
-    // Clear current room when leaving — defer to avoid modifying provider during build.
+    // Clear current room and stop typing tracking — defer to avoid modifying
+    // provider during build.
     Future.microtask(() {
       try {
         ref.read(currentRoomIdProvider.notifier).value = null;
+        unsubscribeTyping().catchError((_) {});
       } catch (_) {}
     });
     super.deactivate();
@@ -444,9 +449,64 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
               ),
             ),
           ),
+          _buildTypingIndicator(),
           MessageInput(
             key: ValueKey('msg_input_${widget.roomId}'),
             roomId: widget.roomId,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// "… is typing" indicator shown above the message input.
+  Widget _buildTypingIndicator() {
+    final typing = ref.watch(typingUsersProvider(widget.roomId));
+    if (typing.isEmpty) return const SizedBox.shrink();
+
+    // Derive display names from user ids (localpart fallback).
+    final names = typing
+        .map((id) {
+          final part = id.split(':').first;
+          return part.startsWith('@') ? part.substring(1) : part;
+        })
+        .toList();
+
+    final String text;
+    if (names.length == 1) {
+      text = '${names.first} 正在输入…';
+    } else if (names.length == 2) {
+      text = '${names[0]} 和 ${names[1]} 正在输入…';
+    } else {
+      text = '${names.length} 人正在输入…';
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.6),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant,
+                fontSize: 12.5,
+                fontStyle: FontStyle.italic,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),
