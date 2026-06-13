@@ -15,6 +15,14 @@ final replyingToProvider =
       String
     >((_) => MutableState(null));
 
+/// Provider to hold the message being edited (per room).
+final editingMessageProvider =
+    NotifierProvider.family<
+      MutableState<rust.ChatMessage?>,
+      rust.ChatMessage?,
+      String
+    >((_) => MutableState(null));
+
 class MessageInput extends ConsumerStatefulWidget {
   final String roomId;
 
@@ -31,6 +39,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   Timer? _typingTimer;
   bool _isTyping = false;
   final _imagePicker = ImagePicker();
+  /// Tracks the event id currently being edited, so we only prefill the input
+  /// when the edited message changes (not on every rebuild).
+  String? _lastEditingId;
 
   @override
   void initState() {
@@ -88,11 +99,19 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     _controller.clear();
     _stopTyping();
 
+    final editing = ref.read(editingMessageProvider(widget.roomId));
     final replyTo = ref.read(replyingToProvider(widget.roomId));
-    ref.read(replyingToProvider(widget.roomId).notifier).value = null;
 
     try {
-      if (replyTo != null) {
+      if (editing != null) {
+        ref.read(editingMessageProvider(widget.roomId).notifier).value = null;
+        await rust.editMessage(
+          roomId: widget.roomId,
+          eventId: editing.id,
+          newText: text,
+        );
+      } else if (replyTo != null) {
+        ref.read(replyingToProvider(widget.roomId).notifier).value = null;
         await rust.sendReply(
           roomId: widget.roomId,
           message: text,
@@ -156,6 +175,25 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   @override
   Widget build(BuildContext context) {
     final replyTo = ref.watch(replyingToProvider(widget.roomId));
+    final editing = ref.watch(editingMessageProvider(widget.roomId));
+
+    // When entering edit mode (or switching the edited message), prefill the
+    // input with the original text. Tracked via id so re-renders don't reset.
+    if (editing != null && editing.id != _lastEditingId) {
+      _lastEditingId = editing.id;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _controller.text = editing.content;
+        _controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: _controller.text.length),
+        );
+        setState(() {
+          _hasText = _controller.text.trim().isNotEmpty;
+        });
+      });
+    } else if (editing == null) {
+      _lastEditingId = null;
+    }
 
     return SafeArea(
       child: Container(
@@ -171,8 +209,11 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Reply preview bar
-            if (replyTo != null) _buildReplyBar(replyTo),
+            // Edit bar takes precedence; otherwise show reply bar.
+            if (editing != null)
+              _buildEditingBar(editing)
+            else if (replyTo != null)
+              _buildReplyBar(replyTo),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
@@ -322,6 +363,66 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           GestureDetector(
             onTap: () {
               ref.read(replyingToProvider(widget.roomId).notifier).value = null;
+            },
+            child: const Icon(
+              Icons.close_rounded,
+              color: AppColors.onSurfaceVariant,
+              size: 18,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEditingBar(rust.ChatMessage editing) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant.withValues(alpha: 0.3),
+        border: Border(left: BorderSide(color: AppColors.primary, width: 3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.edit_rounded,
+            color: AppColors.primary,
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '编辑中',
+                  style: TextStyle(
+                    color: AppColors.primary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  editing.content,
+                  style: TextStyle(
+                    color: AppColors.onSurfaceVariant,
+                    fontSize: 13,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              ref.read(editingMessageProvider(widget.roomId).notifier).value =
+                  null;
+              _controller.clear();
+              setState(() => _hasText = false);
             },
             child: const Icon(
               Icons.close_rounded,
