@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
+import 'emoji_picker_panel.dart';
 import 'image_message_bubble.dart';
 import 'message_input.dart';
 
@@ -136,20 +138,93 @@ class MessageGroupWidget extends ConsumerWidget {
     bool isFirst = false,
     bool isLast = false,
   }) {
+    if (message.msgType == MessageType.event) {
+      return GestureDetector(
+        onLongPress: () => _showContextMenu(context, ref, message),
+        child: Padding(
+          padding: EdgeInsets.only(top: isFirst ? 2 : 1, bottom: isLast ? 10 : 1),
+          child: _buildEventMessage(context, message),
+        ),
+      );
+    }
+
+    final bubble = message.msgType == MessageType.image && message.imageUrl != null
+        ? ImageMessageBubble(
+            imageUrl: message.imageUrl!,
+            timestamp: formatMessageTime(message.timestamp),
+            isMe: isMe,
+            onLoaded: onImageLoaded,
+          )
+        : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst);
+
     return GestureDetector(
       onLongPress: () => _showContextMenu(context, ref, message),
+      // Tapping an own message with readers opens the read-receipts sheet.
+      // (Whole-bubble hit area is far easier to hit than the tiny tick.)
+      onTap: (isMe && message.readers.isNotEmpty)
+          ? () => _showReadReceipts(context, ref, message)
+          : null,
+      behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: EdgeInsets.only(top: isFirst ? 2 : 1, bottom: isLast ? 10 : 1),
-        child: message.msgType == MessageType.event
-            ? _buildEventMessage(context, message)
-            : message.msgType == MessageType.image && message.imageUrl != null
-            ? ImageMessageBubble(
-                imageUrl: message.imageUrl!,
-                timestamp: formatMessageTime(message.timestamp),
-                isMe: isMe,
-                onLoaded: onImageLoaded,
-              )
-            : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst),
+        child: Column(
+          crossAxisAlignment:
+              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            bubble,
+            if (message.reactions.isNotEmpty)
+              _buildReactionsRow(context, ref, message, isMe),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Renders the aggregated emoji reactions below a bubble.
+  Widget _buildReactionsRow(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+    bool isMe,
+  ) {
+    final myUserId = ref.read(currentUserProvider)?.id;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        alignment: isMe ? WrapAlignment.end : WrapAlignment.start,
+        children: message.reactions.map((reaction) {
+          final reacted = myUserId != null && reaction.senders.contains(myUserId);
+          return _ReactionChip(
+            key: ValueKey('${message.id}:${reaction.key}'),
+            reaction: reaction,
+            reacted: reacted,
+            isMe: isMe,
+            onTap: () async {
+              // Re-sending the same key is the supported way to add a reaction;
+              // toggling off would require redacting the reaction event.
+              try {
+                await sendReaction(
+                  roomId: roomId,
+                  eventId: message.id,
+                  key: reaction.key,
+                );
+                ref.invalidate(messagesProvider(roomId));
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('回应失败: $e'),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                }
+              }
+            },
+          );
+        }).toList(),
       ),
     );
   }
@@ -209,6 +284,10 @@ class MessageGroupWidget extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
+                if (isMe) ...[
+                  _buildReadIndicator(context, ref, message),
+                  const SizedBox(width: 4),
+                ],
                 Text(
                   formatMessageTime(message.timestamp),
                   style: TextStyle(
@@ -485,12 +564,205 @@ class MessageGroupWidget extends ConsumerWidget {
     );
   }
 
+  /// Read-receipt indicator (tick) for the current user's own messages.
+  /// Tapping it opens a sheet listing who read this message and when.
+  Widget _buildReadIndicator(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    // No other members to acknowledge, or no data yet: hide the ticks.
+    final others = message.totalMembers - 1;
+    if (others <= 0) return const SizedBox.shrink();
+
+    final readCount = message.readers.length;
+    final allRead = readCount >= others;
+    final anyRead = readCount > 0;
+    // Single tick = sent (no readers); double tick = read (partial or full).
+    final icon = readCount == 0 ? Icons.done_rounded : Icons.done_all_rounded;
+    final color = allRead
+        ? Colors.white.withValues(alpha: 0.85)
+        : (anyRead
+            ? Colors.white.withValues(alpha: 0.55)
+            : Colors.white.withValues(alpha: 0.45));
+    // Pure visual indicator; the whole bubble is tappable (see _buildMessage).
+    return Padding(
+      padding: const EdgeInsets.only(right: 2),
+      child: Icon(icon, size: 15, color: color),
+    );
+  }
+
+  /// Bottom sheet listing the members who read a message and when.
+  void _showReadReceipts(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) => _ReadReceiptsSheet(
+        message: message,
+        roomId: roomId,
+      ),
+    );
+  }
+
   Widget _buildAvatar(String name, String? avatarUrl) {
     return AppAvatar(
       fallback: name,
       size: 48,
       radius: AppRadii.content,
       url: avatarUrl,
+    );
+  }
+
+  Widget _buildQuickReactions(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    const quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            ...quickEmojis.map((emoji) => _quickEmoji(context, ref, message, emoji)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(AppRadii.tag),
+                onTap: () {
+                  // Close the context menu, then open the full emoji picker.
+                  Navigator.of(context).pop();
+                  _showEmojiPicker(context, ref, message);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Icon(
+                    Icons.add_rounded,
+                    color: AppColors.onSurfaceVariant,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _quickEmoji(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+    String emoji,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadii.tag),
+        onTap: () async {
+          Navigator.of(context).pop();
+          await _sendReactionAndRefresh(context, ref, message.id, emoji);
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(emoji, style: const TextStyle(fontSize: 22)),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendReactionAndRefresh(
+    BuildContext context,
+    WidgetRef ref,
+    String eventId,
+    String emoji,
+  ) async {
+    try {
+      await sendReaction(roomId: roomId, eventId: eventId, key: emoji);
+      ref.invalidate(messagesProvider(roomId));
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('回应失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Full emoji picker panel (pure-Dart, no native plugin).
+  void _showEmojiPicker(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) => Container(
+        margin: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadii.surface),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(AppRadii.surface),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.5,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 4),
+                  child: Row(
+                    children: [
+                      const Text(
+                        '选择表情',
+                        style: TextStyle(
+                          color: AppColors.onBackground,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: () => Navigator.of(sheetContext).pop(),
+                        child: const Icon(
+                          Icons.close_rounded,
+                          color: AppColors.onSurfaceVariant,
+                          size: 22,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: EmojiPickerPanel(
+                    onEmojiSelected: (emoji) async {
+                      Navigator.of(sheetContext).pop();
+                      await _sendReactionAndRefresh(
+                        context,
+                        ref,
+                        message.id,
+                        emoji,
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -512,6 +784,9 @@ class MessageGroupWidget extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Quick emoji reaction bar (not for system/event messages).
+              if (message.msgType != MessageType.event)
+                _buildQuickReactions(context, ref, message),
               if (message.msgType == MessageType.text)
                 _MenuItem(
                   icon: Icons.copy_rounded,
@@ -543,6 +818,16 @@ class MessageGroupWidget extends ConsumerWidget {
               ),
               if (message.isMe) ...[
                 const Divider(color: AppColors.surfaceVariant, height: 0.5),
+                if (message.msgType == MessageType.text)
+                  _MenuItem(
+                    icon: Icons.edit_outlined,
+                    label: '编辑',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      ref.read(editingMessageProvider(roomId).notifier).value =
+                          message;
+                    },
+                  ),
                 _MenuItem(
                   icon: Icons.delete_outline_rounded,
                   label: '撤回',
@@ -609,6 +894,243 @@ class _MenuItem extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A single aggregated reaction chip shown below a bubble.
+class _ReactionChip extends StatelessWidget {
+  final Reaction reaction;
+  final bool reacted;
+  final bool isMe;
+  final VoidCallback onTap;
+
+  const _ReactionChip({
+    super.key,
+    required this.reaction,
+    required this.reacted,
+    required this.isMe,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final highlight = reacted
+        ? (isMe ? Colors.white.withValues(alpha: 0.25) : AppColors.primary)
+        : AppColors.surfaceElevated;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          color: highlight,
+          borderRadius: BorderRadius.circular(AppRadii.tag),
+          border: reacted && !isMe
+              ? Border.all(color: AppColors.primary.withValues(alpha: 0.4), width: 1)
+              : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              reaction.key,
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(width: 3),
+              Text(
+                '${reaction.senders.length}',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: reacted
+                      ? (isMe ? Colors.white.withValues(alpha: 0.9) : AppColors.primary)
+                      : AppColors.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom sheet listing who read a message and when (Telegram-style).
+class _ReadReceiptsSheet extends ConsumerWidget {
+  final ChatMessage message;
+  final String roomId;
+
+  const _ReadReceiptsSheet({required this.message, required this.roomId});
+
+  String _formatReadTime(int? tsMillis) {
+    if (tsMillis == null) return '';
+    final dt = DateTime.fromMillisecondsSinceEpoch(tsMillis);
+    final now = DateTime.now();
+    final sameDay = dt.year == now.year &&
+        dt.month == now.month &&
+        dt.day == now.day;
+    final hms = '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+    if (sameDay) return '今天 $hms';
+    final ymd = '${dt.year}/${dt.month.toString().padLeft(2, '0')}/'
+        '${dt.day.toString().padLeft(2, '0')}';
+    return '$ymd $hms';
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Container(
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadii.surface),
+      ),
+      child: SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.6,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已读 ${message.readers.length}',
+                        style: const TextStyle(
+                          color: AppColors.onBackground,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => Navigator.of(context).pop(),
+                      child: const Icon(
+                        Icons.close_rounded,
+                        color: AppColors.onSurfaceVariant,
+                        size: 22,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: message.readers.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 32),
+                        child: Center(
+                          child: Text(
+                            '暂无已读',
+                            style: TextStyle(
+                              color: AppColors.onSurfaceVariant,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.only(bottom: 8),
+                        itemCount: message.readers.length,
+                        itemBuilder: (context, index) {
+                          final reader = message.readers[index];
+                          return _ReadReceiptRow(
+                            reader: reader,
+                            timeLabel: _formatReadTime(
+                              reader.readTs?.toInt(),
+                            ),
+                            roomId: roomId,
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A single row in the read-receipts sheet: avatar + name + read time.
+class _ReadReceiptRow extends ConsumerStatefulWidget {
+  final MessageReader reader;
+  final String timeLabel;
+  final String roomId;
+
+  const _ReadReceiptRow({
+    required this.reader,
+    required this.timeLabel,
+    required this.roomId,
+  });
+
+  @override
+  ConsumerState<_ReadReceiptRow> createState() => _ReadReceiptRowState();
+}
+
+class _ReadReceiptRowState extends ConsumerState<_ReadReceiptRow> {
+  String? _avatarUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveAvatar();
+  }
+
+  Future<void> _resolveAvatar() async {
+    final url = await resolveMxcUrl(ref, widget.reader.avatarUrl);
+    if (mounted && url != _avatarUrl) {
+      setState(() => _avatarUrl = url);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          AppAvatar(
+            fallback: widget.reader.displayName,
+            size: 40,
+            radius: AppRadii.content,
+            url: _avatarUrl,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.reader.displayName,
+                  style: const TextStyle(
+                    color: AppColors.onBackground,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (widget.timeLabel.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      widget.timeLabel,
+                      style: const TextStyle(
+                        color: AppColors.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
