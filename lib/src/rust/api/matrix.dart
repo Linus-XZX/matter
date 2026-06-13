@@ -10,7 +10,7 @@ part 'matrix.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `active_session_meta`, `app_log`, `build_sdk_data_dir`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `extract_edit_text`, `finalize_pending`, `get_client`, `get_last_message_info`, `install_verification_event_handler`, `notify_sync_event`, `room_to_chat_room`, `sanitize_for_path`, `set_connection_status`, `stop_sync_task`, `strip_reply_fallback`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `PendingEntry`, `SyncNotification`, `SyncTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -166,6 +166,21 @@ Future<void> startSync() => RustLib.instance.api.crateApiMatrixStartSync();
 Stream<SyncEvent> watchSyncEvents() =>
     RustLib.instance.api.crateApiMatrixWatchSyncEvents();
 
+/// Stream typing-notification updates (room_id + typing user ids) to Dart.
+/// Mirrors `watch_sync_events`.
+Stream<TypingNotification> watchTypingNotifications() =>
+    RustLib.instance.api.crateApiMatrixWatchTypingNotifications();
+
+/// Begin listening for typing notifications in `room_id`. Any previous
+/// subscription for another room is cancelled first (only one room is
+/// tracked at a time). Call `unsubscribe_typing` when leaving the room.
+Future<void> subscribeTypingForRoom({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixSubscribeTypingForRoom(roomId: roomId);
+
+/// Stop tracking typing notifications (e.g. when leaving the room screen).
+Future<void> unsubscribeTyping() =>
+    RustLib.instance.api.crateApiMatrixUnsubscribeTyping();
+
 /// Check if background sync is alive.
 Future<bool> isConnected() => RustLib.instance.api.crateApiMatrixIsConnected();
 
@@ -200,7 +215,6 @@ Future<List<ChatRoom>> getChatRooms() =>
 Future<List<ChatMessage>> getMessages({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetMessages(roomId: roomId);
 
-/// Send a text message to a room.
 Future<void> sendMessage({required String roomId, required String message}) =>
     RustLib.instance.api.crateApiMatrixSendMessage(
       roomId: roomId,
@@ -292,6 +306,36 @@ Future<void> sendReply({
   roomId: roomId,
   message: message,
   replyToEventId: replyToEventId,
+);
+
+/// Edit (replace) one of your own messages.
+///
+/// Sends an `m.room.message` event whose `m.new_content` carries the new text
+/// and whose `m.relates_to` is an `m.replace` pointing at the original event.
+/// Tuwunel relays edits (MSC2676); the displayed edit history is aggregated
+/// client-side by `get_messages` (see `Relation::Replacement` parsing).
+Future<void> editMessage({
+  required String roomId,
+  required String eventId,
+  required String newText,
+}) => RustLib.instance.api.crateApiMatrixEditMessage(
+  roomId: roomId,
+  eventId: eventId,
+  newText: newText,
+);
+
+/// Send an emoji reaction (m.annotation) to an event.
+///
+/// Re-sending the same key is de-duplicated server-side per MSC2677. To remove
+/// a reaction, redact the reaction event (not implemented in this client yet).
+Future<void> sendReaction({
+  required String roomId,
+  required String eventId,
+  required String key,
+}) => RustLib.instance.api.crateApiMatrixSendReaction(
+  roomId: roomId,
+  eventId: eventId,
+  key: key,
 );
 
 /// Redact (delete) a message from a room.
@@ -468,6 +512,16 @@ class ChatMessage {
   /// History of edits (previous versions), oldest first.
   final List<String> editHistory;
 
+  /// Emoji reactions on this message, one entry per distinct key.
+  final List<Reaction> reactions;
+
+  /// Members who have read up to this message (only populated for the
+  /// current user's own messages; empty otherwise).
+  final List<MessageReader> readers;
+
+  /// Total joined member count of the room (including the current user).
+  final int totalMembers;
+
   const ChatMessage({
     required this.id,
     required this.senderId,
@@ -480,6 +534,9 @@ class ChatMessage {
     this.inReplyTo,
     required this.isEdited,
     required this.editHistory,
+    required this.reactions,
+    required this.readers,
+    required this.totalMembers,
   });
 
   @override
@@ -494,7 +551,10 @@ class ChatMessage {
       imageUrl.hashCode ^
       inReplyTo.hashCode ^
       isEdited.hashCode ^
-      editHistory.hashCode;
+      editHistory.hashCode ^
+      reactions.hashCode ^
+      readers.hashCode ^
+      totalMembers.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -511,7 +571,10 @@ class ChatMessage {
           imageUrl == other.imageUrl &&
           inReplyTo == other.inReplyTo &&
           isEdited == other.isEdited &&
-          editHistory == other.editHistory;
+          editHistory == other.editHistory &&
+          reactions == other.reactions &&
+          readers == other.readers &&
+          totalMembers == other.totalMembers;
 }
 
 class ChatRoom {
@@ -657,12 +720,72 @@ class EncryptionRecoveryInfo {
           deviceVerified == other.deviceVerified;
 }
 
+/// A single member's read receipt on a message.
+class MessageReader {
+  final String userId;
+
+  /// Display name, falling back to the user id localpart.
+  final String displayName;
+
+  /// mxc:// avatar URL, if any.
+  final String? avatarUrl;
+
+  /// Unix milliseconds when the member read up to this message, if known.
+  final PlatformInt64? readTs;
+
+  const MessageReader({
+    required this.userId,
+    required this.displayName,
+    this.avatarUrl,
+    this.readTs,
+  });
+
+  @override
+  int get hashCode =>
+      userId.hashCode ^
+      displayName.hashCode ^
+      avatarUrl.hashCode ^
+      readTs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MessageReader &&
+          runtimeType == other.runtimeType &&
+          userId == other.userId &&
+          displayName == other.displayName &&
+          avatarUrl == other.avatarUrl &&
+          readTs == other.readTs;
+}
+
 enum MessageType {
   text,
   image,
 
   /// State/member change event (join, leave, etc.)
   event,
+}
+
+/// A single emoji reaction aggregated on a message.
+class Reaction {
+  /// The reaction key, e.g. "👍".
+  final String key;
+
+  /// User IDs that sent this reaction (excluding duplicates).
+  final List<String> senders;
+
+  const Reaction({required this.key, required this.senders});
+
+  @override
+  int get hashCode => key.hashCode ^ senders.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Reaction &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          senders == other.senders;
 }
 
 class Space {
@@ -755,6 +878,25 @@ sealed class SyncEvent with _$SyncEvent {
   /// A message was sent (room list should refresh).
   const factory SyncEvent.messageSent({required String roomId}) =
       SyncEvent_MessageSent;
+}
+
+/// Ephemeral "who is typing right now" update for a room, pushed to Dart.
+class TypingNotification {
+  final String roomId;
+  final List<String> userIds;
+
+  const TypingNotification({required this.roomId, required this.userIds});
+
+  @override
+  int get hashCode => roomId.hashCode ^ userIds.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TypingNotification &&
+          runtimeType == other.runtimeType &&
+          roomId == other.roomId &&
+          userIds == other.userIds;
 }
 
 class VerificationDevice {

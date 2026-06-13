@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -210548341;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1330389367;
 
 // Section: executor
 
@@ -373,6 +373,49 @@ fn wire__crate__api__matrix__download_media_bytes_impl(
                         let output_ok = Result::<_, ()>::Ok(
                             crate::api::matrix::download_media_bytes(api_mxc_url).await,
                         )?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__matrix__edit_message_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "edit_message",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_room_id = <String>::sse_decode(&mut deserializer);
+            let api_event_id = <String>::sse_decode(&mut deserializer);
+            let api_new_text = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::matrix::edit_message(
+                            api_room_id,
+                            api_event_id,
+                            api_new_text,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1961,6 +2004,46 @@ fn wire__crate__api__matrix__send_message_impl(
         },
     )
 }
+fn wire__crate__api__matrix__send_reaction_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "send_reaction",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_room_id = <String>::sse_decode(&mut deserializer);
+            let api_event_id = <String>::sse_decode(&mut deserializer);
+            let api_key = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::matrix::send_reaction(api_room_id, api_event_id, api_key)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__matrix__send_reply_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2114,6 +2197,43 @@ fn wire__crate__api__matrix__start_sync_impl(
         },
     )
 }
+fn wire__crate__api__matrix__subscribe_typing_for_room_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "subscribe_typing_for_room",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_room_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::matrix::subscribe_typing_for_room(api_room_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__matrix__switch_account_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2179,6 +2299,43 @@ fn wire__crate__api__matrix__sync_once_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::matrix::sync_once().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__matrix__unsubscribe_typing_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "unsubscribe_typing",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let output_ok = Result::<_, ()>::Ok({
+                            crate::api::matrix::unsubscribe_typing().await;
+                        })?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -2306,6 +2463,44 @@ fn wire__crate__api__matrix__watch_sync_events_impl(
         },
     )
 }
+fn wire__crate__api__matrix__watch_typing_notifications_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "watch_typing_notifications",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sink = <StreamSink<
+                crate::api::matrix::TypingNotification,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::matrix::watch_typing_notifications(api_sink);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 
 // Section: dart2rust
 
@@ -2329,6 +2524,19 @@ impl SseDecode
 
 impl SseDecode
     for StreamSink<crate::api::matrix::SyncEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<
+        crate::api::matrix::TypingNotification,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2420,6 +2628,9 @@ impl SseDecode for crate::api::matrix::ChatMessage {
         let mut var_inReplyTo = <Option<String>>::sse_decode(deserializer);
         let mut var_isEdited = <bool>::sse_decode(deserializer);
         let mut var_editHistory = <Vec<String>>::sse_decode(deserializer);
+        let mut var_reactions = <Vec<crate::api::matrix::Reaction>>::sse_decode(deserializer);
+        let mut var_readers = <Vec<crate::api::matrix::MessageReader>>::sse_decode(deserializer);
+        let mut var_totalMembers = <i32>::sse_decode(deserializer);
         return crate::api::matrix::ChatMessage {
             id: var_id,
             sender_id: var_senderId,
@@ -2432,6 +2643,9 @@ impl SseDecode for crate::api::matrix::ChatMessage {
             in_reply_to: var_inReplyTo,
             is_edited: var_isEdited,
             edit_history: var_editHistory,
+            reactions: var_reactions,
+            readers: var_readers,
+            total_members: var_totalMembers,
         };
     }
 }
@@ -2610,6 +2824,20 @@ impl SseDecode for Vec<crate::api::matrix::Contact> {
     }
 }
 
+impl SseDecode for Vec<crate::api::matrix::MessageReader> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::matrix::MessageReader>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2617,6 +2845,18 @@ impl SseDecode for Vec<u8> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<u8>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::matrix::Reaction> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::matrix::Reaction>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -2662,6 +2902,22 @@ impl SseDecode for Vec<crate::api::matrix::VerificationEmoji> {
     }
 }
 
+impl SseDecode for crate::api::matrix::MessageReader {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_userId = <String>::sse_decode(deserializer);
+        let mut var_displayName = <String>::sse_decode(deserializer);
+        let mut var_avatarUrl = <Option<String>>::sse_decode(deserializer);
+        let mut var_readTs = <Option<i64>>::sse_decode(deserializer);
+        return crate::api::matrix::MessageReader {
+            user_id: var_userId,
+            display_name: var_displayName,
+            avatar_url: var_avatarUrl,
+            read_ts: var_readTs,
+        };
+    }
+}
+
 impl SseDecode for crate::api::matrix::MessageType {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2699,6 +2955,17 @@ impl SseDecode for Option<crate::api::matrix::DeviceVerificationStatus> {
     }
 }
 
+impl SseDecode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::matrix::StoredSession> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2720,6 +2987,18 @@ impl SseDecode for Option<Vec<u8>> {
         } else {
             return None;
         }
+    }
+}
+
+impl SseDecode for crate::api::matrix::Reaction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_key = <String>::sse_decode(deserializer);
+        let mut var_senders = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::matrix::Reaction {
+            key: var_key,
+            senders: var_senders,
+        };
     }
 }
 
@@ -2787,6 +3066,18 @@ impl SseDecode for crate::api::matrix::SyncEvent {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseDecode for crate::api::matrix::TypingNotification {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_roomId = <String>::sse_decode(deserializer);
+        let mut var_userIds = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::matrix::TypingNotification {
+            room_id: var_roomId,
+            user_ids: var_userIds,
+        };
     }
 }
 
@@ -2870,86 +3161,101 @@ fn pde_ffi_dispatcher_primary_impl(
         7 => wire__crate__api__matrix__create_group_room_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__matrix__create_space_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__matrix__download_media_bytes_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__matrix__enable_encryption_recovery_impl(
+        10 => wire__crate__api__matrix__edit_message_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__matrix__enable_encryption_recovery_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        11 => wire__crate__api__matrix__get_access_token_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__matrix__get_active_user_id_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__matrix__get_chat_rooms_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__matrix__get_contacts_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__matrix__get_current_user_id_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__matrix__get_device_verification_status_impl(
+        12 => wire__crate__api__matrix__get_access_token_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__matrix__get_active_user_id_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__matrix__get_chat_rooms_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__matrix__get_contacts_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__matrix__get_current_user_id_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__matrix__get_device_verification_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        18 => wire__crate__api__matrix__get_encryption_recovery_info_impl(
+        19 => wire__crate__api__matrix__get_encryption_recovery_info_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        19 => wire__crate__api__matrix__get_messages_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__matrix__get_messages_before_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__matrix__get_room_avatar_url_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__matrix__get_room_members_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__matrix__get_session_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__matrix__get_space_children_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__matrix__get_space_details_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__matrix__get_spaces_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__matrix__get_ungrouped_rooms_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__matrix__init_client_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__matrix__is_connected_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__matrix__is_logged_in_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__matrix__join_room_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__matrix__leave_space_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__matrix__list_accounts_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__matrix__list_own_devices_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__matrix__login_with_password_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__matrix__login_with_token_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__matrix__logout_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__matrix__mxc_to_http_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__matrix__mxc_to_http_full_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__matrix__recover_encryption_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__matrix__redact_message_impl(port, ptr, rust_vec_len, data_len),
-        45 => {
+        20 => wire__crate__api__matrix__get_messages_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__matrix__get_messages_before_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__matrix__get_room_avatar_url_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__matrix__get_room_members_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__matrix__get_session_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__matrix__get_space_children_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__matrix__get_space_details_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__matrix__get_spaces_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__matrix__get_ungrouped_rooms_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__matrix__init_client_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__matrix__is_connected_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__matrix__is_logged_in_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__matrix__join_room_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__matrix__leave_space_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__matrix__list_accounts_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__matrix__list_own_devices_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__matrix__login_with_password_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__matrix__login_with_token_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__matrix__logout_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__matrix__mxc_to_http_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__matrix__mxc_to_http_full_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__matrix__recover_encryption_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__matrix__redact_message_impl(port, ptr, rust_vec_len, data_len),
+        46 => {
             wire__crate__api__matrix__register_complete_uiaa_impl(port, ptr, rust_vec_len, data_len)
         }
-        46 => wire__crate__api__matrix__register_get_uiaa_session_impl(
+        47 => wire__crate__api__matrix__register_get_uiaa_session_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__api__matrix__remove_account_impl(port, ptr, rust_vec_len, data_len),
-        48 => {
+        48 => wire__crate__api__matrix__remove_account_impl(port, ptr, rust_vec_len, data_len),
+        49 => {
             wire__crate__api__matrix__remove_room_from_space_impl(port, ptr, rust_vec_len, data_len)
         }
-        49 => wire__crate__api__matrix__restore_session_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__matrix__search_rooms_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__matrix__send_image_message_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__matrix__send_message_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__matrix__send_reply_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__matrix__send_typing_notice_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__matrix__start_device_verification_impl(
+        50 => wire__crate__api__matrix__restore_session_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__matrix__search_rooms_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__matrix__send_image_message_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__matrix__send_message_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__matrix__send_reaction_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__matrix__send_reply_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__matrix__send_typing_notice_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__matrix__start_device_verification_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__matrix__start_sync_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__matrix__switch_account_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__matrix__sync_once_impl(port, ptr, rust_vec_len, data_len),
-        59 => {
+        58 => wire__crate__api__matrix__start_sync_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__matrix__subscribe_typing_for_room_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        60 => wire__crate__api__matrix__switch_account_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__matrix__sync_once_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__matrix__unsubscribe_typing_impl(port, ptr, rust_vec_len, data_len),
+        63 => {
             wire__crate__api__matrix__update_space_details_impl(port, ptr, rust_vec_len, data_len)
         }
-        60 => wire__crate__api__matrix__watch_app_logs_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__matrix__watch_sync_events_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__matrix__watch_app_logs_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__matrix__watch_sync_events_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__matrix__watch_typing_notifications_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
         _ => unreachable!(),
     }
 }
@@ -2962,9 +3268,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        14 => wire__crate__api__matrix__get_connection_status_impl(ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__matrix__get_recent_logs_impl(ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__simple__greet_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__matrix__get_connection_status_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__matrix__get_recent_logs_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__simple__greet_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3058,6 +3364,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::ChatMessage {
             self.in_reply_to.into_into_dart().into_dart(),
             self.is_edited.into_into_dart().into_dart(),
             self.edit_history.into_into_dart().into_dart(),
+            self.reactions.into_into_dart().into_dart(),
+            self.readers.into_into_dart().into_dart(),
+            self.total_members.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3188,6 +3497,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::EncryptionRecoveryInf
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::matrix::MessageReader {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.user_id.into_into_dart().into_dart(),
+            self.display_name.into_into_dart().into_dart(),
+            self.avatar_url.into_into_dart().into_dart(),
+            self.read_ts.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::matrix::MessageReader
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::MessageReader>
+    for crate::api::matrix::MessageReader
+{
+    fn into_into_dart(self) -> crate::api::matrix::MessageReader {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::matrix::MessageType {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -3206,6 +3538,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::MessageType>
     for crate::api::matrix::MessageType
 {
     fn into_into_dart(self) -> crate::api::matrix::MessageType {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::matrix::Reaction {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.key.into_into_dart().into_dart(),
+            self.senders.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::matrix::Reaction {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::Reaction>
+    for crate::api::matrix::Reaction
+{
+    fn into_into_dart(self) -> crate::api::matrix::Reaction {
         self
     }
 }
@@ -3295,6 +3645,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::SyncEvent>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::matrix::TypingNotification {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.room_id.into_into_dart().into_dart(),
+            self.user_ids.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::matrix::TypingNotification
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::matrix::TypingNotification>
+    for crate::api::matrix::TypingNotification
+{
+    fn into_into_dart(self) -> crate::api::matrix::TypingNotification {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::matrix::VerificationDevice {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -3364,6 +3735,18 @@ impl SseEncode
     }
 }
 
+impl SseEncode
+    for StreamSink<
+        crate::api::matrix::TypingNotification,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3425,6 +3808,9 @@ impl SseEncode for crate::api::matrix::ChatMessage {
         <Option<String>>::sse_encode(self.in_reply_to, serializer);
         <bool>::sse_encode(self.is_edited, serializer);
         <Vec<String>>::sse_encode(self.edit_history, serializer);
+        <Vec<crate::api::matrix::Reaction>>::sse_encode(self.reactions, serializer);
+        <Vec<crate::api::matrix::MessageReader>>::sse_encode(self.readers, serializer);
+        <i32>::sse_encode(self.total_members, serializer);
     }
 }
 
@@ -3565,12 +3951,32 @@ impl SseEncode for Vec<crate::api::matrix::Contact> {
     }
 }
 
+impl SseEncode for Vec<crate::api::matrix::MessageReader> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::matrix::MessageReader>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::matrix::Reaction> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::matrix::Reaction>::sse_encode(item, serializer);
         }
     }
 }
@@ -3602,6 +4008,16 @@ impl SseEncode for Vec<crate::api::matrix::VerificationEmoji> {
         for item in self {
             <crate::api::matrix::VerificationEmoji>::sse_encode(item, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::matrix::MessageReader {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.user_id, serializer);
+        <String>::sse_encode(self.display_name, serializer);
+        <Option<String>>::sse_encode(self.avatar_url, serializer);
+        <Option<i64>>::sse_encode(self.read_ts, serializer);
     }
 }
 
@@ -3642,6 +4058,16 @@ impl SseEncode for Option<crate::api::matrix::DeviceVerificationStatus> {
     }
 }
 
+impl SseEncode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i64>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::matrix::StoredSession> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3659,6 +4085,14 @@ impl SseEncode for Option<Vec<u8>> {
         if let Some(value) = self {
             <Vec<u8>>::sse_encode(value, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::matrix::Reaction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.key, serializer);
+        <Vec<String>>::sse_encode(self.senders, serializer);
     }
 }
 
@@ -3706,6 +4140,14 @@ impl SseEncode for crate::api::matrix::SyncEvent {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseEncode for crate::api::matrix::TypingNotification {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.room_id, serializer);
+        <Vec<String>>::sse_encode(self.user_ids, serializer);
     }
 }
 

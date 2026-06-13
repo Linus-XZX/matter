@@ -512,6 +512,32 @@ pub enum MessageType {
     Event,
 }
 
+/// A single emoji reaction aggregated on a message.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct Reaction {
+    /// The reaction key, e.g. "👍".
+    pub key: String,
+    /// User IDs that sent this reaction (excluding duplicates).
+    pub senders: Vec<String>,
+}
+
+/// A single member's read receipt on a message.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageReader {
+    pub user_id: String,
+    /// Display name, falling back to the user id localpart.
+    pub display_name: String,
+    /// mxc:// avatar URL, if any.
+    pub avatar_url: Option<String>,
+    /// Unix milliseconds when the member read up to here. Only set on the
+    /// single message this member's receipt points at (their latest read); the
+    /// Matrix protocol stores one receipt position per user, so older messages
+    /// the member has also read carry `None`.
+    pub read_ts: Option<i64>,
+}
+
 #[frb]
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
@@ -529,6 +555,13 @@ pub struct ChatMessage {
     pub is_edited: bool,
     /// History of edits (previous versions), oldest first.
     pub edit_history: Vec<String>,
+    /// Emoji reactions on this message, one entry per distinct key.
+    pub reactions: Vec<Reaction>,
+    /// Members who have read up to this message (only populated for the
+    /// current user's own messages; empty otherwise).
+    pub readers: Vec<MessageReader>,
+    /// Total joined member count of the room (including the current user).
+    pub total_members: i32,
 }
 
 /// Result of a registration or login attempt
@@ -1752,6 +1785,96 @@ pub fn watch_sync_events(sink: crate::frb_generated::StreamSink<SyncEvent>) {
     });
 }
 
+// ── Typing notifications ─────────────────────────────────────────────
+
+/// Ephemeral "who is typing right now" update for a room, pushed to Dart.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct TypingNotification {
+    pub room_id: String,
+    pub user_ids: Vec<String>,
+}
+
+static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> =
+    Lazy::new(|| {
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        tx
+    });
+
+/// Handle to the background task that owns the per-room typing subscription,
+/// so we can abort it when switching rooms or leaving.
+static TYPING_TASK: Lazy<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(None));
+
+/// Stream typing-notification updates (room_id + typing user ids) to Dart.
+/// Mirrors `watch_sync_events`.
+#[frb]
+pub fn watch_typing_notifications(sink: crate::frb_generated::StreamSink<TypingNotification>) {
+    let mut rx = TYPING_TX.subscribe();
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.blocking_recv() {
+            if sink.add(event).is_err() {
+                break; // Dart side disconnected
+            }
+        }
+    });
+}
+
+/// Begin listening for typing notifications in `room_id`. Any previous
+/// subscription for another room is cancelled first (only one room is
+/// tracked at a time). Call `unsubscribe_typing` when leaving the room.
+#[frb]
+pub async fn subscribe_typing_for_room(room_id: String) -> Result<(), String> {
+    let client = get_client()
+        .await
+        .ok_or("No client created.")?;
+
+    let room = client.rooms()
+        .into_iter()
+        .find(|r| r.room_id().to_string() == room_id)
+        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+
+    // Cancel any previous typing task before starting a new one.
+    {
+        let mut task = TYPING_TASK.lock().await;
+        if let Some(prev) = task.take() {
+            prev.abort();
+        }
+    }
+
+    // subscribe_to_typing_notifications returns (drop_guard, receiver).
+    // The guard must stay alive for the lifetime of the subscription, so we
+    // move it into the spawned task along with the receiver.
+    let (guard, mut rx) = room.subscribe_to_typing_notifications();
+    let tx = TYPING_TX.clone();
+    let room_id_for_task = room_id.clone();
+
+    let handle = tokio::spawn(async move {
+        // Keep the guard alive by holding it for the task's lifetime.
+        let _guard = guard;
+        while let Ok(user_ids) = rx.recv().await {
+            let ids: Vec<String> = user_ids.into_iter().map(|u| u.to_string()).collect();
+            let _ = tx.send(TypingNotification {
+                room_id: room_id_for_task.clone(),
+                user_ids: ids,
+            });
+        }
+    });
+
+    let mut task = TYPING_TASK.lock().await;
+    *task = Some(handle);
+    Ok(())
+}
+
+/// Stop tracking typing notifications (e.g. when leaving the room screen).
+#[frb]
+pub async fn unsubscribe_typing() {
+    let mut task = TYPING_TASK.lock().await;
+    if let Some(handle) = task.take() {
+        handle.abort();
+    }
+}
+
 /// Check if background sync is alive.
 #[frb]
 pub async fn is_connected() -> bool {
@@ -1896,12 +2019,15 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
     if let matrix_sdk::latest_events::LatestEventValue::Remote(latest) = latest_value {
         let raw = latest.raw();
         if let Ok(any_ev) = raw.deserialize() {
-            if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
-                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
-            ) = any_ev
-            {
-                last_time = u64::from(msg.origin_server_ts().0).to_string();
-                if let Some(text) = msg.as_original().and_then(|o| {
+            // Always record the latest event's timestamp for sorting, so that
+            // rooms whose newest event isn't a text message (e.g. a reaction or
+            // a state change) don't sink to the bottom of the list.
+            last_time = u64::from(any_ev.origin_server_ts().0).to_string();
+
+            let preview = match any_ev {
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
+                ) => msg.as_original().and_then(|o| {
                     match &o.content.msgtype {
                         matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
                             let is_reply = matches!(
@@ -1914,20 +2040,35 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
                                 t.body.clone()
                             })
                         }
+                        matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
+                            Some(format!("[图片] {}", t.body))
+                        }
+                        matrix_sdk::ruma::events::room::message::MessageType::File(t) => {
+                            Some(format!("[文件] {}", t.body))
+                        }
+                        matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
+                            Some(format!("* {}", t.body))
+                        }
                         _ => None,
                     }
-                }) {
-                    last_msg = text;
-                    if last_msg.len() > 50 {
-                        // Safe truncation that respects UTF-8 char boundaries
-                        let mut end = 50;
-                        while end > 0 && !last_msg.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        last_msg.truncate(end);
-                        last_msg.push_str("...");
+                }),
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Reaction(_),
+                ) => Some("❤️ 表情回应".to_string()),
+                _ => None,
+            };
+
+            if let Some(mut text) = preview {
+                if text.len() > 50 {
+                    // Safe truncation that respects UTF-8 char boundaries
+                    let mut end = 50;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
                     }
+                    text.truncate(end);
+                    text.push_str("...");
                 }
+                last_msg = text;
             }
         }
     }
@@ -1986,6 +2127,8 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
+    // event_id (of the annotated message) → (reaction key → sender ids)
+    let mut reactions: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
     let mut newest_event_id: Option<String> = None;
     let mut opts = matrix_sdk::room::MessagesOptions::backward();
     opts.limit = 100u32.into();
@@ -2057,6 +2200,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                 content, timestamp: timestamp.clone(), is_me,
                                 msg_type: MessageType::Text, image_url: None, in_reply_to,
                                 is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                             }
                         }
                         matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
@@ -2071,6 +2217,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                 content, timestamp: timestamp.clone(), is_me,
                                 msg_type: MessageType::Text, image_url: None, in_reply_to,
                                 is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                             }
                         }
                         matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
@@ -2084,6 +2233,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                 content, timestamp: timestamp.clone(), is_me,
                                 msg_type: MessageType::Text, image_url: None, in_reply_to,
                                 is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                             }
                         }
                         matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
@@ -2096,6 +2248,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                 content: t.body.clone(), timestamp: timestamp.clone(), is_me,
                                 msg_type: MessageType::Image, image_url: url, in_reply_to,
                                 is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                             }
                         }
                         matrix_sdk::ruma::events::room::message::MessageType::File(t) => {
@@ -2105,6 +2260,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                 timestamp: timestamp.clone(), is_me,
                                 msg_type: MessageType::Text, image_url: None, in_reply_to,
                                 is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                             }
                         }
                         _ => {
@@ -2112,6 +2270,21 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         }
                     };
                     raw_messages.push((event_id_str.clone(), chat_msg));
+                }
+
+                // ── Reaction events (m.reaction / m.annotation) ──
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Reaction(r),
+                ) => {
+                    if let Some(orig) = r.as_original() {
+                        let ann = &orig.content.relates_to;
+                        reactions
+                            .entry(ann.event_id.to_string())
+                            .or_default()
+                            .entry(ann.key.clone())
+                            .or_default()
+                            .push(sender_id.clone());
+                    }
                 }
 
                 // ── State/member events ──
@@ -2161,6 +2334,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             content, timestamp: timestamp.clone(), is_me: false,
                             msg_type: MessageType::Event, image_url: None, in_reply_to: None,
                             is_edited: false, edit_history: Vec::new(),
+                                reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                         }));
                     }
                 }
@@ -2188,6 +2364,17 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
             msg.content = full_history.last().unwrap().clone();
             msg.edit_history = full_history;
         }
+        // Apply aggregated reactions (dedupe senders per key defensively).
+        if let Some(by_key) = reactions.remove(&event_id) {
+            msg.reactions = by_key
+                .into_iter()
+                .map(|(key, mut senders)| {
+                    senders.sort();
+                    senders.dedup();
+                    Reaction { key, senders }
+                })
+                .collect();
+        }
         messages.push(msg);
     }
 
@@ -2201,10 +2388,88 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
         }
     }
 
+    // ── Compute per-message read receipts (only meaningful for own messages) ──
+    //
+    // For each joined member (excluding us) we get their last read-receipt
+    // timestamp, then a member counts as having read message i if their receipt
+    // time >= the message's origin_server_ts. Comparing by *timestamp* (rather
+    // than matching the receipt event id against the window) ensures members
+    // are counted even when their last-read event falls outside the current
+    // 100-message window or onto someone else's message.
+    use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+
+    let mut total_members: i32 = 0;
+    /// (user_id, display_name, avatar_url, receipt time in ms, receipt event id)
+    let mut reader_records: Vec<(String, String, Option<String>, i64, String)> = Vec::new();
+
+    if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+        total_members = joined.len() as i32;
+        let my_user_id = client.user_id();
+
+        for member in joined {
+            let uid = member.user_id();
+            if my_user_id == Some(uid) {
+                continue;
+            }
+            if let Ok(Some((receipt_event_id, receipt))) = room
+                .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
+                .await
+            {
+                // The receipt's own timestamp marks when the member read up to
+                // their last-seen event. Fall back to 0 if the homeserver
+                // omitted it (then the member never counts as a reader).
+                let read_ts = receipt.ts.map(|t| i64::from(t.0)).unwrap_or(0);
+                if read_ts > 0 {
+                    let name = member.name().to_string();
+                    let display_name = if name == uid.as_str() {
+                        uid.localpart().to_string()
+                    } else {
+                        name
+                    };
+                    let avatar = member.avatar_url().map(|u| u.to_string());
+                    reader_records.push((
+                        uid.to_string(),
+                        display_name,
+                        avatar,
+                        read_ts,
+                        receipt_event_id.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Attach readers to each of our own messages: a member read message i when
+    // their receipt time >= the message's server timestamp. The timestamp is
+    // only surfaced on the single message the member's receipt points at
+    // (Matrix stores one receipt position per user, so older read messages have
+    // no per-message read time).
+    for msg in messages.iter_mut() {
+        msg.total_members = total_members;
+        if msg.is_me {
+            let msg_ts = msg.timestamp.parse::<i64>().unwrap_or(0);
+            let mut readers: Vec<MessageReader> = reader_records
+                .iter()
+                .filter(|(_, _, _, read_ts, _)| *read_ts >= msg_ts)
+                .map(|(uid, name, avatar, read_ts, receipt_event_id)| MessageReader {
+                    user_id: uid.clone(),
+                    display_name: name.clone(),
+                    avatar_url: avatar.clone(),
+                    read_ts: if receipt_event_id == &msg.id {
+                        Some(*read_ts)
+                    } else {
+                        None
+                    },
+                })
+                .collect();
+            // Most recent reads first (nicer UX in the detail sheet).
+            readers.sort_by(|a, b| b.read_ts.cmp(&a.read_ts));
+            msg.readers = readers;
+        }
+    }
+
     Ok(messages)
 }
-
-/// Send a text message to a room.
 #[frb]
 pub async fn send_message(room_id: String, message: String) -> Result<(), String> {
     let client = get_client()
@@ -2774,6 +3039,74 @@ pub async fn send_reply(room_id: String, message: String, reply_to_event_id: Str
     Ok(())
 }
 
+/// Edit (replace) one of your own messages.
+///
+/// Sends an `m.room.message` event whose `m.new_content` carries the new text
+/// and whose `m.relates_to` is an `m.replace` pointing at the original event.
+/// Tuwunel relays edits (MSC2676); the displayed edit history is aggregated
+/// client-side by `get_messages` (see `Relation::Replacement` parsing).
+#[frb]
+pub async fn edit_message(room_id: String, event_id: String, new_text: String) -> Result<(), String> {
+    let client = get_client()
+        .await
+        .ok_or("No client created.")?;
+
+    let room = client.rooms()
+        .into_iter()
+        .find(|r| r.room_id().to_string() == room_id)
+        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+
+    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
+        .map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    // Build the replacement: new body in m.new_content + m.replace relation.
+    use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
+    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&new_text)
+        .make_replacement(ReplacementMetadata::new(parsed_event_id, None));
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Edit failed: {e}"))?;
+
+    app_log("info", "rooms", format!("Edited event {} in room {}", event_id, room_id));
+    info!("Edited event {} in room {}", event_id, room_id);
+    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    Ok(())
+}
+
+/// Send an emoji reaction (m.annotation) to an event.
+///
+/// Re-sending the same key is de-duplicated server-side per MSC2677. To remove
+/// a reaction, redact the reaction event (not implemented in this client yet).
+#[frb]
+pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Result<(), String> {
+    let client = get_client()
+        .await
+        .ok_or("No client created.")?;
+
+    let room = client.rooms()
+        .into_iter()
+        .find(|r| r.room_id().to_string() == room_id)
+        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+
+    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
+        .map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    use matrix_sdk::ruma::events::relation::Annotation;
+    let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::from(
+        Annotation::new(parsed_event_id, key.clone()),
+    );
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Reaction failed: {e}"))?;
+
+    app_log("info", "rooms", format!("Reaction '{}' on {} in room {}", key, event_id, room_id));
+    info!("Reaction '{}' on {} in room {}", key, event_id, room_id);
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
 /// Redact (delete) a message from a room.
 #[frb]
 pub async fn redact_message(room_id: String, event_id: String, reason: Option<String>) -> Result<(), String> {
@@ -2886,6 +3219,7 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
+    let mut reactions: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
 
     let from = {
         let tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
@@ -2908,12 +3242,30 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
             let raw = timeline_event.kind.raw();
             let Ok(any_ev) = raw.deserialize() else { continue };
 
+            // Collect reaction events; they don't appear as messages themselves.
+            if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Reaction(r),
+            ) = &any_ev
+            {
+                if let Some(orig) = r.as_original() {
+                    let ann = &orig.content.relates_to;
+                    reactions
+                        .entry(ann.event_id.to_string())
+                        .or_default()
+                        .entry(ann.key.clone())
+                        .or_default()
+                        .push(r.sender().to_string());
+                }
+                continue;
+            }
+
             let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                 matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
             ) = any_ev else { continue };
 
             let Some(original) = msg.as_original() else { continue };
 
+            let event_id = msg.event_id().to_string();
             let sender_id = msg.sender().to_string();
             let is_me = my_user_id.as_ref() == Some(&sender_id);
             let sender_name = if is_me {
@@ -2927,7 +3279,6 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
 
             let ts_millis = u64::from(msg.origin_server_ts().0);
             let timestamp = ts_millis.to_string();
-            let event_id = msg.event_id().to_string();
 
             // Check if this is an edit (replacement) event
             if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) = &original.content.relates_to {
@@ -2966,6 +3317,9 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
                         in_reply_to,
                         is_edited: false,
                         edit_history: Vec::new(),
+                        reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                     }
                 }
                 matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
@@ -2985,6 +3339,9 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
                         in_reply_to,
                         is_edited: false,
                         edit_history: Vec::new(),
+                        reactions: Vec::new(),
+                                readers: Vec::new(),
+                                total_members: 0,
                     }
                 }
                 _ => continue,
@@ -3014,6 +3371,16 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
             full_history.extend(history);
             msg.content = full_history.last().unwrap().clone();
             msg.edit_history = full_history;
+        }
+        if let Some(by_key) = reactions.remove(&event_id) {
+            msg.reactions = by_key
+                .into_iter()
+                .map(|(key, mut senders)| {
+                    senders.sort();
+                    senders.dedup();
+                    Reaction { key, senders }
+                })
+                .collect();
         }
         messages.push(msg);
     }

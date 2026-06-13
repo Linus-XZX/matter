@@ -33,6 +33,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RustStreamSink<SyncEvent> dco_decode_StreamSink_sync_event_Sse(dynamic raw);
 
   @protected
+  RustStreamSink<TypingNotification>
+  dco_decode_StreamSink_typing_notification_Sse(dynamic raw);
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
@@ -51,6 +55,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceVerificationStatus dco_decode_box_autoadd_device_verification_status(
     dynamic raw,
   );
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
   StoredSession dco_decode_box_autoadd_stored_session(dynamic raw);
@@ -98,10 +105,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<Contact> dco_decode_list_contact(dynamic raw);
 
   @protected
+  List<MessageReader> dco_decode_list_message_reader(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<Reaction> dco_decode_list_reaction(dynamic raw);
 
   @protected
   List<Space> dco_decode_list_space(dynamic raw);
@@ -111,6 +124,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<VerificationEmoji> dco_decode_list_verification_emoji(dynamic raw);
+
+  @protected
+  MessageReader dco_decode_message_reader(dynamic raw);
 
   @protected
   MessageType dco_decode_message_type(dynamic raw);
@@ -123,10 +139,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_opt_box_autoadd_device_verification_status(dynamic raw);
 
   @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
   StoredSession? dco_decode_opt_box_autoadd_stored_session(dynamic raw);
 
   @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  Reaction dco_decode_reaction(dynamic raw);
 
   @protected
   Space dco_decode_space(dynamic raw);
@@ -139,6 +161,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SyncEvent dco_decode_sync_event(dynamic raw);
+
+  @protected
+  TypingNotification dco_decode_typing_notification(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -169,6 +194,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<TypingNotification>
+  sse_decode_StreamSink_typing_notification_Sse(SseDeserializer deserializer);
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
@@ -187,6 +216,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceVerificationStatus sse_decode_box_autoadd_device_verification_status(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
   StoredSession sse_decode_box_autoadd_stored_session(
@@ -240,10 +272,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<Contact> sse_decode_list_contact(SseDeserializer deserializer);
 
   @protected
+  List<MessageReader> sse_decode_list_message_reader(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<Reaction> sse_decode_list_reaction(SseDeserializer deserializer);
 
   @protected
   List<Space> sse_decode_list_space(SseDeserializer deserializer);
@@ -259,6 +299,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  MessageReader sse_decode_message_reader(SseDeserializer deserializer);
+
+  @protected
   MessageType sse_decode_message_type(SseDeserializer deserializer);
 
   @protected
@@ -271,12 +314,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
   StoredSession? sse_decode_opt_box_autoadd_stored_session(
     SseDeserializer deserializer,
   );
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  Reaction sse_decode_reaction(SseDeserializer deserializer);
 
   @protected
   Space sse_decode_space(SseDeserializer deserializer);
@@ -289,6 +338,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SyncEvent sse_decode_sync_event(SseDeserializer deserializer);
+
+  @protected
+  TypingNotification sse_decode_typing_notification(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -326,6 +380,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_typing_notification_Sse(
+    RustStreamSink<TypingNotification> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
@@ -343,6 +403,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_device_verification_status(
     DeviceVerificationStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
     SseSerializer serializer,
   );
 
@@ -413,6 +479,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_contact(List<Contact> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_message_reader(
+    List<MessageReader> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -420,6 +492,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_reaction(List<Reaction> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_space(List<Space> self, SseSerializer serializer);
@@ -437,6 +512,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_message_reader(MessageReader self, SseSerializer serializer);
+
+  @protected
   void sse_encode_message_type(MessageType self, SseSerializer serializer);
 
   @protected
@@ -445,6 +523,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_device_verification_status(
     DeviceVerificationStatus? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
     SseSerializer serializer,
   );
 
@@ -461,6 +545,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_reaction(Reaction self, SseSerializer serializer);
+
+  @protected
   void sse_encode_space(Space self, SseSerializer serializer);
 
   @protected
@@ -471,6 +558,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_sync_event(SyncEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_typing_notification(
+    TypingNotification self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
