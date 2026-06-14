@@ -520,6 +520,9 @@ pub struct Reaction {
     pub key: String,
     /// User IDs that sent this reaction (excluding duplicates).
     pub senders: Vec<String>,
+    /// Event id of the reaction event the current user sent for this key, if
+    /// any. Used to toggle (redact) the user's own reaction.
+    pub my_event_id: Option<String>,
 }
 
 /// A single member's read receipt on a message.
@@ -1732,6 +1735,14 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
                     (RoomStateType::RoomCanonicalAlias, "".to_owned()),
                     (RoomStateType::RoomMember, "".to_owned()),
                     (RoomStateType::RoomTopic, "".to_owned()),
+                    // Space membership: without these, get_space_children and
+                    // get_ungrouped_rooms see no parent/child relationships and
+                    // every grouped room appears "ungrouped".
+                    (RoomStateType::SpaceChild, "".to_owned()),
+                    (RoomStateType::SpaceParent, "".to_owned()),
+                    // Room type (m.room.create) so is_space() resolves reliably
+                    // without a second round-trip.
+                    (RoomStateType::RoomCreate, "".to_owned()),
                 ])
                 .timeline_limit(10u32),
         )
@@ -1800,6 +1811,19 @@ static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> =
 /// so we can abort it when switching rooms or leaving.
 static TYPING_TASK: Lazy<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
+
+/// Cache of per-room read-receipt records, keyed by room id.
+///
+/// `get_messages` recomputes receipts on every sync (≥500 ms), but receipts
+/// only change when someone reads — so a short TTL avoids re-querying the
+/// SDK store for every member on every sync. Value = (records, total_members,
+/// fetched_at).
+static RECEIPT_CACHE: Lazy<
+    tokio::sync::Mutex<HashMap<String, (Vec<(String, String, Option<String>, i64)>, i32, std::time::Instant)>>,
+> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+/// Receipt cache freshness window. Receipts rarely change faster than this.
+const RECEIPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Stream typing-notification updates (room_id + typing user ids) to Dart.
 /// Mirrors `watch_sync_events`.
@@ -2023,6 +2047,14 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
                 matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                     matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
                 ) => msg.as_original().and_then(|o| {
+                    // An edit (m.replace) carries the new text in new_content,
+                    // and its own body is conventionally prefixed with "* ".
+                    // Use the new_content text so the preview stays clean.
+                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(rep)) = &o.content.relates_to {
+                        if let Some(edited) = extract_edit_text(&rep.new_content) {
+                            return Some(edited);
+                        }
+                    }
                     match &o.content.msgtype {
                         matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
                             let is_reply = matches!(
@@ -2042,7 +2074,7 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
                             Some(format!("[文件] {}", t.body))
                         }
                         matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
-                            Some(format!("* {}", t.body))
+                            Some(t.body.clone())
                         }
                         _ => None,
                     }
@@ -2122,8 +2154,8 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
-    // event_id (of the annotated message) → (reaction key → sender ids)
-    let mut reactions: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    // event_id (of the annotated message) → (reaction key → (sender ids, my reaction event id))
+    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> = HashMap::new();
     let mut newest_event_id: Option<String> = None;
     let mut opts = matrix_sdk::room::MessagesOptions::backward();
     opts.limit = 100u32.into();
@@ -2273,12 +2305,16 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                 ) => {
                     if let Some(orig) = r.as_original() {
                         let ann = &orig.content.relates_to;
-                        reactions
+                        let entry = reactions
                             .entry(ann.event_id.to_string())
                             .or_default()
                             .entry(ann.key.clone())
-                            .or_default()
-                            .push(sender_id.clone());
+                            .or_insert_with(|| (Vec::new(), None));
+                        entry.0.push(sender_id.clone());
+                        // Record the current user's reaction event id for toggling.
+                        if is_me {
+                            entry.1 = Some(event_id_str.clone());
+                        }
                     }
                 }
 
@@ -2363,10 +2399,10 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
         if let Some(by_key) = reactions.remove(&event_id) {
             msg.reactions = by_key
                 .into_iter()
-                .map(|(key, mut senders)| {
+                .map(|(key, (mut senders, my_event_id))| {
                     senders.sort();
                     senders.dedup();
-                    Reaction { key, senders }
+                    Reaction { key, senders, my_event_id }
                 })
                 .collect();
         }
@@ -2397,39 +2433,50 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
 
     let mut total_members: i32 = 0;
-    /// (user_id, display_name, avatar_url, receipt time in ms)
-    let mut reader_records: Vec<(String, String, Option<String>, i64)> = Vec::new();
 
-    if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
-        total_members = joined.len() as i32;
-        let my_user_id = client.user_id();
-
-        for member in joined {
-            let uid = member.user_id();
-            if my_user_id == Some(uid) {
-                continue;
-            }
-            if let Ok(Some((_receipt_event_id, receipt))) = room
-                .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
-                .await
-            {
-                // The receipt time marks when the member read up to their
-                // last-seen event. Members without a receipt time can't be
-                // positioned, so skip them.
-                if let Some(ts) = receipt.ts {
-                    let read_ts = i64::from(ts.0);
-                    let name = member.name().to_string();
-                    let display_name = if name == uid.as_str() {
-                        uid.localpart().to_string()
-                    } else {
-                        name
-                    };
-                    let avatar = member.avatar_url().map(|u| u.to_string());
-                    reader_records.push((uid.to_string(), display_name, avatar, read_ts));
+    // Try the receipt cache first; receipts change rarely so a short TTL avoids
+    // re-querying the store for every member on every sync.
+    let mut cached = RECEIPT_CACHE.lock().await;
+    let now = std::time::Instant::now();
+    let reader_records: Vec<(String, String, Option<String>, i64)> = match cached.get(&room_id) {
+        Some((records, members, fetched_at)) if now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL => {
+            total_members = *members;
+            records.clone()
+        }
+        _ => {
+            // Cache miss / stale: recompute from the SDK store.
+            let mut records: Vec<(String, String, Option<String>, i64)> = Vec::new();
+            if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+                total_members = joined.len() as i32;
+                let my_user_id = client.user_id();
+                for member in joined {
+                    let uid = member.user_id();
+                    if my_user_id == Some(uid) {
+                        continue;
+                    }
+                    if let Ok(Some((_receipt_event_id, receipt))) = room
+                        .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
+                        .await
+                    {
+                        if let Some(ts) = receipt.ts {
+                            let read_ts = i64::from(ts.0);
+                            let name = member.name().to_string();
+                            let display_name = if name == uid.as_str() {
+                                uid.localpart().to_string()
+                            } else {
+                                name
+                            };
+                            let avatar = member.avatar_url().map(|u| u.to_string());
+                            records.push((uid.to_string(), display_name, avatar, read_ts));
+                        }
+                    }
                 }
             }
+            cached.insert(room_id.clone(), (records.clone(), total_members, now));
+            records
         }
-    }
+    };
+    drop(cached);
 
     // Attach readers to each of our own messages.
     for msg in messages.iter_mut() {
@@ -3059,7 +3106,7 @@ pub async fn edit_message(room_id: String, event_id: String, new_text: String) -
 /// Re-sending the same key is de-duplicated server-side per MSC2677. To remove
 /// a reaction, redact the reaction event (not implemented in this client yet).
 #[frb]
-pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Result<(), String> {
+pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Result<String, String> {
     let client = get_client()
         .await
         .ok_or("No client created.")?;
@@ -3077,14 +3124,15 @@ pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Re
         Annotation::new(parsed_event_id, key.clone()),
     );
 
-    room.send(content)
+    let handle = room.send(content)
         .await
         .map_err(|e| format!("Reaction failed: {e}"))?;
+    let new_event_id = handle.response.event_id.to_string();
 
     app_log("info", "rooms", format!("Reaction '{}' on {} in room {}", key, event_id, room_id));
     info!("Reaction '{}' on {} in room {}", key, event_id, room_id);
     notify_sync_event(SyncEvent::SyncCompleted);
-    Ok(())
+    Ok(new_event_id)
 }
 
 /// Redact (delete) a message from a room.
@@ -3199,7 +3247,7 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
-    let mut reactions: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> = HashMap::new();
 
     let from = {
         let tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
@@ -3229,12 +3277,18 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
             {
                 if let Some(orig) = r.as_original() {
                     let ann = &orig.content.relates_to;
-                    reactions
+                    let sender = r.sender().to_string();
+                    let reaction_event_id = r.event_id().to_string();
+                    let is_me = my_user_id.as_deref() == Some(sender.as_str());
+                    let entry = reactions
                         .entry(ann.event_id.to_string())
                         .or_default()
                         .entry(ann.key.clone())
-                        .or_default()
-                        .push(r.sender().to_string());
+                        .or_insert_with(|| (Vec::new(), None));
+                    entry.0.push(sender);
+                    if is_me {
+                        entry.1 = Some(reaction_event_id);
+                    }
                 }
                 continue;
             }
@@ -3355,10 +3409,10 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
         if let Some(by_key) = reactions.remove(&event_id) {
             msg.reactions = by_key
                 .into_iter()
-                .map(|(key, mut senders)| {
+                .map(|(key, (mut senders, my_event_id))| {
                     senders.sort();
                     senders.dedup();
-                    Reaction { key, senders }
+                    Reaction { key, senders, my_event_id }
                 })
                 .collect();
         }

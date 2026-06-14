@@ -241,7 +241,7 @@ abstract class RustLibApi extends BaseApi {
     required String message,
   });
 
-  Future<void> crateApiMatrixSendReaction({
+  Future<String> crateApiMatrixSendReaction({
     required String roomId,
     required String eventId,
     required String key,
@@ -1904,7 +1904,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
-  Future<void> crateApiMatrixSendReaction({
+  Future<String> crateApiMatrixSendReaction({
     required String roomId,
     required String eventId,
     required String key,
@@ -1924,7 +1924,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_String,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiMatrixSendReactionConstMeta,
@@ -2648,11 +2648,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Reaction dco_decode_reaction(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return Reaction(
       key: dco_decode_String(arr[0]),
       senders: dco_decode_list_String(arr[1]),
+      myEventId: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -3232,7 +3233,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_key = sse_decode_String(deserializer);
     var var_senders = sse_decode_list_String(deserializer);
-    return Reaction(key: var_key, senders: var_senders);
+    var var_myEventId = sse_decode_opt_String(deserializer);
+    return Reaction(
+      key: var_key,
+      senders: var_senders,
+      myEventId: var_myEventId,
+    );
   }
 
   @protected
@@ -3761,6 +3767,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.key, serializer);
     sse_encode_list_String(self.senders, serializer);
+    sse_encode_opt_String(self.myEventId, serializer);
   }
 
   @protected

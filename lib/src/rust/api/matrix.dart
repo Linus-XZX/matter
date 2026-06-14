@@ -328,7 +328,7 @@ Future<void> editMessage({
 ///
 /// Re-sending the same key is de-duplicated server-side per MSC2677. To remove
 /// a reaction, redact the reaction event (not implemented in this client yet).
-Future<void> sendReaction({
+Future<String> sendReaction({
   required String roomId,
   required String eventId,
   required String key,
@@ -766,10 +766,14 @@ class Reaction {
   /// User IDs that sent this reaction (excluding duplicates).
   final List<String> senders;
 
-  const Reaction({required this.key, required this.senders});
+  /// Event id of the reaction event the current user sent for this key, if
+  /// any. Used to toggle (redact) the user's own reaction.
+  final String? myEventId;
+
+  const Reaction({required this.key, required this.senders, this.myEventId});
 
   @override
-  int get hashCode => key.hashCode ^ senders.hashCode;
+  int get hashCode => key.hashCode ^ senders.hashCode ^ myEventId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -777,7 +781,8 @@ class Reaction {
       other is Reaction &&
           runtimeType == other.runtimeType &&
           key == other.key &&
-          senders == other.senders;
+          senders == other.senders &&
+          myEventId == other.myEventId;
 }
 
 class Space {

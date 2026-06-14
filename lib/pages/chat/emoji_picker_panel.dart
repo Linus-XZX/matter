@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../theme/app_theme.dart';
 import 'emoji_data.dart';
+import 'emoji_keywords.dart';
 
 /// A pure-Dart emoji picker panel with category tabs and optional search.
 ///
@@ -31,17 +32,22 @@ class _EmojiPickerPanelState extends State<EmojiPickerPanel> {
   List<String> get _currentEmojis {
     if (_query.isNotEmpty) {
       final q = _query.toLowerCase();
-      // Search across all categories when filtering.
-      final all = kEmojiCategories.expand((c) => c.emojis).toSet();
-      // Emoji have no searchable text, so matching is by category label only.
-      final matchedCategories = kEmojiCategories
-          .where((c) => c.label.toLowerCase().contains(q))
-          .toList();
-      if (matchedCategories.isEmpty) {
-        // Fall back to "all" if the label doesn't match — keeps results useful.
-        return all.toList();
+      // Match against per-emoji keywords (Chinese + English). Emoji without a
+      // keyword entry simply won't match a search.
+      final matched = <String>[];
+      final seen = <String>{};
+      for (final category in kEmojiCategories) {
+        for (final emoji in category.emojis) {
+          if (seen.contains(emoji)) continue;
+          final keywords = kEmojiKeywords[emoji];
+          if (keywords == null) continue;
+          if (keywords.any((kw) => kw.toLowerCase().contains(q))) {
+            matched.add(emoji);
+            seen.add(emoji);
+          }
+        }
       }
-      return matchedCategories.expand((c) => c.emojis).toList();
+      return matched;
     }
     return kEmojiCategories[_categoryIndex].emojis;
   }
@@ -67,7 +73,7 @@ class _EmojiPickerPanelState extends State<EmojiPickerPanel> {
                     ),
                     decoration: InputDecoration(
                       isDense: true,
-                      hintText: '搜索分类…',
+                      hintText: '搜索表情，如 笑 / heart',
                       hintStyle: const TextStyle(
                         color: AppColors.onSurfaceVariant,
                         fontSize: 14,

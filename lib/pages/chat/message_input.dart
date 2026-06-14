@@ -88,7 +88,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   void _sendTypingNotice(bool typing) {
     rust
         .sendTypingNotice(roomId: widget.roomId, typing: typing)
-        .catchError((_) {});
+        .catchError((e) {
+      debugPrint('sendTypingNotice failed: $e');
+    });
   }
 
   Future<void> _sendMessage() async {

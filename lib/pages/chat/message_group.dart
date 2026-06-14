@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
@@ -188,7 +187,6 @@ class MessageGroupWidget extends ConsumerWidget {
     ChatMessage message,
     bool isMe,
   ) {
-    final myUserId = ref.read(currentUserProvider)?.id;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Wrap(
@@ -196,22 +194,25 @@ class MessageGroupWidget extends ConsumerWidget {
         runSpacing: 4,
         alignment: isMe ? WrapAlignment.end : WrapAlignment.start,
         children: message.reactions.map((reaction) {
-          final reacted = myUserId != null && reaction.senders.contains(myUserId);
+          final reacted = reaction.myEventId != null;
           return _ReactionChip(
             key: ValueKey('${message.id}:${reaction.key}'),
             reaction: reaction,
             reacted: reacted,
             isMe: isMe,
             onTap: () async {
-              // Re-sending the same key is the supported way to add a reaction;
-              // toggling off would require redacting the reaction event.
               try {
-                await sendReaction(
-                  roomId: roomId,
-                  eventId: message.id,
-                  key: reaction.key,
-                );
-                ref.invalidate(messagesProvider(roomId));
+                if (reacted) {
+                  // Toggle off: redact our own reaction event.
+                  await redactMessage(ref, roomId, reaction.myEventId!);
+                } else {
+                  await sendReaction(
+                    roomId: roomId,
+                    eventId: message.id,
+                    key: reaction.key,
+                  );
+                  ref.invalidate(messagesProvider(roomId));
+                }
               } catch (e) {
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(

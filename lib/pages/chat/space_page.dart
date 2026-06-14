@@ -5,6 +5,7 @@ import '../../providers/chat_provider.dart';
 import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/app_avatar.dart';
 import '../../widgets/cascade_title.dart';
 import 'chat_list_item.dart';
 import 'space_detail_page.dart';
@@ -352,7 +353,11 @@ class _SpaceRoomTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              _SpaceAvatar(name: space.name),
+              AppAvatar(
+                fallback: space.name,
+                size: 48,
+                url: space.avatarUrl,
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -505,34 +510,6 @@ class _ActionTile extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SpaceAvatar extends StatelessWidget {
-  final String name;
-
-  const _SpaceAvatar({required this.name});
-
-  @override
-  Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '空' : name.trim().characters.first;
-    return Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: AppColors.secondary.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(AppRadii.content),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        initial,
-        style: const TextStyle(
-          color: AppColors.secondary,
-          fontSize: 18,
-          fontWeight: FontWeight.w700,
         ),
       ),
     );

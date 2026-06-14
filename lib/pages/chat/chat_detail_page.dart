@@ -58,7 +58,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       ref.read(currentRoomIdProvider.notifier).value = widget.roomId;
       // Keep the global typing listener alive and subscribe to this room.
       ref.read(typingStreamProvider);
-      subscribeTypingForRoom(roomId: widget.roomId).catchError((_) {});
+      subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
+        debugPrint('subscribeTypingForRoom failed: $e');
+      });
     });
   }
 
@@ -173,8 +175,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     Future.microtask(() {
       try {
         ref.read(currentRoomIdProvider.notifier).value = null;
-        unsubscribeTyping().catchError((_) {});
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('deactivate: clear currentRoomId failed: $e');
+      }
+      unsubscribeTyping().catchError((e) {
+        debugPrint('unsubscribeTyping failed: $e');
+      });
     });
     super.deactivate();
   }

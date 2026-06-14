@@ -2982,9 +2982,11 @@ impl SseDecode for crate::api::matrix::Reaction {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_key = <String>::sse_decode(deserializer);
         let mut var_senders = <Vec<String>>::sse_decode(deserializer);
+        let mut var_myEventId = <Option<String>>::sse_decode(deserializer);
         return crate::api::matrix::Reaction {
             key: var_key,
             senders: var_senders,
+            my_event_id: var_myEventId,
         };
     }
 }
@@ -3533,6 +3535,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::Reaction {
         [
             self.key.into_into_dart().into_dart(),
             self.senders.into_into_dart().into_dart(),
+            self.my_event_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4068,6 +4071,7 @@ impl SseEncode for crate::api::matrix::Reaction {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.key, serializer);
         <Vec<String>>::sse_encode(self.senders, serializer);
+        <Option<String>>::sse_encode(self.my_event_id, serializer);
     }
 }
 
