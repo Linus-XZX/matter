@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
-import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 
 import '../../theme/app_theme.dart';
@@ -46,47 +45,38 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (userId == activeId) return;
 
     try {
+      ref.read(sessionReadyProvider.notifier).value = false;
       final success = await rust.switchAccount(userId: userId);
-      if (success && mounted) {
+      if (!success) {
+        throw StateError('账号切换未生效');
+      }
+      if (mounted) {
         final sessions = await loadAllSessions();
         final session = sessions.cast<rust.StoredSession?>().firstWhere(
           (s) => s?.userId == userId,
           orElse: () => null,
         );
-        if (session != null) {
-          final displayName = await loadDisplayName(userId);
-          await saveActiveUserId(userId);
-          ref.read(activeUserIdProvider.notifier).value = userId;
-          ref.read(currentUserProvider.notifier).value = CurrentUser(
-            id: userId,
-            displayName: displayName,
-            homeserver: session.homeserverUrl,
-          );
-          ref.read(homeserverProvider.notifier).value = session.homeserverUrl;
-
-          // Re-sync with new account
-          ref.read(connectionProvider.notifier).value =
-              AppConnectionState.connecting;
-          try {
-            await rust.syncOnce();
-            ref.invalidate(chatRoomsProvider);
-            ref.read(connectionProvider.notifier).value =
-                AppConnectionState.connected;
-          } catch (e) {
-            debugPrint('syncOnce after switch failed: $e');
-            ref.read(connectionProvider.notifier).value =
-                AppConnectionState.disconnected;
-          }
-          try {
-            await rust.startSync();
-          } catch (e) {
-            debugPrint('startSync after switch failed: $e');
-          }
-          ref.read(syncStreamProvider);
-          ref.invalidate(chatRoomsProvider);
+        if (session == null) {
+          throw StateError('找不到已保存的账号会话');
         }
+
+        final displayName = await loadDisplayName(userId);
+        await applyActiveSessionState(
+          ref,
+          userId: userId,
+          displayName: displayName,
+          homeserver: session.homeserverUrl,
+          persistActiveUser: true,
+          refreshStoredSessions: true,
+        );
+        await bootstrapActiveSessionSync(
+          ref,
+          attemptLabel: 'syncOnce after switch attempt',
+          startSyncLabel: 'startSync after switch failed',
+        );
       }
     } catch (e) {
+      ref.read(sessionReadyProvider.notifier).value = true;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -95,7 +85,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
+      return;
     }
+
+    ref.read(sessionReadyProvider.notifier).value = true;
   }
 
   Future<void> _removeAccount(String userId) async {
@@ -288,43 +281,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         icon: Icons.dark_mode_rounded,
                         iconColor: AppColors.secondary,
                         title: '主题',
-                        subtitle: '深色模式',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('主题设置开发中'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
+                        subtitle: '当前固定为深色',
                       ),
                       _SettingItem(
                         icon: Icons.notifications_rounded,
                         iconColor: AppColors.warning,
                         title: '通知',
-                        subtitle: '全部开启',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('通知设置开发中'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
+                        subtitle: '暂未提供应用内设置',
                       ),
                       _SettingItem(
                         icon: Icons.language_rounded,
                         iconColor: AppColors.success,
                         title: '语言',
-                        subtitle: '简体中文',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('语言设置开发中'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
+                        subtitle: '当前固定为简体中文',
                       ),
                     ],
                   ),
@@ -342,28 +311,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                               '',
                             ) ??
                             'matrix.org',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Homeserver 设置开发中'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
                       ),
                       _SettingItem(
                         icon: Icons.sync_rounded,
                         iconColor: AppColors.primaryVariant,
                         title: '同步设置',
-                        subtitle: 'Sliding Sync',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('同步设置开发中'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
+                        subtitle: '自动管理，无手动配置项',
                       ),
                       _SettingItem(
                         icon: Icons.security_rounded,

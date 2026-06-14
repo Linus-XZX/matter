@@ -2573,8 +2573,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ChatRoom dco_decode_chat_room(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 9)
-      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ChatRoom(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -2582,9 +2582,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       lastMessage: dco_decode_String(arr[3]),
       lastMessageTime: dco_decode_String(arr[4]),
       unreadCount: dco_decode_i_32(arr[5]),
-      isPinned: dco_decode_bool(arr[6]),
-      isMuted: dco_decode_bool(arr[7]),
-      roomType: dco_decode_String(arr[8]),
+      roomType: dco_decode_String(arr[6]),
     );
   }
 
@@ -3062,8 +3060,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_lastMessage = sse_decode_String(deserializer);
     var var_lastMessageTime = sse_decode_String(deserializer);
     var var_unreadCount = sse_decode_i_32(deserializer);
-    var var_isPinned = sse_decode_bool(deserializer);
-    var var_isMuted = sse_decode_bool(deserializer);
     var var_roomType = sse_decode_String(deserializer);
     return ChatRoom(
       id: var_id,
@@ -3072,8 +3068,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       lastMessage: var_lastMessage,
       lastMessageTime: var_lastMessageTime,
       unreadCount: var_unreadCount,
-      isPinned: var_isPinned,
-      isMuted: var_isMuted,
       roomType: var_roomType,
     );
   }
@@ -3652,8 +3646,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.lastMessage, serializer);
     sse_encode_String(self.lastMessageTime, serializer);
     sse_encode_i_32(self.unreadCount, serializer);
-    sse_encode_bool(self.isPinned, serializer);
-    sse_encode_bool(self.isMuted, serializer);
     sse_encode_String(self.roomType, serializer);
   }
 

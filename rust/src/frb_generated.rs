@@ -2804,8 +2804,6 @@ impl SseDecode for crate::api::matrix::ChatRoom {
         let mut var_lastMessage = <String>::sse_decode(deserializer);
         let mut var_lastMessageTime = <String>::sse_decode(deserializer);
         let mut var_unreadCount = <i32>::sse_decode(deserializer);
-        let mut var_isPinned = <bool>::sse_decode(deserializer);
-        let mut var_isMuted = <bool>::sse_decode(deserializer);
         let mut var_roomType = <String>::sse_decode(deserializer);
         return crate::api::matrix::ChatRoom {
             id: var_id,
@@ -2814,8 +2812,6 @@ impl SseDecode for crate::api::matrix::ChatRoom {
             last_message: var_lastMessage,
             last_message_time: var_lastMessageTime,
             unread_count: var_unreadCount,
-            is_pinned: var_isPinned,
-            is_muted: var_isMuted,
             room_type: var_roomType,
         };
     }
@@ -3544,8 +3540,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::ChatRoom {
             self.last_message.into_into_dart().into_dart(),
             self.last_message_time.into_into_dart().into_dart(),
             self.unread_count.into_into_dart().into_dart(),
-            self.is_pinned.into_into_dart().into_dart(),
-            self.is_muted.into_into_dart().into_dart(),
             self.room_type.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -3997,8 +3991,6 @@ impl SseEncode for crate::api::matrix::ChatRoom {
         <String>::sse_encode(self.last_message, serializer);
         <String>::sse_encode(self.last_message_time, serializer);
         <i32>::sse_encode(self.unread_count, serializer);
-        <bool>::sse_encode(self.is_pinned, serializer);
-        <bool>::sse_encode(self.is_muted, serializer);
         <String>::sse_encode(self.room_type, serializer);
     }
 }

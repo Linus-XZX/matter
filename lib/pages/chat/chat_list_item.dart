@@ -97,24 +97,6 @@ class ChatListItem extends ConsumerWidget {
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      if (room.isMuted)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.notifications_off_rounded,
-                            color: AppColors.onSurfaceVariant,
-                            size: 14,
-                          ),
-                        ),
-                      if (room.isPinned)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.push_pin_rounded,
-                            color: AppColors.onSurfaceVariant,
-                            size: 14,
-                          ),
-                        ),
                       Expanded(
                         child: Text(
                           room.lastMessage,
@@ -135,19 +117,15 @@ class ChatListItem extends ConsumerWidget {
                             vertical: 2,
                           ),
                           decoration: BoxDecoration(
-                            color: room.isMuted
-                                ? AppColors.surfaceElevated
-                                : AppColors.primary,
+                            color: AppColors.primary,
                             borderRadius: BorderRadius.circular(AppRadii.tag),
                           ),
                           child: Text(
                             room.unreadCount > 99
                                 ? '99+'
                                 : '${room.unreadCount}',
-                            style: TextStyle(
-                              color: room.isMuted
-                                  ? AppColors.onSurfaceVariant
-                                  : Colors.white,
+                            style: const TextStyle(
+                              color: Colors.white,
                               fontSize: 11.5,
                               fontWeight: FontWeight.w700,
                             ),

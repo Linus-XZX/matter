@@ -610,8 +610,6 @@ class ChatRoom {
   final String lastMessage;
   final String lastMessageTime;
   final int unreadCount;
-  final bool isPinned;
-  final bool isMuted;
 
   /// "dm", "group", or "space"
   final String roomType;
@@ -623,8 +621,6 @@ class ChatRoom {
     required this.lastMessage,
     required this.lastMessageTime,
     required this.unreadCount,
-    required this.isPinned,
-    required this.isMuted,
     required this.roomType,
   });
 
@@ -636,8 +632,6 @@ class ChatRoom {
       lastMessage.hashCode ^
       lastMessageTime.hashCode ^
       unreadCount.hashCode ^
-      isPinned.hashCode ^
-      isMuted.hashCode ^
       roomType.hashCode;
 
   @override
@@ -651,8 +645,6 @@ class ChatRoom {
           lastMessage == other.lastMessage &&
           lastMessageTime == other.lastMessageTime &&
           unreadCount == other.unreadCount &&
-          isPinned == other.isPinned &&
-          isMuted == other.isMuted &&
           roomType == other.roomType;
 }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'auth_provider.dart';
@@ -50,6 +51,78 @@ final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
   final contacts = await rust.getContacts();
   return contacts;
 });
+
+void invalidateSessionCollections(WidgetRef ref) {
+  ref.invalidate(chatRoomsProvider);
+  ref.invalidate(spacesProvider);
+  ref.invalidate(ungroupedRoomsProvider);
+  ref.invalidate(contactsProvider);
+}
+
+Future<void> applyActiveSessionState(
+  WidgetRef ref, {
+  required String userId,
+  required String displayName,
+  required String homeserver,
+  bool persistActiveUser = false,
+  bool refreshStoredSessions = false,
+  bool markLoggedIn = true,
+}) async {
+  if (persistActiveUser) {
+    await saveActiveUserId(userId);
+  }
+  ref.read(currentUserProvider.notifier).value = CurrentUser(
+    id: userId,
+    displayName: displayName,
+    homeserver: homeserver,
+  );
+  ref.read(homeserverProvider.notifier).value = homeserver;
+  ref.read(activeUserIdProvider.notifier).value = userId;
+  if (refreshStoredSessions) {
+    ref.read(sessionsProvider.notifier).value = await loadAllSessions();
+  }
+  if (markLoggedIn) {
+    ref.read(isLoggedInProvider.notifier).value = true;
+  }
+  ref.read(connectionProvider.notifier).value = AppConnectionState.connecting;
+}
+
+Future<void> bootstrapActiveSessionSync(
+  WidgetRef ref, {
+  required String attemptLabel,
+  required String startSyncLabel,
+}) async {
+  var initialSyncSucceeded = false;
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      await rust.syncOnce();
+      initialSyncSucceeded = true;
+      ref.read(connectionProvider.notifier).value =
+          AppConnectionState.connected;
+      invalidateSessionCollections(ref);
+      break;
+    } catch (e) {
+      debugPrint('$attemptLabel ${attempt + 1} failed: $e');
+      if (attempt < 2) {
+        await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
+      }
+    }
+  }
+
+  if (!initialSyncSucceeded) {
+    ref.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
+  }
+
+  try {
+    await rust.startSync();
+  } catch (e) {
+    debugPrint('$startSyncLabel: $e');
+  }
+
+  ref.read(syncStreamProvider);
+  invalidateSessionCollections(ref);
+}
 
 final currentRoomIdProvider = NotifierProvider<MutableState<String?>, String?>(
   () => MutableState(null),
@@ -212,37 +285,36 @@ final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
 
 final typingUsersProvider =
     NotifierProvider.family<MutableState<Set<String>>, Set<String>, String>(
-  (_) => MutableState({}),
-);
+      (_) => MutableState({}),
+    );
 
 /// Per-room timeout timers so typing status clears after inactivity.
 final _typingTimers = <String, Timer>{};
 
 /// Start the global typing-notification listener. Initialize once after login
 /// (alongside `syncStreamProvider`). Returns the subscription.
-final typingStreamProvider = Provider<StreamSubscription<rust.TypingNotification>>((
-  ref,
-) {
-  final stream = rust.watchTypingNotifications();
-  final subscription = stream.listen((event) {
-    final roomId = event.roomId;
-    ref.read(typingUsersProvider(roomId).notifier).value =
-        event.userIds.toSet();
-    // (Re)arm the auto-clear timer for this room.
-    _typingTimers[roomId]?.cancel();
-    _typingTimers[roomId] = Timer(const Duration(seconds: 5), () {
-      ref.read(typingUsersProvider(roomId).notifier).value = {};
-      _typingTimers.remove(roomId);
+final typingStreamProvider =
+    Provider<StreamSubscription<rust.TypingNotification>>((ref) {
+      final stream = rust.watchTypingNotifications();
+      final subscription = stream.listen((event) {
+        final roomId = event.roomId;
+        ref.read(typingUsersProvider(roomId).notifier).value = event.userIds
+            .toSet();
+        // (Re)arm the auto-clear timer for this room.
+        _typingTimers[roomId]?.cancel();
+        _typingTimers[roomId] = Timer(const Duration(seconds: 5), () {
+          ref.read(typingUsersProvider(roomId).notifier).value = {};
+          _typingTimers.remove(roomId);
+        });
+      });
+
+      ref.onDispose(() {
+        subscription.cancel();
+        for (final t in _typingTimers.values) {
+          t.cancel();
+        }
+        _typingTimers.clear();
+      });
+
+      return subscription;
     });
-  });
-
-  ref.onDispose(() {
-    subscription.cancel();
-    for (final t in _typingTimers.values) {
-      t.cancel();
-    }
-    _typingTimers.clear();
-  });
-
-  return subscription;
-});

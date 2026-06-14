@@ -6,7 +6,6 @@ import 'app.dart';
 import 'pages/login/login_page.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
-import 'providers/connection_provider.dart';
 import 'src/rust/api/matrix.dart' as rust;
 import 'src/rust/frb_generated.dart';
 import 'theme/app_theme.dart';
@@ -115,21 +114,15 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       if (restoredActiveId != null) {
         await rust.switchAccount(userId: restoredActiveId);
 
-        ref.read(isLoggedInProvider.notifier).value = true;
-        ref.read(currentUserProvider.notifier).value = CurrentUser(
-          id: restoredActiveId,
+        await applyActiveSessionState(
+          ref,
+          userId: restoredActiveId,
           displayName:
               restoredDisplayName ??
               restoredActiveId.split(':').first.replaceFirst('@', ''),
           homeserver: restoredHomeserver ?? '',
+          refreshStoredSessions: true,
         );
-        ref.read(homeserverProvider.notifier).value = restoredHomeserver ?? '';
-        ref.read(activeUserIdProvider.notifier).value = restoredActiveId;
-        ref.read(sessionsProvider.notifier).value = await loadAllSessions();
-        ref.read(connectionProvider.notifier).value =
-            AppConnectionState.connecting;
-
-        ref.read(syncStreamProvider);
       }
     } catch (e) {
       debugPrint('Session restore failed: $e');
@@ -149,27 +142,11 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       return;
     }
 
-    // Run the potentially slow sync in the background.
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        await rust.syncOnce();
-        ref.invalidate(chatRoomsProvider);
-        ref.read(connectionProvider.notifier).value =
-            AppConnectionState.connected;
-        break;
-      } catch (e) {
-        debugPrint('Restore sync attempt ${attempt + 1} failed: $e');
-        if (attempt < 2) {
-          await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
-        }
-      }
-    }
-    try {
-      await rust.startSync();
-    } catch (e) {
-      debugPrint('startSync after restore failed: $e');
-    }
-    ref.invalidate(chatRoomsProvider);
+    await bootstrapActiveSessionSync(
+      ref,
+      attemptLabel: 'Restore sync attempt',
+      startSyncLabel: 'startSync after restore failed',
+    );
 
     // Signal that Rust APIs are safe to call.
     ref.read(sessionReadyProvider.notifier).value = true;

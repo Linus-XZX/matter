@@ -286,11 +286,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ),
         actions: [
           IconButton(
+            tooltip: '搜索暂未提供',
             icon: const Icon(
               Icons.search_rounded,
               color: AppColors.onBackground,
             ),
-            onPressed: () {},
+            onPressed: null,
           ),
           IconButton(
             icon: const Icon(
@@ -471,12 +472,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     if (typing.isEmpty) return const SizedBox.shrink();
 
     // Derive display names from user ids (localpart fallback).
-    final names = typing
-        .map((id) {
-          final part = id.split(':').first;
-          return part.startsWith('@') ? part.substring(1) : part;
-        })
-        .toList();
+    final names = typing.map((id) {
+      final part = id.split(':').first;
+      return part.startsWith('@') ? part.substring(1) : part;
+    }).toList();
 
     final String text;
     if (names.length == 1) {

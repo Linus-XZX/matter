@@ -39,6 +39,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   Timer? _typingTimer;
   bool _isTyping = false;
   final _imagePicker = ImagePicker();
+
   /// Tracks the event id currently being edited, so we only prefill the input
   /// when the edited message changes (not on every rebuild).
   String? _lastEditingId;
@@ -86,9 +87,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   void _sendTypingNotice(bool typing) {
-    rust
-        .sendTypingNotice(roomId: widget.roomId, typing: typing)
-        .catchError((e) {
+    rust.sendTypingNotice(roomId: widget.roomId, typing: typing).catchError((
+      e,
+    ) {
       debugPrint('sendTypingNotice failed: $e');
     });
   }
@@ -97,23 +98,19 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
 
-    setState(() => _isSending = true);
-    _controller.clear();
-    _stopTyping();
-
     final editing = ref.read(editingMessageProvider(widget.roomId));
     final replyTo = ref.read(replyingToProvider(widget.roomId));
 
+    setState(() => _isSending = true);
+
     try {
       if (editing != null) {
-        ref.read(editingMessageProvider(widget.roomId).notifier).value = null;
         await rust.editMessage(
           roomId: widget.roomId,
           eventId: editing.id,
           newText: text,
         );
       } else if (replyTo != null) {
-        ref.read(replyingToProvider(widget.roomId).notifier).value = null;
         await rust.sendReply(
           roomId: widget.roomId,
           message: text,
@@ -121,6 +118,13 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         );
       } else {
         await rust.sendMessage(roomId: widget.roomId, message: text);
+      }
+      _stopTyping();
+      _controller.clear();
+      if (editing != null) {
+        ref.read(editingMessageProvider(widget.roomId).notifier).value = null;
+      } else if (replyTo != null) {
+        ref.read(replyingToProvider(widget.roomId).notifier).value = null;
       }
       // Refresh message list after sending
       ref.invalidate(messagesProvider(widget.roomId));
@@ -246,6 +250,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                       ),
                       child: TextField(
                         controller: _controller,
+                        readOnly: _isSending,
                         style: const TextStyle(
                           color: AppColors.onBackground,
                           fontSize: 15,
@@ -307,12 +312,13 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                             )
                           : IconButton(
                               key: const ValueKey('mic'),
+                              tooltip: '语音消息暂未提供',
                               icon: const Icon(
                                 Icons.mic_none_rounded,
                                 color: AppColors.onSurfaceVariant,
                                 size: 26,
                               ),
-                              onPressed: () {},
+                              onPressed: null,
                               padding: EdgeInsets.zero,
                             ),
                     ),
@@ -386,11 +392,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       ),
       child: Row(
         children: [
-          const Icon(
-            Icons.edit_rounded,
-            color: AppColors.primary,
-            size: 16,
-          ),
+          const Icon(Icons.edit_rounded, color: AppColors.primary, size: 16),
           const SizedBox(width: 8),
           Expanded(
             child: Column(

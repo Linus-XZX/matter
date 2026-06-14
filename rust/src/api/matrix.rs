@@ -1,29 +1,28 @@
 use flutter_rust_bridge::frb;
 use log::{info, warn};
 use matrix_sdk::{
-    Client, SessionMeta, SessionTokens,
     authentication::matrix::MatrixSession,
     encryption::{
-        VerificationState as OwnVerificationState,
         recovery::RecoveryState,
         verification::{Verification, VerificationRequestState},
+        VerificationState as OwnVerificationState,
     },
     ruma::api::client::{
         account::register::v3::Request as RegistrationRequest,
         uiaa::{AuthData, Dummy, RegistrationToken, UiaaInfo},
     },
     ruma::events::key::verification::{
-        VerificationMethod,
-        request::ToDeviceKeyVerificationRequestEvent,
+        request::ToDeviceKeyVerificationRequestEvent, VerificationMethod,
     },
     store::RoomLoadSettings,
+    Client, SessionMeta, SessionTokens,
 };
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use std::time::SystemTime;
 
 // ── App-wide log system ─────────────────────────────────────────────
 
@@ -124,11 +123,10 @@ pub enum SyncEvent {
     MessageSent { room_id: String },
 }
 
-static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> =
-    Lazy::new(|| {
-        let (tx, _rx) = tokio::sync::broadcast::channel(64);
-        tx
-    });
+static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> = Lazy::new(|| {
+    let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    tx
+});
 
 fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
@@ -152,8 +150,7 @@ static CLIENTS: Lazy<Arc<RwLock<HashMap<String, ClientEntry>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// Currently active account.
-static ACTIVE_USER: Lazy<Arc<RwLock<Option<String>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(None)));
+static ACTIVE_USER: Lazy<Arc<RwLock<Option<String>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 struct SyncTask {
     user_id: String,
@@ -185,8 +182,7 @@ async fn stop_sync_task(user_id: Option<&str>) {
 }
 
 /// Temporary client during login (before we know the user_id for a per-user dir).
-static PENDING: Lazy<Arc<RwLock<Option<PendingEntry>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(None)));
+static PENDING: Lazy<Arc<RwLock<Option<PendingEntry>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 #[derive(Clone, Debug)]
 struct VerificationSession {
@@ -261,19 +257,25 @@ async fn finalize_pending() -> Result<String, String> {
     let (pending_client, data_dir, homeserver_url) = {
         let pending = PENDING.read().await;
         let p = pending.as_ref().ok_or("No pending client to finalize")?;
-        (p.client.clone(), p.data_dir.clone(), p.homeserver_url.clone())
+        (
+            p.client.clone(),
+            p.data_dir.clone(),
+            p.homeserver_url.clone(),
+        )
     };
 
     let auth = pending_client.matrix_auth();
     if !auth.logged_in() {
         return Err("Pending client is not logged in".into());
     }
-    let session = auth
-        .session()
-        .ok_or("No session in pending client")?;
+    let session = auth.session().ok_or("No session in pending client")?;
     let user_id = session.meta.user_id.to_string();
 
-    app_log("info", "auth", format!("finalize_pending: starting for user {}", user_id));
+    app_log(
+        "info",
+        "auth",
+        format!("finalize_pending: starting for user {}", user_id),
+    );
     info!("finalize_pending: starting for user {}", user_id);
 
     // Build per-user directory
@@ -292,16 +294,22 @@ async fn finalize_pending() -> Result<String, String> {
         app_log(
             "info",
             "auth",
-            format!("Rebuilding SDK store for newly logged-in device: {}", user_id),
+            format!(
+                "Rebuilding SDK store for newly logged-in device: {}",
+                user_id
+            ),
         );
         std::fs::remove_dir_all(&sdk_dir)
             .map_err(|e| format!("Failed to reset existing account store: {e}"))?;
     }
 
     // Create a new client in the per-user directory
-    let url = url::Url::parse(&homeserver_url)
-        .map_err(|e| format!("Invalid URL: {e}"))?;
-    app_log("info", "auth", format!("finalize_pending: creating client in {}", sdk_dir.display()));
+    let url = url::Url::parse(&homeserver_url).map_err(|e| format!("Invalid URL: {e}"))?;
+    app_log(
+        "info",
+        "auth",
+        format!("finalize_pending: creating client in {}", sdk_dir.display()),
+    );
     info!("finalize_pending: creating client in {}", sdk_dir.display());
     let new_client = Client::builder()
         .homeserver_url(url)
@@ -322,14 +330,22 @@ async fn finalize_pending() -> Result<String, String> {
         },
     };
 
-    app_log("info", "auth", format!("finalize_pending: restoring session for {}", user_id));
+    app_log(
+        "info",
+        "auth",
+        format!("finalize_pending: restoring session for {}", user_id),
+    );
     info!("finalize_pending: restoring session for {}", user_id);
     new_client
         .matrix_auth()
         .restore_session(matrix_session, RoomLoadSettings::default())
         .await
         .map_err(|e| format!("Restore session in per-user store: {e}"))?;
-    app_log("info", "auth", format!("finalize_pending: session restored for {}", user_id));
+    app_log(
+        "info",
+        "auth",
+        format!("finalize_pending: session restored for {}", user_id),
+    );
     info!("finalize_pending: session restored for {}", user_id);
     install_verification_event_handler(&new_client);
 
@@ -366,7 +382,11 @@ async fn finalize_pending() -> Result<String, String> {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let temp_dir = build_sdk_data_dir(&data_dir, None);
     if temp_dir.exists() {
-        app_log("info", "auth", format!("Cleaning up pending dir: {}", temp_dir.display()));
+        app_log(
+            "info",
+            "auth",
+            format!("Cleaning up pending dir: {}", temp_dir.display()),
+        );
         info!("Cleaning up pending dir: {}", temp_dir.display());
         if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
             warn!("Failed to delete pending dir: {e}");
@@ -398,8 +418,6 @@ pub struct ChatRoom {
     pub last_message: String,
     pub last_message_time: String,
     pub unread_count: i32,
-    pub is_pinned: bool,
-    pub is_muted: bool,
     /// "dm", "group", or "space"
     pub room_type: String,
 }
@@ -432,10 +450,7 @@ pub struct Contact {
 
 fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
     let room_id = room.room_id().to_string();
-    let mut name = room
-        .name()
-        .filter(|n| !n.is_empty())
-        .unwrap_or_default();
+    let mut name = room.name().filter(|n| !n.is_empty()).unwrap_or_default();
     if name.is_empty() {
         name = room
             .cached_display_name()
@@ -463,8 +478,6 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         last_message,
         last_message_time,
         unread_count,
-        is_pinned: false,
-        is_muted: false,
         room_type,
     }
 }
@@ -693,7 +706,11 @@ fn uiaa_to_auth_result(uiaa_info: &UiaaInfo) -> AuthResult {
 /// after which it is automatically migrated to a per-user store.
 #[frb]
 pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(), String> {
-    app_log("info", "auth", format!("create_client: homeserver={}", homeserver_url));
+    app_log(
+        "info",
+        "auth",
+        format!("create_client: homeserver={}", homeserver_url),
+    );
     let url = url::Url::parse(&homeserver_url).map_err(|e| {
         let msg = format!("Invalid URL: {e}");
         app_log("error", "auth", msg.clone());
@@ -720,7 +737,11 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
             msg
         })?;
 
-    app_log("info", "auth", format!("Client created for {}", homeserver_url));
+    app_log(
+        "info",
+        "auth",
+        format!("Client created for {}", homeserver_url),
+    );
 
     let mut pending = PENDING.write().await;
     *pending = Some(PendingEntry {
@@ -737,7 +758,11 @@ pub async fn register_get_uiaa_session(
     username: String,
     password: String,
 ) -> Result<AuthResult, String> {
-    app_log("info", "auth", format!("register_get_uiaa_session: user={}", username));
+    app_log(
+        "info",
+        "auth",
+        format!("register_get_uiaa_session: user={}", username),
+    );
     let client = get_client()
         .await
         .ok_or("No client created. Call create_client first.")?;
@@ -797,7 +822,11 @@ pub async fn register_complete_uiaa(
     registration_token: String,
     session: String,
 ) -> Result<AuthResult, String> {
-    app_log("info", "auth", format!("register_complete_uiaa: user={}", username));
+    app_log(
+        "info",
+        "auth",
+        format!("register_complete_uiaa: user={}", username),
+    );
     let client = get_client()
         .await
         .ok_or("No client created. Call create_client first.")?;
@@ -814,7 +843,9 @@ pub async fn register_complete_uiaa(
     match client.matrix_auth().register(request).await {
         Ok(response) => {
             // Auto-finalize: migrate pending client to per-user store
-            let finalized = finalize_pending().await.map_err(|e| format!("Finalization failed: {e}"))?;
+            let finalized = finalize_pending()
+                .await
+                .map_err(|e| format!("Finalization failed: {e}"))?;
             info!("Account finalized after registration: {}", finalized);
             Ok(AuthResult {
                 success: true,
@@ -858,11 +889,12 @@ pub async fn register_complete_uiaa(
 
 /// Login with username and password.
 #[frb]
-pub async fn login_with_password(
-    username: String,
-    password: String,
-) -> Result<AuthResult, String> {
-    app_log("info", "auth", format!("login_with_password: user={}", username));
+pub async fn login_with_password(username: String, password: String) -> Result<AuthResult, String> {
+    app_log(
+        "info",
+        "auth",
+        format!("login_with_password: user={}", username),
+    );
     let client = get_client()
         .await
         .ok_or("No client created. Call create_client first.")?;
@@ -875,8 +907,14 @@ pub async fn login_with_password(
     {
         Ok(response) => {
             // Auto-finalize: migrate pending client to per-user store
-            let finalized = finalize_pending().await.map_err(|e| format!("Finalization failed: {e}"))?;
-            app_log("info", "auth", format!("Account finalized after password login: {}", finalized));
+            let finalized = finalize_pending()
+                .await
+                .map_err(|e| format!("Finalization failed: {e}"))?;
+            app_log(
+                "info",
+                "auth",
+                format!("Account finalized after password login: {}", finalized),
+            );
             info!("Account finalized after password login: {}", finalized);
             Ok(AuthResult {
                 success: true,
@@ -913,8 +951,8 @@ pub async fn login_with_token(
         .await
         .ok_or("No client created. Call create_client first.")?;
 
-    let parsed_user_id = matrix_sdk::ruma::UserId::parse(&user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    let parsed_user_id =
+        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
     let parsed_device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
 
     let session = MatrixSession {
@@ -937,11 +975,19 @@ pub async fn login_with_token(
     // Auto-finalize: migrate pending client to per-user store
     match finalize_pending().await {
         Ok(_) => {
-            app_log("info", "auth", "Account finalized after token login".to_string());
+            app_log(
+                "info",
+                "auth",
+                "Account finalized after token login".to_string(),
+            );
             info!("Account finalized after token login");
         }
         Err(e) => {
-            app_log("warn", "auth", format!("Finalization failed after token login: {e}"));
+            app_log(
+                "warn",
+                "auth",
+                format!("Finalization failed after token login: {e}"),
+            );
             warn!("Finalization failed after token login: {e}");
             // For token login, we keep the pending client as a fallback
             // since the account is already logged in.
@@ -951,7 +997,9 @@ pub async fn login_with_token(
     // Try to get the user_id from the finalized client first,
     // fallback to the pending client (if finalization failed)
     let final_client = get_client().await;
-    let final_user_id = final_client.as_ref().and_then(|c| c.user_id().map(|u| u.to_string()));
+    let final_user_id = final_client
+        .as_ref()
+        .and_then(|c| c.user_id().map(|u| u.to_string()));
 
     Ok(AuthResult {
         success: true,
@@ -998,15 +1046,13 @@ pub async fn get_active_user_id() -> Option<String> {
 /// homeserver. Used to populate the profile editor with current values.
 #[frb]
 pub async fn get_profile() -> Result<UserProfile, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
-    let user_id = client
-        .user_id()
-        .ok_or("Not logged in.")?;
+    let client = get_client().await.ok_or("No client created.")?;
+    let user_id = client.user_id().ok_or("Not logged in.")?;
 
     let account = client.account();
-    let display_name = account.get_display_name().await
+    let display_name = account
+        .get_display_name()
+        .await
         .map_err(|e| format!("Failed to fetch display name: {e}"))?
         .unwrap_or_default();
     let avatar_url = account
@@ -1025,13 +1071,15 @@ pub async fn get_profile() -> Result<UserProfile, String> {
 /// Update the current user's display name. Empty string clears it.
 #[frb]
 pub async fn set_display_name(name: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
     let account = client.account();
     let trimmed = name.trim();
     account
-        .set_display_name(if trimmed.is_empty() { None } else { Some(trimmed) })
+        .set_display_name(if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        })
         .await
         .map_err(|e| format!("Failed to set display name: {e}"))?;
     Ok(())
@@ -1041,9 +1089,7 @@ pub async fn set_display_name(name: String) -> Result<(), String> {
 /// `upload_avatar`. Pass an empty string to remove the avatar.
 #[frb]
 pub async fn set_avatar_url(mxc: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
     let account = client.account();
     let trimmed = mxc.trim();
     if trimmed.is_empty() {
@@ -1069,9 +1115,7 @@ pub async fn set_avatar_url(mxc: String) -> Result<(), String> {
 /// a half-set profile.
 #[frb]
 pub async fn upload_avatar(content_type: String, data: Vec<u8>) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
     let account = client.account();
     let mime: mime::Mime = content_type
         .parse()
@@ -1125,7 +1169,11 @@ pub async fn switch_account(user_id: String) -> bool {
         info!("Switched to account: {}", user_id);
         true
     } else {
-        app_log("warn", "auth", format!("switch_account: account {} not found", user_id));
+        app_log(
+            "warn",
+            "auth",
+            format!("switch_account: account {} not found", user_id),
+        );
         false
     }
 }
@@ -1142,28 +1190,41 @@ pub async fn logout() -> Result<(), String> {
     clear_verification_session().await;
     stop_sync_task(Some(&user_id)).await;
 
-    let entry = {
-        let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id)
+    let (client, data_dir) = {
+        let clients = CLIENTS.read().await;
+        let entry = clients
+            .get(&user_id)
+            .ok_or("Active account missing from store")?;
+        (entry.client.clone(), entry.data_dir.clone())
     };
 
-    if let Some(entry) = entry {
-        if entry.client.matrix_auth().logged_in() {
-            entry
-                .client
-                .matrix_auth()
-                .logout()
-                .await
-                .map_err(|e| format!("Logout failed: {e}"))?;
+    if client.matrix_auth().logged_in() {
+        if let Err(e) = client.matrix_auth().logout().await {
+            app_log(
+                "warn",
+                "auth",
+                format!("Remote logout failed for {}: {e}", user_id),
+            );
+            warn!("Remote logout failed for {}: {e}", user_id);
         }
-        // Delete the per-user SDK data directory
-        let sdk_dir = build_sdk_data_dir(&entry.data_dir, Some(&user_id));
-        if sdk_dir.exists() {
-            app_log("info", "auth", format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()));
-            info!("Deleting SDK store for {}: {}", user_id, sdk_dir.display());
-            if let Err(e) = std::fs::remove_dir_all(&sdk_dir) {
-                warn!("Failed to delete SDK store: {e}");
-            }
+    }
+
+    {
+        let mut clients = CLIENTS.write().await;
+        clients.remove(&user_id);
+    }
+
+    // Delete the per-user SDK data directory after the client has been removed.
+    let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
+    if sdk_dir.exists() {
+        app_log(
+            "info",
+            "auth",
+            format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()),
+        );
+        info!("Deleting SDK store for {}: {}", user_id, sdk_dir.display());
+        if let Err(e) = std::fs::remove_dir_all(&sdk_dir) {
+            warn!("Failed to delete SDK store: {e}");
         }
     }
 
@@ -1172,11 +1233,19 @@ pub async fn logout() -> Result<(), String> {
     let mut active = ACTIVE_USER.write().await;
     if let Some((next_id, _)) = clients.iter().next() {
         *active = Some(next_id.clone());
-        app_log("info", "auth", format!("Switched active account to: {}", next_id));
+        app_log(
+            "info",
+            "auth",
+            format!("Switched active account to: {}", next_id),
+        );
         info!("Switched active account to: {}", next_id);
     } else {
         *active = None;
-        app_log("info", "auth", "No more accounts, active cleared".to_string());
+        app_log(
+            "info",
+            "auth",
+            "No more accounts, active cleared".to_string(),
+        );
         info!("No more accounts, active cleared");
     }
 
@@ -1191,19 +1260,37 @@ pub async fn remove_account(user_id: String) -> Result<(), String> {
         clear_verification_session().await;
     }
     stop_sync_task(Some(&user_id)).await;
-    let entry = {
-        let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id).ok_or("Account not found")?
+
+    let (client, data_dir) = {
+        let clients = CLIENTS.read().await;
+        let entry = clients.get(&user_id).ok_or("Account not found")?;
+        (entry.client.clone(), entry.data_dir.clone())
     };
 
-    if entry.client.matrix_auth().logged_in() {
-        let _ = entry.client.matrix_auth().logout().await;
+    if client.matrix_auth().logged_in() {
+        if let Err(e) = client.matrix_auth().logout().await {
+            app_log(
+                "warn",
+                "auth",
+                format!("Remote logout failed while removing {}: {e}", user_id),
+            );
+            warn!("Remote logout failed while removing {}: {e}", user_id);
+        }
+    }
+
+    {
+        let mut clients = CLIENTS.write().await;
+        clients.remove(&user_id);
     }
 
     // Delete the per-user SDK data directory
-    let sdk_dir = build_sdk_data_dir(&entry.data_dir, Some(&user_id));
+    let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
     if sdk_dir.exists() {
-        app_log("info", "auth", format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()));
+        app_log(
+            "info",
+            "auth",
+            format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()),
+        );
         info!("Deleting SDK store for {}: {}", user_id, sdk_dir.display());
         if let Err(e) = std::fs::remove_dir_all(&sdk_dir) {
             warn!("Failed to delete SDK store: {e}");
@@ -1253,16 +1340,26 @@ pub async fn get_session() -> Option<StoredSession> {
 /// Uses a per-user store directory so multiple accounts coexist.
 #[frb]
 pub async fn restore_session(session: StoredSession, data_dir: String) -> Result<(), String> {
-    app_log("info", "auth", format!("restore_session: user={}, homeserver={}", session.user_id, session.homeserver_url));
-    let url = url::Url::parse(&session.homeserver_url)
-        .map_err(|e| {
-            let msg = format!("Invalid URL: {e}");
-            app_log("error", "auth", msg.clone());
-            msg
-        })?;
+    app_log(
+        "info",
+        "auth",
+        format!(
+            "restore_session: user={}, homeserver={}",
+            session.user_id, session.homeserver_url
+        ),
+    );
+    let url = url::Url::parse(&session.homeserver_url).map_err(|e| {
+        let msg = format!("Invalid URL: {e}");
+        app_log("error", "auth", msg.clone());
+        msg
+    })?;
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&session.user_id));
 
-    app_log("info", "auth", format!("restore_session: SDK dir = {}", sdk_dir.display()));
+    app_log(
+        "info",
+        "auth",
+        format!("restore_session: SDK dir = {}", sdk_dir.display()),
+    );
 
     let client = Client::builder()
         .homeserver_url(url)
@@ -1275,19 +1372,15 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
             msg
         })?;
 
-    let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| {
-            let msg = format!("Invalid user ID: {e}");
-            app_log("error", "auth", msg.clone());
-            msg
-        })?;
+    let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id).map_err(|e| {
+        let msg = format!("Invalid user ID: {e}");
+        app_log("error", "auth", msg.clone());
+        msg
+    })?;
     let device_id = matrix_sdk::ruma::OwnedDeviceId::from(session.device_id);
 
     let matrix_session = MatrixSession {
-        meta: SessionMeta {
-            user_id,
-            device_id,
-        },
+        meta: SessionMeta { user_id, device_id },
         tokens: SessionTokens {
             access_token: session.access_token,
             refresh_token: None,
@@ -1323,15 +1416,25 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
         *active = Some(session.user_id.clone());
     }
 
-    app_log("info", "auth", format!("Session restored for {}", session.user_id));
+    app_log(
+        "info",
+        "auth",
+        format!("Session restored for {}", session.user_id),
+    );
     Ok(())
 }
 
 // ── Device verification & encryption recovery ─────────────────────
 
 fn active_session_meta(client: &Client) -> Result<(String, String), String> {
-    let session = client.matrix_auth().session().ok_or("No active Matrix session")?;
-    Ok((session.meta.user_id.to_string(), session.meta.device_id.to_string()))
+    let session = client
+        .matrix_auth()
+        .session()
+        .ok_or("No active Matrix session")?;
+    Ok((
+        session.meta.user_id.to_string(),
+        session.meta.device_id.to_string(),
+    ))
 }
 
 async fn current_verification_session() -> Result<(Client, VerificationSession), String> {
@@ -1350,7 +1453,10 @@ async fn clear_verification_session() {
 
 async fn clear_verification_session_if(flow_id: &str) {
     let mut active = VERIFICATION_SESSION.write().await;
-    if active.as_ref().is_some_and(|session| session.flow_id == flow_id) {
+    if active
+        .as_ref()
+        .is_some_and(|session| session.flow_id == flow_id)
+    {
         *active = None;
     }
 }
@@ -1359,8 +1465,8 @@ async fn clear_verification_session_if(flow_id: &str) {
 pub async fn list_own_devices() -> Result<Vec<VerificationDevice>, String> {
     let client = get_client().await.ok_or("No active client")?;
     let (user_id, current_device_id) = active_session_meta(&client)?;
-    let user_id = matrix_sdk::ruma::UserId::parse(user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    let user_id =
+        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
 
     // Refresh the identity first so the device list isn't limited to stale local data.
     client
@@ -1394,8 +1500,8 @@ pub async fn start_device_verification(device_id: String) -> Result<(), String> 
     if device_id == current_device_id {
         return Err("Cannot verify the current device with itself".into());
     }
-    let user_id = matrix_sdk::ruma::UserId::parse(user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    let user_id =
+        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
     let device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
     let device = client
         .encryption()
@@ -1469,7 +1575,11 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
         .await;
 
     if let Some(Verification::SasV1(sas)) = verification {
-        if session.accepted && !sas.can_be_presented() && !sas.is_done() && sas.cancel_info().is_none() {
+        if session.accepted
+            && !sas.can_be_presented()
+            && !sas.is_done()
+            && sas.cancel_info().is_none()
+        {
             sas.accept()
                 .await
                 .map_err(|e| format!("Failed to accept emoji verification: {e}"))?;
@@ -1520,9 +1630,7 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
         Some(VerificationRequestState::Created { .. }) => {
             ("waiting", "Waiting for the other device")
         }
-        Some(VerificationRequestState::Ready { .. }) => {
-            ("starting", "Starting emoji verification")
-        }
+        Some(VerificationRequestState::Ready { .. }) => ("starting", "Starting emoji verification"),
         Some(VerificationRequestState::Transitioned { .. }) => {
             ("starting", "Preparing emoji comparison")
         }
@@ -1637,7 +1745,10 @@ pub async fn get_encryption_recovery_info() -> Result<EncryptionRecoveryInfo, St
         client.encryption().verification_state().get(),
         OwnVerificationState::Verified
     );
-    Ok(EncryptionRecoveryInfo { state: state.into(), device_verified })
+    Ok(EncryptionRecoveryInfo {
+        state: state.into(),
+        device_verified,
+    })
 }
 
 #[frb]
@@ -1659,7 +1770,9 @@ pub async fn recover_encryption(recovery_key_or_passphrase: String) -> Result<()
 pub async fn enable_encryption_recovery(passphrase: Option<String>) -> Result<String, String> {
     let client = get_client().await.ok_or("No active client")?;
     let recovery = client.encryption().recovery();
-    let passphrase = passphrase.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let passphrase = passphrase
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let result = if let Some(passphrase) = passphrase.as_deref() {
         recovery
             .enable()
@@ -1689,18 +1802,20 @@ pub struct SyncNotification {
 /// this data in the state store first).
 #[frb]
 pub async fn sync_once() -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or_else(|| {
-            app_log("error", "sync", "sync_once: no client created".to_string());
-            "No client created.".to_string()
-        })?;
-    let user_id = client
-        .user_id()
-        .map(|u| u.to_string())
-        .unwrap_or_default();
+    let client = get_client().await.ok_or_else(|| {
+        app_log("error", "sync", "sync_once: no client created".to_string());
+        "No client created.".to_string()
+    })?;
+    let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
     let hs = client.homeserver().to_string();
-    app_log("info", "sync", format!("sync_once: starting for user {} (homeserver: {hs})", user_id));
+    app_log(
+        "info",
+        "sync",
+        format!(
+            "sync_once: starting for user {} (homeserver: {hs})",
+            user_id
+        ),
+    );
     set_connection_status(ConnectionStatus::Connecting);
 
     client
@@ -1716,7 +1831,11 @@ pub async fn sync_once() -> Result<(), String> {
 
     match result {
         Ok(Ok(_)) => {
-            app_log("info", "sync", format!("sync_once: completed for user {}", user_id));
+            app_log(
+                "info",
+                "sync",
+                format!("sync_once: completed for user {}", user_id),
+            );
             set_connection_status(ConnectionStatus::Connected);
             notify_sync_event(SyncEvent::SyncCompleted);
             Ok(())
@@ -1728,7 +1847,10 @@ pub async fn sync_once() -> Result<(), String> {
             Err(format!("Sync failed: {e}"))
         }
         Err(_) => {
-            let msg = format!("sync_once: timed out after 30s for user {} (homeserver: {hs})", user_id);
+            let msg = format!(
+                "sync_once: timed out after 30s for user {} (homeserver: {hs})",
+                user_id
+            );
             app_log("error", "sync", msg.clone());
             set_connection_status(ConnectionStatus::Disconnected);
             Err("Sync timed out after 30 seconds. Check your network connection and homeserver URL.".to_string())
@@ -1740,18 +1862,20 @@ pub async fn sync_once() -> Result<(), String> {
 /// Falls back to traditional sync_once loop if Sliding Sync is unavailable.
 #[frb]
 pub async fn start_sync() -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or_else(|| {
-            app_log("error", "sync", "start_sync: no client created".to_string());
-            "No client created.".to_string()
-        })?;
-    let user_id = client
-        .user_id()
-        .map(|u| u.to_string())
-        .unwrap_or_default();
+    let client = get_client().await.ok_or_else(|| {
+        app_log("error", "sync", "start_sync: no client created".to_string());
+        "No client created.".to_string()
+    })?;
+    let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
     let hs = client.homeserver().to_string();
-    app_log("info", "sync", format!("start_sync: beginning for user {} (homeserver: {hs})", user_id));
+    app_log(
+        "info",
+        "sync",
+        format!(
+            "start_sync: beginning for user {} (homeserver: {hs})",
+            user_id
+        ),
+    );
 
     client
         .event_cache()
@@ -1763,15 +1887,30 @@ pub async fn start_sync() -> Result<(), String> {
     // Try Sliding Sync first
     let handle = match try_start_sliding_sync(client.clone()).await {
         Ok(handle) => {
-            app_log("info", "sync", format!("start_sync: Sliding Sync started for user {}", user_id));
+            app_log(
+                "info",
+                "sync",
+                format!("start_sync: Sliding Sync started for user {}", user_id),
+            );
             handle
         }
         Err(e) => {
-            app_log("warn", "sync", format!("start_sync: Sliding Sync failed ({}), falling back to traditional sync loop", e));
+            app_log(
+                "warn",
+                "sync",
+                format!(
+                    "start_sync: Sliding Sync failed ({}), falling back to traditional sync loop",
+                    e
+                ),
+            );
             // Fallback: traditional sync loop
             let loop_user_id = user_id.clone();
             tokio::spawn(async move {
-                app_log("info", "sync", format!("Traditional sync loop started for user {}", loop_user_id));
+                app_log(
+                    "info",
+                    "sync",
+                    format!("Traditional sync loop started for user {}", loop_user_id),
+                );
                 loop {
                     set_connection_status(ConnectionStatus::Updating);
                     match client
@@ -1810,9 +1949,9 @@ pub async fn start_sync() -> Result<(), String> {
 
 /// Try to set up Sliding Sync with the SDK's built-in support.
 async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String> {
-    use matrix_sdk::sliding_sync::{SlidingSyncList, SlidingSyncMode, Version};
-    use matrix_sdk::ruma::events::StateEventType as RoomStateType;
     use futures_util::StreamExt;
+    use matrix_sdk::ruma::events::StateEventType as RoomStateType;
+    use matrix_sdk::sliding_sync::{SlidingSyncList, SlidingSyncMode, Version};
 
     // Build the Sliding Sync instance
     let sliding_sync = client
@@ -1857,7 +1996,11 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
         while let Some(update) = stream.next().await {
             match update {
                 Ok(summary) => {
-                    app_log("info", "sync", format!("Sliding Sync update: {} rooms", summary.rooms.len()));
+                    app_log(
+                        "info",
+                        "sync",
+                        format!("Sliding Sync update: {} rooms", summary.rooms.len()),
+                    );
                     set_connection_status(ConnectionStatus::Connected);
                     notify_sync_event(SyncEvent::SyncCompleted);
                 }
@@ -1900,11 +2043,10 @@ pub struct TypingNotification {
     pub user_ids: Vec<String>,
 }
 
-static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> =
-    Lazy::new(|| {
-        let (tx, _rx) = tokio::sync::broadcast::channel(64);
-        tx
-    });
+static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> = Lazy::new(|| {
+    let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    tx
+});
 
 /// Handle to the background task that owns the per-room typing subscription,
 /// so we can abort it when switching rooms or leaving.
@@ -1918,7 +2060,16 @@ static TYPING_TASK: Lazy<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>
 /// SDK store for every member on every sync. Value = (records, total_members,
 /// fetched_at).
 static RECEIPT_CACHE: Lazy<
-    tokio::sync::Mutex<HashMap<String, (Vec<(String, String, Option<String>, i64)>, i32, std::time::Instant)>>,
+    tokio::sync::Mutex<
+        HashMap<
+            String,
+            (
+                Vec<(String, String, Option<String>, i64)>,
+                i32,
+                std::time::Instant,
+            ),
+        >,
+    >,
 > = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 /// Receipt cache freshness window. Receipts rarely change faster than this.
@@ -1943,11 +2094,10 @@ pub fn watch_typing_notifications(sink: crate::frb_generated::StreamSink<TypingN
 /// tracked at a time). Call `unsubscribe_typing` when leaving the room.
 #[frb]
 pub async fn subscribe_typing_for_room(room_id: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -2008,7 +2158,10 @@ pub async fn is_connected() -> bool {
 
 #[frb(sync)]
 pub fn get_connection_status() -> ConnectionStatus {
-    CONNECTION_STATE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    CONNECTION_STATE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 #[frb]
@@ -2022,15 +2175,25 @@ pub async fn init_client() -> Result<(), String> {
 pub async fn mxc_to_http(mxc_url: String) -> Option<String> {
     let client = get_client().await?;
     let url = url::Url::parse(&mxc_url).ok()?;
-    if url.scheme() != "mxc" { return None; }
+    if url.scheme() != "mxc" {
+        return None;
+    }
     let server_name = url.host_str()?;
     let media_id = url.path().trim_start_matches('/');
-    if server_name.is_empty() || media_id.is_empty() { return None; }
+    if server_name.is_empty() || media_id.is_empty() {
+        return None;
+    }
     let raw_base = client.homeserver().to_string();
     let base = raw_base.trim_end_matches('/');
-    let media_url = format!("{}/_matrix/client/v1/media/thumbnail/{}/{}?width=800&height=600&method=scale",
-        base, server_name, media_id);
-    app_log("info", "media", format!("Resolved media thumbnail for {}", mxc_url));
+    let media_url = format!(
+        "{}/_matrix/client/v1/media/thumbnail/{}/{}?width=800&height=600&method=scale",
+        base, server_name, media_id
+    );
+    app_log(
+        "info",
+        "media",
+        format!("Resolved media thumbnail for {}", mxc_url),
+    );
     Some(media_url)
 }
 
@@ -2040,15 +2203,25 @@ pub async fn mxc_to_http(mxc_url: String) -> Option<String> {
 pub async fn mxc_to_http_full(mxc_url: String) -> Option<String> {
     let client = get_client().await?;
     let url = url::Url::parse(&mxc_url).ok()?;
-    if url.scheme() != "mxc" { return None; }
+    if url.scheme() != "mxc" {
+        return None;
+    }
     let server_name = url.host_str()?;
     let media_id = url.path().trim_start_matches('/');
-    if server_name.is_empty() || media_id.is_empty() { return None; }
+    if server_name.is_empty() || media_id.is_empty() {
+        return None;
+    }
     let raw_base = client.homeserver().to_string();
     let base = raw_base.trim_end_matches('/');
-    let media_url = format!("{}/_matrix/client/v1/media/download/{}/{}",
-        base, server_name, media_id);
-    app_log("info", "media", format!("Resolved full media URL for {}", mxc_url));
+    let media_url = format!(
+        "{}/_matrix/client/v1/media/download/{}/{}",
+        base, server_name, media_id
+    );
+    app_log(
+        "info",
+        "media",
+        format!("Resolved full media URL for {}", mxc_url),
+    );
     Some(media_url)
 }
 
@@ -2058,10 +2231,14 @@ pub async fn mxc_to_http_full(mxc_url: String) -> Option<String> {
 pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
     let client = get_client().await?;
     let url = url::Url::parse(&mxc_url).ok()?;
-    if url.scheme() != "mxc" { return None; }
+    if url.scheme() != "mxc" {
+        return None;
+    }
     let server_name = url.host_str()?.to_string();
     let media_id = url.path().trim_start_matches('/').to_string();
-    if server_name.is_empty() || media_id.is_empty() { return None; }
+    if server_name.is_empty() || media_id.is_empty() {
+        return None;
+    }
 
     use matrix_sdk::ruma::api::client::authenticated_media::get_content::v1::Request as MediaDownloadRequest;
     let server = matrix_sdk::ruma::ServerName::parse(&server_name).ok()?;
@@ -2069,11 +2246,23 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
 
     match client.send(request).await {
         Ok(response) => {
-            app_log("info", "media", format!("download_media_bytes: {} bytes for {}", response.file.len(), mxc_url));
+            app_log(
+                "info",
+                "media",
+                format!(
+                    "download_media_bytes: {} bytes for {}",
+                    response.file.len(),
+                    mxc_url
+                ),
+            );
             Some(response.file)
         }
         Err(e) => {
-            app_log("error", "media", format!("download_media_bytes failed: {e}"));
+            app_log(
+                "error",
+                "media",
+                format!("download_media_bytes failed: {e}"),
+            );
             None
         }
     }
@@ -2089,15 +2278,21 @@ pub async fn get_access_token() -> Option<String> {
 
 #[frb]
 pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
-    let client = get_client()
-        .await
-        .ok_or_else(|| {
-            app_log("error", "rooms", "get_chat_rooms: no client created".to_string());
-            "No client created.".to_string()
-        })?;
+    let client = get_client().await.ok_or_else(|| {
+        app_log(
+            "error",
+            "rooms",
+            "get_chat_rooms: no client created".to_string(),
+        );
+        "No client created.".to_string()
+    })?;
 
     let rooms = client.rooms();
-    app_log("info", "rooms", format!("get_chat_rooms: found {} total rooms", rooms.len()));
+    app_log(
+        "info",
+        "rooms",
+        format!("get_chat_rooms: found {} total rooms", rooms.len()),
+    );
     let mut result = Vec::new();
     let mut joined = 0;
 
@@ -2117,7 +2312,11 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
         result.push(chat_room);
     }
 
-    app_log("info", "rooms", format!("get_chat_rooms: {} joined rooms returned", joined));
+    app_log(
+        "info",
+        "rooms",
+        format!("get_chat_rooms: {} joined rooms returned", joined),
+    );
     result.sort_by(|a, b| {
         let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
         let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
@@ -2149,7 +2348,10 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
                     // An edit (m.replace) carries the new text in new_content,
                     // and its own body is conventionally prefixed with "* ".
                     // Use the new_content text so the preview stays clean.
-                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(rep)) = &o.content.relates_to {
+                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(
+                        rep,
+                    )) = &o.content.relates_to
+                    {
                         if let Some(edited) = extract_edit_text(&rep.new_content) {
                             return Some(edited);
                         }
@@ -2229,7 +2431,9 @@ fn strip_reply_fallback(body: &str) -> String {
 }
 
 /// Extract edit text from a replacement relation's new_content.
-fn extract_edit_text(new_content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation) -> Option<String> {
+fn extract_edit_text(
+    new_content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation,
+) -> Option<String> {
     match &new_content.msgtype {
         matrix_sdk::ruma::events::room::message::MessageType::Text(t) => Some(t.body.clone()),
         matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => Some(t.body.clone()),
@@ -2240,13 +2444,12 @@ fn extract_edit_text(new_content: &matrix_sdk::ruma::events::room::message::Room
 /// Get messages for a room (must sync first).
 #[frb]
 pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let my_user_id = client.user_id().map(|u| u.to_string());
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -2254,254 +2457,307 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
     // event_id (of the annotated message) → (reaction key → (sender ids, my reaction event id))
-    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> = HashMap::new();
-    let mut newest_event_id: Option<String> = None;
+    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> =
+        HashMap::new();
     let mut opts = matrix_sdk::room::MessagesOptions::backward();
     opts.limit = 100u32.into();
 
-    if let Ok(msg_resp) = room.messages(opts).await {
-        newest_event_id = msg_resp.chunk.first().and_then(|event| {
-            event
-                .kind
-                .raw()
-                .deserialize()
-                .ok()
-                .map(|event: matrix_sdk::ruma::events::AnySyncTimelineEvent| {
-                    event.event_id().to_string()
-                })
-        });
-        for timeline_event in msg_resp.chunk.iter().rev() {
-            let raw = timeline_event.kind.raw();
-            let Ok(any_ev) = raw.deserialize() else { continue };
+    let msg_resp = room.messages(opts).await.map_err(|e| {
+        let msg = format!("Failed to load messages for room {}: {e}", room_id);
+        app_log("error", "rooms", msg.clone());
+        msg
+    })?;
 
-            let event_id_str = any_ev.event_id().to_string();
-            let sender_id = any_ev.sender().to_string();
-            let is_me = my_user_id.as_ref() == Some(&sender_id);
-            let sender_name = if is_me {
-                "\u{6211}".to_string() // "我"
-            } else {
-                sender_id.split(':').next()
-                    .unwrap_or(&sender_id)
-                    .trim_start_matches('@')
-                    .to_string()
-            };
+    let newest_event_id = msg_resp.chunk.first().and_then(|event| {
+        event.kind.raw().deserialize().ok().map(
+            |event: matrix_sdk::ruma::events::AnySyncTimelineEvent| event.event_id().to_string(),
+        )
+    });
+    for timeline_event in msg_resp.chunk.iter().rev() {
+        let raw = timeline_event.kind.raw();
+        let Ok(any_ev) = raw.deserialize() else {
+            continue;
+        };
 
-            let ts_millis = u64::from(any_ev.origin_server_ts().0);
-            let timestamp = ts_millis.to_string();
-
-            match &any_ev {
-                // ── Message events ──
-                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
-                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
-                ) => {
-                    let Some(original) = msg.as_original() else { continue };
-
-                    // Check if this is an edit (replacement) event
-                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) = &original.content.relates_to {
-                        if let Some(edit_text) = extract_edit_text(&replacement.new_content) {
-                            edits.entry(replacement.event_id.to_string())
-                                .or_default()
-                                .push(edit_text);
-                        }
-                        continue; // Do not add the edit event itself to the message list
-                    }
-
-                    let in_reply_to = original.content.relates_to.as_ref().and_then(|rel| {
-                        if let matrix_sdk::ruma::events::room::message::Relation::Reply(reply) = rel {
-                            Some(reply.in_reply_to.event_id.to_string())
-                        } else {
-                            None
-                        }
-                    });
-
-                    let chat_msg = match &original.content.msgtype {
-                        matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
-                            let content = if in_reply_to.is_some() {
-                                strip_reply_fallback(&t.body)
-                            } else {
-                                t.body.clone()
-                            };
-                            ChatMessage {
-                                id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                                content, timestamp: timestamp.clone(), is_me,
-                                msg_type: MessageType::Text, image_url: None, in_reply_to,
-                                is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                            }
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
-                            let name = sender_name.clone();
-                            let content = if in_reply_to.is_some() {
-                                format!("* {} {}", name, strip_reply_fallback(&t.body))
-                            } else {
-                                format!("* {} {}", name, t.body)
-                            };
-                            ChatMessage {
-                                id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                                content, timestamp: timestamp.clone(), is_me,
-                                msg_type: MessageType::Text, image_url: None, in_reply_to,
-                                is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                            }
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
-                            let content = if in_reply_to.is_some() {
-                                strip_reply_fallback(&t.body)
-                            } else {
-                                t.body.clone()
-                            };
-                            ChatMessage {
-                                id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                                content, timestamp: timestamp.clone(), is_me,
-                                msg_type: MessageType::Text, image_url: None, in_reply_to,
-                                is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                            }
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
-                            let url = match &t.source {
-                                matrix_sdk::ruma::events::room::MediaSource::Plain(mxc) => Some(mxc.to_string()),
-                                _ => None,
-                            };
-                            ChatMessage {
-                                id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                                content: t.body.clone(), timestamp: timestamp.clone(), is_me,
-                                msg_type: MessageType::Image, image_url: url, in_reply_to,
-                                is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                            }
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::File(t) => {
-                            ChatMessage {
-                                id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                                content: format!("\u{6587}\u{4EF6}: {}", t.body),
-                                timestamp: timestamp.clone(), is_me,
-                                msg_type: MessageType::Text, image_url: None, in_reply_to,
-                                is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                            }
-                        }
-                        _ => {
-                            continue; // skip unknown message types
-                        }
-                    };
-                    raw_messages.push((event_id_str.clone(), chat_msg));
-                }
-
-                // ── Reaction events (m.reaction / m.annotation) ──
-                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
-                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Reaction(r),
-                ) => {
-                    if let Some(orig) = r.as_original() {
-                        let ann = &orig.content.relates_to;
-                        let entry = reactions
-                            .entry(ann.event_id.to_string())
-                            .or_default()
-                            .entry(ann.key.clone())
-                            .or_insert_with(|| (Vec::new(), None));
-                        entry.0.push(sender_id.clone());
-                        // Record the current user's reaction event id for toggling.
-                        if is_me {
-                            entry.1 = Some(event_id_str.clone());
-                        }
-                    }
-                }
-
-                // ── State/member events ──
-                matrix_sdk::ruma::events::AnySyncTimelineEvent::State(state_ev) => {
-                    let content = match state_ev {
-                        matrix_sdk::ruma::events::AnySyncStateEvent::RoomMember(m) => {
-                            let target = m.state_key().to_string();
-                            let target_name = target.split(':').next()
-                                .unwrap_or(&target)
-                                .trim_start_matches('@')
-                                .to_string();
-                            match m.as_original() {
-                                Some(orig) => {
-                                    // A member event whose membership is Join but
-                                    // whose prev_membership was also Join is a
-                                    // profile update (avatar/displayname change),
-                                    // not a real join — must not render as
-                                    // "joined the room".
-                                    let prev_membership = orig.unsigned
-                                        .prev_content
-                                        .as_ref()
-                                        .map(|pc| &pc.membership);
-                                    match &orig.content.membership {
-                                        matrix_sdk::ruma::events::room::member::MembershipState::Join => {
-                                            // Real join: no prev, or prev was not Join.
-                                            let is_profile_update = matches!(
-                                                prev_membership,
-                                                Some(matrix_sdk::ruma::events::room::member::MembershipState::Join)
-                                            );
-                                            if is_profile_update {
-                                                None
-                                            } else {
-                                                Some(format!("{} 加入了房间", target_name))
-                                            }
-                                        }
-                                        matrix_sdk::ruma::events::room::member::MembershipState::Leave => {
-                                            if is_me {
-                                                Some(format!("{} 离开了房间", target_name))
-                                            } else {
-                                                None // skip own leave
-                                            }
-                                        }
-                                        matrix_sdk::ruma::events::room::member::MembershipState::Ban => Some(format!("{} 被封禁", target_name)),
-                                        matrix_sdk::ruma::events::room::member::MembershipState::Invite => Some(format!("{} 被邀请加入房间", target_name)),
-                                        matrix_sdk::ruma::events::room::member::MembershipState::Knock => Some(format!("{} 请求加入房间", target_name)),
-                                        _ => None,
-                                    }
-                                }
-                                None => None,
-                            }
-                        }
-                        matrix_sdk::ruma::events::AnySyncStateEvent::RoomCreate(_) => {
-                            Some("房间已创建".to_string())
-                        }
-                        matrix_sdk::ruma::events::AnySyncStateEvent::RoomName(n) => {
-                            n.as_original().map(|o| format!("房间名称更改为: {}", o.content.name))
-                        }
-                        matrix_sdk::ruma::events::AnySyncStateEvent::RoomTopic(t) => {
-                            t.as_original().map(|o| format!("主题更改为: {}", o.content.topic))
-                        }
-                        matrix_sdk::ruma::events::AnySyncStateEvent::RoomAvatar(_) => {
-                            Some("房间头像已更改".to_string())
-                        }
-                        _ => None,
-                    };
-                    if let Some(content) = content {
-                        raw_messages.push((event_id_str.clone(), ChatMessage {
-                            id: event_id_str.clone(), sender_id: sender_id.clone(), sender_name: sender_name.clone(),
-                            content, timestamp: timestamp.clone(), is_me: false,
-                            msg_type: MessageType::Event, image_url: None, in_reply_to: None,
-                            is_edited: false, edit_history: Vec::new(),
-                                reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
-                        }));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
-        if let Some(next_from) = msg_resp.end {
-            tokens.insert(room_id.clone(), next_from);
+        let event_id_str = any_ev.event_id().to_string();
+        let sender_id = any_ev.sender().to_string();
+        let is_me = my_user_id.as_ref() == Some(&sender_id);
+        let sender_name = if is_me {
+            "\u{6211}".to_string() // "我"
         } else {
-            tokens.remove(&room_id);
+            sender_id
+                .split(':')
+                .next()
+                .unwrap_or(&sender_id)
+                .trim_start_matches('@')
+                .to_string()
+        };
+
+        let ts_millis = u64::from(any_ev.origin_server_ts().0);
+        let timestamp = ts_millis.to_string();
+
+        match &any_ev {
+            // ── Message events ──
+            matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
+            ) => {
+                let Some(original) = msg.as_original() else {
+                    continue;
+                };
+
+                // Check if this is an edit (replacement) event
+                if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(
+                    replacement,
+                )) = &original.content.relates_to
+                {
+                    if let Some(edit_text) = extract_edit_text(&replacement.new_content) {
+                        edits
+                            .entry(replacement.event_id.to_string())
+                            .or_default()
+                            .push(edit_text);
+                    }
+                    continue; // Do not add the edit event itself to the message list
+                }
+
+                let in_reply_to = original.content.relates_to.as_ref().and_then(|rel| {
+                    if let matrix_sdk::ruma::events::room::message::Relation::Reply(reply) = rel {
+                        Some(reply.in_reply_to.event_id.to_string())
+                    } else {
+                        None
+                    }
+                });
+
+                let chat_msg = match &original.content.msgtype {
+                    matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
+                        let content = if in_reply_to.is_some() {
+                            strip_reply_fallback(&t.body)
+                        } else {
+                            t.body.clone()
+                        };
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content,
+                            timestamp: timestamp.clone(),
+                            is_me,
+                            msg_type: MessageType::Text,
+                            image_url: None,
+                            in_reply_to,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        }
+                    }
+                    matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
+                        let name = sender_name.clone();
+                        let content = if in_reply_to.is_some() {
+                            format!("* {} {}", name, strip_reply_fallback(&t.body))
+                        } else {
+                            format!("* {} {}", name, t.body)
+                        };
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content,
+                            timestamp: timestamp.clone(),
+                            is_me,
+                            msg_type: MessageType::Text,
+                            image_url: None,
+                            in_reply_to,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        }
+                    }
+                    matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
+                        let content = if in_reply_to.is_some() {
+                            strip_reply_fallback(&t.body)
+                        } else {
+                            t.body.clone()
+                        };
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content,
+                            timestamp: timestamp.clone(),
+                            is_me,
+                            msg_type: MessageType::Text,
+                            image_url: None,
+                            in_reply_to,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        }
+                    }
+                    matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
+                        let url = match &t.source {
+                            matrix_sdk::ruma::events::room::MediaSource::Plain(mxc) => {
+                                Some(mxc.to_string())
+                            }
+                            _ => None,
+                        };
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content: t.body.clone(),
+                            timestamp: timestamp.clone(),
+                            is_me,
+                            msg_type: MessageType::Image,
+                            image_url: url,
+                            in_reply_to,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        }
+                    }
+                    matrix_sdk::ruma::events::room::message::MessageType::File(t) => ChatMessage {
+                        id: event_id_str.clone(),
+                        sender_id: sender_id.clone(),
+                        sender_name: sender_name.clone(),
+                        content: format!("\u{6587}\u{4EF6}: {}", t.body),
+                        timestamp: timestamp.clone(),
+                        is_me,
+                        msg_type: MessageType::Text,
+                        image_url: None,
+                        in_reply_to,
+                        is_edited: false,
+                        edit_history: Vec::new(),
+                        reactions: Vec::new(),
+                        readers: Vec::new(),
+                        total_members: 0,
+                    },
+                    _ => {
+                        continue; // skip unknown message types
+                    }
+                };
+                raw_messages.push((event_id_str.clone(), chat_msg));
+            }
+
+            // ── Reaction events (m.reaction / m.annotation) ──
+            matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Reaction(r),
+            ) => {
+                if let Some(orig) = r.as_original() {
+                    let ann = &orig.content.relates_to;
+                    let entry = reactions
+                        .entry(ann.event_id.to_string())
+                        .or_default()
+                        .entry(ann.key.clone())
+                        .or_insert_with(|| (Vec::new(), None));
+                    entry.0.push(sender_id.clone());
+                    // Record the current user's reaction event id for toggling.
+                    if is_me {
+                        entry.1 = Some(event_id_str.clone());
+                    }
+                }
+            }
+
+            // ── State/member events ──
+            matrix_sdk::ruma::events::AnySyncTimelineEvent::State(state_ev) => {
+                let content = match state_ev {
+                    matrix_sdk::ruma::events::AnySyncStateEvent::RoomMember(m) => {
+                        let target = m.state_key().to_string();
+                        let target_name = target
+                            .split(':')
+                            .next()
+                            .unwrap_or(&target)
+                            .trim_start_matches('@')
+                            .to_string();
+                        match m.as_original() {
+                            Some(orig) => {
+                                // A member event whose membership is Join but
+                                // whose prev_membership was also Join is a
+                                // profile update (avatar/displayname change),
+                                // not a real join — must not render as
+                                // "joined the room".
+                                let prev_membership =
+                                    orig.unsigned.prev_content.as_ref().map(|pc| &pc.membership);
+                                match &orig.content.membership {
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Join => {
+                                        // Real join: no prev, or prev was not Join.
+                                        let is_profile_update = matches!(
+                                            prev_membership,
+                                            Some(matrix_sdk::ruma::events::room::member::MembershipState::Join)
+                                        );
+                                        if is_profile_update {
+                                            None
+                                        } else {
+                                            Some(format!("{} 加入了房间", target_name))
+                                        }
+                                    }
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Leave => {
+                                        if is_me {
+                                            Some(format!("{} 离开了房间", target_name))
+                                        } else {
+                                            None // skip own leave
+                                        }
+                                    }
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Ban => Some(format!("{} 被封禁", target_name)),
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Invite => Some(format!("{} 被邀请加入房间", target_name)),
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Knock => Some(format!("{} 请求加入房间", target_name)),
+                                    _ => None,
+                                }
+                            }
+                            None => None,
+                        }
+                    }
+                    matrix_sdk::ruma::events::AnySyncStateEvent::RoomCreate(_) => {
+                        Some("房间已创建".to_string())
+                    }
+                    matrix_sdk::ruma::events::AnySyncStateEvent::RoomName(n) => n
+                        .as_original()
+                        .map(|o| format!("房间名称更改为: {}", o.content.name)),
+                    matrix_sdk::ruma::events::AnySyncStateEvent::RoomTopic(t) => t
+                        .as_original()
+                        .map(|o| format!("主题更改为: {}", o.content.topic)),
+                    matrix_sdk::ruma::events::AnySyncStateEvent::RoomAvatar(_) => {
+                        Some("房间头像已更改".to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(content) = content {
+                    raw_messages.push((
+                        event_id_str.clone(),
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content,
+                            timestamp: timestamp.clone(),
+                            is_me: false,
+                            msg_type: MessageType::Event,
+                            image_url: None,
+                            in_reply_to: None,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        },
+                    ));
+                }
+            }
+            _ => {}
         }
+    }
+
+    let mut tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
+    if let Some(next_from) = msg_resp.end {
+        tokens.insert(room_id.clone(), next_from);
+    } else {
+        tokens.remove(&room_id);
     }
 
     // Apply edits to the corresponding messages
@@ -2523,7 +2779,11 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                 .map(|(key, (mut senders, my_event_id))| {
                     senders.sort();
                     senders.dedup();
-                    Reaction { key, senders, my_event_id }
+                    Reaction {
+                        key,
+                        senders,
+                        my_event_id,
+                    }
                 })
                 .collect();
         }
@@ -2560,7 +2820,9 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let mut cached = RECEIPT_CACHE.lock().await;
     let now = std::time::Instant::now();
     let reader_records: Vec<(String, String, Option<String>, i64)> = match cached.get(&room_id) {
-        Some((records, members, fetched_at)) if now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL => {
+        Some((records, members, fetched_at))
+            if now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL =>
+        {
             total_members = *members;
             records.clone()
         }
@@ -2620,16 +2882,16 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 }
 #[frb]
 pub async fn send_message(room_id: String, message: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
 
-    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
+    let content =
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
 
     room.send(content)
         .await
@@ -2637,7 +2899,9 @@ pub async fn send_message(room_id: String, message: String) -> Result<(), String
 
     app_log("info", "rooms", format!("Message sent to {}", room_id));
     info!("Message sent to {}", room_id);
-    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
     Ok(())
 }
 
@@ -2650,11 +2914,10 @@ pub async fn send_image_message(
     image_data: Vec<u8>,
     filename: String,
 ) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -2670,7 +2933,16 @@ pub async fn send_image_message(
         mime::IMAGE_JPEG
     };
 
-    app_log("info", "media", format!("Uploading image: {} ({} bytes, mime: {})", filename, image_data.len(), mime_type));
+    app_log(
+        "info",
+        "media",
+        format!(
+            "Uploading image: {} ({} bytes, mime: {})",
+            filename,
+            image_data.len(),
+            mime_type
+        ),
+    );
 
     // Upload image to homeserver
     let upload_response = client
@@ -2683,7 +2955,9 @@ pub async fn send_image_message(
     app_log("info", "media", format!("Image uploaded: {}", content_uri));
 
     // Build image message content
-    use matrix_sdk::ruma::events::room::message::{ImageMessageEventContent, MessageType, RoomMessageEventContent};
+    use matrix_sdk::ruma::events::room::message::{
+        ImageMessageEventContent, MessageType, RoomMessageEventContent,
+    };
 
     let image_content = ImageMessageEventContent::plain(filename.clone(), content_uri);
     let content = RoomMessageEventContent::new(MessageType::Image(image_content));
@@ -2692,21 +2966,25 @@ pub async fn send_image_message(
         .await
         .map_err(|e| format!("Send image message failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Image message sent to {}", room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Image message sent to {}", room_id),
+    );
     info!("Image message sent to {}", room_id);
-    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
     Ok(())
 }
 
 /// Create a new direct chat room with a user.
 #[frb]
 pub async fn create_dm(user_id: String) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let invited_user = matrix_sdk::ruma::UserId::parse(&user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    let invited_user =
+        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
 
     let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     request.invite = vec![invited_user];
@@ -2717,7 +2995,11 @@ pub async fn create_dm(user_id: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("Create room failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Created DM room: {}", response.room_id()));
+    app_log(
+        "info",
+        "rooms",
+        format!("Created DM room: {}", response.room_id()),
+    );
     info!("Created DM room: {}", response.room_id());
     Ok(response.room_id().to_string())
 }
@@ -2725,9 +3007,7 @@ pub async fn create_dm(user_id: String) -> Result<String, String> {
 /// Create a group room with a name and optional topic.
 #[frb]
 pub async fn create_group_room(name: String, topic: Option<String>) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     request.name = Some(name);
@@ -2738,7 +3018,11 @@ pub async fn create_group_room(name: String, topic: Option<String>) -> Result<St
         .await
         .map_err(|e| format!("Create room failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Created group room: {}", response.room_id()));
+    app_log(
+        "info",
+        "rooms",
+        format!("Created group room: {}", response.room_id()),
+    );
     info!("Created group room: {}", response.room_id());
     Ok(response.room_id().to_string())
 }
@@ -2746,9 +3030,7 @@ pub async fn create_group_room(name: String, topic: Option<String>) -> Result<St
 /// Create a space room with a name and optional topic.
 #[frb]
 pub async fn create_space(name: String, topic: Option<String>) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     request.name = Some(name);
@@ -2757,10 +3039,8 @@ pub async fn create_space(name: String, topic: Option<String>) -> Result<String,
         matrix_sdk::ruma::api::client::room::create_room::v3::CreationContent::default();
     creation_content.room_type = Some(matrix_sdk::ruma::room::RoomType::Space);
     request.creation_content = Some(
-        matrix_sdk::ruma::serde::Raw::new(
-            &creation_content,
-        )
-        .map_err(|e| format!("Failed to encode space creation content: {e}"))?,
+        matrix_sdk::ruma::serde::Raw::new(&creation_content)
+            .map_err(|e| format!("Failed to encode space creation content: {e}"))?,
     );
 
     let response = client
@@ -2768,7 +3048,11 @@ pub async fn create_space(name: String, topic: Option<String>) -> Result<String,
         .await
         .map_err(|e| format!("Create space failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Created space: {}", response.room_id()));
+    app_log(
+        "info",
+        "rooms",
+        format!("Created space: {}", response.room_id()),
+    );
     info!("Created space: {}", response.room_id());
     Ok(response.room_id().to_string())
 }
@@ -2776,9 +3060,7 @@ pub async fn create_space(name: String, topic: Option<String>) -> Result<String,
 /// Join a room or space by room ID or alias.
 #[frb]
 pub async fn join_room(identifier: String) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let id_or_alias = matrix_sdk::ruma::RoomOrAliasId::parse(identifier.clone())
         .map_err(|e| format!("Invalid room or space identifier: {e}"))?;
@@ -2796,9 +3078,7 @@ pub async fn join_room(identifier: String) -> Result<String, String> {
 
 #[frb]
 pub async fn get_spaces() -> Result<Vec<Space>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let mut spaces = client
         .rooms()
@@ -2820,9 +3100,7 @@ pub async fn get_spaces() -> Result<Vec<Space>, String> {
 
 #[frb]
 pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
         .map_err(|e| format!("Invalid space id: {e}"))?;
@@ -2850,12 +3128,13 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
 
 #[frb]
 pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room = client
-        .get_room(&matrix_sdk::ruma::RoomId::parse(space_id.clone()).map_err(|e| format!("Invalid space id: {e}"))?)
+        .get_room(
+            &matrix_sdk::ruma::RoomId::parse(space_id.clone())
+                .map_err(|e| format!("Invalid space id: {e}"))?,
+        )
         .ok_or_else(|| format!("Space not found: {space_id}"))?;
 
     let child_events = space_room
@@ -2865,16 +3144,22 @@ pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, Strin
 
     let mut child_rooms = Vec::new();
     for raw_child in child_events {
-        let Ok(child_event) = raw_child.deserialize() else { continue };
+        let Ok(child_event) = raw_child.deserialize() else {
+            continue;
+        };
         let child_room_id = match child_event {
             matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
                 matrix_sdk::ruma::events::SyncStateEvent::Original(event),
             ) => event.state_key,
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => event.state_key,
+            matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
+                event.state_key
+            }
             _ => continue,
         };
 
-        let Some(child_room) = client.get_room(&child_room_id) else { continue };
+        let Some(child_room) = client.get_room(&child_room_id) else {
+            continue;
+        };
         if child_room.state() != matrix_sdk::RoomState::Joined {
             continue;
         }
@@ -2905,9 +3190,7 @@ pub async fn update_space_details(
     name: String,
     topic: Option<String>,
 ) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
         .map_err(|e| format!("Invalid space id: {e}"))?;
@@ -2933,7 +3216,11 @@ pub async fn update_space_details(
         .await
         .map_err(|e| format!("Failed to update space topic: {e}"))?;
 
-    app_log("info", "rooms", format!("Updated space details: {}", space_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Updated space details: {}", space_id),
+    );
     info!("Updated space details: {}", space_id);
     notify_sync_event(SyncEvent::SyncCompleted);
     Ok(())
@@ -2942,9 +3229,7 @@ pub async fn update_space_details(
 /// Add a room to a space, and advertise the reciprocal parent relation.
 #[frb]
 pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
         .map_err(|e| format!("Invalid space id: {e}"))?;
@@ -2958,13 +3243,11 @@ pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), 
         .get_room(&child_room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
 
-    let via = vec![
-        client
-            .user_id()
-            .ok_or("No active user.")?
-            .server_name()
-            .to_owned(),
-    ];
+    let via = vec![client
+        .user_id()
+        .ok_or("No active user.")?
+        .server_name()
+        .to_owned()];
 
     space_room
         .send_state_event_for_key(
@@ -2994,9 +3277,7 @@ pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), 
 
 #[frb]
 pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
         .map_err(|e| format!("Invalid space id: {e}"))?;
@@ -3015,7 +3296,9 @@ pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result
         .await
         .map_err(|e| format!("Failed to load space children: {e}"))?;
     let space_child_event_id = child_events.into_iter().find_map(|raw_child| {
-        let Ok(child_event) = raw_child.deserialize() else { return None };
+        let Ok(child_event) = raw_child.deserialize() else {
+            return None;
+        };
         match child_event {
             matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
                 matrix_sdk::ruma::events::SyncStateEvent::Original(event),
@@ -3029,7 +3312,9 @@ pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result
         .await
         .map_err(|e| format!("Failed to load room parents: {e}"))?;
     let space_parent_event_id = parent_events.into_iter().find_map(|raw_parent| {
-        let Ok(parent_event) = raw_parent.deserialize() else { return None };
+        let Ok(parent_event) = raw_parent.deserialize() else {
+            return None;
+        };
         match parent_event {
             matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
                 matrix_sdk::ruma::events::SyncStateEvent::Original(event),
@@ -3064,9 +3349,7 @@ pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result
 
 #[frb]
 pub async fn leave_space(space_id: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
         .map_err(|e| format!("Invalid space id: {e}"))?;
@@ -3090,9 +3373,7 @@ pub async fn leave_space(space_id: String) -> Result<(), String> {
 
 #[frb]
 pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
     let mut grouped_room_ids = std::collections::HashSet::new();
     for room in client.rooms() {
@@ -3106,7 +3387,9 @@ pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
             .map_err(|e| format!("Failed to load space children: {e}"))?;
 
         for raw_child in child_events {
-            let Ok(child_event) = raw_child.deserialize() else { continue };
+            let Ok(child_event) = raw_child.deserialize() else {
+                continue;
+            };
             let child_room_id = match child_event {
                 matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
                     matrix_sdk::ruma::events::SyncStateEvent::Original(event),
@@ -3151,17 +3434,77 @@ pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
 
 #[frb]
 pub async fn get_contacts() -> Result<Vec<Contact>, String> {
-    Ok(vec![])
+    let client = get_client().await.ok_or("No client created.")?;
+    let my_user_id = client.user_id().map(|user_id| user_id.to_string());
+    let mut contacts_by_id: HashMap<String, Contact> = HashMap::new();
+
+    for room in client.rooms() {
+        if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
+            continue;
+        }
+
+        let members = room
+            .members(matrix_sdk::RoomMemberships::JOIN)
+            .await
+            .map_err(|e| format!("Failed to get contacts from room {}: {e}", room.room_id()))?;
+
+        for member in members {
+            let user_id = member.user_id().to_string();
+            if my_user_id.as_deref() == Some(user_id.as_str()) {
+                continue;
+            }
+
+            let name = member.name().to_string();
+            let avatar_url = member.avatar_url().map(|u| u.to_string());
+            let contact = contacts_by_id
+                .entry(user_id.clone())
+                .or_insert_with(|| Contact {
+                    id: user_id.clone(),
+                    name: if name == user_id {
+                        user_id.clone()
+                    } else {
+                        name.clone()
+                    },
+                    avatar_url: avatar_url.clone(),
+                    status: user_id.clone(),
+                });
+
+            if contact.name == contact.id && name != user_id {
+                contact.name = name;
+            }
+            if contact.avatar_url.is_none() && avatar_url.is_some() {
+                contact.avatar_url = avatar_url;
+            }
+        }
+    }
+
+    let mut contacts: Vec<Contact> = contacts_by_id.into_values().collect();
+    contacts.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    app_log(
+        "info",
+        "contacts",
+        format!("get_contacts: {} unique contacts", contacts.len()),
+    );
+    Ok(contacts)
 }
 
 /// Send a reply to a specific message in a room.
 #[frb]
-pub async fn send_reply(room_id: String, message: String, reply_to_event_id: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+pub async fn send_reply(
+    room_id: String,
+    message: String,
+    reply_to_event_id: String,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -3171,7 +3514,8 @@ pub async fn send_reply(room_id: String, message: String, reply_to_event_id: Str
         .map_err(|e| format!("Invalid event ID: {e}"))?;
 
     // Build the reply content
-    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
+    let content =
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
     let mut reply_content = content;
     reply_content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Reply(
         matrix_sdk::ruma::events::relation::Reply::with_event_id(event_id),
@@ -3181,9 +3525,15 @@ pub async fn send_reply(room_id: String, message: String, reply_to_event_id: Str
         .await
         .map_err(|e| format!("Reply failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Reply sent to {} in room {}", reply_to_event_id, room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Reply sent to {} in room {}", reply_to_event_id, room_id),
+    );
     info!("Reply sent to {} in room {}", reply_to_event_id, room_id);
-    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
     Ok(())
 }
 
@@ -3194,12 +3544,15 @@ pub async fn send_reply(room_id: String, message: String, reply_to_event_id: Str
 /// Tuwunel relays edits (MSC2676); the displayed edit history is aggregated
 /// client-side by `get_messages` (see `Relation::Replacement` parsing).
 #[frb]
-pub async fn edit_message(room_id: String, event_id: String, new_text: String) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+pub async fn edit_message(
+    room_id: String,
+    event_id: String,
+    new_text: String,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -3209,16 +3562,23 @@ pub async fn edit_message(room_id: String, event_id: String, new_text: String) -
 
     // Build the replacement: new body in m.new_content + m.replace relation.
     use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
-    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&new_text)
-        .make_replacement(ReplacementMetadata::new(parsed_event_id, None));
+    let content =
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&new_text)
+            .make_replacement(ReplacementMetadata::new(parsed_event_id, None));
 
     room.send(content)
         .await
         .map_err(|e| format!("Edit failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Edited event {} in room {}", event_id, room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Edited event {} in room {}", event_id, room_id),
+    );
     info!("Edited event {} in room {}", event_id, room_id);
-    notify_sync_event(SyncEvent::MessageSent { room_id: room_id.clone() });
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
     Ok(())
 }
 
@@ -3227,12 +3587,15 @@ pub async fn edit_message(room_id: String, event_id: String, new_text: String) -
 /// Re-sending the same key is de-duplicated server-side per MSC2677. To remove
 /// a reaction, redact the reaction event (not implemented in this client yet).
 #[frb]
-pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Result<String, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+pub async fn send_reaction(
+    room_id: String,
+    event_id: String,
+    key: String,
+) -> Result<String, String> {
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -3241,16 +3604,22 @@ pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Re
         .map_err(|e| format!("Invalid event ID: {e}"))?;
 
     use matrix_sdk::ruma::events::relation::Annotation;
-    let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::from(
-        Annotation::new(parsed_event_id, key.clone()),
-    );
+    let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::from(Annotation::new(
+        parsed_event_id,
+        key.clone(),
+    ));
 
-    let handle = room.send(content)
+    let handle = room
+        .send(content)
         .await
         .map_err(|e| format!("Reaction failed: {e}"))?;
     let new_event_id = handle.response.event_id.to_string();
 
-    app_log("info", "rooms", format!("Reaction '{}' on {} in room {}", key, event_id, room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Reaction '{}' on {} in room {}", key, event_id, room_id),
+    );
     info!("Reaction '{}' on {} in room {}", key, event_id, room_id);
     notify_sync_event(SyncEvent::SyncCompleted);
     Ok(new_event_id)
@@ -3258,12 +3627,15 @@ pub async fn send_reaction(room_id: String, event_id: String, key: String) -> Re
 
 /// Redact (delete) a message from a room.
 #[frb]
-pub async fn redact_message(room_id: String, event_id: String, reason: Option<String>) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+pub async fn redact_message(
+    room_id: String,
+    event_id: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -3275,7 +3647,11 @@ pub async fn redact_message(room_id: String, event_id: String, reason: Option<St
         .await
         .map_err(|e| format!("Redact failed: {e}"))?;
 
-    app_log("info", "rooms", format!("Redacted event {} in room {}", event_id, room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!("Redacted event {} in room {}", event_id, room_id),
+    );
     info!("Redacted event {} in room {}", event_id, room_id);
     notify_sync_event(SyncEvent::SyncCompleted);
     Ok(())
@@ -3284,11 +3660,10 @@ pub async fn redact_message(room_id: String, event_id: String, reason: Option<St
 /// Send a typing notice to a room.
 #[frb]
 pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
@@ -3302,19 +3677,28 @@ pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), Str
 /// Get members of a room.
 #[frb]
 pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+    let client = get_client().await.ok_or("No client created.")?;
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
 
-    let members = room.members(matrix_sdk::RoomMemberships::JOIN).await
+    let members = room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
         .map_err(|e| format!("Failed to get members: {e}"))?;
 
-    app_log("info", "rooms", format!("get_room_members: {} members in room {}", members.len(), room_id));
+    app_log(
+        "info",
+        "rooms",
+        format!(
+            "get_room_members: {} members in room {}",
+            members.len(),
+            room_id
+        ),
+    );
 
     let mut contacts = Vec::new();
     for member in members {
@@ -3323,7 +3707,11 @@ pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
         let avatar = member.avatar_url().map(|u| u.to_string());
         contacts.push(Contact {
             id: user_id.clone(),
-            name: if name == user_id { user_id.clone() } else { name },
+            name: if name == user_id {
+                user_id.clone()
+            } else {
+                name
+            },
             status: user_id,
             avatar_url: avatar,
         });
@@ -3335,7 +3723,8 @@ pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
 #[frb]
 pub async fn get_room_avatar_url(room_id: String) -> Option<String> {
     let client = get_client().await?;
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)?;
     room.avatar_url().map(|u| u.to_string())
@@ -3346,7 +3735,8 @@ pub async fn get_room_avatar_url(room_id: String) -> Option<String> {
 pub async fn search_rooms(query: String) -> Result<Vec<ChatRoom>, String> {
     let all = get_chat_rooms().await?;
     let q = query.to_lowercase();
-    let filtered: Vec<ChatRoom> = all.into_iter()
+    let filtered: Vec<ChatRoom> = all
+        .into_iter()
         .filter(|r| r.name.to_lowercase().contains(&q))
         .collect();
     Ok(filtered)
@@ -3354,21 +3744,25 @@ pub async fn search_rooms(query: String) -> Result<Vec<ChatRoom>, String> {
 
 /// Load more messages (paginated) from before a given event.
 #[frb]
-pub async fn get_messages_before(room_id: String, _from_event_id: String, limit: u32) -> Result<Vec<ChatMessage>, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created.")?;
+pub async fn get_messages_before(
+    room_id: String,
+    _from_event_id: String,
+    limit: u32,
+) -> Result<Vec<ChatMessage>, String> {
+    let client = get_client().await.ok_or("No client created.")?;
 
     let my_user_id = client.user_id().map(|u| u.to_string());
 
-    let room = client.rooms()
+    let room = client
+        .rooms()
         .into_iter()
         .find(|r| r.room_id().to_string() == room_id)
         .ok_or_else(|| format!("Room not found: {room_id}"))?;
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
     let mut edits: HashMap<String, Vec<String>> = HashMap::new();
-    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> = HashMap::new();
+    let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> =
+        HashMap::new();
 
     let from = {
         let tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
@@ -3389,7 +3783,9 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
     {
         for timeline_event in msg_resp.chunk.iter().rev() {
             let raw = timeline_event.kind.raw();
-            let Ok(any_ev) = raw.deserialize() else { continue };
+            let Ok(any_ev) = raw.deserialize() else {
+                continue;
+            };
 
             // Collect reaction events; they don't appear as messages themselves.
             if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
@@ -3416,9 +3812,14 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
 
             let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                 matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
-            ) = any_ev else { continue };
+            ) = any_ev
+            else {
+                continue;
+            };
 
-            let Some(original) = msg.as_original() else { continue };
+            let Some(original) = msg.as_original() else {
+                continue;
+            };
 
             let event_id = msg.event_id().to_string();
             let sender_id = msg.sender().to_string();
@@ -3426,7 +3827,9 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
             let sender_name = if is_me {
                 "\u{6211}".to_string()
             } else {
-                sender_id.split(':').next()
+                sender_id
+                    .split(':')
+                    .next()
                     .unwrap_or(&sender_id)
                     .trim_start_matches('@')
                     .to_string()
@@ -3436,9 +3839,13 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
             let timestamp = ts_millis.to_string();
 
             // Check if this is an edit (replacement) event
-            if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) = &original.content.relates_to {
+            if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(
+                replacement,
+            )) = &original.content.relates_to
+            {
                 if let Some(edit_text) = extract_edit_text(&replacement.new_content) {
-                    edits.entry(replacement.event_id.to_string())
+                    edits
+                        .entry(replacement.event_id.to_string())
                         .or_default()
                         .push(edit_text);
                 }
@@ -3473,13 +3880,15 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
                         is_edited: false,
                         edit_history: Vec::new(),
                         reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
+                        readers: Vec::new(),
+                        total_members: 0,
                     }
                 }
                 matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
                     let url = match &t.source {
-                        matrix_sdk::ruma::events::room::MediaSource::Plain(mxc) => Some(mxc.to_string()),
+                        matrix_sdk::ruma::events::room::MediaSource::Plain(mxc) => {
+                            Some(mxc.to_string())
+                        }
                         _ => None,
                     };
                     ChatMessage {
@@ -3495,8 +3904,8 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
                         is_edited: false,
                         edit_history: Vec::new(),
                         reactions: Vec::new(),
-                                readers: Vec::new(),
-                                total_members: 0,
+                        readers: Vec::new(),
+                        total_members: 0,
                     }
                 }
                 _ => continue,
@@ -3533,7 +3942,11 @@ pub async fn get_messages_before(room_id: String, _from_event_id: String, limit:
                 .map(|(key, (mut senders, my_event_id))| {
                     senders.sort();
                     senders.dedup();
-                    Reaction { key, senders, my_event_id }
+                    Reaction {
+                        key,
+                        senders,
+                        my_event_id,
+                    }
                 })
                 .collect();
         }

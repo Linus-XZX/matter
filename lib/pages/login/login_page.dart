@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
-import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 
@@ -57,13 +56,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     // its first sync. Querying rooms while that sync initializes can leave the
     // first room-list request waiting on the store until the app is restarted.
     ref.read(sessionReadyProvider.notifier).value = false;
-    ref.read(currentUserProvider.notifier).value = CurrentUser(
-      id: userId,
+    await applyActiveSessionState(
+      ref,
+      userId: userId,
       displayName: displayName,
       homeserver: _homeserverController.text,
+      markLoggedIn: false,
     );
-    ref.read(homeserverProvider.notifier).value = _homeserverController.text;
-    ref.read(connectionProvider.notifier).value = AppConnectionState.connecting;
 
     try {
       await _persistAndSync(userId, displayName);
@@ -73,37 +72,6 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     }
     if (!mounted) return;
     ref.read(isLoggedInProvider.notifier).value = true;
-  }
-
-  Future<void> _initialSync() async {
-    // Retry sync up to 3 times with increasing delay
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        await rust.syncOnce();
-        // Sync succeeded — refresh room list and mark connected
-        ref.invalidate(chatRoomsProvider);
-        if (mounted) {
-          ref.read(connectionProvider.notifier).value =
-              AppConnectionState.connected;
-        }
-        break;
-      } catch (e) {
-        debugPrint('Initial sync attempt ${attempt + 1} failed: $e');
-        if (attempt < 2) {
-          await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
-        }
-      }
-    }
-    // Start background sync regardless of initial sync result
-    try {
-      await rust.startSync();
-    } catch (e) {
-      debugPrint('startSync failed: $e');
-    }
-    // Initialize the sync event listener so UI auto-refreshes
-    ref.read(syncStreamProvider);
-    // Refresh room list
-    ref.invalidate(chatRoomsProvider);
   }
 
   Future<void> _persistAndSync(String userId, String displayName) async {
@@ -117,12 +85,21 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         deviceId: session.deviceId,
         displayName: displayName,
       );
-      // Update multi-account providers
-      ref.read(activeUserIdProvider.notifier).value = session.userId;
-      ref.read(sessionsProvider.notifier).value = await loadAllSessions();
+      await applyActiveSessionState(
+        ref,
+        userId: session.userId,
+        displayName: displayName,
+        homeserver: _homeserverController.text,
+        refreshStoredSessions: true,
+        markLoggedIn: false,
+      );
     }
     try {
-      await _initialSync();
+      await bootstrapActiveSessionSync(
+        ref,
+        attemptLabel: 'Initial sync attempt',
+        startSyncLabel: 'startSync failed',
+      );
     } catch (e) {
       debugPrint('Initial sync after login failed: $e');
     }
