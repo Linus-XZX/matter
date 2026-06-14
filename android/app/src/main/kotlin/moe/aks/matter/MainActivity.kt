@@ -1,4 +1,4 @@
-package com.example.matter
+package moe.aks.matter
 
 import io.flutter.embedding.android.FlutterActivity
 

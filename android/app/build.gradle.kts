@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.matter"
+    namespace = "moe.aks.matter"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.matter"
+        applicationId = "moe.aks.matter"
         minSdk = 31
         targetSdk = 35
         versionCode = flutter.versionCode
