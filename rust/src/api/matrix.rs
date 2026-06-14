@@ -2705,7 +2705,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                                         }
                                     }
                                     matrix_sdk::ruma::events::room::member::MembershipState::Ban => Some(format!("{} 被封禁", target_name)),
-                                    matrix_sdk::ruma::events::room::member::MembershipState::Invite => Some(format!("{} 被邀请加入房间", target_name)),
+                                    matrix_sdk::ruma::events::room::member::MembershipState::Invite => Some(format!("{} 收到了加入房间的邀请", target_name)),
                                     matrix_sdk::ruma::events::room::member::MembershipState::Knock => Some(format!("{} 请求加入房间", target_name)),
                                     _ => None,
                                 }
@@ -2985,6 +2985,37 @@ pub async fn create_dm(user_id: String) -> Result<String, String> {
 
     let invited_user =
         matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
+
+    for room in client.rooms() {
+        if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
+            continue;
+        }
+
+        if !matches!(room.is_direct().await, Ok(true)) {
+            continue;
+        }
+
+        let members = match room.members(matrix_sdk::RoomMemberships::JOIN).await {
+            Ok(members) => members,
+            Err(_) => continue,
+        };
+
+        if members
+            .iter()
+            .any(|member| member.user_id() == invited_user)
+        {
+            app_log(
+                "info",
+                "rooms",
+                format!(
+                    "Reusing existing DM room {} for {}",
+                    room.room_id(),
+                    user_id
+                ),
+            );
+            return Ok(room.room_id().to_string());
+        }
+    }
 
     let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     request.invite = vec![invited_user];
