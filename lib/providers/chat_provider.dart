@@ -231,8 +231,41 @@ Future<void> redactMessage(
 /// Initialize once after login with: `ref.read(syncStreamProvider);`
 final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
   final stream = rust.watchSyncEvents();
-  DateTime? lastMessageRefresh;
-  DateTime? lastRoomRefresh;
+  Timer? messageRefreshTimer;
+  Timer? roomRefreshTimer;
+  final pendingMessageRefreshes = <String>{};
+
+  void refreshRooms() {
+    ref.invalidate(chatRoomsProvider);
+    ref.invalidate(spacesProvider);
+    ref.invalidate(ungroupedRoomsProvider);
+  }
+
+  void scheduleRoomRefresh() {
+    roomRefreshTimer?.cancel();
+    roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
+      roomRefreshTimer = null;
+      refreshRooms();
+    });
+  }
+
+  void flushMessageRefreshes() {
+    final roomIds = pendingMessageRefreshes.toList();
+    pendingMessageRefreshes.clear();
+    for (final roomId in roomIds) {
+      ref.invalidate(messagesProvider(roomId));
+    }
+  }
+
+  void scheduleMessageRefresh(String roomId) {
+    pendingMessageRefreshes.add(roomId);
+    messageRefreshTimer?.cancel();
+    messageRefreshTimer = Timer(const Duration(milliseconds: 200), () {
+      messageRefreshTimer = null;
+      flushMessageRefreshes();
+    });
+  }
+
   final statusTimer = Timer.periodic(
     const Duration(seconds: 1),
     (_) => pollConnectionStatus(ref),
@@ -242,34 +275,21 @@ final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
     pollConnectionStatus(ref);
     switch (event) {
       case rust.SyncEvent_SyncCompleted():
-        // Debounce room-list refreshes to avoid flooding during rapid syncs
-        final now = DateTime.now();
-        if (lastRoomRefresh == null ||
-            now.difference(lastRoomRefresh!).inMilliseconds >= 2000) {
-          lastRoomRefresh = now;
-          ref.invalidate(chatRoomsProvider);
-          ref.invalidate(spacesProvider);
-          ref.invalidate(ungroupedRoomsProvider);
-        }
-        // Refresh messages for the currently open room, but debounce to avoid flicker
+        scheduleRoomRefresh();
         final currentRoomId = ref.read(currentRoomIdProvider);
         if (currentRoomId != null) {
-          if (lastMessageRefresh == null ||
-              now.difference(lastMessageRefresh!).inMilliseconds >= 500) {
-            lastMessageRefresh = now;
-            ref.invalidate(messagesProvider(currentRoomId));
-          }
+          scheduleMessageRefresh(currentRoomId);
         }
       case rust.SyncEvent_MessageSent(:final roomId):
-        // A message was sent — refresh that room's messages
-        ref.invalidate(messagesProvider(roomId));
-        // Also refresh room list (last message may have changed)
-        ref.invalidate(chatRoomsProvider);
+        scheduleMessageRefresh(roomId);
+        scheduleRoomRefresh();
     }
   });
 
   ref.onDispose(() {
     statusTimer.cancel();
+    messageRefreshTimer?.cancel();
+    roomRefreshTimer?.cancel();
     subscription.cancel();
   });
 

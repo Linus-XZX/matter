@@ -132,6 +132,18 @@ fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
 }
 
+async fn clear_receipt_cache() {
+    RECEIPT_CACHE.lock().await.clear();
+}
+
+async fn clear_sent_read_receipts_for_user(user_id: &str) {
+    let prefix = format!("{user_id}\n");
+    SENT_READ_RECEIPTS
+        .lock()
+        .await
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
 // ── Multi-account store ──────────────────────────────────────────────
 
 struct ClientEntry {
@@ -1165,6 +1177,7 @@ pub async fn switch_account(user_id: String) -> bool {
         drop(active);
         drop(sync_task);
         clear_verification_session().await;
+        clear_receipt_cache().await;
         app_log("info", "auth", format!("Switched to account: {}", user_id));
         info!("Switched to account: {}", user_id);
         true
@@ -1189,6 +1202,8 @@ pub async fn logout() -> Result<(), String> {
     let user_id = active_user.ok_or("No active account to logout")?;
     clear_verification_session().await;
     stop_sync_task(Some(&user_id)).await;
+    clear_sent_read_receipts_for_user(&user_id).await;
+    clear_receipt_cache().await;
 
     let (client, data_dir) = {
         let clients = CLIENTS.read().await;
@@ -1258,8 +1273,10 @@ pub async fn remove_account(user_id: String) -> Result<(), String> {
     let removing_active = ACTIVE_USER.read().await.as_ref() == Some(&user_id);
     if removing_active {
         clear_verification_session().await;
+        clear_receipt_cache().await;
     }
     stop_sync_task(Some(&user_id)).await;
+    clear_sent_read_receipts_for_user(&user_id).await;
 
     let (client, data_dir) = {
         let clients = CLIENTS.read().await;
@@ -2072,6 +2089,11 @@ static RECEIPT_CACHE: Lazy<
     >,
 > = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
+/// Last event for which this client sent a read receipt, keyed by account and
+/// room. Message refreshes must not continuously re-send the same receipt.
+static SENT_READ_RECEIPTS: Lazy<tokio::sync::Mutex<HashMap<String, String>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
 /// Receipt cache freshness window. Receipts rarely change faster than this.
 const RECEIPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -2790,13 +2812,27 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
         messages.push(msg);
     }
 
-    // Send read receipt for the last event (mark room as read)
+    // Send a read receipt only when the newest event changes. Re-sending the
+    // same receipt on every UI refresh creates avoidable sync traffic.
     if let Some(ref last_id) = newest_event_id {
-        if let Ok(event_id) = matrix_sdk::ruma::EventId::parse(last_id) {
-            let receipts = matrix_sdk::room::Receipts::new()
-                .fully_read_marker(event_id.clone())
-                .public_read_receipt(event_id);
-            let _ = room.send_multiple_receipts(receipts).await;
+        let receipt_key = format!("{}\n{}", my_user_id.as_deref().unwrap_or_default(), room_id);
+        let already_sent = SENT_READ_RECEIPTS
+            .lock()
+            .await
+            .get(&receipt_key)
+            .is_some_and(|event_id| event_id == last_id);
+        if !already_sent {
+            if let Ok(event_id) = matrix_sdk::ruma::EventId::parse(last_id) {
+                let receipts = matrix_sdk::room::Receipts::new()
+                    .fully_read_marker(event_id.clone())
+                    .public_read_receipt(event_id);
+                if room.send_multiple_receipts(receipts).await.is_ok() {
+                    SENT_READ_RECEIPTS
+                        .lock()
+                        .await
+                        .insert(receipt_key, last_id.clone());
+                }
+            }
         }
     }
 
@@ -2817,17 +2853,17 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
     // Try the receipt cache first; receipts change rarely so a short TTL avoids
     // re-querying the store for every member on every sync.
-    let mut cached = RECEIPT_CACHE.lock().await;
     let now = std::time::Instant::now();
-    let reader_records: Vec<(String, String, Option<String>, i64)> = match cached.get(&room_id) {
-        Some((records, members, fetched_at))
-            if now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL =>
+    let cached_receipts = RECEIPT_CACHE.lock().await.get(&room_id).cloned();
+    let reader_records: Vec<(String, String, Option<String>, i64)> =
+        if let Some((records, members, _)) = cached_receipts
+            .filter(|(_, _, fetched_at)| now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL)
         {
-            total_members = *members;
-            records.clone()
-        }
-        _ => {
-            // Cache miss / stale: recompute from the SDK store.
+            total_members = members;
+            records
+        } else {
+            // Do not hold the global cache lock during SDK/store awaits. A
+            // slow room must not block receipt refreshes in every other room.
             let mut records: Vec<(String, String, Option<String>, i64)> = Vec::new();
             if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
                 total_members = joined.len() as i32;
@@ -2855,11 +2891,12 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                     }
                 }
             }
-            cached.insert(room_id.clone(), (records.clone(), total_members, now));
+            RECEIPT_CACHE
+                .lock()
+                .await
+                .insert(room_id.clone(), (records.clone(), total_members, now));
             records
-        }
-    };
-    drop(cached);
+        };
 
     // Attach readers to each of our own messages.
     for msg in messages.iter_mut() {
