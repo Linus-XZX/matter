@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/chat_provider.dart';
@@ -31,6 +32,8 @@ class MessageGroupWidget extends ConsumerWidget {
   final Map<String, ChatMessage> messageIndex;
   final String? senderAvatarUrl;
   final bool compact;
+  final ScrollController? scrollController;
+  final GlobalKey? scrollViewportKey;
   final VoidCallback? onImageLoaded;
 
   const MessageGroupWidget({
@@ -41,8 +44,15 @@ class MessageGroupWidget extends ConsumerWidget {
     this.showAvatar = true,
     this.senderAvatarUrl,
     this.compact = false,
+    this.scrollController,
+    this.scrollViewportKey,
     this.onImageLoaded,
   });
+
+  static const double _avatarSize = 36.0;
+  static const double _avatarSlotWidth = 44.0;
+  static const double _messageBottomPadding = 1.0;
+  static const double _groupBottomGap = 9.0;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,7 +63,11 @@ class MessageGroupWidget extends ConsumerWidget {
 
     if (isEventGroup) {
       return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.only(
+          left: 12,
+          right: 12,
+          bottom: _groupBottomGap,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: group.messages
@@ -76,7 +90,11 @@ class MessageGroupWidget extends ConsumerWidget {
 
     if (isMe) {
       return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.only(
+          left: 12,
+          right: 12,
+          bottom: _groupBottomGap,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: group.messages
@@ -97,39 +115,67 @@ class MessageGroupWidget extends ConsumerWidget {
       );
     }
 
-    return Padding(
-      padding: EdgeInsets.only(
-        left: compact ? 12 : (showAvatar ? 12 : 68),
-        right: 12,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          if (showAvatar)
-            KeyedSubtree(
-              key: ValueKey('group-avatar:${group.senderId}:$senderAvatarUrl'),
-              child: _buildAvatar(group.senderName, senderAvatarUrl),
+    final messagesColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: group.messages
+          .asMap()
+          .entries
+          .map(
+            (e) => _buildMessage(
+              context,
+              ref,
+              e.value,
+              false,
+              isFirst: e.key == 0,
+              isLast: e.key == group.messages.length - 1,
             ),
-          if (showAvatar) const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: group.messages
-                  .asMap()
-                  .entries
-                  .map(
-                    (e) => _buildMessage(
-                      context,
-                      ref,
-                      e.value,
-                      false,
-                      isFirst: e.key == 0,
-                      isLast: e.key == group.messages.length - 1,
-                    ),
-                  )
-                  .toList(),
+          )
+          .toList(),
+    );
+
+    if (compact) {
+      return Padding(
+        padding: const EdgeInsets.only(
+          left: 12,
+          right: 12,
+          bottom: _groupBottomGap,
+        ),
+        child: messagesColumn,
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(
+        left: 12,
+        right: 12,
+        bottom: _groupBottomGap,
+      ),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: _avatarSlotWidth),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: showAvatar ? _avatarSize : 0,
+              ),
+              child: messagesColumn,
             ),
           ),
+          if (showAvatar)
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: _avatarSlotWidth,
+              child: _StickyGroupAvatar(
+                fallback: group.senderName,
+                avatarUrl: senderAvatarUrl,
+                scrollController: scrollController,
+                scrollViewportKey: scrollViewportKey,
+                avatarSize: _avatarSize,
+              ),
+            ),
         ],
       ),
     );
@@ -149,7 +195,7 @@ class MessageGroupWidget extends ConsumerWidget {
         child: Padding(
           padding: EdgeInsets.only(
             top: isFirst ? 2 : 1,
-            bottom: isLast ? 10 : 1,
+            bottom: _messageBottomPadding,
           ),
           child: _buildEventMessage(context, message),
         ),
@@ -161,6 +207,8 @@ class MessageGroupWidget extends ConsumerWidget {
         ? ImageMessageBubble(
             key: ValueKey('image-bubble:${message.id}:${message.imageUrl}'),
             imageUrl: message.imageUrl!,
+            imageWidth: message.imageWidth,
+            imageHeight: message.imageHeight,
             timestamp: formatMessageTime(message.timestamp),
             isMe: isMe,
             onLoaded: onImageLoaded,
@@ -176,7 +224,10 @@ class MessageGroupWidget extends ConsumerWidget {
           : null,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: EdgeInsets.only(top: isFirst ? 2 : 1, bottom: isLast ? 10 : 1),
+        padding: EdgeInsets.only(
+          top: isFirst ? 2 : 1,
+          bottom: _messageBottomPadding,
+        ),
         child: Column(
           crossAxisAlignment: isMe
               ? CrossAxisAlignment.end
@@ -609,15 +660,6 @@ class MessageGroupWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildAvatar(String name, String? avatarUrl) {
-    return AppAvatar(
-      fallback: name,
-      size: 48,
-      radius: AppRadii.content,
-      url: avatarUrl,
-    );
-  }
-
   Widget _buildQuickReactions(
     BuildContext context,
     WidgetRef ref,
@@ -1040,6 +1082,124 @@ class _ReadReceiptsSheet extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
+  final String fallback;
+  final String? avatarUrl;
+  final ScrollController? scrollController;
+  final GlobalKey? scrollViewportKey;
+  final double avatarSize;
+
+  _StickyGroupAvatar({
+    required this.fallback,
+    required this.avatarUrl,
+    required this.scrollController,
+    required this.scrollViewportKey,
+    required this.avatarSize,
+  }) : super(
+         child: AppAvatar(
+           fallback: fallback,
+           size: avatarSize,
+           radius: AppRadii.content,
+           url: avatarUrl,
+         ),
+       );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderStickyGroupAvatar(
+      scrollController: scrollController,
+      scrollViewportKey: scrollViewportKey,
+      avatarSize: avatarSize,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderStickyGroupAvatar renderObject,
+  ) {
+    renderObject
+      ..scrollController = scrollController
+      ..scrollViewportKey = scrollViewportKey
+      ..avatarSize = avatarSize;
+  }
+}
+
+class _RenderStickyGroupAvatar extends RenderProxyBox {
+  ScrollController? _scrollController;
+  GlobalKey? scrollViewportKey;
+  double _avatarSize;
+
+  _RenderStickyGroupAvatar({
+    required this._scrollController,
+    required this.scrollViewportKey,
+    required this._avatarSize,
+  });
+
+  ScrollController? get scrollController => _scrollController;
+
+  set scrollController(ScrollController? value) {
+    if (identical(value, _scrollController)) return;
+    if (attached) {
+      _scrollController?.removeListener(markNeedsPaint);
+      value?.addListener(markNeedsPaint);
+    }
+    _scrollController = value;
+    markNeedsPaint();
+  }
+
+  double get avatarSize => _avatarSize;
+
+  set avatarSize(double value) {
+    if (value == _avatarSize) return;
+    _avatarSize = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    _scrollController?.addListener(markNeedsPaint);
+  }
+
+  @override
+  void detach() {
+    _scrollController?.removeListener(markNeedsPaint);
+    super.detach();
+  }
+
+  @override
+  void performLayout() {
+    size = constraints.biggest;
+    child?.layout(
+      BoxConstraints.tight(Size.square(_avatarSize)),
+      parentUsesSize: false,
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final child = this.child;
+    if (child == null) return;
+    context.paintChild(child, offset + Offset(0, _avatarTopInSlot()));
+  }
+
+  double _avatarTopInSlot() {
+    final maxTop = (size.height - _avatarSize).clamp(0.0, double.infinity);
+    final controller = _scrollController;
+    if (controller == null || !controller.hasClients) return maxTop;
+    final viewportBox =
+        scrollViewportKey?.currentContext?.findRenderObject() as RenderBox?;
+    if (viewportBox == null || !viewportBox.hasSize || !hasSize) {
+      return maxTop;
+    }
+
+    final slotTop = localToGlobal(Offset.zero, ancestor: viewportBox).dy;
+    final stickyTop = viewportBox.size.height - _avatarSize;
+    return (stickyTop - slotTop).clamp(0.0, maxTop);
   }
 }
 

@@ -31,28 +31,23 @@ class ChatDetailPage extends ConsumerStatefulWidget {
 
 class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   final _scrollController = ScrollController();
-  final Map<int, double> _heights = {};
-  final Map<int, GlobalKey> _keys = {};
+  final _scrollViewportKey = GlobalKey();
   final List<ChatMessage> _olderMessages = [];
+  final List<MessageGroup> _groupedMessages = [];
+  final Map<String, ChatMessage> _messageIndex = {};
+  final List<_TimelineEntry> _timelineEntries = [];
   List<ChatMessage> _displayedMessages = [];
   bool _isLoadingOlder = false;
   bool _hasMoreMessages = true;
+  bool _olderLoadArmed = true;
+  String _derivedMessagesFingerprint = '';
 
-  /// senderId → avatar HTTP URL, populated from room members.
-  Map<String, String?> _avatarMap = {};
-
-  // ── Sticky avatar constants ─────────────────────────────────────────
-  //
-  // The sticky offset limit is: avatar size + bottom padding + top gap.
-  static const double _avatarSize = 48.0;
-  static const double _avatarBottom = 4.5;
-  static const double _stickyLimit =
-      _avatarSize + _avatarBottom; // avatar slides all the way to the group top
+  static const double _olderLoadTriggerDistance = 24.0;
+  static const double _olderLoadRearmDistance = 240.0;
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_maybeLoadOlderMessages);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
       ref.read(currentRoomIdProvider.notifier).value = widget.roomId;
@@ -64,7 +59,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     });
   }
 
-  void _buildAvatarMap(List<ChatMessage> messages, List<Contact> members) {
+  Map<String, String?> _buildAvatarMap(
+    List<ChatMessage> messages,
+    List<Contact> members,
+  ) {
     final map = <String, String?>{};
     for (final m in members) {
       map[m.id] = m.avatarUrl;
@@ -75,27 +73,32 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         map[msg.senderId] = null;
       }
     }
-    _avatarMap = map;
+    return map;
   }
 
   @override
   void dispose() {
-    _scrollController.removeListener(_maybeLoadOlderMessages);
     _scrollController.dispose();
     super.dispose();
   }
 
-  void _maybeLoadOlderMessages() {
-    if (!_scrollController.hasClients ||
-        _isLoadingOlder ||
-        !_hasMoreMessages ||
-        _displayedMessages.isEmpty) {
-      return;
+  bool _handleScrollNotification(ScrollNotification notification) {
+    final metrics = notification.metrics;
+    final distanceFromOlderEdge = metrics.maxScrollExtent - metrics.pixels;
+    if (distanceFromOlderEdge > _olderLoadRearmDistance) {
+      _olderLoadArmed = true;
     }
-    final position = _scrollController.position;
-    if (position.pixels >= position.maxScrollExtent - 240) {
+
+    if (notification is ScrollEndNotification &&
+        _olderLoadArmed &&
+        !_isLoadingOlder &&
+        _hasMoreMessages &&
+        _displayedMessages.isNotEmpty &&
+        distanceFromOlderEdge <= _olderLoadTriggerDistance) {
+      _olderLoadArmed = false;
       _loadOlderMessages();
     }
+    return false;
   }
 
   Future<void> _loadOlderMessages() async {
@@ -118,7 +121,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           .toList();
       setState(() {
         _olderMessages.insertAll(0, newMessages);
-        _hasMoreMessages = older.isNotEmpty;
+        _hasMoreMessages = older.isNotEmpty && newMessages.isNotEmpty;
         _isLoadingOlder = false;
       });
     } catch (error) {
@@ -168,6 +171,72 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     return groups;
   }
 
+  String _messagesFingerprint(List<ChatMessage> latestMessages) {
+    final buffer = StringBuffer()
+      ..write('older=')
+      ..write(_olderMessages.length)
+      ..write(';latest=')
+      ..write(latestMessages.length);
+    for (final message in _olderMessages) {
+      buffer
+        ..write('|o:')
+        ..write(message.id)
+        ..write('@')
+        ..write(message.timestamp);
+    }
+    for (final message in latestMessages) {
+      buffer
+        ..write('|l:')
+        ..write(message.id)
+        ..write('@')
+        ..write(message.timestamp)
+        ..write('#')
+        ..write(message.isEdited ? 1 : 0)
+        ..write('#')
+        ..write(message.reactions.length)
+        ..write('#')
+        ..write(message.readers.length);
+    }
+    return buffer.toString();
+  }
+
+  void _rebuildDerivedMessages(List<ChatMessage> latestMessages) {
+    final fingerprint = _messagesFingerprint(latestMessages);
+    if (_derivedMessagesFingerprint == fingerprint) {
+      return;
+    }
+    _derivedMessagesFingerprint = fingerprint;
+    final displayedMessages = _mergeMessages(latestMessages);
+    _displayedMessages = displayedMessages;
+    _messageIndex
+      ..clear()
+      ..addEntries(
+        displayedMessages.map((message) => MapEntry(message.id, message)),
+      );
+    _groupedMessages
+      ..clear()
+      ..addAll(_groupMessages(displayedMessages));
+    _timelineEntries
+      ..clear()
+      ..addAll(_buildTimelineEntries(_groupedMessages));
+  }
+
+  List<_TimelineEntry> _buildTimelineEntries(List<MessageGroup> groups) {
+    final entries = <_TimelineEntry>[];
+    for (var i = groups.length - 1; i >= 0; i--) {
+      final group = groups[i];
+      entries.add(_TimelineEntry.group(group));
+      if (i == 0 ||
+          chatDateKey(groups[i - 1].messages.first.timestamp) !=
+              chatDateKey(group.messages.first.timestamp)) {
+        entries.add(
+          _TimelineEntry.date(formatChatDate(group.messages.first.timestamp)),
+        );
+      }
+    }
+    return entries;
+  }
+
   @override
   void deactivate() {
     // Clear current room and stop typing tracking — defer to avoid modifying
@@ -185,54 +254,47 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     super.deactivate();
   }
 
-  void _measureHeights() {
-    bool changed = false;
-    for (final entry in _keys.entries) {
-      final box = entry.value.currentContext?.findRenderObject() as RenderBox?;
-      if (box != null && box.hasSize) {
-        final newHeight = box.size.height;
-        if (_heights[entry.key] != newHeight) {
-          _heights[entry.key] = newHeight;
-          changed = true;
-        }
-      }
-    }
-    if (changed && mounted) {
-      // Defer to after the current frame to avoid calling setState during build.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() {});
-      });
-    }
-  }
-
-  /// Default height for unmeasured groups: use the median of already-measured heights.
-  double get _defaultHeight {
-    if (_heights.isEmpty) return 80.0;
-    final vals = _heights.values.toList()..sort();
-    return vals[vals.length ~/ 2];
-  }
-
-  Widget _buildAvatar(String name, String? avatarUrl) {
-    return AppAvatar(
-      fallback: name,
-      size: _avatarSize,
-      radius: AppRadii.content,
-      url: avatarUrl,
-    );
-  }
-
-  /// Check if a message group consists entirely of event-type messages.
   bool _isEventGroup(MessageGroup group) {
     return group.messages.every((m) => m.msgType == MessageType.event);
   }
 
   bool _needsStickyAvatar(MessageGroup group) {
-    return !group.isMe && !_isEventGroup(group);
+    return !widget.isDm && !group.isMe && !_isEventGroup(group);
+  }
+
+  Widget _buildTimelineEntry(
+    _TimelineEntry entry,
+    Map<String, String?> avatarMap,
+  ) {
+    switch (entry.type) {
+      case _TimelineEntryType.group:
+        final group = entry.group!;
+        return MessageGroupWidget(
+          key: ValueKey(
+            'group:${group.senderId}:${group.messages.first.id}:${group.messages.last.id}',
+          ),
+          group: group,
+          roomId: widget.roomId,
+          messageIndex: _messageIndex,
+          showAvatar: _needsStickyAvatar(group),
+          compact: widget.isDm,
+          senderAvatarUrl: avatarMap[group.senderId],
+          scrollController: _scrollController,
+          scrollViewportKey: _scrollViewportKey,
+          onImageLoaded: null,
+        );
+      case _TimelineEntryType.date:
+        return DateSeparator(
+          key: ValueKey('date:${entry.dateLabel}'),
+          dateLabel: entry.dateLabel!,
+        );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final messagesAsync = ref.watch(messagesProvider(widget.roomId));
+    final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -309,139 +371,33 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           Expanded(
             child: messagesAsync.when(
               data: (messages) {
-                final displayedMessages = _mergeMessages(messages);
-                _displayedMessages = displayedMessages;
-                final messageIndex = <String, ChatMessage>{
-                  for (final message in displayedMessages) message.id: message,
-                };
-                final groups = _groupMessages(displayedMessages);
-
-                WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => _maybeLoadOlderMessages(),
+                _rebuildDerivedMessages(messages);
+                final displayedMessages = _displayedMessages;
+                final avatarMap = membersAsync.maybeWhen(
+                  data: (members) =>
+                      _buildAvatarMap(displayedMessages, members),
+                  orElse: () => const <String, String?>{},
                 );
-
-                // Resolve member avatars
-                final membersAsync = ref.read(
-                  roomMembersProvider(widget.roomId),
-                );
-                membersAsync.whenData(
-                  (members) => _buildAvatarMap(displayedMessages, members),
-                );
-
-                // Lazily create keys only for new indices; remove stale ones.
-                for (int i = 0; i < groups.length; i++) {
-                  if (_needsStickyAvatar(groups[i])) {
-                    _keys.putIfAbsent(i, () => GlobalKey());
-                  }
-                }
-                // Remove keys for indices that no longer exist
-                _keys.removeWhere(
-                  (i, _) =>
-                      i >= groups.length || !_needsStickyAvatar(groups[i]),
-                );
-                _heights.removeWhere(
-                  (i, _) =>
-                      i >= groups.length || !_needsStickyAvatar(groups[i]),
-                );
-                // Schedule height measurement after every build so that async
-                // image loads are picked up even when the group count doesn't change.
-                WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => _measureHeights(),
-                );
-
-                return CustomScrollView(
-                  reverse: true,
-                  controller: _scrollController,
-                  slivers: [
-                    const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
-                    for (int i = groups.length - 1; i >= 0; i--) ...[
-                      if (!_needsStickyAvatar(groups[i]))
-                        SliverToBoxAdapter(
-                          child: MessageGroupWidget(
-                            group: groups[i],
-                            roomId: widget.roomId,
-                            messageIndex: messageIndex,
-                          ),
-                        )
-                      else
-                        SliverLayoutBuilder(
-                          builder: (context, constraints) {
-                            final height = _heights[i] ?? _defaultHeight;
-                            final so = constraints.scrollOffset;
-
-                            // Slide the avatar from its resting position at the
-                            // message group's bottom up to the top gap, then
-                            // hold it there. Because each group's avatar is
-                            // clipped to its own Stack, it cannot follow the
-                            // viewport bottom across groups; a full Telegram-
-                            // style sticky header would need a global sliver
-                            // header instead.
-                            final dy = (-so).clamp(
-                              (_stickyLimit - height).clamp(
-                                double.negativeInfinity,
-                                0.0,
-                              ),
-                              0.0,
-                            );
-
-                            return SliverToBoxAdapter(
-                              child: Stack(
-                                key: _keys[i],
-                                clipBehavior: Clip.none,
-                                children: [
-                                  MessageGroupWidget(
-                                    group: groups[i],
-                                    roomId: widget.roomId,
-                                    messageIndex: messageIndex,
-                                    showAvatar: false,
-                                    compact: widget.isDm,
-                                    onImageLoaded: _measureHeights,
-                                  ),
-                                  if (!widget.isDm)
-                                    Positioned(
-                                      left: 12,
-                                      bottom: _avatarBottom,
-                                      child: Transform.translate(
-                                        offset: Offset(0, dy),
-                                        child: _buildAvatar(
-                                          groups[i].senderName,
-                                          _avatarMap[groups[i].senderId],
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      if (i == 0 ||
-                          chatDateKey(groups[i - 1].messages.first.timestamp) !=
-                              chatDateKey(groups[i].messages.first.timestamp))
-                        SliverToBoxAdapter(
-                          child: DateSeparator(
-                            dateLabel: formatChatDate(
-                              groups[i].messages.first.timestamp,
-                            ),
-                          ),
-                        ),
-                    ],
-                    if (_isLoadingOlder)
-                      const SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.symmetric(vertical: 16),
-                          child: Center(
-                            child: SizedBox.square(
-                              dimension: 20,
-                              child: CircularProgressIndicator(
-                                color: AppColors.primary,
-                                strokeWidth: 2,
-                              ),
-                            ),
-                          ),
-                        ),
+                return NotificationListener<ScrollNotification>(
+                  onNotification: _handleScrollNotification,
+                  child: CustomScrollView(
+                    key: _scrollViewportKey,
+                    reverse: true,
+                    controller: _scrollController,
+                    slivers: [
+                      const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
+                      SliverList.builder(
+                        itemCount: _timelineEntries.length,
+                        itemBuilder: (context, index) {
+                          return _buildTimelineEntry(
+                            _timelineEntries[index],
+                            avatarMap,
+                          );
+                        },
                       ),
-                    const SliverPadding(padding: EdgeInsets.only(top: 8)),
-                  ],
+                      const SliverPadding(padding: EdgeInsets.only(top: 8)),
+                    ],
+                  ),
                 );
               },
               loading: () => const Center(
@@ -635,6 +591,24 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ),
       ),
     );
+  }
+}
+
+enum _TimelineEntryType { group, date }
+
+class _TimelineEntry {
+  final _TimelineEntryType type;
+  final MessageGroup? group;
+  final String? dateLabel;
+
+  const _TimelineEntry._({required this.type, this.group, this.dateLabel});
+
+  factory _TimelineEntry.group(MessageGroup group) {
+    return _TimelineEntry._(type: _TimelineEntryType.group, group: group);
+  }
+
+  factory _TimelineEntry.date(String label) {
+    return _TimelineEntry._(type: _TimelineEntryType.date, dateLabel: label);
   }
 }
 

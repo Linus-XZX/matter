@@ -61,6 +61,17 @@ void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(contactsProvider);
 }
 
+void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
+  ref.read(isLoggedInProvider.notifier).value = false;
+  ref.read(currentUserProvider.notifier).value = null;
+  ref.read(currentAccessTokenProvider.notifier).value = null;
+  ref.read(activeUserIdProvider.notifier).value = null;
+  ref.read(connectionProvider.notifier).value = AppConnectionState.disconnected;
+  if (markSessionReady) {
+    ref.read(sessionReadyProvider.notifier).value = true;
+  }
+}
+
 Future<void> applyActiveSessionState(
   WidgetRef ref, {
   required String userId,
@@ -73,17 +84,18 @@ Future<void> applyActiveSessionState(
   if (persistActiveUser) {
     await saveActiveUserId(userId);
   }
+  final accessToken = await rust.getAccessToken();
+  final sessions = refreshStoredSessions ? await loadAllSessions() : null;
   ref.read(currentUserProvider.notifier).value = CurrentUser(
     id: userId,
     displayName: displayName,
     homeserver: homeserver,
   );
-  ref.read(currentAccessTokenProvider.notifier).value = await rust
-      .getAccessToken();
+  ref.read(currentAccessTokenProvider.notifier).value = accessToken;
   ref.read(homeserverProvider.notifier).value = homeserver;
   ref.read(activeUserIdProvider.notifier).value = userId;
   if (refreshStoredSessions) {
-    ref.read(sessionsProvider.notifier).value = await loadAllSessions();
+    ref.read(sessionsProvider.notifier).value = sessions ?? [];
   }
   if (markLoggedIn) {
     ref.read(isLoggedInProvider.notifier).value = true;
@@ -123,8 +135,6 @@ Future<void> bootstrapActiveSessionSync(
   } catch (e) {
     debugPrint('$startSyncLabel: $e');
   }
-
-  ref.read(syncStreamProvider);
   invalidateSessionCollections(ref);
 }
 
@@ -132,86 +142,22 @@ final currentRoomIdProvider = NotifierProvider<MutableState<String?>, String?>(
   () => MutableState(null),
 );
 
-final _roomMessagesStoreProvider =
-    NotifierProvider<
-      MutableState<Map<String, AsyncValue<List<rust.ChatMessage>>>>,
-      Map<String, AsyncValue<List<rust.ChatMessage>>>
-    >(() => MutableState({}));
-
-Future<void> _fetchMessagesIntoStoreCore(
-  bool sessionReady,
-  Map<String, AsyncValue<List<rust.ChatMessage>>> currentStore,
-  Map<String, AsyncValue<List<rust.ChatMessage>>> Function() readStore,
-  void Function(Map<String, AsyncValue<List<rust.ChatMessage>>>) writeStore,
-  String roomId, {
-  bool force = false,
-}) async {
-  if (!sessionReady) {
-    writeStore({...currentStore, roomId: const AsyncData([])});
-    return;
-  }
-
-  final current = currentStore[roomId];
-  if (!force && current is AsyncLoading<List<rust.ChatMessage>>) return;
-
-  if (current == null) {
-    writeStore({...currentStore, roomId: const AsyncLoading()});
-  }
-
-  try {
-    final messages = await rust.getMessages(roomId: roomId);
-    final latestStore = readStore();
-    writeStore({...latestStore, roomId: AsyncData(messages)});
-  } catch (error, stackTrace) {
-    final latestStore = readStore();
-    if (current == null || !current.hasValue) {
-      writeStore({...latestStore, roomId: AsyncError(error, stackTrace)});
-    } else {
-      debugPrint('refresh messages failed for $roomId: $error');
-    }
-  }
-}
-
-final messagesProvider =
-    Provider.family<AsyncValue<List<rust.ChatMessage>>, String>((ref, roomId) {
-      if (!ref.watch(sessionReadyProvider)) return const AsyncData([]);
-
-      final store = ref.watch(_roomMessagesStoreProvider);
-      final current = store[roomId];
-      if (current != null) return current;
-
-      Future.microtask(
-        () => _fetchMessagesIntoStoreCore(
-          ref.read(sessionReadyProvider),
-          ref.read(_roomMessagesStoreProvider),
-          () => ref.read(_roomMessagesStoreProvider),
-          (next) => ref.read(_roomMessagesStoreProvider.notifier).value = next,
-          roomId,
-        ),
-      );
-      return const AsyncLoading();
-    });
+final messagesProvider = FutureProvider.family<List<rust.ChatMessage>, String>((
+  ref,
+  roomId,
+) async {
+  if (!ref.watch(sessionReadyProvider)) return const <rust.ChatMessage>[];
+  return rust.getMessages(roomId: roomId);
+});
 
 Future<void> refreshMessagesRef(Ref ref, String roomId) {
-  return _fetchMessagesIntoStoreCore(
-    ref.read(sessionReadyProvider),
-    ref.read(_roomMessagesStoreProvider),
-    () => ref.read(_roomMessagesStoreProvider),
-    (next) => ref.read(_roomMessagesStoreProvider.notifier).value = next,
-    roomId,
-    force: true,
-  );
+  ref.invalidate(messagesProvider(roomId));
+  return ref.read(messagesProvider(roomId).future);
 }
 
 Future<void> refreshMessages(WidgetRef ref, String roomId) {
-  return _fetchMessagesIntoStoreCore(
-    ref.read(sessionReadyProvider),
-    ref.read(_roomMessagesStoreProvider),
-    () => ref.read(_roomMessagesStoreProvider),
-    (next) => ref.read(_roomMessagesStoreProvider.notifier).value = next,
-    roomId,
-    force: true,
-  );
+  ref.invalidate(messagesProvider(roomId));
+  return ref.read(messagesProvider(roomId).future);
 }
 
 final stickerPacksProvider =
@@ -434,82 +380,89 @@ Future<void> redactMessage(
 /// When sync events arrive, invalidates room/message providers so the UI
 /// updates automatically.
 ///
-/// Initialize once after login with: `ref.read(syncStreamProvider);`
-final syncStreamProvider = Provider<StreamSubscription<rust.SyncEvent>>((ref) {
-  final stream = rust.watchSyncEvents();
-  Timer? messageRefreshTimer;
-  Timer? roomRefreshTimer;
-  final pendingMessageRefreshes = <String>{};
+/// Initialize once after login with: `ref.watch(syncStreamProvider);`
+final syncStreamProvider =
+    Provider.autoDispose<StreamSubscription<rust.SyncEvent>?>((ref) {
+      final sessionReady = ref.watch(sessionReadyProvider);
+      final activeUserId = ref.watch(activeUserIdProvider);
+      if (!sessionReady || activeUserId == null) {
+        return null;
+      }
 
-  void refreshRooms() {
-    ref.invalidate(chatRoomsProvider);
-    ref.invalidate(spacesProvider);
-    ref.invalidate(ungroupedRoomsProvider);
-  }
+      final stream = rust.watchSyncEvents();
+      Timer? messageRefreshTimer;
+      Timer? roomRefreshTimer;
+      final pendingMessageRefreshes = <String>{};
 
-  void refreshCurrentRoomMeta() {
-    final currentRoomId = ref.read(currentRoomIdProvider);
-    if (currentRoomId != null) {
-      ref.invalidate(stickerPacksProvider(currentRoomId));
-    }
-  }
+      void refreshRooms() {
+        ref.invalidate(chatRoomsProvider);
+        ref.invalidate(spacesProvider);
+        ref.invalidate(ungroupedRoomsProvider);
+      }
 
-  void scheduleRoomRefresh() {
-    roomRefreshTimer?.cancel();
-    roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
-      roomRefreshTimer = null;
-      refreshRooms();
-    });
-  }
-
-  void flushMessageRefreshes() {
-    final roomIds = pendingMessageRefreshes.toList();
-    pendingMessageRefreshes.clear();
-    for (final roomId in roomIds) {
-      unawaited(refreshMessagesRef(ref, roomId));
-    }
-  }
-
-  void scheduleMessageRefresh(String roomId) {
-    pendingMessageRefreshes.add(roomId);
-    messageRefreshTimer?.cancel();
-    messageRefreshTimer = Timer(const Duration(milliseconds: 200), () {
-      messageRefreshTimer = null;
-      flushMessageRefreshes();
-    });
-  }
-
-  final statusTimer = Timer.periodic(
-    const Duration(seconds: 1),
-    (_) => pollConnectionStatus(ref),
-  );
-  Future.microtask(() => pollConnectionStatus(ref));
-  final subscription = stream.listen((event) {
-    pollConnectionStatus(ref);
-    switch (event) {
-      case rust.SyncEvent_SyncCompleted():
-        scheduleRoomRefresh();
-        refreshCurrentRoomMeta();
+      void refreshCurrentRoomMeta() {
         final currentRoomId = ref.read(currentRoomIdProvider);
         if (currentRoomId != null) {
-          scheduleMessageRefresh(currentRoomId);
+          ref.invalidate(stickerPacksProvider(currentRoomId));
         }
-      case rust.SyncEvent_MessageSent(:final roomId):
-        scheduleMessageRefresh(roomId);
-        scheduleRoomRefresh();
-        ref.invalidate(stickerPacksProvider(roomId));
-    }
-  });
+      }
 
-  ref.onDispose(() {
-    statusTimer.cancel();
-    messageRefreshTimer?.cancel();
-    roomRefreshTimer?.cancel();
-    subscription.cancel();
-  });
+      void scheduleRoomRefresh() {
+        roomRefreshTimer?.cancel();
+        roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
+          roomRefreshTimer = null;
+          refreshRooms();
+        });
+      }
 
-  return subscription;
-});
+      void flushMessageRefreshes() {
+        final roomIds = pendingMessageRefreshes.toList();
+        pendingMessageRefreshes.clear();
+        for (final roomId in roomIds) {
+          unawaited(refreshMessagesRef(ref, roomId));
+        }
+      }
+
+      void scheduleMessageRefresh(String roomId) {
+        pendingMessageRefreshes.add(roomId);
+        messageRefreshTimer?.cancel();
+        messageRefreshTimer = Timer(const Duration(milliseconds: 200), () {
+          messageRefreshTimer = null;
+          flushMessageRefreshes();
+        });
+      }
+
+      final statusTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => pollConnectionStatus(ref),
+      );
+      Future.microtask(() => pollConnectionStatus(ref));
+      final subscription = stream.listen((event) {
+        pollConnectionStatus(ref);
+        switch (event) {
+          case rust.SyncEvent_SyncCompleted():
+            scheduleRoomRefresh();
+            refreshCurrentRoomMeta();
+            final currentRoomId = ref.read(currentRoomIdProvider);
+            if (currentRoomId != null) {
+              scheduleMessageRefresh(currentRoomId);
+            }
+          case rust.SyncEvent_MessageSent(:final roomId):
+            scheduleMessageRefresh(roomId);
+            scheduleRoomRefresh();
+            ref.invalidate(stickerPacksProvider(roomId));
+        }
+      });
+
+      ref.onDispose(() {
+        statusTimer.cancel();
+        messageRefreshTimer?.cancel();
+        roomRefreshTimer?.cancel();
+        subscription.cancel();
+      });
+
+      return subscription;
+    });
 
 // ── Typing notifications ─────────────────────────────────────────────
 //
@@ -529,7 +482,13 @@ final _typingTimers = <String, Timer>{};
 /// Start the global typing-notification listener. Initialize once after login
 /// (alongside `syncStreamProvider`). Returns the subscription.
 final typingStreamProvider =
-    Provider<StreamSubscription<rust.TypingNotification>>((ref) {
+    Provider.autoDispose<StreamSubscription<rust.TypingNotification>?>((ref) {
+      final sessionReady = ref.watch(sessionReadyProvider);
+      final activeUserId = ref.watch(activeUserIdProvider);
+      if (!sessionReady || activeUserId == null) {
+        return null;
+      }
+
       final stream = rust.watchTypingNotifications();
       final subscription = stream.listen((event) {
         final roomId = event.roomId;
