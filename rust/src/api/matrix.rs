@@ -3289,21 +3289,37 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                     if my_user_id == Some(uid) {
                         continue;
                     }
-                    if let Ok(Some((_receipt_event_id, receipt))) = room
+                    let unthreaded = room
                         .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
                         .await
-                    {
-                        if let Some(ts) = receipt.ts {
-                            let read_ts = i64::from(ts.0);
-                            let name = member.name().to_string();
-                            let display_name = if name == uid.as_str() {
-                                uid.localpart().to_string()
-                            } else {
-                                name
-                            };
-                            let avatar = member.avatar_url().map(|u| u.to_string());
-                            records.push((uid.to_string(), display_name, avatar, read_ts));
-                        }
+                        .ok()
+                        .flatten();
+                    let main = room
+                        .load_user_receipt(ReceiptType::Read, ReceiptThread::Main, uid)
+                        .await
+                        .ok()
+                        .flatten();
+                    let read_ts = unthreaded
+                        .as_ref()
+                        .and_then(|(_, r)| r.ts)
+                        .map(|ts| i64::from(ts.0))
+                        .into_iter()
+                        .chain(
+                            main.as_ref()
+                                .and_then(|(_, r)| r.ts)
+                                .map(|ts| i64::from(ts.0))
+                                .into_iter(),
+                        )
+                        .max();
+                    if let Some(read_ts) = read_ts {
+                        let name = member.name().to_string();
+                        let display_name = if name == uid.as_str() {
+                            uid.localpart().to_string()
+                        } else {
+                            name
+                        };
+                        let avatar = member.avatar_url().map(|u| u.to_string());
+                        records.push((uid.to_string(), display_name, avatar, read_ts));
                     }
                 }
             }

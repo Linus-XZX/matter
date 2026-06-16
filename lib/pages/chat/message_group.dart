@@ -211,6 +211,7 @@ class MessageGroupWidget extends ConsumerWidget {
             imageHeight: message.imageHeight,
             timestamp: formatMessageTime(message.timestamp),
             isMe: isMe,
+            heroTag: 'image-preview:${message.id}',
             onLoaded: onImageLoaded,
           )
         : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst);

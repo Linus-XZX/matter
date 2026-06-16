@@ -143,6 +143,7 @@ class _AuthenticatedImage extends StatelessWidget {
   final Widget fallback;
   final BoxFit? fit;
   final VoidCallback? onLoaded;
+  final VoidCallback? onError;
   final double? width;
   final double? height;
   final int? cacheWidth;
@@ -155,6 +156,7 @@ class _AuthenticatedImage extends StatelessWidget {
     required this.fallback,
     this.fit,
     this.onLoaded,
+    this.onError,
     this.width,
     this.height,
     this.cacheWidth,
@@ -194,7 +196,10 @@ class _AuthenticatedImage extends StatelessWidget {
           strokeWidth: 1.5,
         ),
       ),
-      errorWidget: (context, url, error) => fallback,
+      errorWidget: (context, url, error) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => onError?.call());
+        return fallback;
+      },
     );
   }
 }
@@ -205,6 +210,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
   final VoidCallback? onTap;
   final BoxFit? fit;
   final VoidCallback? onLoaded;
+  final VoidCallback? onError;
   final int? cacheWidth;
   final int? cacheHeight;
 
@@ -214,6 +220,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
     this.onTap,
     this.fit,
     this.onLoaded,
+    this.onError,
     this.cacheWidth,
     this.cacheHeight,
   });
@@ -222,6 +229,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // mxc:// URLs can't be shown directly
     if (imageUrl.startsWith('mxc://')) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => onError?.call());
       return const Center(
         child: Icon(
           Icons.broken_image_rounded,
@@ -246,6 +254,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
       fallback: brokenIcon,
       fit: fit ?? BoxFit.cover,
       onLoaded: onLoaded,
+      onError: onError,
       cacheWidth: cacheWidth,
       cacheHeight: cacheHeight,
     );
