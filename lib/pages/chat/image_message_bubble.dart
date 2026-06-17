@@ -63,25 +63,33 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   @override
   void didUpdateWidget(covariant ImageMessageBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.imageUrl != oldWidget.imageUrl || _resolvedUrl == null) {
+    if (widget.imageUrl != oldWidget.imageUrl ||
+        widget.imageWidth != oldWidget.imageWidth ||
+        widget.imageHeight != oldWidget.imageHeight ||
+        _resolvedUrl == null) {
       _resolveUrl();
     }
   }
 
   Future<void> _resolveUrl() async {
     if (widget.imageUrl.startsWith('mxc://')) {
+      final useOriginalCache = _shouldUseOriginalCache;
       final url = await resolveMxcUrl(
         ref,
         widget.imageUrl,
-        width: _thumbnailWidth,
-        height: _thumbnailHeight,
+        width: useOriginalCache ? null : _thumbnailWidth,
+        height: useOriginalCache ? null : _thumbnailHeight,
       );
       if (mounted && url != null) {
         setState(() => _resolvedUrl = url);
         widget.onLoaded?.call();
       }
     } else {
-      _resolvedUrl = widget.imageUrl;
+      if (mounted) {
+        setState(() => _resolvedUrl = widget.imageUrl);
+      } else {
+        _resolvedUrl = widget.imageUrl;
+      }
       widget.onLoaded?.call();
     }
   }
@@ -191,6 +199,17 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       return sourceWidth / sourceHeight;
     }
     return 1.0;
+  }
+
+  bool get _shouldUseOriginalCache {
+    final width = widget.imageWidth;
+    final height = widget.imageHeight;
+    return width != null &&
+        height != null &&
+        width > 0 &&
+        height > 0 &&
+        width <= 512 &&
+        height <= 512;
   }
 
   Size _bubbleSize(BuildContext context) {

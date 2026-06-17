@@ -479,7 +479,10 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
                             return _StickerCard(
                               key: _stickerKeyFor(sticker),
                               sticker: sticker,
-                              onTap: () => widget.onStickerSelected(sticker),
+                              onTap: () {
+                                _hideHoldPreview();
+                                widget.onStickerSelected(sticker);
+                              },
                               onLongPressStart: (_) =>
                                   _showHoldPreview(sticker),
                               onLongPressMoveUpdate: (details) =>
@@ -546,31 +549,7 @@ class _PackThumb extends StatelessWidget {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(11),
-          child: sticker.isRemote
-              ? _RemoteStickerPreview(sticker: sticker)
-              : DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: sticker.colors,
-                    ),
-                  ),
-                  child: Center(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        sticker.glyph ?? fallback,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          height: 1,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+          child: _RemoteStickerPreview(sticker: sticker, fallback: fallback),
         ),
       ),
     );
@@ -606,16 +585,7 @@ class _StickerCard extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Ink(
         decoration: BoxDecoration(
-          color: sticker.isRemote
-              ? AppColors.surfaceVariant.withValues(alpha: 0.18)
-              : null,
-          gradient: sticker.isRemote
-              ? null
-              : LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: sticker.colors,
-                ),
+          color: AppColors.surfaceVariant.withValues(alpha: 0.18),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: AppColors.surfaceVariant.withValues(alpha: 0.35),
@@ -626,21 +596,7 @@ class _StickerCard extends StatelessWidget {
           padding: const EdgeInsets.all(4),
           child: AspectRatio(
             aspectRatio: sticker.aspectRatio,
-            child: sticker.isRemote
-                ? _RemoteStickerPreview(sticker: sticker)
-                : FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(
-                      sticker.glyph ?? sticker.body,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                        height: 1.0,
-                      ),
-                    ),
-                  ),
+            child: _RemoteStickerPreview(sticker: sticker),
           ),
         ),
       ),
@@ -705,32 +661,10 @@ class _StickerHoldPreviewOverlay extends StatelessWidget {
                         aspectRatio: sticker.aspectRatio,
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(18),
-                          child: sticker.isRemote
-                              ? _RemoteStickerPreview(
-                                  sticker: sticker,
-                                  fit: BoxFit.contain,
-                                )
-                              : DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                      colors: sticker.colors,
-                                    ),
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      sticker.glyph ?? sticker.body,
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 72,
-                                        fontWeight: FontWeight.w700,
-                                        height: 1.0,
-                                      ),
-                                    ),
-                                  ),
-                                ),
+                          child: _RemoteStickerPreview(
+                            sticker: sticker,
+                            fit: BoxFit.contain,
+                          ),
                         ),
                       ),
                     ),
@@ -768,10 +702,12 @@ class _StickerHoldPreviewOverlay extends StatelessWidget {
 class _RemoteStickerPreview extends ConsumerStatefulWidget {
   final StickerItem sticker;
   final BoxFit fit;
+  final String? fallback;
 
   const _RemoteStickerPreview({
     required this.sticker,
     this.fit = BoxFit.contain,
+    this.fallback,
   });
 
   @override
@@ -814,13 +750,7 @@ class _RemoteStickerPreviewState extends ConsumerState<_RemoteStickerPreview> {
   Widget build(BuildContext context) {
     final imageUrl = _sourceUrl;
     if (imageUrl == null) {
-      return const Center(
-        child: Icon(
-          Icons.sticky_note_2_rounded,
-          color: AppColors.onSurfaceVariant,
-          size: 28,
-        ),
-      );
+      return _StickerFallback(label: widget.fallback);
     }
 
     return FutureBuilder<String?>(
@@ -839,13 +769,7 @@ class _RemoteStickerPreviewState extends ConsumerState<_RemoteStickerPreview> {
               ),
             );
           }
-          return const Center(
-            child: Icon(
-              Icons.sticky_note_2_rounded,
-              color: AppColors.onSurfaceVariant,
-              size: 28,
-            ),
-          );
+          return _StickerFallback(label: widget.fallback);
         }
 
         return ClipRRect(
@@ -856,6 +780,36 @@ class _RemoteStickerPreviewState extends ConsumerState<_RemoteStickerPreview> {
           ),
         );
       },
+    );
+  }
+}
+
+class _StickerFallback extends StatelessWidget {
+  final String? label;
+
+  const _StickerFallback({this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = this.label;
+    if (label != null && label.isNotEmpty) {
+      return Center(
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppColors.onSurfaceVariant,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    }
+    return const Center(
+      child: Icon(
+        Icons.sticky_note_2_rounded,
+        color: AppColors.onSurfaceVariant,
+        size: 28,
+      ),
     );
   }
 }

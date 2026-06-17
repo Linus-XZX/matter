@@ -46,6 +46,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   final _imagePicker = ImagePicker();
   bool _showPicker = false;
   ComposerPickerTab _pickerTab = ComposerPickerTab.emoji;
+  int _pickerInstance = 0;
 
   /// Tracks the event id currently being edited, so we only prefill the input
   /// when the edited message changes (not on every rebuild).
@@ -121,6 +122,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       if (_showPicker && sameTab) {
         _showPicker = false;
       } else {
+        if (!_showPicker) {
+          _pickerInstance++;
+        }
         _pickerTab = nextTab;
         _showPicker = true;
         _focusNode.unfocus();
@@ -244,119 +248,25 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     _insertComposerText(emoji);
   }
 
-  Future<Uint8List> _renderStickerPng(StickerItem sticker) async {
-    const size = 512.0;
-    const padding = 36.0;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final rect = const Rect.fromLTWH(0, 0, size, size);
-    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(96));
-
-    final background = Paint()
-      ..shader = ui.Gradient.linear(
-        Offset.zero,
-        const Offset(size, size),
-        sticker.colors,
-      );
-    canvas.drawRRect(rrect, background);
-
-    final glow = Paint()
-      ..shader = ui.Gradient.radial(
-        const Offset(size * 0.3, size * 0.28),
-        size * 0.9,
-        [
-          Colors.white.withValues(alpha: 0.28),
-          Colors.white.withValues(alpha: 0.0),
-        ],
-      );
-    canvas.drawRRect(rrect, glow);
-
-    final frame = Paint()
-      ..color = Colors.white.withValues(alpha: 0.18)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
-    canvas.drawRRect(rrect.deflate(8), frame);
-
-    final glyphPainter = TextPainter(
-      text: TextSpan(
-        text: sticker.glyph ?? sticker.body,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 92,
-          fontWeight: FontWeight.w700,
-          height: 1.0,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.center,
-      maxLines: 3,
-    )..layout(maxWidth: size - padding * 2);
-    glyphPainter.paint(
-      canvas,
-      Offset(
-        (size - glyphPainter.width) / 2,
-        (size - glyphPainter.height) / 2 - 28,
-      ),
-    );
-
-    final labelPainter = TextPainter(
-      text: TextSpan(
-        text: sticker.label,
-        style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.92),
-          fontSize: 28,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.2,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.center,
-      maxLines: 1,
-    )..layout(maxWidth: size - padding * 2);
-    labelPainter.paint(
-      canvas,
-      Offset((size - labelPainter.width) / 2, size - padding - 38),
-    );
-
-    final image = await recorder.endRecording().toImage(
-      size.toInt(),
-      size.toInt(),
-    );
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    image.dispose();
-    if (bytes == null) {
-      throw StateError('生成贴纸图片失败');
-    }
-    return bytes.buffer.asUint8List();
-  }
-
   Future<void> _sendSticker(StickerItem sticker) async {
     if (_isSending) return;
 
     setState(() => _isSending = true);
     try {
-      if (sticker.isRemote && sticker.imageUrl != null) {
-        await rust.sendSticker(
-          roomId: widget.roomId,
-          imageUrl: sticker.imageUrl!,
-          body: sticker.body,
-          mimeType: sticker.mimeType,
-          width: sticker.width,
-          height: sticker.height,
-        );
-      } else {
-        final bytes = await _renderStickerPng(sticker);
-        await rust.sendImageMessage(
-          roomId: widget.roomId,
-          imageData: bytes,
-          filename: 'sticker__${sticker.label}.png',
-        );
+      final imageUrl = sticker.imageUrl;
+      if (imageUrl == null) {
+        throw StateError('贴纸缺少图片地址');
       }
+      await rust.sendSticker(
+        roomId: widget.roomId,
+        imageUrl: imageUrl,
+        body: sticker.body,
+        mimeType: sticker.mimeType,
+        width: sticker.width,
+        height: sticker.height,
+      );
       _stopTyping();
       unawaited(refreshMessages(ref, widget.roomId));
-      if (mounted) {
-        setState(() => _showPicker = false);
-      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -549,6 +459,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
             AnimatedCrossFade(
               firstChild: const SizedBox.shrink(),
               secondChild: ComposerPickerPanel(
+                key: ValueKey(
+                  'composer_picker_${widget.roomId}_$_pickerInstance',
+                ),
                 roomId: widget.roomId,
                 tab: _pickerTab,
                 onTabChanged: (tab) => setState(() => _pickerTab = tab),
