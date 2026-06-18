@@ -53,6 +53,9 @@ class MessageInput extends ConsumerStatefulWidget {
 }
 
 class _MessageInputState extends ConsumerState<MessageInput> {
+  static const _toolbarAnimationDuration = Duration(milliseconds: 180);
+  static const _toolbarAnimationCurve = Curves.easeOutCubic;
+
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   bool _hasText = false;
@@ -494,66 +497,99 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                     ),
                   ),
                   const SizedBox(width: 6),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 180),
-                    transitionBuilder: (child, animation) => FadeTransition(
-                      opacity: animation,
-                      child: ScaleTransition(scale: animation, child: child),
-                    ),
-                    child: _hasText
-                        ? SizedBox.square(
-                            key: const ValueKey('send_only'),
-                            dimension: 44,
-                            child: IconButton(
-                              onPressed: _isSending ? null : _sendMessage,
-                              padding: EdgeInsets.zero,
-                              icon: _isSending
-                                  ? const SizedBox.square(
-                                      dimension: 20,
-                                      child: CircularProgressIndicator(
-                                        color: AppColors.primary,
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(
-                                      Icons.send_rounded,
-                                      color: AppColors.primary,
-                                      size: 25,
-                                    ),
+                  AnimatedContainer(
+                    duration: _toolbarAnimationDuration,
+                    curve: _toolbarAnimationCurve,
+                    width: _hasText ? 44 : 94,
+                    height: 44,
+                    alignment: Alignment.centerRight,
+                    child: ClipRect(
+                      child: AnimatedSwitcher(
+                        duration: _toolbarAnimationDuration,
+                        switchInCurve: _toolbarAnimationCurve,
+                        switchOutCurve: Curves.easeInCubic,
+                        layoutBuilder: (currentChild, previousChildren) {
+                          return Stack(
+                            alignment: Alignment.centerRight,
+                            children: [...previousChildren, ?currentChild],
+                          );
+                        },
+                        transitionBuilder: (child, animation) {
+                          final scale = Tween<double>(
+                            begin: 0.92,
+                            end: 1,
+                          ).animate(animation);
+                          return FadeTransition(
+                            opacity: animation,
+                            child: ScaleTransition(
+                              scale: scale,
+                              alignment: Alignment.centerRight,
+                              child: child,
                             ),
-                          )
-                        : Row(
-                            key: const ValueKey('tools'),
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox.square(
+                          );
+                        },
+                        child: _hasText
+                            ? SizedBox.square(
+                                key: const ValueKey('send_only'),
                                 dimension: 44,
                                 child: IconButton(
-                                  tooltip: '文件发送暂仅支持图片',
-                                  onPressed: _isSending ? null : _pickImage,
+                                  onPressed: _isSending ? null : _sendMessage,
                                   padding: EdgeInsets.zero,
-                                  icon: const Icon(
-                                    Icons.attach_file_rounded,
-                                    color: AppColors.onSurfaceVariant,
-                                    size: 24,
-                                  ),
+                                  icon: _isSending
+                                      ? const SizedBox.square(
+                                          dimension: 20,
+                                          child: CircularProgressIndicator(
+                                            color: AppColors.primary,
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(
+                                          Icons.send_rounded,
+                                          color: AppColors.primary,
+                                          size: 25,
+                                        ),
+                                ),
+                              )
+                            : SizedBox(
+                                key: const ValueKey('tools'),
+                                width: 94,
+                                height: 44,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    SizedBox.square(
+                                      dimension: 44,
+                                      child: IconButton(
+                                        tooltip: '文件发送暂仅支持图片',
+                                        onPressed: _isSending
+                                            ? null
+                                            : _pickImage,
+                                        padding: EdgeInsets.zero,
+                                        icon: const Icon(
+                                          Icons.attach_file_rounded,
+                                          color: AppColors.onSurfaceVariant,
+                                          size: 24,
+                                        ),
+                                      ),
+                                    ),
+                                    SizedBox.square(
+                                      dimension: 44,
+                                      child: IconButton(
+                                        tooltip: '语音消息暂未提供',
+                                        icon: const Icon(
+                                          Icons.mic_none_rounded,
+                                          color: AppColors.onSurfaceVariant,
+                                          size: 25,
+                                        ),
+                                        onPressed: null,
+                                        padding: EdgeInsets.zero,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              SizedBox.square(
-                                dimension: 44,
-                                child: IconButton(
-                                  tooltip: '语音消息暂未提供',
-                                  icon: const Icon(
-                                    Icons.mic_none_rounded,
-                                    color: AppColors.onSurfaceVariant,
-                                    size: 25,
-                                  ),
-                                  onPressed: null,
-                                  padding: EdgeInsets.zero,
-                                ),
-                              ),
-                            ],
-                          ),
+                      ),
+                    ),
                   ),
                 ],
               ),
