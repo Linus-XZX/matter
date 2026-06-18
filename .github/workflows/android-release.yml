@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-android-arm64:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       FLUTTER_VERSION: 3.35.3
       JAVA_VERSION: "17"
