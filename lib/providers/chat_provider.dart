@@ -573,7 +573,7 @@ final _typingTimers = <String, Timer>{};
 /// Start the global typing-notification listener. Initialize once after login
 /// (alongside `syncStreamProvider`). Returns the subscription.
 final typingStreamProvider =
-    Provider.autoDispose<StreamSubscription<rust.TypingNotification>?>((ref) {
+    Provider<StreamSubscription<rust.TypingNotification>?>((ref) {
       final sessionReady = ref.watch(sessionReadyProvider);
       final activeUserId = ref.watch(activeUserIdProvider);
       if (!sessionReady || activeUserId == null) {

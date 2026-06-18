@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/app_theme.dart';
@@ -74,8 +75,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
       ref.read(currentRoomIdProvider.notifier).value = widget.roomId;
-      // Keep the global typing listener alive and subscribe to this room.
-      ref.read(typingStreamProvider);
+      // Subscribe Rust-side typing events for this room.
       subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
         debugPrint('subscribeTypingForRoom failed: $e');
       });
@@ -381,6 +381,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   Widget build(BuildContext context) {
     final messagesAsync = ref.watch(messagesProvider(widget.roomId));
     final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
+    ref.watch(typingStreamProvider);
     final localOutgoingMessages = ref.watch(
       localOutgoingMessagesProvider(widget.roomId),
     );
@@ -618,7 +619,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   /// "… is typing" indicator shown above the message input.
   Widget _buildTypingIndicator() {
-    final typing = ref.watch(typingUsersProvider(widget.roomId));
+    final activeUserId = ref.watch(activeUserIdProvider);
+    final typing = ref
+        .watch(typingUsersProvider(widget.roomId))
+        .where((id) => id != activeUserId)
+        .toSet();
     if (typing.isEmpty) return const SizedBox.shrink();
 
     // Derive display names from user ids (localpart fallback).
