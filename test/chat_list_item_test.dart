@@ -17,6 +17,10 @@ void main() {
     expect(chatListPreview(room(type: 'group', sender: '小明')), '小明：你好');
   });
 
+  test('group preview labels the current user as me', () {
+    expect(chatListPreview(room(type: 'group', sender: '我')), '我：你好');
+  });
+
   test('dm preview does not repeat the sender', () {
     expect(chatListPreview(room(type: 'dm', sender: '小明')), '你好');
   });

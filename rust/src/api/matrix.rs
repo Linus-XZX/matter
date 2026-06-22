@@ -547,21 +547,29 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
     let unread_count = room.unread_notification_counts().notification_count as i32;
     let (last_message, last_message_sender_id, last_message_time) = get_last_message_info(room);
     let last_message_sender = if let Some(sender_id) = last_message_sender_id {
-        let fallback = sender_id
-            .split(':')
-            .next()
-            .unwrap_or(&sender_id)
-            .trim_start_matches('@')
-            .to_string();
-        match matrix_sdk::ruma::UserId::parse(&sender_id) {
-            Ok(user_id) => room
-                .get_member_no_sync(&user_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|member| member.name().to_string())
-                .or(Some(fallback)),
-            Err(_) => Some(fallback),
+        let is_me = room
+            .client()
+            .user_id()
+            .is_some_and(|user_id| user_id.as_str() == sender_id);
+        if is_me {
+            Some("我".to_string())
+        } else {
+            let fallback = sender_id
+                .split(':')
+                .next()
+                .unwrap_or(&sender_id)
+                .trim_start_matches('@')
+                .to_string();
+            match matrix_sdk::ruma::UserId::parse(&sender_id) {
+                Ok(user_id) => room
+                    .get_member_no_sync(&user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|member| member.name().to_string())
+                    .or(Some(fallback)),
+                Err(_) => Some(fallback),
+            }
         }
     } else {
         None
