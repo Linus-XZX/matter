@@ -449,6 +449,7 @@ pub struct ChatRoom {
     pub name: String,
     pub avatar_url: Option<String>,
     pub last_message: String,
+    pub last_message_sender: Option<String>,
     pub last_message_time: String,
     pub unread_count: i32,
     /// "dm", "group", or "space"
@@ -505,7 +506,7 @@ pub struct Contact {
     pub status: String,
 }
 
-fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
+async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
     let room_id = room.room_id().to_string();
     let mut name = room.name().filter(|n| !n.is_empty()).unwrap_or_default();
     if name.is_empty() {
@@ -521,7 +522,27 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
-    let (last_message, last_message_time) = get_last_message_info(room);
+    let (last_message, last_message_sender_id, last_message_time) = get_last_message_info(room);
+    let last_message_sender = if let Some(sender_id) = last_message_sender_id {
+        let fallback = sender_id
+            .split(':')
+            .next()
+            .unwrap_or(&sender_id)
+            .trim_start_matches('@')
+            .to_string();
+        match matrix_sdk::ruma::UserId::parse(&sender_id) {
+            Ok(user_id) => room
+                .get_member_no_sync(&user_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|member| member.name().to_string())
+                .or(Some(fallback)),
+            Err(_) => Some(fallback),
+        }
+    } else {
+        None
+    };
     let room_type = if room.is_space() {
         "space".to_string()
     } else {
@@ -533,6 +554,7 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         name,
         avatar_url,
         last_message,
+        last_message_sender,
         last_message_time,
         unread_count,
         room_type,
@@ -2714,7 +2736,7 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
         }
         joined += 1;
 
-        let mut chat_room = room_to_chat_room(&room);
+        let mut chat_room = room_to_chat_room(&room).await;
         if !room.is_space() {
             chat_room.room_type = match room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -2740,7 +2762,7 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
     Ok(result)
 }
 
-fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
+fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String) {
     let mut last_msg = "(暂无消息)".to_string();
     let mut last_time = String::new();
 
@@ -2754,9 +2776,14 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
             last_time = u64::from(any_ev.origin_server_ts().0).to_string();
 
             if latest.kind.is_utd() {
-                return ("无法解密此消息".to_string(), last_time);
+                return (
+                    "无法解密此消息".to_string(),
+                    Some(any_ev.sender().to_string()),
+                    last_time,
+                );
             }
 
+            let sender_id = any_ev.sender().to_string();
             let preview = match any_ev {
                 matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                     matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
@@ -2821,11 +2848,12 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
                     text.push_str("...");
                 }
                 last_msg = text;
+                return (last_msg, Some(sender_id), last_time);
             }
         }
     }
 
-    (last_msg, last_time)
+    (last_msg, None, last_time)
 }
 
 /// Strip the Matrix reply fallback prefix from a message body.
@@ -3822,19 +3850,18 @@ pub async fn join_room(identifier: String) -> Result<String, String> {
 pub async fn get_spaces() -> Result<Vec<Space>, String> {
     let client = get_client().await.ok_or("No client created.")?;
 
-    let mut spaces = client
-        .rooms()
-        .into_iter()
-        .filter(|room| room.state() == matrix_sdk::RoomState::Joined && room.is_space())
-        .map(|room| {
-            let chat_room = room_to_chat_room(&room);
-            Space {
-                id: chat_room.id,
-                name: chat_room.name,
-                avatar_url: chat_room.avatar_url,
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut spaces = Vec::new();
+    for room in client.rooms() {
+        if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
+            continue;
+        }
+        let chat_room = room_to_chat_room(&room).await;
+        spaces.push(Space {
+            id: chat_room.id,
+            name: chat_room.name,
+            avatar_url: chat_room.avatar_url,
+        });
+    }
 
     spaces.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(spaces)
@@ -3854,7 +3881,7 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
         return Err(format!("Room is not a joined space: {space_id}"));
     }
 
-    let chat_room = room_to_chat_room(&room);
+    let chat_room = room_to_chat_room(&room).await;
     let topic = room
         .topic()
         .map(|topic| topic.trim().to_string())
@@ -3906,7 +3933,7 @@ pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, Strin
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&child_room);
+        let mut chat_room = room_to_chat_room(&child_room).await;
         if !child_room.is_space() {
             chat_room.room_type = match child_room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -4159,7 +4186,7 @@ pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&room);
+        let mut chat_room = room_to_chat_room(&room).await;
         chat_room.room_type = "group".to_string();
         rooms.push(chat_room);
     }
