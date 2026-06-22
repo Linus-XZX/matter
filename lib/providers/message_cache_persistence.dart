@@ -16,7 +16,7 @@ import 'message_ordering.dart';
 /// Storage layout mirrors the persisted MXC URL cache: one SharedPreferences
 /// key per room, namespaced by user id, capped per room and pruned to the most
 /// recent messages.
-const _kMsgCachePrefix = 'msg_cache_v1';
+const _kMsgCachePrefix = 'msg_cache_v2';
 const _kMaxCachedMessagesPerRoom = 200;
 
 String _msgStorageKey(String namespace, String roomId) =>
@@ -64,6 +64,9 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
   switch (msgTypeName) {
     case 'image':
       msgType = rust.MessageType.image;
+      break;
+    case 'sticker':
+      msgType = rust.MessageType.sticker;
       break;
     case 'video':
       msgType = rust.MessageType.video;

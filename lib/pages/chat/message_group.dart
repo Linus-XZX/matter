@@ -221,7 +221,8 @@ class MessageGroupWidget extends ConsumerWidget {
             heroTag: 'video-preview:${message.id}',
             onLoaded: onImageLoaded,
           )
-        : message.msgType == MessageType.image &&
+        : (message.msgType == MessageType.image ||
+                  message.msgType == MessageType.sticker) &&
               (message.imageUrl != null || message.mediaSourceJson != null)
         ? ImageMessageBubble(
             key: ValueKey('image-bubble:${message.id}'),
@@ -232,6 +233,7 @@ class MessageGroupWidget extends ConsumerWidget {
             timestamp: formatMessageTime(message.timestamp),
             isMe: isMe,
             heroTag: 'image-preview:${message.id}',
+            isSticker: message.msgType == MessageType.sticker,
             onLoaded: onImageLoaded,
           )
         : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst);

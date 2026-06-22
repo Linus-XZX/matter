@@ -80,4 +80,27 @@ void main() {
     expect(restored.readers.single.userId, '@bob:example.org');
     expect(restored.totalMembers, 2);
   });
+
+  test('message cache preserves the sticker message type', () {
+    final sticker = message(r'$sticker', '100');
+    final map = chatMessageToMap(
+      ChatMessage(
+        id: sticker.id,
+        senderId: sticker.senderId,
+        senderName: sticker.senderName,
+        content: sticker.content,
+        timestamp: sticker.timestamp,
+        isMe: sticker.isMe,
+        msgType: MessageType.sticker,
+        imageUrl: 'mxc://example.org/sticker',
+        isEdited: false,
+        editHistory: const [],
+        reactions: const [],
+        readers: const [],
+        totalMembers: 2,
+      ),
+    );
+
+    expect(chatMessageFromMap(map).msgType, MessageType.sticker);
+  });
 }

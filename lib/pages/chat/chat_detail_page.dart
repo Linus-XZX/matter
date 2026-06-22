@@ -232,8 +232,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       for (final remote in latestMessages) {
         if (matchedRemoteIds.contains(remote.id) || !remote.isMe) continue;
         final remoteTime = int.tryParse(remote.timestamp) ?? 0;
-        final samePayload = local.message.msgType == MessageType.image
-            ? remote.msgType == MessageType.image &&
+        final isLocalMedia =
+            local.message.msgType == MessageType.image ||
+            local.message.msgType == MessageType.sticker;
+        final samePayload = isLocalMedia
+            ? remote.msgType == local.message.msgType &&
                   remote.imageUrl == local.sourceImageUrl &&
                   remote.content == local.message.content
             : remote.msgType == MessageType.text &&

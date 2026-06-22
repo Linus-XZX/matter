@@ -406,7 +406,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       content: sticker.body,
       timestamp: now,
       isMe: true,
-      msgType: rust.MessageType.image,
+      msgType: rust.MessageType.sticker,
       imageUrl: displayImageUrl,
       imageWidth: sticker.width,
       imageHeight: sticker.height,

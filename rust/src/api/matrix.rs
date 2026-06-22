@@ -840,6 +840,7 @@ pub struct EncryptionRecoveryInfo {
 pub enum MessageType {
     Text,
     Image,
+    Sticker,
     Video,
     /// State/member change event (join, leave, etc.)
     Event,
@@ -3283,7 +3284,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         content: original.content.body.clone(),
                         timestamp: timestamp.clone(),
                         is_me,
-                        msg_type: MessageType::Image,
+                        msg_type: MessageType::Sticker,
                         image_url: url,
                         media_source_json: serde_json::to_string(&original.content.source).ok(),
                         image_width,
@@ -4684,7 +4685,7 @@ pub async fn get_messages_before(
                         content: original.content.body.clone(),
                         timestamp,
                         is_me,
-                        msg_type: MessageType::Image,
+                        msg_type: MessageType::Sticker,
                         image_url: url,
                         media_source_json: serde_json::to_string(&original.content.source).ok(),
                         image_width,
