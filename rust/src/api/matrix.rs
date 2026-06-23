@@ -372,6 +372,17 @@ async fn finalize_pending() -> Result<String, String> {
     }
     let session = auth.session().ok_or("No session in pending client")?;
     let user_id = session.meta.user_id.to_string();
+    let matrix_session = MatrixSession {
+        meta: SessionMeta {
+            user_id: session.meta.user_id.clone(),
+            device_id: session.meta.device_id.clone(),
+        },
+        tokens: SessionTokens {
+            access_token: session.tokens.access_token.clone(),
+            refresh_token: session.tokens.refresh_token.clone(),
+        },
+    };
+    drop(auth);
 
     app_log(
         "info",
@@ -383,27 +394,46 @@ async fn finalize_pending() -> Result<String, String> {
     // Build per-user directory
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
 
-    // A password/token login creates a fresh Matrix device. An existing SDK
-    // store for the same user may still be bound to the previous device ID,
-    // which matrix-sdk correctly rejects as a crypto-account mismatch.
-    // Drop the old client and rebuild its store for the new device.
+    // A password login creates the crypto identity in the pending store. Keep
+    // that exact store: rebuilding an empty store with the same Matrix device
+    // ID discards the Olm account and makes encrypted messages undecryptable.
     stop_sync_task(Some(&user_id)).await;
     {
         let mut clients = CLIENTS.write().await;
         clients.remove(&user_id);
     }
-    if sdk_dir.exists() {
-        app_log(
-            "info",
-            "auth",
-            format!(
-                "Rebuilding SDK store for newly logged-in device: {}",
-                user_id
-            ),
-        );
-        remove_dir_all_if_exists(&sdk_dir)
+
+    // Release every reference before moving SQLite files (required on Windows
+    // and avoids moving a database while WAL writes are still in flight).
+    {
+        let mut pending = PENDING.write().await;
+        *pending = None;
+    }
+    drop(pending_client);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let temp_dir = build_sdk_data_dir(&data_dir, None);
+    let accounts_dir = sdk_dir
+        .parent()
+        .ok_or_else(|| "Invalid account store path".to_string())?;
+    tokio::fs::create_dir_all(accounts_dir)
+        .await
+        .map_err(|e| format!("Failed to create accounts directory: {e}"))?;
+    let previous_dir = sdk_dir.with_extension("previous");
+    remove_dir_all_if_exists(&previous_dir)
+        .await
+        .map_err(|e| format!("Failed to remove stale account store backup: {e}"))?;
+    let had_previous_store = sdk_dir.exists();
+    if had_previous_store {
+        tokio::fs::rename(&sdk_dir, &previous_dir)
             .await
-            .map_err(|e| format!("Failed to reset existing account store: {e}"))?;
+            .map_err(|e| format!("Failed to preserve existing account store: {e}"))?;
+    }
+    if let Err(error) = tokio::fs::rename(&temp_dir, &sdk_dir).await {
+        if had_previous_store {
+            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+        }
+        return Err(format!("Failed to migrate encryption store: {error}"));
     }
 
     // Create a new client in the per-user directory
@@ -414,24 +444,21 @@ async fn finalize_pending() -> Result<String, String> {
         format!("finalize_pending: creating client in {}", sdk_dir.display()),
     );
     info!("finalize_pending: creating client in {}", sdk_dir.display());
-    let new_client = Client::builder()
+    let new_client = match Client::builder()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
-        .map_err(|e| format!("Failed to create per-user client: {e}"))?;
-
-    // Restore the session into the new client
-    let matrix_session = MatrixSession {
-        meta: SessionMeta {
-            user_id: session.meta.user_id.clone(),
-            device_id: session.meta.device_id.clone(),
-        },
-        tokens: SessionTokens {
-            access_token: session.tokens.access_token.clone(),
-            refresh_token: session.tokens.refresh_token.clone(),
-        },
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = remove_dir_all_if_exists(&sdk_dir).await;
+            if had_previous_store {
+                let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+            }
+            return Err(format!("Failed to create per-user client: {error}"));
+        }
     };
 
     app_log(
@@ -440,11 +467,24 @@ async fn finalize_pending() -> Result<String, String> {
         format!("finalize_pending: restoring session for {}", user_id),
     );
     info!("finalize_pending: restoring session for {}", user_id);
-    new_client
+    if let Err(error) = new_client
         .matrix_auth()
         .restore_session(matrix_session, RoomLoadSettings::default())
         .await
-        .map_err(|e| format!("Restore session in per-user store: {e}"))?;
+    {
+        drop(new_client);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = remove_dir_all_if_exists(&sdk_dir).await;
+        if had_previous_store {
+            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+        }
+        return Err(format!("Restore session in per-user store: {error}"));
+    }
+    if had_previous_store {
+        if let Err(error) = remove_dir_all_if_exists(&previous_dir).await {
+            warn!("Failed to remove previous account store: {error}");
+        }
+    }
     wait_for_e2ee_initialization(&new_client, "login finalization").await;
     app_log(
         "info",
@@ -472,32 +512,6 @@ async fn finalize_pending() -> Result<String, String> {
     {
         let mut active = ACTIVE_USER.write().await;
         *active = Some(user_id.clone());
-    }
-
-    // Clear pending — this drops our last reference to the pending client,
-    // which will close its SQLite connection when it's dropped.
-    {
-        let mut pending = PENDING.write().await;
-        *pending = None;
-    }
-
-    // Drop our local reference to the pending client so SQLite can close.
-    drop(pending_client);
-
-    // Now safe to clean up the temp directory (SQLite file is closed).
-    // Give a small grace period for the OS to release file handles.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let temp_dir = build_sdk_data_dir(&data_dir, None);
-    if temp_dir.exists() {
-        app_log(
-            "info",
-            "auth",
-            format!("Cleaning up pending dir: {}", temp_dir.display()),
-        );
-        info!("Cleaning up pending dir: {}", temp_dir.display());
-        if let Err(e) = remove_dir_all_if_exists(&temp_dir).await {
-            warn!("Failed to delete pending dir: {e}");
-        }
     }
 
     app_log("info", "auth", format!("Account finalized: {}", user_id));
@@ -580,7 +594,7 @@ pub struct Contact {
     pub status: String,
 }
 
-fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
+async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
     let room_id = room.room_id().to_string();
     let mut name = room.name().filter(|n| !n.is_empty()).unwrap_or_default();
     if name.is_empty() {
@@ -596,7 +610,35 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
-    let (last_message, last_message_sender, last_message_time) = get_last_message_info(room);
+    let (last_message, last_message_sender_id, last_message_time) = get_last_message_info(room);
+    let last_message_sender = if let Some(sender_id) = last_message_sender_id {
+        let is_me = room
+            .client()
+            .user_id()
+            .is_some_and(|user_id| user_id.as_str() == sender_id);
+        if is_me {
+            Some("我".to_string())
+        } else {
+            let fallback = sender_id
+                .split(':')
+                .next()
+                .unwrap_or(&sender_id)
+                .trim_start_matches('@')
+                .to_string();
+            match matrix_sdk::ruma::UserId::parse(&sender_id) {
+                Ok(user_id) => room
+                    .get_member_no_sync(&user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|member| member.name().to_string())
+                    .or(Some(fallback)),
+                Err(_) => Some(fallback),
+            }
+        }
+    } else {
+        None
+    };
     let room_type = if room.is_space() {
         "space".to_string()
     } else {
@@ -1264,6 +1306,7 @@ pub async fn register_complete_uiaa(
     match client.matrix_auth().register(request).await {
         Ok(response) => {
             // Auto-finalize: migrate pending client to per-user store
+            drop(client);
             let finalized = finalize_pending()
                 .await
                 .map_err(|e| format!("Finalization failed: {e}"))?;
@@ -1328,6 +1371,7 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
     {
         Ok(response) => {
             // Auto-finalize: migrate pending client to per-user store
+            drop(client);
             let finalized = finalize_pending()
                 .await
                 .map_err(|e| format!("Finalization failed: {e}"))?;
@@ -1398,6 +1442,7 @@ pub async fn login_with_token(
             )
         })?;
 
+    drop(client);
     let finalized_user = finalize_pending().await.map_err(|e| {
         let raw = format!("Finalization failed after token login: {e}");
         app_log("error", "auth", raw.clone());
@@ -2183,7 +2228,9 @@ pub async fn recover_encryption(recovery_key_or_passphrase: String) -> Result<()
         .recovery()
         .recover(value)
         .await
-        .map_err(|e| format!("Failed to recover encryption data: {e}"))
+        .map_err(|e| format!("Failed to recover encryption data: {e}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
 }
 
 #[frb]
@@ -2796,7 +2843,7 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
         }
         joined += 1;
 
-        let mut chat_room = room_to_chat_room(&room);
+        let mut chat_room = room_to_chat_room(&room).await;
         if !room.is_space() {
             chat_room.room_type = match room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -2824,7 +2871,6 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
 
 fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String) {
     let mut last_msg = "(暂无消息)".to_string();
-    let mut last_sender = None;
     let mut last_time = String::new();
 
     let latest_value = room.latest_event();
@@ -2835,20 +2881,16 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
             // rooms whose newest event isn't a text message (e.g. a reaction or
             // a state change) don't sink to the bottom of the list.
             last_time = u64::from(any_ev.origin_server_ts().0).to_string();
-            let sender_id = any_ev.sender().to_string();
-            last_sender = Some(
-                sender_id
-                    .split(':')
-                    .next()
-                    .unwrap_or(&sender_id)
-                    .trim_start_matches('@')
-                    .to_string(),
-            );
 
             if latest.kind.is_utd() {
-                return ("无法解密此消息".to_string(), last_sender, last_time);
+                return (
+                    "无法解密此消息".to_string(),
+                    Some(any_ev.sender().to_string()),
+                    last_time,
+                );
             }
 
+            let sender_id = any_ev.sender().to_string();
             let preview = match any_ev {
                 matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                     matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
@@ -2913,11 +2955,12 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
                     text.push_str("...");
                 }
                 last_msg = text;
+                return (last_msg, Some(sender_id), last_time);
             }
         }
     }
 
-    (last_msg, last_sender, last_time)
+    (last_msg, None, last_time)
 }
 
 /// Strip the Matrix reply fallback prefix from a message body.
@@ -3112,7 +3155,7 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     }
     for index in 0..=haystack.len() - needle.len() {
         let matches = needle.iter().enumerate().all(|(offset, expected)| {
-            haystack[index + offset].to_ascii_lowercase() == expected.to_ascii_lowercase()
+            haystack[index + offset].eq_ignore_ascii_case(expected)
         });
         if matches {
             return Some(index);
@@ -3252,6 +3295,53 @@ fn unable_to_decrypt_message(
     }
 }
 
+async fn load_room_messages_with_key_recovery(
+    client: &Client,
+    room: &Room,
+    from: Option<String>,
+    limit: u32,
+) -> Result<matrix_sdk::room::Messages, matrix_sdk::Error> {
+    let make_options = || {
+        let mut options = matrix_sdk::room::MessagesOptions::backward();
+        options.limit = limit.into();
+        options.from = from.clone();
+        options
+    };
+
+    let response = room.messages(make_options()).await?;
+    let has_undecryptable_events = response.chunk.iter().any(|event| event.kind.is_utd());
+    if !has_undecryptable_events || !client.encryption().backups().are_enabled().await {
+        return Ok(response);
+    }
+
+    match client
+        .encryption()
+        .backups()
+        .download_room_keys_for_room(room.room_id())
+        .await
+    {
+        Ok(()) => {
+            app_log(
+                "info",
+                "encryption",
+                format!("Downloaded backup room keys for {}", room.room_id()),
+            );
+            room.messages(make_options()).await
+        }
+        Err(error) => {
+            app_log(
+                "warn",
+                "encryption",
+                format!(
+                    "Failed to download backup room keys for {}: {error}",
+                    room.room_id()
+                ),
+            );
+            Ok(response)
+        }
+    }
+}
+
 /// Get messages for a room (must sync first).
 #[frb]
 pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
@@ -3265,14 +3355,13 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     // event_id (of the annotated message) → (reaction key → (sender ids, my reaction event id))
     let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> =
         HashMap::new();
-    let mut opts = matrix_sdk::room::MessagesOptions::backward();
-    opts.limit = 100u32.into();
-
-    let msg_resp = room.messages(opts).await.map_err(|e| {
-        let msg = format!("Failed to load messages for room {}: {e}", room_id);
-        app_log("error", "rooms", msg.clone());
-        msg
-    })?;
+    let msg_resp = load_room_messages_with_key_recovery(&client, &room, None, 100)
+        .await
+        .map_err(|e| {
+            let msg = format!("Failed to load messages for room {}: {e}", room_id);
+            app_log("error", "rooms", msg.clone());
+            msg
+        })?;
 
     let newest_event_id = msg_resp.chunk.first().and_then(|event| {
         event.kind.raw().deserialize().ok().map(
@@ -4198,19 +4287,18 @@ pub async fn join_room(identifier: String) -> Result<String, String> {
 pub async fn get_spaces() -> Result<Vec<Space>, String> {
     let client = get_client().await.ok_or("No client created.")?;
 
-    let mut spaces = client
-        .rooms()
-        .into_iter()
-        .filter(|room| room.state() == matrix_sdk::RoomState::Joined && room.is_space())
-        .map(|room| {
-            let chat_room = room_to_chat_room(&room);
-            Space {
-                id: chat_room.id,
-                name: chat_room.name,
-                avatar_url: chat_room.avatar_url,
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut spaces = Vec::new();
+    for room in client.rooms() {
+        if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
+            continue;
+        }
+        let chat_room = room_to_chat_room(&room).await;
+        spaces.push(Space {
+            id: chat_room.id,
+            name: chat_room.name,
+            avatar_url: chat_room.avatar_url,
+        });
+    }
 
     spaces.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(spaces)
@@ -4230,7 +4318,7 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
         return Err(format!("Room is not a joined space: {space_id}"));
     }
 
-    let chat_room = room_to_chat_room(&room);
+    let chat_room = room_to_chat_room(&room).await;
     let topic = room
         .topic()
         .map(|topic| topic.trim().to_string())
@@ -4282,7 +4370,7 @@ pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, Strin
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&child_room);
+        let mut chat_room = room_to_chat_room(&child_room).await;
         if !child_room.is_space() {
             chat_room.room_type = match child_room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -4535,7 +4623,7 @@ pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&room);
+        let mut chat_room = room_to_chat_room(&room).await;
         chat_room.room_type = "group".to_string();
         rooms.push(chat_room);
     }
@@ -4852,12 +4940,7 @@ pub async fn get_messages_before(
         return Ok(Vec::new());
     };
 
-    let mut opts = matrix_sdk::room::MessagesOptions::backward();
-    opts.limit = limit.into();
-    opts.from = Some(from.clone());
-
-    let msg_resp = room
-        .messages(opts)
+    let msg_resp = load_room_messages_with_key_recovery(&client, &room, Some(from.clone()), limit)
         .await
         .map_err(|e| format!("Failed to load older messages: {e}"))?;
     {
