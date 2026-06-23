@@ -2786,16 +2786,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ChatRoom dco_decode_chat_room(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return ChatRoom(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       avatarUrl: dco_decode_opt_String(arr[2]),
       lastMessage: dco_decode_String(arr[3]),
-      lastMessageTime: dco_decode_String(arr[4]),
-      unreadCount: dco_decode_i_32(arr[5]),
-      roomType: dco_decode_String(arr[6]),
+      lastMessageSender: dco_decode_opt_String(arr[4]),
+      lastMessageTime: dco_decode_String(arr[5]),
+      unreadCount: dco_decode_i_32(arr[6]),
+      roomType: dco_decode_String(arr[7]),
     );
   }
 
@@ -3334,6 +3335,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_name = sse_decode_String(deserializer);
     var var_avatarUrl = sse_decode_opt_String(deserializer);
     var var_lastMessage = sse_decode_String(deserializer);
+    var var_lastMessageSender = sse_decode_opt_String(deserializer);
     var var_lastMessageTime = sse_decode_String(deserializer);
     var var_unreadCount = sse_decode_i_32(deserializer);
     var var_roomType = sse_decode_String(deserializer);
@@ -3342,6 +3344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       name: var_name,
       avatarUrl: var_avatarUrl,
       lastMessage: var_lastMessage,
+      lastMessageSender: var_lastMessageSender,
       lastMessageTime: var_lastMessageTime,
       unreadCount: var_unreadCount,
       roomType: var_roomType,
@@ -4004,6 +4007,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.name, serializer);
     sse_encode_opt_String(self.avatarUrl, serializer);
     sse_encode_String(self.lastMessage, serializer);
+    sse_encode_opt_String(self.lastMessageSender, serializer);
     sse_encode_String(self.lastMessageTime, serializer);
     sse_encode_i_32(self.unreadCount, serializer);
     sse_encode_String(self.roomType, serializer);

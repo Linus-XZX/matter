@@ -55,4 +55,29 @@ void main() {
       1,
     );
   });
+
+  test('formatChatListTime shows clock time for today', () {
+    final now = DateTime(2026, 6, 13, 12);
+    final localTime = DateTime(2026, 6, 13, 9, 5);
+
+    expect(formatChatListTime(timestamp(localTime), now: now), '09:05');
+  });
+
+  test('formatChatListTime uses calendar labels for older days', () {
+    final now = DateTime(2026, 6, 13, 12);
+
+    expect(formatChatListTime(timestamp(DateTime(2026, 6, 12)), now: now), '昨天');
+    expect(formatChatListTime(timestamp(DateTime(2026, 6, 10)), now: now), '6/10');
+    expect(
+      formatChatListTime(timestamp(DateTime(2025, 12, 31)), now: now),
+      '2025/12/31',
+    );
+  });
+
+  test('timestamp helpers pass through invalid values unchanged', () {
+    expect(formatMessageTime('not-a-number'), 'not-a-number');
+    expect(formatChatDate('not-a-number'), 'not-a-number');
+    expect(formatChatListTime('not-a-number'), 'not-a-number');
+    expect(chatDateKey('not-a-number'), 'not-a-number');
+  });
 }

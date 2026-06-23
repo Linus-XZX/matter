@@ -3018,6 +3018,7 @@ impl SseDecode for crate::api::matrix::ChatRoom {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_avatarUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_lastMessage = <String>::sse_decode(deserializer);
+        let mut var_lastMessageSender = <Option<String>>::sse_decode(deserializer);
         let mut var_lastMessageTime = <String>::sse_decode(deserializer);
         let mut var_unreadCount = <i32>::sse_decode(deserializer);
         let mut var_roomType = <String>::sse_decode(deserializer);
@@ -3026,6 +3027,7 @@ impl SseDecode for crate::api::matrix::ChatRoom {
             name: var_name,
             avatar_url: var_avatarUrl,
             last_message: var_lastMessage,
+            last_message_sender: var_lastMessageSender,
             last_message_time: var_lastMessageTime,
             unread_count: var_unreadCount,
             room_type: var_roomType,
@@ -3304,8 +3306,9 @@ impl SseDecode for crate::api::matrix::MessageType {
         return match inner {
             0 => crate::api::matrix::MessageType::Text,
             1 => crate::api::matrix::MessageType::Image,
-            2 => crate::api::matrix::MessageType::Video,
-            3 => crate::api::matrix::MessageType::Event,
+            2 => crate::api::matrix::MessageType::Sticker,
+            3 => crate::api::matrix::MessageType::Video,
+            4 => crate::api::matrix::MessageType::Event,
             _ => unreachable!("Invalid variant for MessageType: {}", inner),
         };
     }
@@ -3847,6 +3850,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::ChatRoom {
             self.name.into_into_dart().into_dart(),
             self.avatar_url.into_into_dart().into_dart(),
             self.last_message.into_into_dart().into_dart(),
+            self.last_message_sender.into_into_dart().into_dart(),
             self.last_message_time.into_into_dart().into_dart(),
             self.unread_count.into_into_dart().into_dart(),
             self.room_type.into_into_dart().into_dart(),
@@ -3979,8 +3983,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::MessageType {
         match self {
             Self::Text => 0.into_dart(),
             Self::Image => 1.into_dart(),
-            Self::Video => 2.into_dart(),
-            Self::Event => 3.into_dart(),
+            Self::Sticker => 2.into_dart(),
+            Self::Video => 3.into_dart(),
+            Self::Event => 4.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4350,6 +4355,7 @@ impl SseEncode for crate::api::matrix::ChatRoom {
         <String>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.avatar_url, serializer);
         <String>::sse_encode(self.last_message, serializer);
+        <Option<String>>::sse_encode(self.last_message_sender, serializer);
         <String>::sse_encode(self.last_message_time, serializer);
         <i32>::sse_encode(self.unread_count, serializer);
         <String>::sse_encode(self.room_type, serializer);
@@ -4574,8 +4580,9 @@ impl SseEncode for crate::api::matrix::MessageType {
             match self {
                 crate::api::matrix::MessageType::Text => 0,
                 crate::api::matrix::MessageType::Image => 1,
-                crate::api::matrix::MessageType::Video => 2,
-                crate::api::matrix::MessageType::Event => 3,
+                crate::api::matrix::MessageType::Sticker => 2,
+                crate::api::matrix::MessageType::Video => 3,
+                crate::api::matrix::MessageType::Event => 4,
                 _ => {
                     unimplemented!("");
                 }

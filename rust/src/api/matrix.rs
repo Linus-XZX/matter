@@ -449,6 +449,7 @@ pub struct ChatRoom {
     pub name: String,
     pub avatar_url: Option<String>,
     pub last_message: String,
+    pub last_message_sender: Option<String>,
     pub last_message_time: String,
     pub unread_count: i32,
     /// "dm", "group", or "space"
@@ -521,7 +522,7 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
-    let (last_message, last_message_time) = get_last_message_info(room);
+    let (last_message, last_message_sender, last_message_time) = get_last_message_info(room);
     let room_type = if room.is_space() {
         "space".to_string()
     } else {
@@ -533,6 +534,7 @@ fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         name,
         avatar_url,
         last_message,
+        last_message_sender,
         last_message_time,
         unread_count,
         room_type,
@@ -795,6 +797,7 @@ pub struct EncryptionRecoveryInfo {
 pub enum MessageType {
     Text,
     Image,
+    Sticker,
     Video,
     /// State/member change event (join, leave, etc.)
     Event,
@@ -2740,8 +2743,9 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
     Ok(result)
 }
 
-fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
+fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String) {
     let mut last_msg = "(暂无消息)".to_string();
+    let mut last_sender = None;
     let mut last_time = String::new();
 
     let latest_value = room.latest_event();
@@ -2752,9 +2756,18 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
             // rooms whose newest event isn't a text message (e.g. a reaction or
             // a state change) don't sink to the bottom of the list.
             last_time = u64::from(any_ev.origin_server_ts().0).to_string();
+            let sender_id = any_ev.sender().to_string();
+            last_sender = Some(
+                sender_id
+                    .split(':')
+                    .next()
+                    .unwrap_or(&sender_id)
+                    .trim_start_matches('@')
+                    .to_string(),
+            );
 
             if latest.kind.is_utd() {
-                return ("无法解密此消息".to_string(), last_time);
+                return ("无法解密此消息".to_string(), last_sender, last_time);
             }
 
             let preview = match any_ev {
@@ -2825,7 +2838,7 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, String) {
         }
     }
 
-    (last_msg, last_time)
+    (last_msg, last_sender, last_time)
 }
 
 /// Strip the Matrix reply fallback prefix from a message body.
@@ -3179,7 +3192,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         content: original.content.body.clone(),
                         timestamp: timestamp.clone(),
                         is_me,
-                        msg_type: MessageType::Image,
+                        msg_type: MessageType::Sticker,
                         image_url: url,
                         media_source_json: serde_json::to_string(&original.content.source).ok(),
                         image_width,
@@ -4586,7 +4599,7 @@ pub async fn get_messages_before(
                         content: original.content.body.clone(),
                         timestamp,
                         is_me,
-                        msg_type: MessageType::Image,
+                        msg_type: MessageType::Sticker,
                         image_url: url,
                         media_source_json: serde_json::to_string(&original.content.source).ok(),
                         image_width,

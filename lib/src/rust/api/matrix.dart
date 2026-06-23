@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `app_log`, `build_sdk_data_dir`, `clear_receipt_cache`, `clear_sent_read_receipts_for_user`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `extract_edit_text`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `install_verification_event_handler`, `load_room_sticker_packs`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_to_chat_room`, `sanitize_for_path`, `set_connection_status`, `sticker_info_dimensions`, `sticker_label_from_filename`, `stop_sync_task`, `strip_reply_fallback`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `app_log`, `build_sdk_data_dir`, `clear_receipt_cache`, `clear_sent_read_receipts_for_user`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `extract_edit_text`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `install_live_update_event_handlers`, `install_verification_event_handler`, `load_room_sticker_packs`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_to_chat_room`, `sanitize_for_path`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `PendingEntry`, `SyncNotification`, `SyncTask`, `VerificationSession`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -668,6 +668,7 @@ class ChatRoom {
   final String name;
   final String? avatarUrl;
   final String lastMessage;
+  final String? lastMessageSender;
   final String lastMessageTime;
   final int unreadCount;
 
@@ -679,6 +680,7 @@ class ChatRoom {
     required this.name,
     this.avatarUrl,
     required this.lastMessage,
+    this.lastMessageSender,
     required this.lastMessageTime,
     required this.unreadCount,
     required this.roomType,
@@ -690,6 +692,7 @@ class ChatRoom {
       name.hashCode ^
       avatarUrl.hashCode ^
       lastMessage.hashCode ^
+      lastMessageSender.hashCode ^
       lastMessageTime.hashCode ^
       unreadCount.hashCode ^
       roomType.hashCode;
@@ -703,6 +706,7 @@ class ChatRoom {
           name == other.name &&
           avatarUrl == other.avatarUrl &&
           lastMessage == other.lastMessage &&
+          lastMessageSender == other.lastMessageSender &&
           lastMessageTime == other.lastMessageTime &&
           unreadCount == other.unreadCount &&
           roomType == other.roomType;
@@ -831,6 +835,7 @@ class MessageReader {
 enum MessageType {
   text,
   image,
+  sticker,
   video,
 
   /// State/member change event (join, leave, etc.)

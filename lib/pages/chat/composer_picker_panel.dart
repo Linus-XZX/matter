@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -20,7 +21,7 @@ class ComposerPickerPanel extends StatefulWidget {
   final ComposerPickerTab tab;
   final ValueChanged<ComposerPickerTab> onTabChanged;
   final ValueChanged<String> onEmojiSelected;
-  final ValueChanged<StickerItem> onStickerSelected;
+  final void Function(StickerItem sticker, Rect? sourceRect) onStickerSelected;
   final ValueChanged<double>? onHeightChanged;
 
   const ComposerPickerPanel({
@@ -143,6 +144,52 @@ class _ComposerPickerPanelState extends State<ComposerPickerPanel> {
     return false;
   }
 
+  void _handleStickerSelected(StickerItem sticker, Rect? sourceRect) {
+    widget.onStickerSelected(sticker, sourceRect);
+    unawaited(_collapseToBaseHeight());
+  }
+
+  Future<void> _collapseToBaseHeight() async {
+    if (!mounted) return;
+    final maxHeight = _maxPanelHeight(context);
+    final baseHeight = widget.height ?? ComposerPickerPanel.baseHeight;
+    final minSize = baseHeight / maxHeight;
+    if (_sheetExtent.value <= minSize + 0.001) return;
+
+    if (_sheetController.isAttached) {
+      try {
+        await _sheetController.animateTo(
+          minSize,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        );
+      } catch (error) {
+        debugPrint('Collapse sticker panel failed: $error');
+      }
+    }
+    if (!mounted) return;
+    _sheetExtent.value = minSize;
+    widget.onHeightChanged?.call(baseHeight);
+  }
+
+  Future<void> _expandForStickerPackNavigation() async {
+    if (!mounted || !_sheetController.isAttached) return;
+    final maxHeight = _maxPanelHeight(context);
+    final baseHeight = widget.height ?? ComposerPickerPanel.baseHeight;
+    final minSize = baseHeight / maxHeight;
+    if (_sheetExtent.value <= minSize + 0.001) return;
+    if (_sheetExtent.value >= 0.999) return;
+    try {
+      await _sheetController.animateTo(
+        1,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    } catch (error) {
+      debugPrint('Expand sticker panel failed: $error');
+    }
+  }
+
   Widget _buildSheet(BuildContext context, ScrollController scrollController) {
     return Container(
       clipBehavior: Clip.antiAlias,
@@ -184,7 +231,8 @@ class _ComposerPickerPanelState extends State<ComposerPickerPanel> {
               ),
               ComposerPickerTab.sticker => StickerPackPanel(
                 roomId: widget.roomId,
-                onStickerSelected: widget.onStickerSelected,
+                onStickerSelected: _handleStickerSelected,
+                onPackNavigation: _expandForStickerPackNavigation,
                 scrollController: scrollController,
               ),
             },
@@ -197,13 +245,15 @@ class _ComposerPickerPanelState extends State<ComposerPickerPanel> {
 
 class StickerPackPanel extends ConsumerStatefulWidget {
   final String roomId;
-  final ValueChanged<StickerItem> onStickerSelected;
+  final void Function(StickerItem sticker, Rect? sourceRect) onStickerSelected;
+  final Future<void> Function() onPackNavigation;
   final ScrollController scrollController;
 
   const StickerPackPanel({
     super.key,
     required this.roomId,
     required this.onStickerSelected,
+    required this.onPackNavigation,
     required this.scrollController,
   });
 
@@ -213,11 +263,14 @@ class StickerPackPanel extends ConsumerStatefulWidget {
 
 class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
   final GlobalKey _scrollViewportKey = GlobalKey();
+  final ScrollController _packStripController = ScrollController();
   final List<GlobalKey> _headerKeys = [];
   final Map<String, GlobalKey> _stickerKeys = {};
   final Map<String, StickerItem> _visibleStickers = {};
   int _activePackIndex = 0;
   bool _isJumpingToPack = false;
+  int _jumpGeneration = 0;
+  List<StickerPack> _packs = const [];
   OverlayEntry? _holdPreviewOverlay;
   StickerItem? _holdPreviewSticker;
 
@@ -245,29 +298,111 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
       );
   }
 
-  void _jumpToPack(int index) {
+  Future<void> _jumpToPack(int index) async {
+    if (index < 0 || index >= _packs.length) return;
+    final generation = ++_jumpGeneration;
+    _setActivePack(index, revealThumbnail: false);
+    _isJumpingToPack = true;
+    try {
+      await widget.onPackNavigation();
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || generation != _jumpGeneration) return;
+      if (!widget.scrollController.hasClients) return;
+      var targetOffset = _offsetForBuiltHeader(index);
+      targetOffset ??= _estimatedPackOffset(index);
+      await widget.scrollController.animateTo(
+        targetOffset.clamp(
+          widget.scrollController.position.minScrollExtent,
+          widget.scrollController.position.maxScrollExtent,
+        ),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+
+      // A distant lazy sliver may only exist after the approximate jump.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || generation != _jumpGeneration) return;
+      final correctedOffset = _offsetForBuiltHeader(index);
+      if (correctedOffset != null &&
+          (correctedOffset - widget.scrollController.offset).abs() > 1) {
+        await widget.scrollController.animateTo(
+          correctedOffset.clamp(
+            widget.scrollController.position.minScrollExtent,
+            widget.scrollController.position.maxScrollExtent,
+          ),
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    } catch (error) {
+      debugPrint('Jump to sticker pack failed: $error');
+    } finally {
+      if (mounted && generation == _jumpGeneration) {
+        _isJumpingToPack = false;
+        _updateActivePackByViewport();
+      }
+    }
+  }
+
+  double? _offsetForBuiltHeader(int index) {
+    if (!widget.scrollController.hasClients) return null;
+    final viewportBox =
+        _scrollViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    final headerBox =
+        _headerKeys[index].currentContext?.findRenderObject() as RenderBox?;
+    if (viewportBox == null ||
+        !viewportBox.hasSize ||
+        headerBox == null ||
+        !headerBox.hasSize) {
+      return null;
+    }
+    final top = headerBox.localToGlobal(Offset.zero, ancestor: viewportBox).dy;
+    return widget.scrollController.offset + top - 8;
+  }
+
+  double _estimatedPackOffset(int index) {
+    if (!widget.scrollController.hasClients || _packs.length <= 1) return 0;
+    double packWeight(StickerPack pack) =>
+        1 + (pack.stickers.length / 5).ceilToDouble();
+    final before = _packs.take(index).fold<double>(0, (sum, pack) {
+      return sum + packWeight(pack);
+    });
+    final total = _packs.fold<double>(0, (sum, pack) {
+      return sum + packWeight(pack);
+    });
+    return widget.scrollController.position.maxScrollExtent * before / total;
+  }
+
+  void _setActivePack(int index, {bool revealThumbnail = true}) {
     if (index == _activePackIndex) return;
     setState(() => _activePackIndex = index);
-    _isJumpingToPack = true;
-    final targetContext = _headerKeys[index].currentContext;
-    if (targetContext == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _jumpToPack(index);
-      });
+    if (revealThumbnail) {
+      unawaited(_revealPackThumbnail(index));
+    }
+  }
+
+  Future<void> _revealPackThumbnail(int index) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || !_packStripController.hasClients) return;
+    const itemStride = 48.0;
+    const horizontalPadding = 10.0;
+    const itemWidth = 40.0;
+    final position = _packStripController.position;
+    final itemStart = horizontalPadding + index * itemStride;
+    final itemEnd = itemStart + itemWidth;
+    var target = position.pixels;
+    if (itemStart < position.pixels + horizontalPadding) {
+      target = itemStart - horizontalPadding;
+    } else if (itemEnd > position.pixels + position.viewportDimension) {
+      target = itemEnd - position.viewportDimension + horizontalPadding;
+    } else {
       return;
     }
-    Scrollable.ensureVisible(
-      targetContext,
-      duration: const Duration(milliseconds: 220),
+    await _packStripController.animateTo(
+      target.clamp(position.minScrollExtent, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
-      alignment: 0,
-    ).whenComplete(() {
-      if (mounted) {
-        Future<void>.delayed(const Duration(milliseconds: 80), () {
-          if (mounted) _isJumpingToPack = false;
-        });
-      }
-    });
+    );
   }
 
   void _updateActivePackByViewport() {
@@ -297,7 +432,7 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
     }
 
     if (bestIndex != _activePackIndex && mounted) {
-      setState(() => _activePackIndex = bestIndex);
+      _setActivePack(bestIndex);
     }
   }
 
@@ -351,6 +486,12 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
     return _visibleStickers[id];
   }
 
+  Rect? _globalRectFor(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
   void _hideHoldPreview() {
     _holdPreviewSticker = null;
     _holdPreviewOverlay?.remove();
@@ -360,6 +501,7 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
   @override
   void dispose() {
     _hideHoldPreview();
+    _packStripController.dispose();
     super.dispose();
   }
 
@@ -370,6 +512,7 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
     return packsAsync.when(
       data: (remotePacks) {
         final packs = stickerPacksFromRemote(remotePacks);
+        _packs = packs;
         _syncPackKeys(packs.length);
         _syncVisibleStickers(packs);
         return _buildPackStream(packs);
@@ -430,6 +573,7 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
               return false;
             },
             child: ListView.separated(
+              controller: _packStripController,
               padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
               scrollDirection: Axis.horizontal,
               itemCount: packs.length,
@@ -508,12 +652,14 @@ class _StickerPackPanelState extends ConsumerState<StickerPackPanel> {
                             index,
                           ) {
                             final sticker = packs[i].stickers[index];
+                            final stickerKey = _stickerKeyFor(sticker);
                             return _StickerCard(
-                              key: _stickerKeyFor(sticker),
+                              key: stickerKey,
                               sticker: sticker,
                               onTap: () {
                                 _hideHoldPreview();
-                                widget.onStickerSelected(sticker);
+                                final sourceRect = _globalRectFor(stickerKey);
+                                widget.onStickerSelected(sticker, sourceRect);
                               },
                               onLongPressStart: (_) =>
                                   _showHoldPreview(sticker),
@@ -585,6 +731,17 @@ class _PackThumb extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class StickerFlightPreview extends StatelessWidget {
+  final StickerItem sticker;
+
+  const StickerFlightPreview({super.key, required this.sticker});
+
+  @override
+  Widget build(BuildContext context) {
+    return _RemoteStickerPreview(sticker: sticker, fallback: '');
   }
 }
 

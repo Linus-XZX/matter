@@ -1,0 +1,218 @@
+import 'dart:convert';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:matter/providers/auth_provider.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+  });
+
+  group('active user id persistence', () {
+    test('saveActiveUserId writes the active user key', () async {
+      await saveActiveUserId('@alice:example.org');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('active_user_id'), '@alice:example.org');
+    });
+
+    test('loadActiveUserId reads the persisted value', () async {
+      SharedPreferences.setMockInitialValues({
+        'active_user_id': '@bob:example.org',
+      });
+      expect(await loadActiveUserId(), '@bob:example.org');
+    });
+
+    test('loadActiveUserId returns null when unset', () async {
+      expect(await loadActiveUserId(), isNull);
+    });
+  });
+
+  group('display name persistence', () {
+    test('loadDisplayName returns the stored name', () async {
+      SharedPreferences.setMockInitialValues({
+        'session_display_names': jsonEncode({
+          '@alice:example.org': 'Alice',
+        }),
+      });
+      expect(await loadDisplayName('@alice:example.org'), 'Alice');
+    });
+
+    test('loadDisplayName falls back to localpart', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await loadDisplayName('@bob:example.org'), 'bob');
+    });
+  });
+
+  group('session persistence', () {
+    test('addSession stores metadata and secure token', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      final sessionsRaw = prefs.getString('multi_sessions');
+      expect(sessionsRaw, isNotNull);
+
+      final sessions = jsonDecode(sessionsRaw!) as List;
+      expect(sessions.length, 1);
+      expect(sessions.first['user_id'], '@alice:example.org');
+      expect(sessions.first['homeserver_url'], 'https://example.org');
+      expect(sessions.first['device_id'], 'DEVICE_A');
+      expect(sessions.first.containsKey('access_token'), isFalse);
+
+      expect(prefs.getString('active_user_id'), '@alice:example.org');
+      final names = jsonDecode(prefs.getString('session_display_names')!);
+      expect(names['@alice:example.org'], 'Alice');
+
+      final secure = FlutterSecureStorage();
+      final token = await secure.read(
+        key: 'matrix_access_token_${base64Url.encode(utf8.encode('@alice:example.org'))}',
+      );
+      expect(token, 'token-a');
+    });
+
+    test('loadAllSessions restores sessions from metadata and secure storage', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+      await addSession(
+        homeserver: 'https://matrix.org',
+        accessToken: 'token-b',
+        userId: '@bob:matrix.org',
+        deviceId: 'DEVICE_B',
+        displayName: 'Bob',
+      );
+
+      final sessions = await loadAllSessions();
+      expect(sessions.map((s) => s.userId), [
+        '@alice:example.org',
+        '@bob:matrix.org',
+      ]);
+      expect(sessions.map((s) => s.accessToken), ['token-a', 'token-b']);
+    });
+
+    test('loadAllSessions skips sessions with missing tokens', () async {
+      SharedPreferences.setMockInitialValues({
+        'multi_sessions': jsonEncode([
+          {
+            'homeserver_url': 'https://example.org',
+            'user_id': '@alice:example.org',
+            'device_id': 'DEVICE_A',
+          },
+        ]),
+      });
+
+      final sessions = await loadAllSessions();
+      expect(sessions, isEmpty);
+    });
+
+    test('removeSession deletes metadata, token and display name', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+
+      await removeSession('@alice:example.org');
+
+      final sessions = await loadAllSessions();
+      expect(sessions, isEmpty);
+
+      final prefs = await SharedPreferences.getInstance();
+      final names = jsonDecode(prefs.getString('session_display_names')!);
+      expect(names.containsKey('@alice:example.org'), isFalse);
+
+      final secure = FlutterSecureStorage();
+      final token = await secure.read(
+        key: 'matrix_access_token_${base64Url.encode(utf8.encode('@alice:example.org'))}',
+      );
+      expect(token, isNull);
+    });
+
+    test('removeSession switches active user when another exists', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+      await addSession(
+        homeserver: 'https://matrix.org',
+        accessToken: 'token-b',
+        userId: '@bob:matrix.org',
+        deviceId: 'DEVICE_B',
+        displayName: 'Bob',
+      );
+
+      await removeSession('@alice:example.org');
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('active_user_id'), '@bob:matrix.org');
+    });
+
+    test('clearAllSessions wipes everything', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+
+      await clearAllSessions();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('multi_sessions'), isNull);
+      expect(prefs.getString('session_display_names'), isNull);
+      expect(prefs.getString('active_user_id'), isNull);
+
+      final secure = FlutterSecureStorage();
+      final all = await secure.readAll();
+      expect(all, isEmpty);
+    });
+
+    test('migrateLegacySession converts old keys to multi-session', () async {
+      SharedPreferences.setMockInitialValues({
+        'session_homeserver': 'https://legacy.org',
+        'session_access_token': 'legacy-token',
+        'session_user_id': '@legacy:example.org',
+        'session_device_id': 'LEGACY',
+        'session_display_name': 'Legacy User',
+      });
+
+      final migrated = await migrateLegacySession();
+      expect(migrated, isTrue);
+
+      final sessions = await loadAllSessions();
+      expect(sessions.single.userId, '@legacy:example.org');
+      expect(sessions.single.accessToken, 'legacy-token');
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('session_homeserver'), isNull);
+      expect(prefs.getString('session_access_token'), isNull);
+    });
+
+    test('migrateLegacySession returns false when keys are missing', () async {
+      SharedPreferences.setMockInitialValues({});
+      final migrated = await migrateLegacySession();
+      expect(migrated, isFalse);
+    });
+  });
+}

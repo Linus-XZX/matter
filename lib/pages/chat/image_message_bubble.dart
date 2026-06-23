@@ -14,9 +14,10 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final String? mediaSourceJson;
   final int? imageWidth;
   final int? imageHeight;
-  final String timestamp;
   final bool isMe;
   final Object heroTag;
+  final bool isSticker;
+  final Widget metadata;
   final VoidCallback? onLoaded;
 
   const ImageMessageBubble({
@@ -25,9 +26,10 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     this.mediaSourceJson,
     this.imageWidth,
     this.imageHeight,
-    required this.timestamp,
     required this.isMe,
     required this.heroTag,
+    this.isSticker = false,
+    required this.metadata,
     this.onLoaded,
   });
 
@@ -141,10 +143,57 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     final bubbleSize = _bubbleSize(context);
 
     if (url == null && bytes == null) {
-      if (_isLoadingEncrypted && !_encryptedLoadFailed) {
-        return _buildLoading(context, bubbleSize);
-      }
-      return _buildBroken(context, bubbleSize);
+      final placeholder = _isLoadingEncrypted && !_encryptedLoadFailed
+          ? _buildLoading(context, bubbleSize)
+          : _buildBroken(context, bubbleSize);
+      return Stack(children: [placeholder, widget.metadata]);
+    }
+
+    final media = _MediaImage(
+      key: ValueKey('msg-image:${widget.heroTag}'),
+      imageUrl: url,
+      imageBytes: bytes,
+      fit: widget.isSticker ? BoxFit.contain : BoxFit.cover,
+      onLoaded: widget.onLoaded,
+      cacheWidth: _thumbnailWidth,
+      cacheHeight: _thumbnailHeight,
+    );
+    final bubble = Container(
+      width: bubbleSize.width,
+      height: bubbleSize.height,
+      decoration: BoxDecoration(
+        color: widget.isSticker
+            ? Colors.transparent
+            : isMe
+            ? AppColors.primary.withValues(alpha: 0.3)
+            : AppColors.surfaceElevated,
+        borderRadius: _bubbleBorderRadius,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        alignment: Alignment.bottomRight,
+        children: [
+          Positioned.fill(
+            child: widget.isSticker
+                ? RepaintBoundary(child: media)
+                : Hero(
+                    tag: widget.heroTag,
+                    createRectTween: (begin, end) =>
+                        RectTween(begin: begin, end: end),
+                    flightShuttleBuilder: _roundedImageFlightShuttle,
+                    child: _HeroImageClip(
+                      borderRadius: _bubbleBorderRadius,
+                      child: media,
+                    ),
+                  ),
+          ),
+          widget.metadata,
+        ],
+      ),
+    );
+
+    if (widget.isSticker) {
+      return RepaintBoundary(child: bubble);
     }
 
     return GestureDetector(
@@ -165,62 +214,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
           ),
         );
       },
-      child: Container(
-        width: bubbleSize.width,
-        height: bubbleSize.height,
-        decoration: BoxDecoration(
-          color: isMe
-              ? AppColors.primary.withValues(alpha: 0.3)
-              : AppColors.surfaceElevated,
-          borderRadius: _bubbleBorderRadius,
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Stack(
-          alignment: Alignment.bottomRight,
-          children: [
-            Positioned.fill(
-              child: Hero(
-                tag: widget.heroTag,
-                createRectTween: (begin, end) =>
-                    RectTween(begin: begin, end: end),
-                flightShuttleBuilder: _roundedImageFlightShuttle,
-                child: _HeroImageClip(
-                  borderRadius: _bubbleBorderRadius,
-                  child: _MediaImage(
-                    key: ValueKey('msg-image:${widget.heroTag}'),
-                    imageUrl: url,
-                    imageBytes: bytes,
-                    onLoaded: widget.onLoaded,
-                    cacheWidth: _thumbnailWidth,
-                    cacheHeight: _thumbnailHeight,
-                  ),
-                ),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.5),
-                  ],
-                ),
-              ),
-              child: Text(
-                widget.timestamp,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.85),
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+      child: bubble,
     );
   }
 
@@ -246,6 +240,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   }
 
   bool get _shouldUseOriginalCache {
+    if (widget.isSticker) return false;
     final width = widget.imageWidth;
     final height = widget.imageHeight;
     return width != null &&
@@ -257,8 +252,10 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   }
 
   Size _bubbleSize(BuildContext context) {
-    const maxHeight = 280.0;
-    final maxWidth = MediaQuery.sizeOf(context).width * 0.65;
+    final maxHeight = widget.isSticker ? 160.0 : 280.0;
+    final maxWidth = widget.isSticker
+        ? 160.0
+        : MediaQuery.sizeOf(context).width * 0.65;
     final aspectRatio = _imageAspectRatio;
 
     var width = maxWidth;

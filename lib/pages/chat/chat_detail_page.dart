@@ -15,6 +15,7 @@ import 'chat_timestamp.dart';
 import 'composer_picker_panel.dart';
 import 'date_separator.dart';
 import 'floating_date_header.dart';
+import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
 import 'message_input.dart';
 
@@ -57,6 +58,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   double _expandedPickerHeight = 0;
   bool _isPickerResizing = false;
   Timer? _pickerResizeTimer;
+
+  /// Remote event ids that have already been matched with a local outgoing
+  /// message. Keeps duplicate sends of the same payload from being incorrectly
+  /// collapsed onto the same remote event.
+  final Set<String> _consumedRemoteIds = {};
+
+  /// Maps a remote event id to the stable flight id of the local message it
+  /// replaced. Used to keep [SendFlightTarget] state alive across the
+  /// local-to-remote transition.
+  final Map<String, String> _remoteToLocalFlightId = {};
+
+  /// Maps a matched remote event id to the optimistic local timestamp it
+  /// replaced. This keeps rapid sends visually ordered by send intent while
+  /// the server copy takes over from the local optimistic row.
+  final Map<String, int> _remoteToLocalSortTimestamp = {};
   bool _keepPickerDuringKeyboardOpen = false;
   bool _keyboardWasVisible = false;
 
@@ -178,7 +194,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       for (final message in _olderMessages) message.id: message,
       for (final message in latestMessages) message.id: message,
     };
-    final messages = byId.values.toList()..sort(compareChatMessages);
+    final messages = byId.values.toList()
+      ..sort(
+        (a, b) => compareChatMessagesWithOverrides(
+          a,
+          b,
+          _remoteToLocalSortTimestamp,
+          _remoteToLocalFlightId,
+        ),
+      );
     return messages;
   }
 
@@ -187,10 +211,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     List<LocalOutgoingMessage> localMessages,
   ) {
     if (localMessages.isEmpty) return latestMessages;
-    final matchedLocalIds = _matchedLocalOutgoingIds(
-      latestMessages,
-      localMessages,
-    );
+    final matchResult = _matchedLocalOutgoingIds(latestMessages, localMessages);
+    final matchedLocalIds = matchResult.localIds;
     if (matchedLocalIds.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -220,38 +242,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     ];
   }
 
-  Set<String> _matchedLocalOutgoingIds(
+  LocalOutgoingMatchResult _matchedLocalOutgoingIds(
     List<ChatMessage> latestMessages,
     List<LocalOutgoingMessage> localMessages,
   ) {
-    final ids = <String>{};
-    final matchedRemoteIds = <String>{};
-    for (final local in localMessages) {
-      final localTime = int.tryParse(local.message.timestamp) ?? 0;
-      ChatMessage? matched;
-      for (final remote in latestMessages) {
-        if (matchedRemoteIds.contains(remote.id) || !remote.isMe) continue;
-        final remoteTime = int.tryParse(remote.timestamp) ?? 0;
-        final samePayload = local.message.msgType == MessageType.image
-            ? remote.msgType == MessageType.image &&
-                  remote.imageUrl == local.sourceImageUrl &&
-                  remote.content == local.message.content
-            : remote.msgType == MessageType.text &&
-                  remote.content == local.message.content &&
-                  remote.inReplyTo == local.message.inReplyTo;
-        if (samePayload &&
-            remoteTime >= localTime - 60000 &&
-            remoteTime <= localTime + 300000) {
-          matched = remote;
-          break;
-        }
-      }
-      if (matched != null) {
-        ids.add(local.message.id);
-        matchedRemoteIds.add(matched.id);
-      }
-    }
-    return ids;
+    final result = matchLocalOutgoingMessages(
+      latestMessages,
+      localMessages,
+      _consumedRemoteIds,
+    );
+    _remoteToLocalFlightId.addAll(result.remoteToLocalFlightId);
+    _remoteToLocalSortTimestamp.addAll(result.remoteToLocalSortTimestamp);
+    return result;
   }
 
   List<MessageGroup> _groupMessages(List<ChatMessage> messages) {
@@ -290,6 +292,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ..write(message.id)
         ..write('@')
         ..write(message.timestamp);
+      final localSortTimestamp = _remoteToLocalSortTimestamp[message.id];
+      if (localSortTimestamp != null) {
+        buffer
+          ..write('#localSort=')
+          ..write(localSortTimestamp);
+      }
     }
     for (final message in latestMessages) {
       buffer
@@ -302,7 +310,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ..write('#')
         ..write(message.reactions.length)
         ..write('#')
-        ..write(message.readers.length);
+        ..write(message.totalMembers)
+        ..write('#')
+        ..writeAll(message.readers.map((reader) => reader.userId), ',');
+      final localSortTimestamp = _remoteToLocalSortTimestamp[message.id];
+      if (localSortTimestamp != null) {
+        buffer
+          ..write('#localSort=')
+          ..write(localSortTimestamp);
+      }
     }
     return buffer.toString();
   }
@@ -320,6 +336,13 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       ..addEntries(
         displayedMessages.map((message) => MapEntry(message.id, message)),
       );
+    // Drop flight-id mappings for remote messages that are no longer on screen.
+    _remoteToLocalFlightId.removeWhere(
+      (remoteId, _) => !_messageIndex.containsKey(remoteId),
+    );
+    _remoteToLocalSortTimestamp.removeWhere(
+      (remoteId, _) => !_messageIndex.containsKey(remoteId),
+    );
     _groupedMessages
       ..clear()
       ..addAll(_groupMessages(displayedMessages));
@@ -414,6 +437,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           group: group,
           roomId: widget.roomId,
           messageIndex: messageIndex,
+          remoteToLocalFlightId: _remoteToLocalFlightId,
           showAvatar: _needsStickyAvatar(group),
           compact: widget.isDm,
           senderAvatarUrl: avatarMap[group.senderId],
@@ -591,6 +615,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ),
         body: Stack(
           children: [
+            const Positioned.fill(
+              child: ColoredBox(color: AppColors.background),
+            ),
             Positioned.fill(
               child: Builder(
                 builder: (context) {

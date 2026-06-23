@@ -7,6 +7,17 @@ import 'chat_timestamp.dart';
 import 'chat_detail_page.dart';
 import 'space_detail_page.dart';
 
+String chatListPreview(ChatRoom room) {
+  final sender = room.lastMessageSender?.trim();
+  if (room.roomType != 'group' ||
+      sender == null ||
+      sender.isEmpty ||
+      room.lastMessage.isEmpty) {
+    return room.lastMessage;
+  }
+  return '$sender：${room.lastMessage}';
+}
+
 class ChatListItem extends ConsumerWidget {
   final ChatRoom room;
   final bool dense;
@@ -22,6 +33,7 @@ class ChatListItem extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final room = this.room;
+    final preview = chatListPreview(room);
 
     return InkWell(
       onTap: () {
@@ -100,7 +112,7 @@ class ChatListItem extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          room.lastMessage,
+                          preview,
                           style: const TextStyle(
                             color: AppColors.onSurfaceVariant,
                             fontSize: 13.5,

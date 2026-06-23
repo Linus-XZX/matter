@@ -10,6 +10,7 @@ import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import 'composer_picker_panel.dart';
+import 'send_flight.dart';
 import 'sticker_catalog.dart';
 
 /// Provider to hold the message being replied to (per room).
@@ -64,6 +65,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
+  final _textFieldKey = GlobalKey();
   bool _hasText = false;
   bool _isSending = false;
   Timer? _typingTimer;
@@ -203,7 +205,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final localId = isNewMessage
         ? '$localOutgoingPendingPrefix${DateTime.now().microsecondsSinceEpoch}'
         : null;
+    final localTimestamp = isNewMessage ? _nextLocalTimestamp() : null;
     if (localId != null) {
+      _registerTextSendFlight(localId, text);
       upsertLocalOutgoingMessage(
         ref,
         widget.roomId,
@@ -212,6 +216,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
             id: localId,
             text: text,
             inReplyTo: replyTo?.id,
+            timestamp: localTimestamp,
           ),
         ),
       );
@@ -266,6 +271,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
               id: failedLocalOutgoingId(localId),
               text: text,
               inReplyTo: replyTo?.id,
+              timestamp: localTimestamp,
             ),
           ),
         );
@@ -293,6 +299,43 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     }
   }
 
+  Rect? _globalRectFor(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  void _registerTextSendFlight(String localId, String text) {
+    final sourceRect = _globalRectFor(_textFieldKey);
+    if (sourceRect == null) return;
+    unawaited(
+      registerSendFlight(
+        localId,
+        SendFlightSpec(
+          sourceRect: sourceRect,
+          kind: SendFlightKind.text,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                text,
+                maxLines: 5,
+                overflow: TextOverflow.clip,
+                style: const TextStyle(
+                  color: AppColors.onBackground,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w400,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _reconcileSentLocalMessage(String localId) async {
     const retryDelays = [
       Duration.zero,
@@ -313,10 +356,26 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     }
   }
 
+  int _nextLocalTimestamp() {
+    var timestamp = DateTime.now().millisecondsSinceEpoch;
+    final cached = ref.read(messageCacheProvider(widget.roomId));
+    for (final message in cached) {
+      final ts = int.tryParse(message.timestamp) ?? 0;
+      if (ts >= timestamp) timestamp = ts + 1;
+    }
+    final local = ref.read(localOutgoingMessagesProvider(widget.roomId));
+    for (final outgoing in local) {
+      final ts = int.tryParse(outgoing.message.timestamp) ?? 0;
+      if (ts >= timestamp) timestamp = ts + 1;
+    }
+    return timestamp;
+  }
+
   rust.ChatMessage _localTextMessage({
     required String id,
     required String text,
     String? inReplyTo,
+    int? timestamp,
   }) {
     final currentUser = ref.read(currentUserProvider);
     return rust.ChatMessage(
@@ -324,7 +383,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       senderId: currentUser?.id ?? '',
       senderName: '我',
       content: text,
-      timestamp: DateTime.now().millisecondsSinceEpoch.toString(),
+      timestamp: (timestamp ?? DateTime.now().millisecondsSinceEpoch)
+          .toString(),
       isMe: true,
       msgType: rust.MessageType.text,
       inReplyTo: inReplyTo,
@@ -396,17 +456,18 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     required String id,
     required StickerItem sticker,
     required String displayImageUrl,
+    int? timestamp,
   }) {
     final currentUser = ref.read(currentUserProvider);
-    final now = DateTime.now().millisecondsSinceEpoch.toString();
     return rust.ChatMessage(
       id: id,
       senderId: currentUser?.id ?? '',
       senderName: '我',
       content: sticker.body,
-      timestamp: now,
+      timestamp: (timestamp ?? DateTime.now().millisecondsSinceEpoch)
+          .toString(),
       isMe: true,
-      msgType: rust.MessageType.image,
+      msgType: rust.MessageType.sticker,
       imageUrl: displayImageUrl,
       imageWidth: sticker.width,
       imageHeight: sticker.height,
@@ -418,7 +479,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
   }
 
-  Future<void> _sendSticker(StickerItem sticker) async {
+  Future<void> _sendSticker(StickerItem sticker, Rect? sourceRect) async {
     final imageUrl = sticker.imageUrl;
     if (imageUrl == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -432,10 +493,23 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
     final localId =
         '$localOutgoingPendingPrefix${DateTime.now().microsecondsSinceEpoch}';
+    final localTimestamp = _nextLocalTimestamp();
     final displayImageUrl =
         cachedResolvedMxcUrl(ref, sticker.thumbnailUrl ?? imageUrl) ??
         cachedResolvedMxcUrl(ref, imageUrl) ??
         imageUrl;
+    if (sourceRect != null) {
+      unawaited(
+        registerSendFlight(
+          localId,
+          SendFlightSpec(
+            sourceRect: sourceRect,
+            kind: SendFlightKind.sticker,
+            child: StickerFlightPreview(sticker: sticker),
+          ),
+        ),
+      );
+    }
     upsertLocalOutgoingMessage(
       ref,
       widget.roomId,
@@ -444,6 +518,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           id: localId,
           sticker: sticker,
           displayImageUrl: displayImageUrl,
+          timestamp: localTimestamp,
         ),
         sourceImageUrl: imageUrl,
       ),
@@ -473,6 +548,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
               id: failedLocalOutgoingId(localId),
               sticker: sticker,
               displayImageUrl: displayImageUrl,
+              timestamp: localTimestamp,
             ),
             sourceImageUrl: imageUrl,
           ),
@@ -553,6 +629,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Container(
+                      key: _textFieldKey,
                       constraints: const BoxConstraints(
                         minHeight: 44,
                         maxHeight: 120,
@@ -713,8 +790,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                             onTabChanged: (tab) =>
                                 setState(() => _pickerTab = tab),
                             onEmojiSelected: _insertEmoji,
-                            onStickerSelected: (sticker) {
-                              _sendSticker(sticker);
+                            onStickerSelected: (sticker, sourceRect) {
+                              _sendSticker(sticker, sourceRect);
                             },
                             onHeightChanged: widget.onPickerHeightChanged,
                           )
