@@ -272,6 +272,7 @@ class MessageGroupWidget extends ConsumerWidget {
             mediaSourceJson: message.mediaSourceJson,
             imageWidth: message.imageWidth,
             imageHeight: message.imageHeight,
+            caption: message.caption,
             isMe: isMe,
             heroTag: 'image-preview:${message.id}',
             isSticker: message.msgType == MessageType.sticker,

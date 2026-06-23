@@ -70,6 +70,7 @@ void main() {
       senderId: '@alice:example.org',
       senderName: 'Alice',
       content: 'hello',
+      caption: 'image description',
       timestamp: '1781798400000',
       isMe: true,
       msgType: MessageType.text,
@@ -92,6 +93,7 @@ void main() {
     final restored = chatMessageFromMap(chatMessageToMap(message));
 
     expect(restored.id, message.id);
+    expect(restored.caption, message.caption);
     expect(restored.inReplyTo, message.inReplyTo);
     expect(restored.isEdited, isTrue);
     expect(restored.editHistory, message.editHistory);

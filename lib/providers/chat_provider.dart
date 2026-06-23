@@ -358,6 +358,7 @@ String markLocalOutgoingMessageSent(
       senderId: message.senderId,
       senderName: message.senderName,
       content: message.content,
+      caption: message.caption,
       timestamp: message.timestamp,
       isMe: message.isMe,
       msgType: message.msgType,

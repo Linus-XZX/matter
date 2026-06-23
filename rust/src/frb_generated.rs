@@ -2976,6 +2976,7 @@ impl SseDecode for crate::api::matrix::ChatMessage {
         let mut var_senderId = <String>::sse_decode(deserializer);
         let mut var_senderName = <String>::sse_decode(deserializer);
         let mut var_content = <String>::sse_decode(deserializer);
+        let mut var_caption = <Option<String>>::sse_decode(deserializer);
         let mut var_timestamp = <String>::sse_decode(deserializer);
         let mut var_isMe = <bool>::sse_decode(deserializer);
         let mut var_msgType = <crate::api::matrix::MessageType>::sse_decode(deserializer);
@@ -2994,6 +2995,7 @@ impl SseDecode for crate::api::matrix::ChatMessage {
             sender_id: var_senderId,
             sender_name: var_senderName,
             content: var_content,
+            caption: var_caption,
             timestamp: var_timestamp,
             is_me: var_isMe,
             msg_type: var_msgType,
@@ -3814,6 +3816,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::matrix::ChatMessage {
             self.sender_id.into_into_dart().into_dart(),
             self.sender_name.into_into_dart().into_dart(),
             self.content.into_into_dart().into_dart(),
+            self.caption.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
             self.is_me.into_into_dart().into_dart(),
             self.msg_type.into_into_dart().into_dart(),
@@ -4332,6 +4335,7 @@ impl SseEncode for crate::api::matrix::ChatMessage {
         <String>::sse_encode(self.sender_id, serializer);
         <String>::sse_encode(self.sender_name, serializer);
         <String>::sse_encode(self.content, serializer);
+        <Option<String>>::sse_encode(self.caption, serializer);
         <String>::sse_encode(self.timestamp, serializer);
         <bool>::sse_encode(self.is_me, serializer);
         <crate::api::matrix::MessageType>::sse_encode(self.msg_type, serializer);

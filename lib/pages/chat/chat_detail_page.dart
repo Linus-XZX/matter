@@ -331,7 +331,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ..write('|o:')
         ..write(message.id)
         ..write('@')
-        ..write(message.timestamp);
+        ..write(message.timestamp)
+        ..write('#')
+        ..write(message.content)
+        ..write('#')
+        ..write(message.caption ?? '');
       final localSortTimestamp = _remoteToLocalSortTimestamp[message.id];
       if (localSortTimestamp != null) {
         buffer
@@ -345,6 +349,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         ..write(message.id)
         ..write('@')
         ..write(message.timestamp)
+        ..write('#')
+        ..write(message.content)
+        ..write('#')
+        ..write(message.caption ?? '')
         ..write('#')
         ..write(message.isEdited ? 1 : 0)
         ..write('#')

@@ -35,6 +35,32 @@ void main() {
     );
   });
 
+  testWidgets('image caption is rendered below the media bubble', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: ImageMessageBubble(
+              imageUrl: 'https://example.org/photo.png',
+              imageWidth: 640,
+              imageHeight: 480,
+              caption: '这里是图片描述',
+              isMe: false,
+              heroTag: 'caption-test',
+              metadata: SizedBox.shrink(),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('image-caption')), findsOneWidget);
+    expect(find.text('这里是图片描述'), findsOneWidget);
+  });
+
   testWidgets('media read indicator opens the readers sheet', (tester) async {
     const message = ChatMessage(
       id: r'$sticker',

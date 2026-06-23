@@ -14,6 +14,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final String? mediaSourceJson;
   final int? imageWidth;
   final int? imageHeight;
+  final String? caption;
   final bool isMe;
   final Object heroTag;
   final bool isSticker;
@@ -26,6 +27,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     this.mediaSourceJson,
     this.imageWidth,
     this.imageHeight,
+    this.caption,
     required this.isMe,
     required this.heroTag,
     this.isSticker = false,
@@ -141,12 +143,19 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     final url = _resolvedUrl;
     final bytes = _decryptedBytes;
     final bubbleSize = _bubbleSize(context);
+    final caption = widget.caption?.trim();
+    final hasCaption =
+        !widget.isSticker && caption != null && caption.isNotEmpty;
 
     if (url == null && bytes == null) {
       final placeholder = _isLoadingEncrypted && !_encryptedLoadFailed
           ? _buildLoading(context, bubbleSize)
           : _buildBroken(context, bubbleSize);
-      return Stack(children: [placeholder, widget.metadata]);
+      return _withCaption(
+        Stack(children: [placeholder, widget.metadata]),
+        caption,
+        hasCaption,
+      );
     }
 
     final media = _MediaImage(
@@ -214,7 +223,26 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
           ),
         );
       },
-      child: bubble,
+      child: _withCaption(bubble, caption, hasCaption),
+    );
+  }
+
+  Widget _withCaption(Widget bubble, String? caption, bool hasCaption) {
+    if (!hasCaption || caption == null) return bubble;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: widget.isMe
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
+      children: [
+        bubble,
+        const SizedBox(height: 4),
+        _ImageCaption(
+          text: caption,
+          width: _bubbleSize(context).width,
+          isMe: widget.isMe,
+        ),
+      ],
     );
   }
 
@@ -302,6 +330,44 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
         borderRadius: _bubbleBorderRadius,
       ),
       child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+    );
+  }
+}
+
+class _ImageCaption extends StatelessWidget {
+  final String text;
+  final double width;
+  final bool isMe;
+
+  const _ImageCaption({
+    required this.text,
+    required this.width,
+    required this.isMe,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('image-caption'),
+      width: width,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: isMe ? AppColors.primary : AppColors.surfaceElevated,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(AppRadii.tag),
+          topRight: const Radius.circular(AppRadii.tag),
+          bottomLeft: Radius.circular(isMe ? AppRadii.content : AppRadii.tag),
+          bottomRight: Radius.circular(isMe ? AppRadii.tag : AppRadii.content),
+        ),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: isMe ? Colors.white : AppColors.onBackground,
+          fontSize: 14,
+          height: 1.35,
+        ),
+      ),
     );
   }
 }

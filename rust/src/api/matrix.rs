@@ -5,7 +5,7 @@ use matrix_sdk::{
     encryption::{
         recovery::RecoveryState,
         verification::{Verification, VerificationRequestState},
-        VerificationState as OwnVerificationState,
+        BackupDownloadStrategy, EncryptionSettings, VerificationState as OwnVerificationState,
     },
     ruma::api::client::{
         account::register::v3::Request as RegistrationRequest,
@@ -254,6 +254,77 @@ fn install_live_update_event_handlers(client: &Client) {
     });
 }
 
+fn encryption_settings() -> EncryptionSettings {
+    EncryptionSettings {
+        backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+        ..Default::default()
+    }
+}
+
+async fn wait_for_e2ee_initialization(client: &Client, context: &str) {
+    client
+        .encryption()
+        .wait_for_e2ee_initialization_tasks()
+        .await;
+    app_log(
+        "info",
+        "encryption",
+        format!("E2EE initialization completed after {context}"),
+    );
+}
+
+fn install_room_key_event_handler(client: &Client) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        let Some(mut stream) = client.encryption().room_keys_received_stream().await else {
+            app_log(
+                "warn",
+                "encryption",
+                "Room-key stream unavailable; encrypted history may need a restart to refresh"
+                    .to_string(),
+            );
+            return;
+        };
+
+        use futures_util::StreamExt;
+        while let Some(update) = stream.next().await {
+            match update {
+                Ok(keys) => {
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    let rooms = keys
+                        .iter()
+                        .map(|key| key.room_id.to_string())
+                        .collect::<BTreeSet<_>>();
+                    app_log(
+                        "info",
+                        "encryption",
+                        format!(
+                            "Received {} room keys for {} rooms; refreshing affected timelines",
+                            keys.len(),
+                            rooms.len()
+                        ),
+                    );
+                    for room_id in rooms {
+                        notify_sync_event(SyncEvent::MessageSent { room_id });
+                    }
+                }
+                Err(error) => {
+                    app_log(
+                        "warn",
+                        "encryption",
+                        format!(
+                            "Room-key stream lagged ({error}); refreshing visible encrypted timelines"
+                        ),
+                    );
+                    notify_sync_event(SyncEvent::SyncCompleted);
+                }
+            }
+        }
+    });
+}
+
 fn sanitize_for_path(s: &str) -> String {
     s.replace('@', "_at_")
         .replace(':', "_colon_")
@@ -345,6 +416,7 @@ async fn finalize_pending() -> Result<String, String> {
     info!("finalize_pending: creating client in {}", sdk_dir.display());
     let new_client = Client::builder()
         .homeserver_url(url)
+        .with_encryption_settings(encryption_settings())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -373,6 +445,7 @@ async fn finalize_pending() -> Result<String, String> {
         .restore_session(matrix_session, RoomLoadSettings::default())
         .await
         .map_err(|e| format!("Restore session in per-user store: {e}"))?;
+    wait_for_e2ee_initialization(&new_client, "login finalization").await;
     app_log(
         "info",
         "auth",
@@ -381,6 +454,7 @@ async fn finalize_pending() -> Result<String, String> {
     info!("finalize_pending: session restored for {}", user_id);
     install_verification_event_handler(&new_client);
     install_live_update_event_handlers(&new_client);
+    install_room_key_event_handler(&new_client);
 
     // Store in the multi-account map
     {
@@ -834,6 +908,7 @@ pub struct ChatMessage {
     pub sender_id: String,
     pub sender_name: String,
     pub content: String,
+    pub caption: Option<String>,
     pub timestamp: String,
     pub is_me: bool,
     pub msg_type: MessageType,
@@ -1073,6 +1148,7 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
 
     let client = Client::builder()
         .homeserver_url(url)
+        .with_encryption_settings(encryption_settings())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -1703,6 +1779,7 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
 
     let client = Client::builder()
         .homeserver_url(url)
+        .with_encryption_settings(encryption_settings())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -1736,8 +1813,10 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
             app_log("error", "auth", msg.clone());
             msg
         })?;
+    wait_for_e2ee_initialization(&client, "session restore").await;
     install_verification_event_handler(&client);
     install_live_update_event_handlers(&client);
+    install_room_key_event_handler(&client);
 
     // Add to multi-account store
     {
@@ -2867,6 +2946,272 @@ fn strip_reply_fallback(body: &str) -> String {
     body.to_string()
 }
 
+fn message_body_from_formatted(
+    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
+    fallback: &str,
+) -> String {
+    formatted
+        .map(|body| html_message_to_text(&body.body))
+        .filter(|body| !body.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn media_caption_from_formatted(
+    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
+    fallback: Option<&str>,
+) -> Option<String> {
+    let text = formatted
+        .map(|body| html_message_to_text(&body.body))
+        .or_else(|| fallback.map(ToString::to_string))?;
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn html_message_to_text(html: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0;
+    while index < html.len() {
+        let rest = &html[index..];
+        if !rest.starts_with('<') {
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let Some(tag_end_rel) = rest.find('>') else {
+            output.push_str(rest);
+            break;
+        };
+        let tag = &rest[1..tag_end_rel];
+        let tag_lower = tag.trim().to_ascii_lowercase();
+        let after_tag = index + tag_end_rel + 1;
+
+        if is_opening_html_tag(&tag_lower, "mx-reply") {
+            if let Some(reply_end_rel) =
+                find_ascii_case_insensitive(&html[after_tag..], "</mx-reply>")
+            {
+                index = after_tag + reply_end_rel + "</mx-reply>".len();
+                continue;
+            }
+        }
+
+        if is_opening_html_tag(&tag_lower, "a") && is_matrix_mention_anchor(&tag_lower) {
+            if let Some(anchor_end_rel) = find_ascii_case_insensitive(&html[after_tag..], "</a>") {
+                let inner = &html[after_tag..after_tag + anchor_end_rel];
+                let rendered = html_message_to_text(inner);
+                let fallback = mention_fallback_from_anchor(&tag_lower);
+                output.push_str(&mention_display_text(&rendered, fallback.as_deref()));
+                index = after_tag + anchor_end_rel + "</a>".len();
+                continue;
+            }
+        }
+
+        if tag_lower.starts_with("br")
+            || is_closing_html_tag(&tag_lower, "p")
+            || is_closing_html_tag(&tag_lower, "div")
+        {
+            output.push('\n');
+        }
+        index = after_tag;
+    }
+    normalize_rendered_text(&decode_html_entities(&output))
+}
+
+fn is_opening_html_tag(tag_lower: &str, name: &str) -> bool {
+    !tag_lower.starts_with('/') && (tag_lower == name || tag_lower.starts_with(&format!("{name} ")))
+}
+
+fn is_closing_html_tag(tag_lower: &str, name: &str) -> bool {
+    tag_lower == format!("/{name}")
+}
+
+fn is_matrix_mention_anchor(tag_lower: &str) -> bool {
+    tag_lower.contains("matrix.to/#/@")
+        || tag_lower.contains("matrix.to/#/%40")
+        || tag_lower.contains("href=\"@")
+        || tag_lower.contains("href='@")
+}
+
+fn mention_fallback_from_anchor(tag_lower: &str) -> Option<String> {
+    let href = extract_html_attr(tag_lower, "href")?;
+    let decoded = percent_decode_minimal(&href);
+    let user_id = decoded
+        .split("#/")
+        .nth(1)
+        .unwrap_or(&decoded)
+        .split('?')
+        .next()
+        .unwrap_or(&decoded);
+    if !user_id.starts_with('@') {
+        return None;
+    }
+    Some(
+        user_id
+            .split(':')
+            .next()
+            .unwrap_or(user_id)
+            .trim_start_matches('@')
+            .to_string(),
+    )
+}
+
+fn extract_html_attr(tag: &str, attr: &str) -> Option<String> {
+    let key = format!("{attr}=");
+    let start = tag.find(&key)? + key.len();
+    let quote = tag[start..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value_start = start + quote.len_utf8();
+    let value_end = tag[value_start..].find(quote)? + value_start;
+    Some(tag[value_start..value_end].to_string())
+}
+
+fn mention_display_text(rendered: &str, fallback: Option<&str>) -> String {
+    let text = rendered.trim();
+    let text = if text.is_empty() {
+        fallback.unwrap_or("")
+    } else {
+        text
+    };
+    if text.is_empty() || text.starts_with('@') {
+        text.to_string()
+    } else {
+        format!("@{text}")
+    }
+}
+
+fn percent_decode_minimal(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    index += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    for index in 0..=haystack.len() - needle.len() {
+        let matches = needle.iter().enumerate().all(|(offset, expected)| {
+            haystack[index + offset].to_ascii_lowercase() == expected.to_ascii_lowercase()
+        });
+        if matches {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn decode_html_entities(value: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0;
+    while index < value.len() {
+        let rest = &value[index..];
+        if !rest.starts_with('&') {
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+        let Some(end_rel) = rest.find(';') else {
+            output.push('&');
+            index += 1;
+            continue;
+        };
+        let entity = &rest[1..end_rel];
+        if let Some(decoded) = decode_html_entity(entity) {
+            output.push(decoded);
+            index += end_rel + 1;
+        } else {
+            output.push('&');
+            index += 1;
+        }
+    }
+    output
+}
+
+fn decode_html_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            u32::from_str_radix(&entity[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
+        _ => None,
+    }
+}
+
+fn normalize_rendered_text(value: &str) -> String {
+    let mut lines = value.lines().map(str::trim_end).collect::<Vec<_>>();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{html_message_to_text, media_caption_from_formatted};
+    use matrix_sdk::ruma::events::room::message::FormattedBody;
+
+    #[test]
+    fn html_message_mentions_render_with_at_prefix() {
+        let html = r#"hello <a href="https://matrix.to/#/@alice:example.org">Alice</a> &amp; team"#;
+
+        assert_eq!(html_message_to_text(html), "hello @Alice & team");
+    }
+
+    #[test]
+    fn html_message_strips_reply_fallback_block() {
+        let html = r#"<mx-reply><blockquote>old</blockquote></mx-reply><a href="https://matrix.to/#/%40bob%3Aexample.org">Bob</a>"#;
+
+        assert_eq!(html_message_to_text(html), "@Bob");
+    }
+
+    #[test]
+    fn formatted_caption_prefers_rendered_html() {
+        let formatted = FormattedBody::html(
+            r#"<a href="https://matrix.to/#/@alice:example.org">Alice</a> 的图片"#.to_string(),
+        );
+
+        assert_eq!(
+            media_caption_from_formatted(Some(&formatted), Some("fallback")),
+            Some("@Alice 的图片".to_string()),
+        );
+    }
+}
+
 /// Extract edit text from a replacement relation's new_content.
 fn extract_edit_text(
     new_content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation,
@@ -2890,6 +3235,7 @@ fn unable_to_decrypt_message(
         sender_id,
         sender_name,
         content: "无法解密此消息（缺少会话密钥）".to_string(),
+        caption: None,
         timestamp,
         is_me,
         msg_type: MessageType::Text,
@@ -2997,16 +3343,18 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
                 let chat_msg = match &original.content.msgtype {
                     matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
+                        let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
                         let content = if in_reply_to.is_some() {
-                            strip_reply_fallback(&t.body)
+                            strip_reply_fallback(&content)
                         } else {
-                            t.body.clone()
+                            content
                         };
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            caption: None,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3024,16 +3372,18 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                     }
                     matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
                         let name = sender_name.clone();
+                        let body = message_body_from_formatted(t.formatted.as_ref(), &t.body);
                         let content = if in_reply_to.is_some() {
-                            format!("* {} {}", name, strip_reply_fallback(&t.body))
+                            format!("* {} {}", name, strip_reply_fallback(&body))
                         } else {
-                            format!("* {} {}", name, t.body)
+                            format!("* {} {}", name, body)
                         };
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            caption: None,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3050,16 +3400,18 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         }
                     }
                     matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
+                        let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
                         let content = if in_reply_to.is_some() {
-                            strip_reply_fallback(&t.body)
+                            strip_reply_fallback(&content)
                         } else {
-                            t.body.clone()
+                            content
                         };
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            caption: None,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3087,7 +3439,11 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
-                            content: t.body.clone(),
+                            content: t.filename().to_string(),
+                            caption: media_caption_from_formatted(
+                                t.formatted_caption(),
+                                t.caption(),
+                            ),
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Image,
@@ -3119,7 +3475,11 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
-                            content: t.body.clone(),
+                            content: t.filename().to_string(),
+                            caption: media_caption_from_formatted(
+                                t.formatted_caption(),
+                                t.caption(),
+                            ),
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Video,
@@ -3139,7 +3499,8 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         id: event_id_str.clone(),
                         sender_id: sender_id.clone(),
                         sender_name: sender_name.clone(),
-                        content: format!("\u{6587}\u{4EF6}: {}", t.body),
+                        content: format!("\u{6587}\u{4EF6}: {}", t.filename()),
+                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
                         timestamp: timestamp.clone(),
                         is_me,
                         msg_type: MessageType::Text,
@@ -3190,6 +3551,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         sender_id: sender_id.clone(),
                         sender_name: sender_name.clone(),
                         content: original.content.body.clone(),
+                        caption: None,
                         timestamp: timestamp.clone(),
                         is_me,
                         msg_type: MessageType::Sticker,
@@ -3297,6 +3659,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            caption: None,
                             timestamp: timestamp.clone(),
                             is_me: false,
                             msg_type: MessageType::Event,
@@ -4597,6 +4960,7 @@ pub async fn get_messages_before(
                         sender_id,
                         sender_name,
                         content: original.content.body.clone(),
+                        caption: None,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Sticker,
@@ -4667,16 +5031,18 @@ pub async fn get_messages_before(
 
             let chat_msg = match &original.content.msgtype {
                 matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
+                    let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
                     let content = if in_reply_to.is_some() {
-                        strip_reply_fallback(&t.body)
+                        strip_reply_fallback(&content)
                     } else {
-                        t.body.clone()
+                        content
                     };
                     ChatMessage {
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
                         content,
+                        caption: None,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Text,
@@ -4704,7 +5070,8 @@ pub async fn get_messages_before(
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
-                        content: t.body.clone(),
+                        content: t.filename().to_string(),
+                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
                         timestamp,
                         is_me,
                         msg_type: MessageType::Image,
@@ -4736,7 +5103,8 @@ pub async fn get_messages_before(
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
-                        content: t.body.clone(),
+                        content: t.filename().to_string(),
+                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
                         timestamp,
                         is_me,
                         msg_type: MessageType::Video,

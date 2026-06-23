@@ -2759,26 +2759,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ChatMessage dco_decode_chat_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 17)
-      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
     return ChatMessage(
       id: dco_decode_String(arr[0]),
       senderId: dco_decode_String(arr[1]),
       senderName: dco_decode_String(arr[2]),
       content: dco_decode_String(arr[3]),
-      timestamp: dco_decode_String(arr[4]),
-      isMe: dco_decode_bool(arr[5]),
-      msgType: dco_decode_message_type(arr[6]),
-      imageUrl: dco_decode_opt_String(arr[7]),
-      mediaSourceJson: dco_decode_opt_String(arr[8]),
-      imageWidth: dco_decode_opt_box_autoadd_i_32(arr[9]),
-      imageHeight: dco_decode_opt_box_autoadd_i_32(arr[10]),
-      inReplyTo: dco_decode_opt_String(arr[11]),
-      isEdited: dco_decode_bool(arr[12]),
-      editHistory: dco_decode_list_String(arr[13]),
-      reactions: dco_decode_list_reaction(arr[14]),
-      readers: dco_decode_list_message_reader(arr[15]),
-      totalMembers: dco_decode_i_32(arr[16]),
+      caption: dco_decode_opt_String(arr[4]),
+      timestamp: dco_decode_String(arr[5]),
+      isMe: dco_decode_bool(arr[6]),
+      msgType: dco_decode_message_type(arr[7]),
+      imageUrl: dco_decode_opt_String(arr[8]),
+      mediaSourceJson: dco_decode_opt_String(arr[9]),
+      imageWidth: dco_decode_opt_box_autoadd_i_32(arr[10]),
+      imageHeight: dco_decode_opt_box_autoadd_i_32(arr[11]),
+      inReplyTo: dco_decode_opt_String(arr[12]),
+      isEdited: dco_decode_bool(arr[13]),
+      editHistory: dco_decode_list_String(arr[14]),
+      reactions: dco_decode_list_reaction(arr[15]),
+      readers: dco_decode_list_message_reader(arr[16]),
+      totalMembers: dco_decode_i_32(arr[17]),
     );
   }
 
@@ -3294,6 +3295,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_senderId = sse_decode_String(deserializer);
     var var_senderName = sse_decode_String(deserializer);
     var var_content = sse_decode_String(deserializer);
+    var var_caption = sse_decode_opt_String(deserializer);
     var var_timestamp = sse_decode_String(deserializer);
     var var_isMe = sse_decode_bool(deserializer);
     var var_msgType = sse_decode_message_type(deserializer);
@@ -3312,6 +3314,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       senderId: var_senderId,
       senderName: var_senderName,
       content: var_content,
+      caption: var_caption,
       timestamp: var_timestamp,
       isMe: var_isMe,
       msgType: var_msgType,
@@ -3985,6 +3988,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.senderId, serializer);
     sse_encode_String(self.senderName, serializer);
     sse_encode_String(self.content, serializer);
+    sse_encode_opt_String(self.caption, serializer);
     sse_encode_String(self.timestamp, serializer);
     sse_encode_bool(self.isMe, serializer);
     sse_encode_message_type(self.msgType, serializer);
