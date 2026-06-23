@@ -46,8 +46,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   final List<MessageGroup> _groupedMessages = [];
   final Map<String, ChatMessage> _messageIndex = {};
   final List<_TimelineEntry> _timelineEntries = [];
+  final Map<Key, int> _timelineEntryIndexByKey = {};
   final Map<String, GlobalKey> _dateSeparatorKeys = {};
   List<ChatMessage> _displayedMessages = [];
+  List<DateBoundary> _floatingDateBoundariesCache = const [];
+  List<GlobalKey> _floatingDateSeparatorKeysCache = const [];
+  bool _hasTimelineGroups = false;
+  List<ChatMessage>? _lastMessageMergeInput;
+  List<LocalOutgoingMessage>? _lastLocalMergeInput;
+  List<ChatMessage> _lastTimelineMessages = const [];
+  List<ChatMessage>? _lastDerivedMessagesInput;
+  int _olderMessagesRevision = 0;
+  int _lastDerivedOlderMessagesRevision = -1;
+  int _sortOverrideRevision = 0;
+  int _lastDerivedSortOverrideRevision = -1;
   bool _isLoadingOlder = false;
   bool _hasMoreMessages = true;
   bool _olderLoadArmed = true;
@@ -78,6 +90,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   static const double _olderLoadTriggerDistance = 24.0;
   static const double _olderLoadRearmDistance = 240.0;
+  static const int _maxMessagesPerRenderGroup = 12;
 
   void _setInputPanelMode(InputPanelMode mode) {
     if (_inputPanelMode == mode) return;
@@ -114,19 +127,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     });
   }
 
-  Map<String, String?> _buildAvatarMap(
-    List<ChatMessage> messages,
-    List<Contact> members,
-  ) {
+  Map<String, String?> _buildAvatarMap(List<Contact> members) {
     final map = <String, String?>{};
     for (final m in members) {
       map[m.id] = m.avatarUrl;
-    }
-    // Also cover senders not in members (edge case)
-    for (final msg in messages) {
-      if (!msg.isMe && !map.containsKey(msg.senderId)) {
-        map[msg.senderId] = null;
-      }
     }
     return map;
   }
@@ -177,6 +181,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           .toList();
       setState(() {
         _olderMessages.insertAll(0, newMessages);
+        if (newMessages.isNotEmpty) {
+          _olderMessagesRevision++;
+        }
         _hasMoreMessages = older.isNotEmpty && newMessages.isNotEmpty;
         _isLoadingOlder = false;
       });
@@ -242,6 +249,23 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     ];
   }
 
+  List<ChatMessage> _timelineMessagesFor(
+    List<ChatMessage> latestMessages,
+    List<LocalOutgoingMessage> localMessages,
+  ) {
+    if (identical(latestMessages, _lastMessageMergeInput) &&
+        identical(localMessages, _lastLocalMergeInput)) {
+      return _lastTimelineMessages;
+    }
+    _lastMessageMergeInput = latestMessages;
+    _lastLocalMergeInput = localMessages;
+    _lastTimelineMessages = _mergeLocalOutgoingMessages(
+      latestMessages,
+      localMessages,
+    );
+    return _lastTimelineMessages;
+  }
+
   LocalOutgoingMatchResult _matchedLocalOutgoingIds(
     List<ChatMessage> latestMessages,
     List<LocalOutgoingMessage> localMessages,
@@ -252,25 +276,41 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       _consumedRemoteIds,
     );
     _remoteToLocalFlightId.addAll(result.remoteToLocalFlightId);
-    _remoteToLocalSortTimestamp.addAll(result.remoteToLocalSortTimestamp);
+    var sortOverridesChanged = false;
+    for (final entry in result.remoteToLocalSortTimestamp.entries) {
+      if (_remoteToLocalSortTimestamp[entry.key] != entry.value) {
+        sortOverridesChanged = true;
+      }
+      _remoteToLocalSortTimestamp[entry.key] = entry.value;
+    }
+    if (sortOverridesChanged) {
+      _sortOverrideRevision++;
+    }
     return result;
   }
 
   List<MessageGroup> _groupMessages(List<ChatMessage> messages) {
     final groups = <MessageGroup>[];
     for (final message in messages) {
-      final startsNewGroup =
+      final startsNewCluster =
           groups.isEmpty ||
           groups.last.senderId != message.senderId ||
           chatDateKey(groups.last.messages.last.timestamp) !=
               chatDateKey(message.timestamp);
-      if (startsNewGroup) {
+      final startsNewRenderGroup =
+          startsNewCluster ||
+          groups.last.messages.length >= _maxMessagesPerRenderGroup;
+      if (startsNewRenderGroup) {
+        if (!startsNewCluster && groups.isNotEmpty) {
+          groups.last.endsCluster = false;
+        }
         groups.add(
           MessageGroup(
             senderId: message.senderId,
             senderName: message.senderName,
             isMe: message.isMe,
             messages: [message],
+            startsCluster: startsNewCluster,
           ),
         );
       } else {
@@ -324,11 +364,22 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   }
 
   void _rebuildDerivedMessages(List<ChatMessage> latestMessages) {
+    if (identical(_lastDerivedMessagesInput, latestMessages) &&
+        _lastDerivedOlderMessagesRevision == _olderMessagesRevision &&
+        _lastDerivedSortOverrideRevision == _sortOverrideRevision) {
+      return;
+    }
     final fingerprint = _messagesFingerprint(latestMessages);
     if (_derivedMessagesFingerprint == fingerprint) {
+      _lastDerivedMessagesInput = latestMessages;
+      _lastDerivedOlderMessagesRevision = _olderMessagesRevision;
+      _lastDerivedSortOverrideRevision = _sortOverrideRevision;
       return;
     }
     _derivedMessagesFingerprint = fingerprint;
+    _lastDerivedMessagesInput = latestMessages;
+    _lastDerivedOlderMessagesRevision = _olderMessagesRevision;
+    _lastDerivedSortOverrideRevision = _sortOverrideRevision;
     final displayedMessages = _mergeMessages(latestMessages);
     _displayedMessages = displayedMessages;
     _messageIndex
@@ -349,6 +400,22 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     _timelineEntries
       ..clear()
       ..addAll(_buildTimelineEntries(_groupedMessages));
+    _timelineEntryIndexByKey
+      ..clear()
+      ..addEntries(
+        _timelineEntries.asMap().entries.map(
+          (entry) => MapEntry(entry.value.itemKey, entry.key),
+        ),
+      );
+    _hasTimelineGroups = _timelineEntries.any(
+      (entry) => entry.type == _TimelineEntryType.group,
+    );
+    _floatingDateBoundariesCache = _buildFloatingDateBoundaries(
+      _timelineEntries,
+    );
+    _floatingDateSeparatorKeysCache = _buildFloatingDateSeparatorKeys(
+      _timelineEntries,
+    );
   }
 
   List<_TimelineEntry> _buildTimelineEntries(List<MessageGroup> groups) {
@@ -357,7 +424,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     for (var i = groups.length - 1; i >= 0; i--) {
       final group = groups[i];
       final dateKey = chatDateKey(group.messages.first.timestamp);
-      final anchorId = '$dateKey:${group.senderId}:$i';
+      final anchorId =
+          '$dateKey:${group.senderId}:${group.messages.first.id}:${group.messages.last.id}';
       entries.add(
         _TimelineEntry.group(
           group,
@@ -453,12 +521,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     }
   }
 
-  int? _findTimelineEntryIndex(List<_TimelineEntry> entries, Key key) {
-    for (var index = 0; index < entries.length; index++) {
-      final entry = entries[index];
-      if (entry.itemKey == key) return index;
-    }
-    return null;
+  int? _findTimelineEntryIndex(Key key) {
+    return _timelineEntryIndexByKey[key];
   }
 
   @override
@@ -637,21 +701,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                       ),
                     );
                   }
-                  final timelineMessages = _mergeLocalOutgoingMessages(
+                  final timelineMessages = _timelineMessagesFor(
                     messages,
                     localOutgoingMessages,
                   );
                   _rebuildDerivedMessages(timelineMessages);
-                  final displayedMessages = _displayedMessages;
-                  final timelineEntries = List<_TimelineEntry>.unmodifiable(
-                    _timelineEntries,
-                  );
-                  final messageIndex = Map<String, ChatMessage>.unmodifiable(
-                    _messageIndex,
-                  );
+                  final timelineEntries = _timelineEntries;
+                  final messageIndex = _messageIndex;
                   final avatarMap = membersAsync.maybeWhen(
-                    data: (members) =>
-                        _buildAvatarMap(displayedMessages, members),
+                    data: _buildAvatarMap,
                     orElse: () => const <String, String?>{},
                   );
                   return TweenAnimationBuilder<double>(
@@ -681,11 +739,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                                   messageIndex,
                                 ),
                                 childCount: timelineEntries.length,
-                                findChildIndexCallback: (key) =>
-                                    _findTimelineEntryIndex(
-                                      timelineEntries,
-                                      key,
-                                    ),
+                                findChildIndexCallback: _findTimelineEntryIndex,
                               ),
                             ),
                             const SliverPadding(
@@ -702,14 +756,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
             ),
             // Telegram-style floating date that tracks the day at the top edge
             // of the viewport while scrolling, then fades out.
-            if (_timelineEntries.any(
-              (entry) => entry.type == _TimelineEntryType.group,
-            ))
+            if (_hasTimelineGroups)
               FloatingDateHeader(
                 scrollController: _scrollController,
                 scrollViewportKey: _scrollViewportKey,
-                boundaries: _floatingDateBoundaries(),
-                separatorKeys: _floatingDateSeparatorKeys(),
+                boundaries: _floatingDateBoundariesCache,
+                separatorKeys: _floatingDateSeparatorKeysCache,
               ),
             AnimatedPositioned(
               left: 0,
@@ -756,9 +808,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   }
 
   /// Day boundaries (oldest → newest) for the floating date header.
-  List<DateBoundary> _floatingDateBoundaries() {
+  List<DateBoundary> _buildFloatingDateBoundaries(
+    List<_TimelineEntry> timelineEntries,
+  ) {
     final labels = <String>[];
-    for (final entry in _timelineEntries) {
+    for (final entry in timelineEntries) {
       if (entry.type == _TimelineEntryType.date && entry.dateLabel != null) {
         labels.add(entry.dateLabel!);
       }
@@ -776,9 +830,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   }
 
   /// Date separator anchors ordered oldest → newest.
-  List<GlobalKey> _floatingDateSeparatorKeys() {
+  List<GlobalKey> _buildFloatingDateSeparatorKeys(
+    List<_TimelineEntry> timelineEntries,
+  ) {
     final keys = <GlobalKey>[];
-    for (final entry in _timelineEntries) {
+    for (final entry in timelineEntries) {
       if (entry.type == _TimelineEntryType.date && entry.separatorKey != null) {
         keys.add(entry.separatorKey!);
       }

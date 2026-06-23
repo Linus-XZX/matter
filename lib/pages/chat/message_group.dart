@@ -20,12 +20,16 @@ class MessageGroup {
   final String senderName;
   final bool isMe;
   final List<ChatMessage> messages;
+  final bool startsCluster;
+  bool endsCluster;
 
   MessageGroup({
     required this.senderId,
     required this.senderName,
     required this.isMe,
     required this.messages,
+    this.startsCluster = true,
+    this.endsCluster = true,
   });
 }
 
@@ -87,10 +91,10 @@ class MessageGroupWidget extends ConsumerWidget {
 
     if (isEventGroup) {
       return Padding(
-        padding: const EdgeInsets.only(
+        padding: EdgeInsets.only(
           left: 12,
           right: 12,
-          bottom: _groupBottomGap,
+          bottom: group.endsCluster ? _groupBottomGap : 0,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -105,7 +109,7 @@ class MessageGroupWidget extends ConsumerWidget {
                     ref,
                     e.value,
                     false,
-                    isFirst: e.key == 0,
+                    isFirst: e.key == 0 && group.startsCluster,
                     isLast: e.key == group.messages.length - 1,
                   ),
                 ),
@@ -117,10 +121,10 @@ class MessageGroupWidget extends ConsumerWidget {
 
     if (isMe) {
       return Padding(
-        padding: const EdgeInsets.only(
+        padding: EdgeInsets.only(
           left: 12,
           right: 12,
-          bottom: _groupBottomGap,
+          bottom: group.endsCluster ? _groupBottomGap : 0,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -135,7 +139,7 @@ class MessageGroupWidget extends ConsumerWidget {
                     ref,
                     e.value,
                     true,
-                    isFirst: e.key == 0,
+                    isFirst: e.key == 0 && group.startsCluster,
                     isLast: e.key == group.messages.length - 1,
                   ),
                 ),
@@ -158,7 +162,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 ref,
                 e.value,
                 false,
-                isFirst: e.key == 0,
+                isFirst: e.key == 0 && group.startsCluster,
                 isLast: e.key == group.messages.length - 1,
               ),
             ),
@@ -168,20 +172,20 @@ class MessageGroupWidget extends ConsumerWidget {
 
     if (compact) {
       return Padding(
-        padding: const EdgeInsets.only(
+        padding: EdgeInsets.only(
           left: 12,
           right: 12,
-          bottom: _groupBottomGap,
+          bottom: group.endsCluster ? _groupBottomGap : 0,
         ),
         child: messagesColumn,
       );
     }
 
     return Padding(
-      padding: const EdgeInsets.only(
+      padding: EdgeInsets.only(
         left: 12,
         right: 12,
-        bottom: _groupBottomGap,
+        bottom: group.endsCluster ? _groupBottomGap : 0,
       ),
       child: Stack(
         clipBehavior: Clip.none,
