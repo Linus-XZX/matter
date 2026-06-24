@@ -11,6 +11,7 @@ import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
 import 'image_message_bubble.dart';
+import 'message_text.dart';
 import 'video_message_bubble.dart';
 import 'message_input.dart';
 import 'send_flight.dart';
@@ -43,6 +44,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final bool compact;
   final ScrollController? scrollController;
   final GlobalKey? scrollViewportKey;
+  final double stickyBottomInset;
   final VoidCallback? onImageLoaded;
 
   const MessageGroupWidget({
@@ -56,6 +58,7 @@ class MessageGroupWidget extends ConsumerWidget {
     this.compact = false,
     this.scrollController,
     this.scrollViewportKey,
+    this.stickyBottomInset = 0,
     this.onImageLoaded,
   });
 
@@ -63,6 +66,7 @@ class MessageGroupWidget extends ConsumerWidget {
   static const double _avatarSlotWidth = 44.0;
   static const double _messageBottomPadding = 1.0;
   static const double _groupBottomGap = 9.0;
+  static const double _joinedRadius = 6.0;
 
   /// Stable row key for list identity. Local outgoing messages keep the same
   /// key across pending/sent/failed prefix changes so the [SendFlightTarget]
@@ -110,7 +114,8 @@ class MessageGroupWidget extends ConsumerWidget {
                     e.value,
                     false,
                     isFirst: e.key == 0 && group.startsCluster,
-                    isLast: e.key == group.messages.length - 1,
+                    isLast:
+                        e.key == group.messages.length - 1 && group.endsCluster,
                   ),
                 ),
               )
@@ -140,7 +145,8 @@ class MessageGroupWidget extends ConsumerWidget {
                     e.value,
                     true,
                     isFirst: e.key == 0 && group.startsCluster,
-                    isLast: e.key == group.messages.length - 1,
+                    isLast:
+                        e.key == group.messages.length - 1 && group.endsCluster,
                   ),
                 ),
               )
@@ -163,7 +169,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 e.value,
                 false,
                 isFirst: e.key == 0 && group.startsCluster,
-                isLast: e.key == group.messages.length - 1,
+                isLast: e.key == group.messages.length - 1 && group.endsCluster,
               ),
             ),
           )
@@ -201,6 +207,7 @@ class MessageGroupWidget extends ConsumerWidget {
           ),
           if (showAvatar)
             Positioned(
+              key: const ValueKey('sticky-group-avatar-slot'),
               left: 0,
               top: 0,
               bottom: 0,
@@ -211,6 +218,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 scrollController: scrollController,
                 scrollViewportKey: scrollViewportKey,
                 avatarSize: _avatarSize,
+                bottomInset: stickyBottomInset,
               ),
             ),
         ],
@@ -248,7 +256,7 @@ class MessageGroupWidget extends ConsumerWidget {
       message,
       overlay: message.msgType != MessageType.text,
     );
-    final bubble =
+    final coreBubble =
         message.msgType == MessageType.video &&
             (message.imageUrl != null || message.mediaSourceJson != null)
         ? VideoMessageBubble(
@@ -277,9 +285,22 @@ class MessageGroupWidget extends ConsumerWidget {
             heroTag: 'image-preview:${message.id}',
             isSticker: message.msgType == MessageType.sticker,
             metadata: metadata,
+            borderRadius: _messageBorderRadius(
+              isMe: isMe,
+              isFirst: isFirst,
+              isLast: isLast,
+            ),
             onLoaded: onImageLoaded,
           )
-        : _buildTextBubble(context, ref, message, isMe, isFirst: isFirst);
+        : _buildTextBubble(
+            context,
+            ref,
+            message,
+            isMe,
+            isFirst: isFirst,
+            isLast: isLast,
+          );
+    final bubble = coreBubble;
     final flightId = _messageFlightId(message);
     final displayedBubble = flightId != null
         ? SendFlightTarget(
@@ -417,6 +438,7 @@ class MessageGroupWidget extends ConsumerWidget {
     ChatMessage message,
     bool isMe, {
     bool isFirst = false,
+    bool isLast = false,
   }) {
     final maxBubbleWidth = MediaQuery.of(context).size.width * 0.70;
     final textStyle = TextStyle(
@@ -425,17 +447,16 @@ class MessageGroupWidget extends ConsumerWidget {
       height: 1.35,
     );
     final metadata = _buildMessageMetadata(context, ref, message);
-    return Container(
+    final bubble = Container(
       key: ValueKey('text-bubble:${message.id}'),
       constraints: BoxConstraints(maxWidth: maxBubbleWidth),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
         color: isMe ? AppColors.primary : AppColors.surfaceElevated,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(AppRadii.content),
-          topRight: const Radius.circular(AppRadii.content),
-          bottomLeft: Radius.circular(isMe ? AppRadii.content : AppRadii.tag),
-          bottomRight: Radius.circular(isMe ? AppRadii.tag : AppRadii.content),
+        borderRadius: _messageBorderRadius(
+          isMe: isMe,
+          isFirst: isFirst,
+          isLast: isLast,
         ),
       ),
       child: Column(
@@ -465,6 +486,32 @@ class MessageGroupWidget extends ConsumerWidget {
           ),
         ],
       ),
+    );
+    return bubble;
+  }
+
+  BorderRadius _messageBorderRadius({
+    required bool isMe,
+    required bool isFirst,
+    required bool isLast,
+  }) {
+    final outer = const Radius.circular(AppRadii.content);
+    final joined = const Radius.circular(_joinedRadius);
+    if (isMe) {
+      return BorderRadius.only(
+        topLeft: outer,
+        topRight: isFirst ? outer : joined,
+        bottomLeft: outer,
+        bottomRight: isLast
+            ? const Radius.circular(AppRadii.tag)
+            : joined,
+      );
+    }
+    return BorderRadius.only(
+      topLeft: isFirst ? outer : joined,
+      topRight: outer,
+      bottomLeft: isLast ? const Radius.circular(AppRadii.tag) : joined,
+      bottomRight: outer,
     );
   }
 
@@ -770,7 +817,9 @@ class MessageGroupWidget extends ConsumerWidget {
     required Color color,
   }) {
     final others = message.totalMembers - 1;
-    if (others <= 0) return const SizedBox.shrink();
+    if (others <= 0) {
+      return const SizedBox.square(dimension: 15);
+    }
 
     final readCount = message.readers.length;
     final icon = readCount == 0 ? Icons.done_rounded : Icons.done_all_rounded;
@@ -805,7 +854,7 @@ class MessageGroupWidget extends ConsumerWidget {
     if (message.isEdited) {
       width += 5 + textWidth('已编辑', 10);
     }
-    if (message.isMe && message.totalMembers > 1) {
+    if (message.isMe) {
       width += 4 + 15;
     }
     return width;
@@ -1092,8 +1141,13 @@ class _AdaptiveTextMetadata extends StatelessWidget {
             ? math.min(constraints.maxWidth, maxWidth)
             : maxWidth;
         final textScaler = MediaQuery.textScalerOf(context);
+        final span = messageTextSpan(
+          text,
+          style: textStyle,
+          mentionColor: AppColors.secondary,
+        );
         final textPainter = TextPainter(
-          text: TextSpan(text: text, style: textStyle),
+          text: span,
           textDirection: Directionality.of(context),
           textScaler: textScaler,
         )..layout(maxWidth: availableWidth);
@@ -1121,12 +1175,7 @@ class _AdaptiveTextMetadata extends StatelessWidget {
           height: height,
           child: Stack(
             children: [
-              Positioned(
-                left: 0,
-                top: 0,
-                width: width,
-                child: Text(text, style: textStyle),
-              ),
+              Positioned(left: 0, top: 0, width: width, child: Text.rich(span)),
               Positioned(
                 key: ValueKey(inline ? 'metadata-inline' : 'metadata-below'),
                 right: 0,
@@ -1330,6 +1379,7 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
   final ScrollController? scrollController;
   final GlobalKey? scrollViewportKey;
   final double avatarSize;
+  final double bottomInset;
 
   _StickyGroupAvatar({
     required this.fallback,
@@ -1337,6 +1387,7 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
     required this.scrollController,
     required this.scrollViewportKey,
     required this.avatarSize,
+    required this.bottomInset,
   }) : super(
          child: AppAvatar(
            fallback: fallback,
@@ -1352,6 +1403,7 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
       scrollController: scrollController,
       scrollViewportKey: scrollViewportKey,
       avatarSize: avatarSize,
+      bottomInset: bottomInset,
     );
   }
 
@@ -1363,7 +1415,8 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
     renderObject
       ..scrollController = scrollController
       ..scrollViewportKey = scrollViewportKey
-      ..avatarSize = avatarSize;
+      ..avatarSize = avatarSize
+      ..bottomInset = bottomInset;
   }
 }
 
@@ -1371,11 +1424,13 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
   ScrollController? _scrollController;
   GlobalKey? scrollViewportKey;
   double _avatarSize;
+  double _bottomInset;
 
   _RenderStickyGroupAvatar({
     required this._scrollController,
     required this.scrollViewportKey,
     required this._avatarSize,
+    required this._bottomInset,
   });
 
   ScrollController? get scrollController => _scrollController;
@@ -1396,6 +1451,14 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
     if (value == _avatarSize) return;
     _avatarSize = value;
     markNeedsLayout();
+  }
+
+  double get bottomInset => _bottomInset;
+
+  set bottomInset(double value) {
+    if (value == _bottomInset) return;
+    _bottomInset = value;
+    markNeedsPaint();
   }
 
   @override
@@ -1437,7 +1500,7 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
     }
 
     final slotTop = localToGlobal(Offset.zero, ancestor: viewportBox).dy;
-    final stickyTop = viewportBox.size.height - _avatarSize;
+    final stickyTop = viewportBox.size.height - _bottomInset - _avatarSize;
     return (stickyTop - slotTop).clamp(0.0, maxTop);
   }
 }

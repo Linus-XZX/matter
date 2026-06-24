@@ -11,6 +11,15 @@ val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
+val releaseSigningProperties = listOf(
+    "storeFile",
+    "storePassword",
+    "keyAlias",
+    "keyPassword",
+)
+val missingReleaseSigningProperties = releaseSigningProperties.filter {
+    (keystoreProperties[it] as String?).isNullOrBlank()
+}
 val configuredNdkVersion =
     System.getenv("ANDROID_NDK_VERSION")
         ?: project.findProperty("android.ndkVersion") as String?
@@ -38,22 +47,29 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            keyAlias = keystoreProperties["keyAlias"] as String?
-            keyPassword = keystoreProperties["keyPassword"] as String?
-            storeFile = keystoreProperties["storeFile"]?.let { file(it as String) }
-            storePassword = keystoreProperties["storePassword"] as String?
+        if (keystorePropertiesFile.exists() && missingReleaseSigningProperties.isEmpty()) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig =
-                if (keystorePropertiesFile.exists()) {
-                    signingConfigs.getByName("release")
-                } else {
-                    signingConfigs.getByName("debug")
-                }
+            if (!keystorePropertiesFile.exists()) {
+                throw GradleException(
+                    "Release signing requires android/key.properties; refusing to use the debug key.",
+                )
+            }
+            if (missingReleaseSigningProperties.isNotEmpty()) {
+                throw GradleException(
+                    "Missing release signing properties: ${missingReleaseSigningProperties.joinToString()}",
+                )
+            }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

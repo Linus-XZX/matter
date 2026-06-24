@@ -89,7 +89,12 @@ void main() {
 
     // The overlay should exist and start near the source position.
     expect(find.byKey(sourceKey), findsOneWidget);
-    final startPositioned = tester.widget<Positioned>(find.byType(Positioned));
+    final startPositioned = tester.widget<Positioned>(
+      find.ancestor(
+        of: find.byKey(sourceKey),
+        matching: find.byType(Positioned),
+      ),
+    );
     expect(startPositioned.left, closeTo(sourceRect.left, 1));
     expect(startPositioned.top, closeTo(sourceRect.top, 1));
 
@@ -109,6 +114,70 @@ void main() {
     expect(find.byKey(sourceKey), findsNothing);
 
     // Drain the cleanup timer registered by registerSendFlight.
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  testWidgets('text flight lands exactly on its target rect', (tester) async {
+    const messageId = '${localOutgoingPendingPrefix}text-status-space';
+    const sourceKey = ValueKey('text-status-source');
+    const targetRect = Rect.fromLTWH(220, 300, 90, 40);
+    registerSendFlight(
+      messageId,
+      const SendFlightSpec(
+        sourceRect: Rect.fromLTWH(20, 500, 180, 44),
+        kind: SendFlightKind.text,
+        child: ColoredBox(key: sourceKey, color: Colors.blue),
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: [
+              Positioned(
+                left: targetRect.left,
+                top: targetRect.top,
+                child: const SendFlightTarget(
+                  messageId: messageId,
+                  child: SizedBox(width: 90, height: 40),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 299));
+
+    final positioned = tester.widget<Positioned>(
+      find.ancestor(
+        of: find.byKey(sourceKey),
+        matching: find.byType(Positioned),
+      ),
+    );
+    expect(positioned.left, closeTo(targetRect.left, 1));
+    expect(positioned.width, closeTo(targetRect.width, 1));
+
+    final decoratedBox = tester.widget<DecoratedBox>(
+      find.ancestor(
+        of: find.byKey(sourceKey),
+        matching: find.byType(DecoratedBox),
+      ),
+    );
+    final decoration = decoratedBox.decoration as BoxDecoration;
+    final radius = decoration.borderRadius! as BorderRadius;
+    expect(
+      radius.bottomRight.x,
+      closeTo(outgoingTextBubbleBorderRadius.bottomRight.x, 0.1),
+    );
+    expect(
+      radius.bottomLeft.x,
+      closeTo(outgoingTextBubbleBorderRadius.bottomLeft.x, 0.1),
+    );
+
+    await tester.pump(const Duration(milliseconds: 1));
     await tester.pump(const Duration(seconds: 2));
   });
 

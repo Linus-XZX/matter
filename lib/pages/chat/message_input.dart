@@ -33,6 +33,7 @@ enum InputPanelMode { none, keyboard, emoji }
 
 class MessageInput extends ConsumerStatefulWidget {
   final String roomId;
+  final int totalMembers;
   final InputPanelMode panelMode;
   final double pickerHeight;
   final double pickerFullHeight;
@@ -45,6 +46,7 @@ class MessageInput extends ConsumerStatefulWidget {
   const MessageInput({
     super.key,
     required this.roomId,
+    required this.totalMembers,
     required this.panelMode,
     required this.pickerHeight,
     required this.pickerFullHeight,
@@ -392,7 +394,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       editHistory: const [],
       reactions: const [],
       readers: const [],
-      totalMembers: 0,
+      totalMembers: widget.totalMembers,
     );
   }
 
@@ -475,7 +477,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       editHistory: const [],
       reactions: const [],
       readers: const [],
-      totalMembers: 0,
+      totalMembers: widget.totalMembers,
     );
   }
 

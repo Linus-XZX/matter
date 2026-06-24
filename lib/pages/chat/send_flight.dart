@@ -7,6 +7,13 @@ import '../../theme/app_theme.dart';
 
 enum SendFlightKind { text, sticker }
 
+const BorderRadius outgoingTextBubbleBorderRadius = BorderRadius.only(
+  topLeft: Radius.circular(AppRadii.content),
+  topRight: Radius.circular(AppRadii.content),
+  bottomLeft: Radius.circular(AppRadii.content),
+  bottomRight: Radius.circular(AppRadii.tag),
+);
+
 class SendFlightSpec {
   final Rect sourceRect;
   final Widget child;
@@ -292,6 +299,13 @@ class _SendFlightOverlayState extends State<_SendFlightOverlay>
               final end = widget.resolveEnd?.call() ?? widget.end;
               final rect = Rect.lerp(widget.begin, end, progress)!;
               final isText = widget.spec.kind == SendFlightKind.text;
+              final borderRadius = BorderRadius.lerp(
+                BorderRadius.circular(AppRadii.surface),
+                isText
+                    ? outgoingTextBubbleBorderRadius
+                    : BorderRadius.circular(AppRadii.content),
+                progress,
+              )!;
               return Stack(
                 children: [
                   Positioned.fromRect(
@@ -305,14 +319,10 @@ class _SendFlightOverlayState extends State<_SendFlightOverlay>
                                 progress,
                               )
                             : Colors.transparent,
-                        borderRadius: BorderRadius.lerp(
-                          BorderRadius.circular(AppRadii.surface),
-                          BorderRadius.circular(AppRadii.content),
-                          progress,
-                        ),
+                        borderRadius: borderRadius,
                       ),
                       child: ClipRRect(
-                        borderRadius: BorderRadius.circular(AppRadii.content),
+                        borderRadius: borderRadius,
                         child: child,
                       ),
                     ),

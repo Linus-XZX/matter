@@ -521,6 +521,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     _TimelineEntry entry,
     Map<String, String?> avatarMap,
     Map<String, ChatMessage> messageIndex,
+    double stickyBottomInset,
   ) {
     switch (entry.type) {
       case _TimelineEntryType.group:
@@ -536,6 +537,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           senderAvatarUrl: avatarMap[group.senderId],
           scrollController: _scrollController,
           scrollViewportKey: _scrollViewportKey,
+          stickyBottomInset: stickyBottomInset,
           onImageLoaded: null,
         );
       case _TimelineEntryType.date:
@@ -564,6 +566,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     );
     final activeUserId = ref.watch(activeUserIdProvider) ?? 'anonymous';
     final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
+    final cachedTotalMembers = cachedMessages.fold<int>(
+      0,
+      (count, message) => math.max(count, message.totalMembers),
+    );
+    final totalMembers =
+        membersAsync.asData?.value.length ?? cachedTotalMembers;
     ref.watch(typingStreamProvider);
     final localOutgoingMessages = ref.watch(
       localOutgoingMessagesProvider(widget.roomId),
@@ -762,6 +770,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                                   timelineEntries[index],
                                   avatarMap,
                                   messageIndex,
+                                  8 + animatedBottomPadding,
                                 ),
                                 childCount: timelineEntries.length,
                                 findChildIndexCallback: _findTimelineEntryIndex,
@@ -812,6 +821,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                     MessageInput(
                       key: ValueKey('msg_input_${widget.roomId}'),
                       roomId: widget.roomId,
+                      totalMembers: totalMembers,
                       panelMode: _inputPanelMode,
                       pickerHeight: pickerHeight,
                       pickerFullHeight: pickerFullHeight,

@@ -6,6 +6,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
+import 'message_text.dart';
 
 enum _OriginalImageState { thumbnail, resolving, loading, loaded, failed }
 
@@ -19,6 +20,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final Object heroTag;
   final bool isSticker;
   final Widget metadata;
+  final BorderRadius? borderRadius;
   final VoidCallback? onLoaded;
 
   const ImageMessageBubble({
@@ -32,6 +34,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     required this.heroTag,
     this.isSticker = false,
     required this.metadata,
+    this.borderRadius,
     this.onLoaded,
   });
 
@@ -146,6 +149,9 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     final caption = widget.caption?.trim();
     final hasCaption =
         !widget.isSticker && caption != null && caption.isNotEmpty;
+    final mediaBorderRadius = hasCaption
+        ? BorderRadius.zero
+        : _bubbleBorderRadius;
 
     if (url == null && bytes == null) {
       final placeholder = _isLoadingEncrypted && !_encryptedLoadFailed
@@ -176,7 +182,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
             : isMe
             ? AppColors.primary.withValues(alpha: 0.3)
             : AppColors.surfaceElevated,
-        borderRadius: _bubbleBorderRadius,
+        borderRadius: mediaBorderRadius,
       ),
       clipBehavior: Clip.antiAlias,
       child: Stack(
@@ -191,7 +197,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
                         RectTween(begin: begin, end: end),
                     flightShuttleBuilder: _roundedImageFlightShuttle,
                     child: _HeroImageClip(
-                      borderRadius: _bubbleBorderRadius,
+                      borderRadius: mediaBorderRadius,
                       child: media,
                     ),
                   ),
@@ -229,31 +235,38 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
 
   Widget _withCaption(Widget bubble, String? caption, bool hasCaption) {
     if (!hasCaption || caption == null) return bubble;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: widget.isMe
-          ? CrossAxisAlignment.end
-          : CrossAxisAlignment.start,
-      children: [
-        bubble,
-        const SizedBox(height: 4),
-        _ImageCaption(
-          text: caption,
-          width: _bubbleSize(context).width,
-          isMe: widget.isMe,
-        ),
-      ],
+    return Container(
+      key: const ValueKey('image-caption-bubble'),
+      width: _bubbleSize(context).width,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: widget.isMe ? AppColors.primary : AppColors.surfaceElevated,
+        borderRadius: _bubbleBorderRadius,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          bubble,
+          _ImageCaption(text: caption, isMe: widget.isMe),
+        ],
+      ),
     );
   }
 
   bool get isMe => widget.isMe;
 
-  BorderRadius get _bubbleBorderRadius => BorderRadius.only(
-    topLeft: const Radius.circular(AppRadii.content),
-    topRight: const Radius.circular(AppRadii.content),
-    bottomLeft: Radius.circular(widget.isMe ? AppRadii.content : AppRadii.tag),
-    bottomRight: Radius.circular(widget.isMe ? AppRadii.tag : AppRadii.content),
-  );
+  BorderRadius get _bubbleBorderRadius =>
+      widget.borderRadius ??
+      BorderRadius.only(
+        topLeft: const Radius.circular(AppRadii.content),
+        topRight: const Radius.circular(AppRadii.content),
+        bottomLeft: Radius.circular(
+          widget.isMe ? AppRadii.content : AppRadii.tag,
+        ),
+        bottomRight: Radius.circular(
+          widget.isMe ? AppRadii.tag : AppRadii.content,
+        ),
+      );
 
   double get _imageAspectRatio {
     final sourceWidth = widget.imageWidth;
@@ -336,36 +349,26 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
 
 class _ImageCaption extends StatelessWidget {
   final String text;
-  final double width;
   final bool isMe;
 
-  const _ImageCaption({
-    required this.text,
-    required this.width,
-    required this.isMe,
-  });
+  const _ImageCaption({required this.text, required this.isMe});
 
   @override
   Widget build(BuildContext context) {
+    final style = TextStyle(
+      color: isMe ? Colors.white : AppColors.onBackground,
+      fontSize: 14,
+      height: 1.35,
+    );
     return Container(
       key: const ValueKey('image-caption'),
-      width: width,
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: isMe ? AppColors.primary : AppColors.surfaceElevated,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(AppRadii.tag),
-          topRight: const Radius.circular(AppRadii.tag),
-          bottomLeft: Radius.circular(isMe ? AppRadii.content : AppRadii.tag),
-          bottomRight: Radius.circular(isMe ? AppRadii.tag : AppRadii.content),
-        ),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: isMe ? Colors.white : AppColors.onBackground,
-          fontSize: 14,
-          height: 1.35,
+      child: Text.rich(
+        messageTextSpan(
+          text,
+          style: style,
+          mentionColor: isMe ? Colors.white : AppColors.secondary,
         ),
       ),
     );

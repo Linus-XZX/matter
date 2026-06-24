@@ -58,7 +58,15 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(const ValueKey('image-caption')), findsOneWidget);
+    expect(find.byKey(const ValueKey('image-caption-bubble')), findsOneWidget);
     expect(find.text('这里是图片描述'), findsOneWidget);
+    final imageRect = tester.getRect(
+      find.byKey(const ValueKey('msg-image:caption-test')),
+    );
+    final captionRect = tester.getRect(
+      find.byKey(const ValueKey('image-caption')),
+    );
+    expect(captionRect.top, closeTo(imageRect.bottom, 0.1));
   });
 
   testWidgets('media read indicator opens the readers sheet', (tester) async {
@@ -167,6 +175,181 @@ void main() {
     );
     expect(bubbleRect.right - metadataRect.right, closeTo(14, 0.1));
     expect(bubbleRect.bottom - metadataRect.bottom, closeTo(10, 0.1));
+  });
+
+  testWidgets('own text bubble keeps read-indicator space before member data', (
+    tester,
+  ) async {
+    Widget buildMessage(int totalMembers) {
+      final message = ChatMessage(
+        id: r'$stable-read-space',
+        senderId: '@me:example.org',
+        senderName: '我',
+        content: '短消息',
+        timestamp: '100',
+        isMe: true,
+        msgType: MessageType.text,
+        isEdited: false,
+        editHistory: const [],
+        reactions: const [],
+        readers: const [],
+        totalMembers: totalMembers,
+      );
+      return ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: message.senderId,
+                senderName: message.senderName,
+                isMe: true,
+                messages: [message],
+              ),
+              roomId: '!room:example.org',
+              messageIndex: {message.id: message},
+              showAvatar: false,
+            ),
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildMessage(0));
+    await tester.pump();
+    final sizeBeforeMembers = tester.getSize(
+      find.byKey(const ValueKey(r'text-bubble:$stable-read-space')),
+    );
+    expect(
+      find.byKey(const ValueKey(r'message-read-receipt:$stable-read-space')),
+      findsNothing,
+    );
+
+    await tester.pumpWidget(buildMessage(2));
+    await tester.pump();
+    final sizeAfterMembers = tester.getSize(
+      find.byKey(const ValueKey(r'text-bubble:$stable-read-space')),
+    );
+
+    expect(sizeAfterMembers, sizeBeforeMembers);
+    expect(
+      find.byKey(const ValueKey(r'message-read-receipt:$stable-read-space')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('outgoing message groups use joined corners', (
+    tester,
+  ) async {
+    const first = ChatMessage(
+      id: r'$group-first',
+      senderId: '@me:example.org',
+      senderName: '我',
+      content: '第一条',
+      timestamp: '100',
+      isMe: true,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+    const last = ChatMessage(
+      id: r'$group-last',
+      senderId: '@me:example.org',
+      senderName: '我',
+      content: '第二条',
+      timestamp: '101',
+      isMe: true,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: first.senderId,
+                senderName: first.senderName,
+                isMe: true,
+                messages: const [first, last],
+              ),
+              roomId: '!room:example.org',
+              messageIndex: const {
+                r'$group-first': first,
+                r'$group-last': last,
+              },
+              showAvatar: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    BorderRadius radiusFor(Key key) {
+      final container = tester.widget<Container>(find.byKey(key));
+      return (container.decoration! as BoxDecoration).borderRadius!
+          as BorderRadius;
+    }
+
+    final firstRadius = radiusFor(const ValueKey(r'text-bubble:$group-first'));
+    final lastRadius = radiusFor(const ValueKey(r'text-bubble:$group-last'));
+    expect(firstRadius.bottomRight.x, 6);
+    expect(lastRadius.topRight.x, 6);
+    expect(lastRadius.bottomRight.x, 10);
+  });
+
+  testWidgets('group-chat incoming messages keep the sticky avatar slot', (
+    tester,
+  ) async {
+    const message = ChatMessage(
+      id: r'$incoming-avatar',
+      senderId: '@alice:example.org',
+      senderName: 'Alice',
+      content: '你好',
+      timestamp: '100',
+      isMe: false,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: message.senderId,
+                senderName: message.senderName,
+                isMe: false,
+                messages: const [message],
+              ),
+              roomId: '!room:example.org',
+              messageIndex: const {r'$incoming-avatar': message},
+              showAvatar: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('sticky-group-avatar-slot')),
+      findsOneWidget,
+    );
+    expect(find.text('A'), findsOneWidget);
   });
 
   testWidgets('wrapped text lifts metadata into a short last line', (
