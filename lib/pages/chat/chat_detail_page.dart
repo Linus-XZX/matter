@@ -539,6 +539,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           scrollViewportKey: _scrollViewportKey,
           stickyBottomInset: stickyBottomInset,
           onImageLoaded: null,
+          onReplyRequested: () => _setInputPanelMode(InputPanelMode.keyboard),
         );
       case _TimelineEntryType.date:
         return DateSeparator(

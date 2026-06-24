@@ -98,6 +98,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         widget.panelMode == InputPanelMode.none) {
       _focusNode.unfocus();
       SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    } else if (oldWidget.panelMode != widget.panelMode &&
+        widget.panelMode == InputPanelMode.keyboard &&
+        !_focusNode.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _focusNode.requestFocus();
+        SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      });
     }
   }
 

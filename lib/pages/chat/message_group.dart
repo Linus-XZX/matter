@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -46,6 +47,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final GlobalKey? scrollViewportKey;
   final double stickyBottomInset;
   final VoidCallback? onImageLoaded;
+  final VoidCallback? onReplyRequested;
 
   const MessageGroupWidget({
     super.key,
@@ -60,6 +62,7 @@ class MessageGroupWidget extends ConsumerWidget {
     this.scrollViewportKey,
     this.stickyBottomInset = 0,
     this.onImageLoaded,
+    this.onReplyRequested,
   });
 
   static const double _avatarSize = 36.0;
@@ -193,35 +196,39 @@ class MessageGroupWidget extends ConsumerWidget {
         right: 12,
         bottom: group.endsCluster ? _groupBottomGap : 0,
       ),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: _avatarSlotWidth),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: showAvatar ? _avatarSize : 0,
-              ),
-              child: messagesColumn,
-            ),
-          ),
-          if (showAvatar)
-            Positioned(
-              key: const ValueKey('sticky-group-avatar-slot'),
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: _avatarSlotWidth,
-              child: _StickyGroupAvatar(
-                fallback: group.senderName,
-                avatarUrl: senderAvatarUrl,
-                scrollController: scrollController,
-                scrollViewportKey: scrollViewportKey,
-                avatarSize: _avatarSize,
-                bottomInset: stickyBottomInset,
-              ),
-            ),
-        ],
+      child: _StickyAvatarMessageGroup(
+        showAvatar: showAvatar,
+        fallback: group.senderName,
+        avatarUrl: senderAvatarUrl,
+        scrollController: scrollController,
+        scrollViewportKey: scrollViewportKey,
+        avatarSize: _avatarSize,
+        avatarSlotWidth: _avatarSlotWidth,
+        bottomInset: stickyBottomInset,
+        messagesBuilder: (avatarSwipeOffset) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: group.messages
+              .asMap()
+              .entries
+              .map(
+                (e) => KeyedSubtree(
+                  key: ValueKey(_messageRowKey(e.value)),
+                  child: _buildMessage(
+                    context,
+                    ref,
+                    e.value,
+                    false,
+                    isFirst: e.key == 0 && group.startsCluster,
+                    isLast:
+                        e.key == group.messages.length - 1 && group.endsCluster,
+                    linkedAvatarOffset: e.key == group.messages.length - 1
+                        ? avatarSwipeOffset
+                        : null,
+                  ),
+                ),
+              )
+              .toList(),
+        ),
       ),
     );
   }
@@ -233,6 +240,7 @@ class MessageGroupWidget extends ConsumerWidget {
     bool isMe, {
     bool isFirst = false,
     bool isLast = false,
+    ValueNotifier<double>? linkedAvatarOffset,
   }) {
     if (message.msgType == MessageType.event) {
       return GestureDetector(
@@ -311,7 +319,7 @@ class MessageGroupWidget extends ConsumerWidget {
           )
         : bubble;
 
-    return GestureDetector(
+    final messageRow = GestureDetector(
       onLongPress: isLocalOutgoing
           ? null
           : () => _showContextMenu(context, ref, message),
@@ -345,6 +353,20 @@ class MessageGroupWidget extends ConsumerWidget {
             if (message.reactions.isNotEmpty)
               _buildReactionsRow(context, ref, message, isMe),
           ],
+        ),
+      ),
+    );
+
+    if (isLocalOutgoing) return messageRow;
+    return SizedBox(
+      width: double.infinity,
+      child: _SwipeToReply(
+        key: ValueKey('swipe-reply:${message.id}'),
+        onReply: () => _startReply(ref, message),
+        linkedOffset: linkedAvatarOffset,
+        child: Align(
+          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+          child: messageRow,
         ),
       ),
     );
@@ -502,9 +524,7 @@ class MessageGroupWidget extends ConsumerWidget {
         topLeft: outer,
         topRight: isFirst ? outer : joined,
         bottomLeft: outer,
-        bottomRight: isLast
-            ? const Radius.circular(AppRadii.tag)
-            : joined,
+        bottomRight: isLast ? const Radius.circular(AppRadii.tag) : joined,
       );
     }
     return BorderRadius.only(
@@ -1066,8 +1086,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 label: '回复',
                 onTap: () {
                   Navigator.of(context).pop();
-                  // Set the reply target
-                  ref.read(replyingToProvider(roomId).notifier).value = message;
+                  _startReply(ref, message);
                 },
               ),
               _MenuItem(
@@ -1112,6 +1131,164 @@ class MessageGroupWidget extends ConsumerWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _startReply(WidgetRef ref, ChatMessage message) {
+    ref.read(editingMessageProvider(roomId).notifier).value = null;
+    ref.read(replyingToProvider(roomId).notifier).value = message;
+    onReplyRequested?.call();
+  }
+}
+
+class _SwipeToReply extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onReply;
+  final ValueNotifier<double>? linkedOffset;
+
+  const _SwipeToReply({
+    super.key,
+    required this.child,
+    required this.onReply,
+    this.linkedOffset,
+  });
+
+  @override
+  State<_SwipeToReply> createState() => _SwipeToReplyState();
+}
+
+class _SwipeToReplyState extends State<_SwipeToReply>
+    with SingleTickerProviderStateMixin {
+  static const double _triggerDistance = 56;
+  static const double _maxDistance = 72;
+  static const Duration _settleDuration = Duration(milliseconds: 180);
+
+  late final AnimationController _dragController;
+  bool _thresholdFeedbackSent = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _dragController = AnimationController(
+      vsync: this,
+      lowerBound: 0,
+      upperBound: _maxDistance,
+      duration: _settleDuration,
+    )..addListener(_syncLinkedOffset);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SwipeToReply oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.linkedOffset, widget.linkedOffset)) return;
+    oldWidget.linkedOffset?.value = 0;
+    _syncLinkedOffset();
+  }
+
+  @override
+  void dispose() {
+    widget.linkedOffset?.value = 0;
+    _dragController.removeListener(_syncLinkedOffset);
+    _dragController.dispose();
+    super.dispose();
+  }
+
+  void _syncLinkedOffset() {
+    widget.linkedOffset?.value = _dragController.value;
+  }
+
+  void _handleDragStart(DragStartDetails details) {
+    _dragController.stop();
+    _thresholdFeedbackSent = _dragController.value >= _triggerDistance;
+  }
+
+  void _handleDragUpdate(DragUpdateDetails details) {
+    final distance = (_dragController.value - details.delta.dx).clamp(
+      0.0,
+      _maxDistance,
+    );
+    _dragController.value = distance;
+
+    final reachedThreshold = distance >= _triggerDistance;
+    if (reachedThreshold && !_thresholdFeedbackSent) {
+      _thresholdFeedbackSent = true;
+      HapticFeedback.mediumImpact();
+    } else if (!reachedThreshold) {
+      _thresholdFeedbackSent = false;
+    }
+  }
+
+  void _handleDragEnd(DragEndDetails details) {
+    final shouldReply = _dragController.value >= _triggerDistance;
+    _settle();
+    if (shouldReply) widget.onReply();
+  }
+
+  void _settle() {
+    _thresholdFeedbackSent = false;
+    _dragController.animateBack(
+      0,
+      duration: _settleDuration,
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      dragStartBehavior: DragStartBehavior.down,
+      onHorizontalDragStart: _handleDragStart,
+      onHorizontalDragUpdate: _handleDragUpdate,
+      onHorizontalDragEnd: _handleDragEnd,
+      onHorizontalDragCancel: _settle,
+      child: AnimatedBuilder(
+        animation: _dragController,
+        child: widget.child,
+        builder: (context, child) {
+          final progress = (_dragController.value / _triggerDistance).clamp(
+            0.0,
+            1.0,
+          );
+          return Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.centerRight,
+            children: [
+              Positioned(
+                right: 5,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: Opacity(
+                    opacity: progress,
+                    child: Transform.scale(
+                      scale: 0.72 + (0.28 * progress),
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: AppColors.primary.withValues(alpha: 0.14),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.reply_rounded,
+                          color: AppColors.primary,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Transform.translate(
+                key: const ValueKey('swipe-reply-content'),
+                offset: Offset(-_dragController.value, 0),
+                child: child,
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1373,6 +1550,83 @@ class _ReadReceiptsSheet extends ConsumerWidget {
   }
 }
 
+class _StickyAvatarMessageGroup extends StatefulWidget {
+  final bool showAvatar;
+  final String fallback;
+  final String? avatarUrl;
+  final ScrollController? scrollController;
+  final GlobalKey? scrollViewportKey;
+  final double avatarSize;
+  final double avatarSlotWidth;
+  final double bottomInset;
+  final Widget Function(ValueNotifier<double>? avatarSwipeOffset)
+  messagesBuilder;
+
+  const _StickyAvatarMessageGroup({
+    required this.showAvatar,
+    required this.fallback,
+    required this.avatarUrl,
+    required this.scrollController,
+    required this.scrollViewportKey,
+    required this.avatarSize,
+    required this.avatarSlotWidth,
+    required this.bottomInset,
+    required this.messagesBuilder,
+  });
+
+  @override
+  State<_StickyAvatarMessageGroup> createState() =>
+      _StickyAvatarMessageGroupState();
+}
+
+class _StickyAvatarMessageGroupState extends State<_StickyAvatarMessageGroup> {
+  final ValueNotifier<double> _avatarSwipeOffset = ValueNotifier(0);
+
+  @override
+  void dispose() {
+    _avatarSwipeOffset.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        if (widget.showAvatar)
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: widget.avatarSlotWidth,
+            child: _StickyGroupAvatar(
+              key: const ValueKey('sticky-group-avatar-slot'),
+              fallback: widget.fallback,
+              avatarUrl: widget.avatarUrl,
+              scrollController: widget.scrollController,
+              scrollViewportKey: widget.scrollViewportKey,
+              avatarSize: widget.avatarSize,
+              bottomInset: widget.bottomInset,
+              swipeOffset: _avatarSwipeOffset,
+            ),
+          ),
+        Padding(
+          key: const ValueKey('sticky-group-messages-layer'),
+          padding: EdgeInsets.only(left: widget.avatarSlotWidth),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: widget.showAvatar ? widget.avatarSize : 0,
+            ),
+            child: widget.messagesBuilder(
+              widget.showAvatar ? _avatarSwipeOffset : null,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
   final String fallback;
   final String? avatarUrl;
@@ -1380,14 +1634,17 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
   final GlobalKey? scrollViewportKey;
   final double avatarSize;
   final double bottomInset;
+  final ValueNotifier<double> swipeOffset;
 
   _StickyGroupAvatar({
+    super.key,
     required this.fallback,
     required this.avatarUrl,
     required this.scrollController,
     required this.scrollViewportKey,
     required this.avatarSize,
     required this.bottomInset,
+    required this.swipeOffset,
   }) : super(
          child: AppAvatar(
            fallback: fallback,
@@ -1404,6 +1661,7 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
       scrollViewportKey: scrollViewportKey,
       avatarSize: avatarSize,
       bottomInset: bottomInset,
+      swipeOffset: swipeOffset,
     );
   }
 
@@ -1416,7 +1674,8 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
       ..scrollController = scrollController
       ..scrollViewportKey = scrollViewportKey
       ..avatarSize = avatarSize
-      ..bottomInset = bottomInset;
+      ..bottomInset = bottomInset
+      ..swipeOffset = swipeOffset;
   }
 }
 
@@ -1425,12 +1684,14 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
   GlobalKey? scrollViewportKey;
   double _avatarSize;
   double _bottomInset;
+  ValueNotifier<double> _swipeOffset;
 
   _RenderStickyGroupAvatar({
     required this._scrollController,
     required this.scrollViewportKey,
     required this._avatarSize,
     required this._bottomInset,
+    required this._swipeOffset,
   });
 
   ScrollController? get scrollController => _scrollController;
@@ -1461,15 +1722,29 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
     markNeedsPaint();
   }
 
+  ValueNotifier<double> get swipeOffset => _swipeOffset;
+
+  set swipeOffset(ValueNotifier<double> value) {
+    if (identical(value, _swipeOffset)) return;
+    if (attached) {
+      _swipeOffset.removeListener(markNeedsPaint);
+      value.addListener(markNeedsPaint);
+    }
+    _swipeOffset = value;
+    markNeedsPaint();
+  }
+
   @override
   void attach(PipelineOwner owner) {
     super.attach(owner);
     _scrollController?.addListener(markNeedsPaint);
+    _swipeOffset.addListener(markNeedsPaint);
   }
 
   @override
   void detach() {
     _scrollController?.removeListener(markNeedsPaint);
+    _swipeOffset.removeListener(markNeedsPaint);
     super.detach();
   }
 
@@ -1486,11 +1761,42 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
   void paint(PaintingContext context, Offset offset) {
     final child = this.child;
     if (child == null) return;
-    context.paintChild(child, offset + Offset(0, _avatarTopInSlot()));
+    context.paintChild(child, offset + _avatarPaintOffset());
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    final child = this.child;
+    if (child == null) return false;
+    return result.addWithPaintOffset(
+      offset: _avatarPaintOffset(),
+      position: position,
+      hitTest: (result, transformed) =>
+          child.hitTest(result, position: transformed),
+    );
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    final paintOffset = _avatarPaintOffset();
+    transform.translateByDouble(paintOffset.dx, paintOffset.dy, 0, 1);
+  }
+
+  double get debugHorizontalPaintOffset => _avatarPaintOffset().dx;
+
+  bool get debugIsSticky {
+    final avatarTop = _avatarTopInSlot();
+    return (avatarTop - _maxAvatarTop).abs() > 0.5;
+  }
+
+  Offset _avatarPaintOffset() {
+    final avatarTop = _avatarTopInSlot();
+    final isAtDefault = (avatarTop - _maxAvatarTop).abs() <= 0.5;
+    return Offset(isAtDefault ? -_swipeOffset.value : 0, avatarTop);
   }
 
   double _avatarTopInSlot() {
-    final maxTop = (size.height - _avatarSize).clamp(0.0, double.infinity);
+    final maxTop = _maxAvatarTop;
     final controller = _scrollController;
     if (controller == null || !controller.hasClients) return maxTop;
     final viewportBox =
@@ -1503,6 +1809,9 @@ class _RenderStickyGroupAvatar extends RenderProxyBox {
     final stickyTop = viewportBox.size.height - _bottomInset - _avatarSize;
     return (stickyTop - slotTop).clamp(0.0, maxTop);
   }
+
+  double get _maxAvatarTop =>
+      (size.height - _avatarSize).clamp(0.0, double.infinity);
 }
 
 /// A single row in the read-receipts sheet: avatar + name.
