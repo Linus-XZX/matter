@@ -12,6 +12,7 @@ import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
 import 'image_message_bubble.dart';
+import 'message_insert_animation.dart';
 import 'message_text.dart';
 import 'video_message_bubble.dart';
 import 'message_input.dart';
@@ -41,6 +42,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final String roomId;
   final Map<String, ChatMessage> messageIndex;
   final Map<String, String> remoteToLocalFlightId;
+  final Set<String> insertionAnimationIds;
   final String? senderAvatarUrl;
   final bool compact;
   final ScrollController? scrollController;
@@ -55,6 +57,7 @@ class MessageGroupWidget extends ConsumerWidget {
     required this.roomId,
     required this.messageIndex,
     this.remoteToLocalFlightId = const {},
+    this.insertionAnimationIds = const {},
     this.showAvatar = true,
     this.senderAvatarUrl,
     this.compact = false,
@@ -315,6 +318,8 @@ class MessageGroupWidget extends ConsumerWidget {
             key: ValueKey(flightId),
             messageId: message.id,
             flightId: flightId,
+            latestScrollController: scrollController,
+            lockEndAtLatest: true,
             child: bubble,
           )
         : bubble;
@@ -357,7 +362,16 @@ class MessageGroupWidget extends ConsumerWidget {
       ),
     );
 
-    if (isLocalOutgoing) return messageRow;
+    if (isLocalOutgoing) {
+      final shouldAnimateInsertion =
+          flightId != null && insertionAnimationIds.contains(flightId);
+      return shouldAnimateInsertion
+          ? MessageInsertAnimation(
+              key: ValueKey('message-insert:$flightId'),
+              child: messageRow,
+            )
+          : messageRow;
+    }
     return SizedBox(
       width: double.infinity,
       child: _SwipeToReply(

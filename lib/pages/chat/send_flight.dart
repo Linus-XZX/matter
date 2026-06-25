@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -57,6 +58,16 @@ void _notifySendFlightStateChanged() {
 bool _shouldHideSendFlightTarget(String id) =>
     _pendingSendFlights.containsKey(id) || _activeSendFlights.containsKey(id);
 
+Rect projectSendFlightTargetToLatest(Rect currentRect, ScrollMetrics metrics) {
+  final distance = math.max(0.0, metrics.pixels - metrics.minScrollExtent);
+  return switch (metrics.axisDirection) {
+    AxisDirection.up => currentRect.translate(0, -distance),
+    AxisDirection.down => currentRect.translate(0, distance),
+    AxisDirection.left => currentRect.translate(-distance, 0),
+    AxisDirection.right => currentRect.translate(distance, 0),
+  };
+}
+
 /// Registers a send flight and returns a [Future] that completes when the
 /// flight animation finishes (or times out). If a flight for the same message
 /// id is already registered, the existing future is returned.
@@ -86,12 +97,16 @@ Future<void> registerSendFlight(String messageId, SendFlightSpec spec) {
 class SendFlightTarget extends StatefulWidget {
   final String messageId;
   final String? flightId;
+  final ScrollController? latestScrollController;
+  final bool lockEndAtLatest;
   final Widget child;
 
   const SendFlightTarget({
     super.key,
     required this.messageId,
     this.flightId,
+    this.latestScrollController,
+    this.lockEndAtLatest = false,
     required this.child,
   });
 
@@ -194,7 +209,19 @@ class _SendFlightTargetState extends State<SendFlightTarget> {
       return topLeft & targetBox.size;
     }
 
-    final end = targetRect() ?? inOverlay(spec.sourceRect);
+    Rect? lockedTargetRect() {
+      final rect = targetRect();
+      if (rect == null) return null;
+      final controller = widget.latestScrollController;
+      if (!widget.lockEndAtLatest ||
+          controller == null ||
+          !controller.hasClients) {
+        return rect;
+      }
+      return projectSendFlightTargetToLatest(rect, controller.position);
+    }
+
+    final end = lockedTargetRect() ?? inOverlay(spec.sourceRect);
     final overlayCompleter = Completer<void>();
     late final OverlayEntry entry;
     entry = OverlayEntry(
@@ -202,7 +229,7 @@ class _SendFlightTargetState extends State<SendFlightTarget> {
         spec: spec,
         begin: inOverlay(spec.sourceRect),
         end: end,
-        resolveEnd: targetRect,
+        resolveEnd: widget.lockEndAtLatest ? null : targetRect,
         onCompleted: () {
           entry.remove();
           if (!overlayCompleter.isCompleted) overlayCompleter.complete();

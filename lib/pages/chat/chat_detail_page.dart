@@ -16,6 +16,7 @@ import 'chat_timestamp.dart';
 import 'composer_picker_panel.dart';
 import 'date_separator.dart';
 import 'floating_date_header.dart';
+import 'latest_message_control.dart';
 import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
 import 'message_input.dart';
@@ -71,6 +72,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   double _expandedPickerHeight = 0;
   bool _isPickerResizing = false;
   Timer? _pickerResizeTimer;
+  Timer? _sentNoticeTimer;
+  bool _showLatestMessageControl = false;
+  bool _showSentNotice = false;
+  final Set<String> _insertionAnimationIds = {};
 
   /// Remote event ids that have already been matched with a local outgoing
   /// message. Keeps duplicate sends of the same payload from being incorrectly
@@ -92,6 +97,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   static const double _olderLoadTriggerDistance = 24.0;
   static const double _olderLoadRearmDistance = 240.0;
   static const int _maxMessagesPerRenderGroup = 12;
+  static const Duration _sentNoticeDuration = Duration(milliseconds: 2800);
+  static const Duration _insertionAnimationLifetime = Duration(
+    milliseconds: 500,
+  );
 
   void _setInputPanelMode(InputPanelMode mode) {
     if (_inputPanelMode == mode) return;
@@ -139,12 +148,35 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   @override
   void dispose() {
     _pickerResizeTimer?.cancel();
+    _sentNoticeTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
 
+  double _distanceFromLatest(ScrollMetrics metrics) {
+    return math.max(0, metrics.pixels - metrics.minScrollExtent);
+  }
+
+  void _updateLatestMessageControl(ScrollMetrics metrics) {
+    final shouldShow = shouldShowLatestMessageControl(
+      distanceFromLatest: _distanceFromLatest(metrics),
+      viewportDimension: metrics.viewportDimension,
+      currentlyVisible: _showLatestMessageControl,
+    );
+    if (shouldShow == _showLatestMessageControl) return;
+
+    if (!shouldShow) {
+      _sentNoticeTimer?.cancel();
+    }
+    setState(() {
+      _showLatestMessageControl = shouldShow;
+      if (!shouldShow) _showSentNotice = false;
+    });
+  }
+
   bool _handleScrollNotification(ScrollNotification notification) {
     final metrics = notification.metrics;
+    _updateLatestMessageControl(metrics);
     final distanceFromOlderEdge = metrics.maxScrollExtent - metrics.pixels;
     if (distanceFromOlderEdge > _olderLoadRearmDistance) {
       _olderLoadArmed = true;
@@ -160,6 +192,82 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       _loadOlderMessages();
     }
     return false;
+  }
+
+  bool _handleScrollMetricsNotification(
+    ScrollMetricsNotification notification,
+  ) {
+    _updateLatestMessageControl(notification.metrics);
+    return false;
+  }
+
+  void _scrollToLatest() {
+    _sentNoticeTimer?.cancel();
+    if (_showSentNotice) {
+      setState(() => _showSentNotice = false);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      _scrollController.animateTo(
+        position.minScrollExtent,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  MessageSendPresentation _resolveSendPresentation() {
+    if (!_scrollController.hasClients) {
+      return MessageSendPresentation.flight;
+    }
+    final position = _scrollController.position;
+    return resolveMessageSendPresentation(
+      distanceFromLatest: _distanceFromLatest(position),
+      viewportDimension: position.viewportDimension,
+    );
+  }
+
+  void _handleMessageQueued(
+    String stableMessageId,
+    MessageSendPresentation presentation,
+  ) {
+    if (presentation == MessageSendPresentation.quiet) return;
+    if (presentation == MessageSendPresentation.insert) {
+      setState(() => _insertionAnimationIds.add(stableMessageId));
+      Future<void>.delayed(_insertionAnimationLifetime, () {
+        if (!mounted || !_insertionAnimationIds.contains(stableMessageId)) {
+          return;
+        }
+        setState(() => _insertionAnimationIds.remove(stableMessageId));
+      });
+    }
+    _scrollToLatest();
+  }
+
+  void _showMessageSentNotice() {
+    _sentNoticeTimer?.cancel();
+    setState(() {
+      _showLatestMessageControl = true;
+      _showSentNotice = true;
+    });
+    _sentNoticeTimer = Timer(_sentNoticeDuration, () {
+      if (!mounted) return;
+      setState(() => _showSentNotice = false);
+    });
+  }
+
+  void _handleMessageSent(
+    MessageSendPresentation presentation,
+    bool insertedOptimistically,
+  ) {
+    if (presentation == MessageSendPresentation.quiet) {
+      _showMessageSentNotice();
+      return;
+    }
+    if (!insertedOptimistically) {
+      _scrollToLatest();
+    }
   }
 
   Future<void> _loadOlderMessages() async {
@@ -532,6 +640,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
           roomId: widget.roomId,
           messageIndex: messageIndex,
           remoteToLocalFlightId: _remoteToLocalFlightId,
+          insertionAnimationIds: _insertionAnimationIds,
           showAvatar: _needsStickyAvatar(group),
           compact: widget.isDm,
           senderAvatarUrl: avatarMap[group.senderId],
@@ -753,34 +862,38 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                         : Duration.zero,
                     curve: Curves.easeOutCubic,
                     builder: (context, animatedBottomPadding, _) {
-                      return NotificationListener<ScrollNotification>(
-                        onNotification: _handleScrollNotification,
-                        child: CustomScrollView(
-                          key: _scrollViewportKey,
-                          reverse: true,
-                          controller: _scrollController,
-                          slivers: [
-                            SliverPadding(
-                              padding: EdgeInsets.only(
-                                bottom: 8 + animatedBottomPadding,
-                              ),
-                            ),
-                            SliverList(
-                              delegate: SliverChildBuilderDelegate(
-                                (context, index) => _buildTimelineEntry(
-                                  timelineEntries[index],
-                                  avatarMap,
-                                  messageIndex,
-                                  8 + animatedBottomPadding,
+                      return NotificationListener<ScrollMetricsNotification>(
+                        onNotification: _handleScrollMetricsNotification,
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: _handleScrollNotification,
+                          child: CustomScrollView(
+                            key: _scrollViewportKey,
+                            reverse: true,
+                            controller: _scrollController,
+                            slivers: [
+                              SliverPadding(
+                                padding: EdgeInsets.only(
+                                  bottom: 8 + animatedBottomPadding,
                                 ),
-                                childCount: timelineEntries.length,
-                                findChildIndexCallback: _findTimelineEntryIndex,
                               ),
-                            ),
-                            const SliverPadding(
-                              padding: EdgeInsets.only(top: 8),
-                            ),
-                          ],
+                              SliverList(
+                                delegate: SliverChildBuilderDelegate(
+                                  (context, index) => _buildTimelineEntry(
+                                    timelineEntries[index],
+                                    avatarMap,
+                                    messageIndex,
+                                    8 + animatedBottomPadding,
+                                  ),
+                                  childCount: timelineEntries.length,
+                                  findChildIndexCallback:
+                                      _findTimelineEntryIndex,
+                                ),
+                              ),
+                              const SliverPadding(
+                                padding: EdgeInsets.only(top: 8),
+                              ),
+                            ],
+                          ),
                         ),
                       );
                     },
@@ -798,6 +911,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                 boundaries: _floatingDateBoundariesCache,
                 separatorKeys: _floatingDateSeparatorKeysCache,
               ),
+            AnimatedPositioned(
+              right: 16,
+              bottom: messageBottomPadding + 12,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              child: LatestMessageControl(
+                visible: _showLatestMessageControl,
+                showSentNotice: _showSentNotice,
+                onPressed: _scrollToLatest,
+              ),
+            ),
             AnimatedPositioned(
               left: 0,
               right: 0,
@@ -832,6 +956,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                       onPanelModeChanged: _setInputPanelMode,
                       onPickerHeightChanged: (height) =>
                           _handlePickerHeightChanged(height, pickerBaseHeight),
+                      resolveSendPresentation: _resolveSendPresentation,
+                      onMessageQueued: _handleMessageQueued,
+                      onMessageSent: _handleMessageSent,
                     ),
                   ],
                 ),

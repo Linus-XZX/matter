@@ -10,6 +10,7 @@ import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import 'composer_picker_panel.dart';
+import 'latest_message_control.dart';
 import 'send_flight.dart';
 import 'sticker_catalog.dart';
 
@@ -42,6 +43,17 @@ class MessageInput extends ConsumerStatefulWidget {
   final bool animatePickerHeight;
   final ValueChanged<InputPanelMode> onPanelModeChanged;
   final ValueChanged<double> onPickerHeightChanged;
+  final MessageSendPresentation Function() resolveSendPresentation;
+  final void Function(
+    String stableMessageId,
+    MessageSendPresentation presentation,
+  )
+  onMessageQueued;
+  final void Function(
+    MessageSendPresentation presentation,
+    bool insertedOptimistically,
+  )
+  onMessageSent;
 
   const MessageInput({
     super.key,
@@ -55,6 +67,9 @@ class MessageInput extends ConsumerStatefulWidget {
     required this.animatePickerHeight,
     required this.onPanelModeChanged,
     required this.onPickerHeightChanged,
+    required this.resolveSendPresentation,
+    required this.onMessageQueued,
+    required this.onMessageSent,
   });
 
   @override
@@ -216,8 +231,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         ? '$localOutgoingPendingPrefix${DateTime.now().microsecondsSinceEpoch}'
         : null;
     final localTimestamp = isNewMessage ? _nextLocalTimestamp() : null;
+    final sendPresentation = localId != null
+        ? widget.resolveSendPresentation()
+        : null;
     if (localId != null) {
-      _registerTextSendFlight(localId, text);
+      if (sendPresentation == MessageSendPresentation.flight) {
+        _registerTextSendFlight(localId, text);
+      }
+      widget.onMessageQueued(sendFlightId(localId), sendPresentation!);
       upsertLocalOutgoingMessage(
         ref,
         widget.roomId,
@@ -266,6 +287,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           widget.roomId,
           localId,
         );
+        widget.onMessageSent(sendPresentation!, true);
         unawaited(_reconcileSentLocalMessage(sentId));
       } else {
         unawaited(refreshMessages(ref, widget.roomId));
@@ -416,6 +438,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       );
       if (pickedFile == null) return;
 
+      final sendPresentation = widget.resolveSendPresentation();
       setState(() => _isSending = true);
 
       final bytes = await pickedFile.readAsBytes();
@@ -430,7 +453,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         height: imageSize?.height.round(),
       );
 
-      unawaited(refreshMessages(ref, widget.roomId));
+      await refreshMessages(ref, widget.roomId);
+      if (!mounted) return;
+      widget.onMessageSent(sendPresentation, false);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -504,11 +529,13 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final localId =
         '$localOutgoingPendingPrefix${DateTime.now().microsecondsSinceEpoch}';
     final localTimestamp = _nextLocalTimestamp();
+    final sendPresentation = widget.resolveSendPresentation();
     final displayImageUrl =
         cachedResolvedMxcUrl(ref, sticker.thumbnailUrl ?? imageUrl) ??
         cachedResolvedMxcUrl(ref, imageUrl) ??
         imageUrl;
-    if (sourceRect != null) {
+    if (sendPresentation == MessageSendPresentation.flight &&
+        sourceRect != null) {
       unawaited(
         registerSendFlight(
           localId,
@@ -520,6 +547,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         ),
       );
     }
+    widget.onMessageQueued(sendFlightId(localId), sendPresentation);
     upsertLocalOutgoingMessage(
       ref,
       widget.roomId,
@@ -546,6 +574,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       _stopTyping();
       if (!mounted) return;
       final sentId = markLocalOutgoingMessageSent(ref, widget.roomId, localId);
+      widget.onMessageSent(sendPresentation, true);
       unawaited(_reconcileSentLocalMessage(sentId));
     } catch (e) {
       if (mounted) {

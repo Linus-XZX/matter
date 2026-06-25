@@ -10,6 +10,43 @@ void main() {
     expect(sendFlightId('${localOutgoingFailedPrefix}42'), '42');
   });
 
+  testWidgets(
+    'projects a reverse-list target to its final latest-message rect',
+    (tester) async {
+      final controller = ScrollController(initialScrollOffset: 80);
+      addTearDown(controller.dispose);
+      const targetKey = ValueKey('projected-target');
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              controller: controller,
+              reverse: true,
+              child: const Column(
+                children: [
+                  SizedBox(height: 1000),
+                  SizedBox(key: targetKey, height: 40),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final projected = projectSendFlightTargetToLatest(
+        tester.getRect(find.byKey(targetKey)),
+        controller.position,
+      );
+      controller.jumpTo(controller.position.minScrollExtent);
+      await tester.pump();
+      final finalRect = tester.getRect(find.byKey(targetKey));
+
+      expect(projected.top, closeTo(finalRect.top, 0.1));
+      expect(projected.bottom, closeTo(finalRect.bottom, 0.1));
+    },
+  );
+
   testWidgets('send flight reveals the target after reaching it', (
     tester,
   ) async {
