@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../features/markdown/markdown_composer.dart';
+import '../../features/markdown/markdown_source_store.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/mutable_state.dart';
@@ -79,6 +81,8 @@ class MessageInput extends ConsumerStatefulWidget {
 class _MessageInputState extends ConsumerState<MessageInput> {
   static const _toolbarAnimationDuration = Duration(milliseconds: 180);
   static const _toolbarAnimationCurve = Curves.easeOutCubic;
+  static const _markdownComposer = MarkdownComposer();
+  static const _markdownSourceStore = MarkdownSourceStore();
 
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
@@ -220,6 +224,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
+    final compiled = _markdownComposer.compile(text);
+    if (compiled.body.trim().isEmpty) return;
 
     final editing = ref.read(editingMessageProvider(widget.roomId));
     final replyTo = ref.read(replyingToProvider(widget.roomId));
@@ -236,7 +242,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         : null;
     if (localId != null) {
       if (sendPresentation == MessageSendPresentation.flight) {
-        _registerTextSendFlight(localId, text);
+        _registerTextSendFlight(localId, compiled.body);
       }
       widget.onMessageQueued(sendFlightId(localId), sendPresentation!);
       upsertLocalOutgoingMessage(
@@ -245,7 +251,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         LocalOutgoingMessage(
           message: _localTextMessage(
             id: localId,
-            text: text,
+            compiled: compiled,
             inReplyTo: replyTo?.id,
             timestamp: localTimestamp,
           ),
@@ -260,21 +266,35 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     setState(() => _isSending = true);
 
     try {
+      String remoteEventId;
       if (editing != null) {
-        await rust.editMessage(
+        remoteEventId = await rust.editMessage(
           roomId: widget.roomId,
           eventId: editing.id,
-          newText: text,
+          message: compiled.toRust(),
+          previousMentionedUserIds: editing.mentionedUserIds,
+          previousMentionsRoom: editing.mentionsRoom,
         );
       } else if (replyTo != null) {
-        await rust.sendReply(
+        remoteEventId = await rust.sendReply(
           roomId: widget.roomId,
-          message: text,
+          message: compiled.toRust(),
           replyToEventId: replyTo.id,
+          replyToUserId: replyTo.isMe ? null : replyTo.senderId,
         );
       } else {
-        await rust.sendMessage(roomId: widget.roomId, message: text);
+        remoteEventId = await rust.sendMessage(
+          roomId: widget.roomId,
+          message: compiled.toRust(),
+        );
       }
+      await _markdownSourceStore.save(
+        roomId: widget.roomId,
+        eventId: editing?.id ?? remoteEventId,
+        source: compiled.source,
+        body: compiled.body,
+        formattedBody: compiled.formattedBody,
+      );
       if (!mounted) return;
       _stopTyping();
       if (!isNewMessage) _controller.clear();
@@ -301,7 +321,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           LocalOutgoingMessage(
             message: _localTextMessage(
               id: failedLocalOutgoingId(localId),
-              text: text,
+              compiled: compiled,
               inReplyTo: replyTo?.id,
               timestamp: localTimestamp,
             ),
@@ -405,7 +425,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   rust.ChatMessage _localTextMessage({
     required String id,
-    required String text,
+    required CompiledMarkdownMessage compiled,
     String? inReplyTo,
     int? timestamp,
   }) {
@@ -414,7 +434,10 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       id: id,
       senderId: currentUser?.id ?? '',
       senderName: '我',
-      content: text,
+      content: compiled.body,
+      formattedBody: compiled.formattedBody,
+      mentionedUserIds: compiled.mentionedUserIds,
+      mentionsRoom: compiled.mentionsRoom,
       timestamp: (timestamp ?? DateTime.now().millisecondsSinceEpoch)
           .toString(),
       isMe: true,
@@ -499,6 +522,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       senderId: currentUser?.id ?? '',
       senderName: '我',
       content: sticker.body,
+      mentionedUserIds: const [],
+      mentionsRoom: false,
       timestamp: (timestamp ?? DateTime.now().millisecondsSinceEpoch)
           .toString(),
       isMe: true,
@@ -605,16 +630,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     // input with the original text. Tracked via id so re-renders don't reset.
     if (editing != null && editing.id != _lastEditingId) {
       _lastEditingId = editing.id;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _controller.text = editing.content;
-        _controller.selection = TextSelection.fromPosition(
-          TextPosition(offset: _controller.text.length),
-        );
-        setState(() {
-          _hasText = _controller.text.trim().isNotEmpty;
-        });
-      });
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _prefillEditingSource(editing),
+      );
     } else if (editing == null) {
       _lastEditingId = null;
     }
@@ -843,6 +861,21 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         ),
       ),
     );
+  }
+
+  Future<void> _prefillEditingSource(rust.ChatMessage editing) async {
+    final source = await _markdownSourceStore.load(
+      roomId: widget.roomId,
+      eventId: editing.id,
+      body: editing.content,
+      formattedBody: editing.formattedBody,
+    );
+    if (!mounted || _lastEditingId != editing.id) return;
+    _controller.text = source ?? editing.content;
+    _controller.selection = TextSelection.fromPosition(
+      TextPosition(offset: _controller.text.length),
+    );
+    setState(() => _hasText = _controller.text.trim().isNotEmpty);
   }
 
   Widget _buildReplyBar(rust.ChatMessage replyTo) {

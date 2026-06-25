@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/markdown/markdown_source_store.dart';
+import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
@@ -292,6 +294,7 @@ class MessageGroupWidget extends ConsumerWidget {
             imageWidth: message.imageWidth,
             imageHeight: message.imageHeight,
             caption: message.caption,
+            captionFormattedBody: message.captionFormattedBody,
             isMe: isMe,
             heroTag: 'image-preview:${message.id}',
             isSticker: message.msgType == MessageType.sticker,
@@ -512,14 +515,28 @@ class MessageGroupWidget extends ConsumerWidget {
             ),
           if (message.inReplyTo != null)
             _buildReplyPreview(context, message, isMe),
-          _AdaptiveTextMetadata(
-            key: ValueKey('adaptive-text-metadata:${message.id}'),
-            text: message.content,
-            textStyle: textStyle,
-            metadata: metadata,
-            metadataWidth: _messageMetadataWidth(context, message),
-            maxWidth: maxBubbleWidth - 28,
-          ),
+          if (message.formattedBody?.isNotEmpty == true)
+            _FormattedBodyMetadata(
+              key: ValueKey('formatted-body-metadata:${message.id}'),
+              content: MatrixHtmlMessage(
+                key: ValueKey('matrix-html:${message.id}'),
+                html: message.formattedBody!,
+                style: textStyle,
+                accentColor: isMe ? Colors.white : AppColors.secondary,
+              ),
+              metadata: metadata,
+              metadataWidth: _messageMetadataWidth(context, message),
+              maxWidth: maxBubbleWidth - 28,
+            )
+          else
+            _AdaptiveTextMetadata(
+              key: ValueKey('adaptive-text-metadata:${message.id}'),
+              text: message.content,
+              textStyle: textStyle,
+              metadata: metadata,
+              metadataWidth: _messageMetadataWidth(context, message),
+              maxWidth: maxBubbleWidth - 28,
+            ),
         ],
       ),
     );
@@ -1129,6 +1146,10 @@ class MessageGroupWidget extends ConsumerWidget {
                     Navigator.of(context).pop();
                     try {
                       await redactMessage(ref, roomId, message.id);
+                      await const MarkdownSourceStore().delete(
+                        roomId: roomId,
+                        eventId: message.id,
+                      );
                     } catch (e) {
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -1304,6 +1325,59 @@ class _SwipeToReplyState extends State<_SwipeToReply>
           );
         },
       ),
+    );
+  }
+}
+
+/// Renders rich HTML/Markdown content with trailing metadata without forcing
+/// the bubble to fill its maximum width. The bubble width hugs the content
+/// while still right-aligning the metadata.
+class _FormattedBodyMetadata extends StatelessWidget {
+  final Widget content;
+  final Widget metadata;
+  final double metadataWidth;
+  final double maxWidth;
+
+  const _FormattedBodyMetadata({
+    super.key,
+    required this.content,
+    required this.metadata,
+    required this.metadataWidth,
+    required this.maxWidth,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availableWidth = constraints.maxWidth.isFinite
+            ? math.min(constraints.maxWidth, maxWidth)
+            : maxWidth;
+        final textScaler = MediaQuery.textScalerOf(context);
+        final metadataHeight = math.max(15.0, textScaler.scale(10.5));
+        const gap = 4.0;
+        return ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: availableWidth),
+          child: IntrinsicWidth(
+            child: Stack(
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(minWidth: metadataWidth),
+                  child: Padding(
+                    padding: EdgeInsets.only(bottom: metadataHeight + gap),
+                    child: content,
+                  ),
+                ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: metadata,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

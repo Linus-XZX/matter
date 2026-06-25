@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
@@ -16,6 +17,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final int? imageWidth;
   final int? imageHeight;
   final String? caption;
+  final String? captionFormattedBody;
   final bool isMe;
   final Object heroTag;
   final bool isSticker;
@@ -30,6 +32,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     this.imageWidth,
     this.imageHeight,
     this.caption,
+    this.captionFormattedBody,
     required this.isMe,
     required this.heroTag,
     this.isSticker = false,
@@ -247,7 +250,11 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
         mainAxisSize: MainAxisSize.min,
         children: [
           bubble,
-          _ImageCaption(text: caption, isMe: widget.isMe),
+          _ImageCaption(
+            text: caption,
+            formattedBody: widget.captionFormattedBody,
+            isMe: widget.isMe,
+          ),
         ],
       ),
     );
@@ -349,9 +356,14 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
 
 class _ImageCaption extends StatelessWidget {
   final String text;
+  final String? formattedBody;
   final bool isMe;
 
-  const _ImageCaption({required this.text, required this.isMe});
+  const _ImageCaption({
+    required this.text,
+    required this.formattedBody,
+    required this.isMe,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -364,13 +376,19 @@ class _ImageCaption extends StatelessWidget {
       key: const ValueKey('image-caption'),
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Text.rich(
-        messageTextSpan(
-          text,
-          style: style,
-          mentionColor: isMe ? Colors.white : AppColors.secondary,
-        ),
-      ),
+      child: formattedBody?.isNotEmpty == true
+          ? MatrixHtmlMessage(
+              html: formattedBody!,
+              style: style,
+              accentColor: isMe ? Colors.white : AppColors.secondary,
+            )
+          : Text.rich(
+              messageTextSpan(
+                text,
+                style: style,
+                mentionColor: isMe ? Colors.white : AppColors.secondary,
+              ),
+            ),
     );
   }
 }

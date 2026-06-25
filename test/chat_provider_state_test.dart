@@ -31,6 +31,8 @@ rust.ChatMessage _message(String id, String timestamp) => rust.ChatMessage(
   senderId: '@alice:example.org',
   senderName: 'Alice',
   content: id,
+  mentionedUserIds: const [],
+  mentionsRoom: false,
   timestamp: timestamp,
   isMe: false,
   msgType: rust.MessageType.text,

@@ -413,7 +413,11 @@ String markLocalOutgoingMessageSent(
       senderId: message.senderId,
       senderName: message.senderName,
       content: message.content,
+      formattedBody: message.formattedBody,
       caption: message.caption,
+      captionFormattedBody: message.captionFormattedBody,
+      mentionedUserIds: message.mentionedUserIds,
+      mentionsRoom: message.mentionsRoom,
       timestamp: message.timestamp,
       isMe: message.isMe,
       msgType: message.msgType,
@@ -700,7 +704,11 @@ Future<void> sendReply(
 ) async {
   await rust.sendReply(
     roomId: roomId,
-    message: message,
+    message: rust.FormattedMessageInput(
+      body: message,
+      mentionedUserIds: const [],
+      mentionsRoom: false,
+    ),
     replyToEventId: replyToEventId,
   );
   await refreshMessagesRef(ref, roomId);

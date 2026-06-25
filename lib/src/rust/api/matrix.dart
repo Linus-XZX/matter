@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `app_log`, `build_sdk_data_dir`, `clear_receipt_cache`, `clear_sent_read_receipts_for_user`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decode_html_entities`, `decode_html_entity`, `encryption_settings`, `extract_edit_text`, `extract_html_attr`, `finalize_pending`, `find_ascii_case_insensitive`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `html_message_to_text`, `image_info_dimensions`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `is_closing_html_tag`, `is_matrix_mention_anchor`, `is_opening_html_tag`, `load_room_messages_with_key_recovery`, `load_room_sticker_packs`, `media_caption_from_formatted`, `mention_display_text`, `mention_fallback_from_anchor`, `message_body_from_formatted`, `mxc_to_thumbnail_http`, `normalize_rendered_text`, `notify_sync_event`, `pack_image_to_sticker`, `percent_decode_minimal`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_to_chat_room`, `sanitize_for_path`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `PendingEntry`, `SyncNotification`, `SyncTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `app_log`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `clear_receipt_cache`, `clear_sent_read_receipts_for_user`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `encryption_settings`, `extract_edit_content`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `load_room_messages_with_key_recovery`, `load_room_sticker_packs`, `media_caption_parts`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `EditedTextContent`, `PendingEntry`, `SyncNotification`, `SyncTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -267,11 +267,13 @@ Future<List<ChatMessage>> getMessages({required String roomId}) =>
 Future<List<StickerPack>> getStickerPacks({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetStickerPacks(roomId: roomId);
 
-Future<void> sendMessage({required String roomId, required String message}) =>
-    RustLib.instance.api.crateApiMatrixSendMessage(
-      roomId: roomId,
-      message: message,
-    );
+Future<String> sendMessage({
+  required String roomId,
+  required FormattedMessageInput message,
+}) => RustLib.instance.api.crateApiMatrixSendMessage(
+  roomId: roomId,
+  message: message,
+);
 
 /// Send an image message to a room.
 /// `image_data` is the raw bytes of the image file.
@@ -370,14 +372,16 @@ Future<List<Contact>> getContacts() =>
     RustLib.instance.api.crateApiMatrixGetContacts();
 
 /// Send a reply to a specific message in a room.
-Future<void> sendReply({
+Future<String> sendReply({
   required String roomId,
-  required String message,
+  required FormattedMessageInput message,
   required String replyToEventId,
+  String? replyToUserId,
 }) => RustLib.instance.api.crateApiMatrixSendReply(
   roomId: roomId,
   message: message,
   replyToEventId: replyToEventId,
+  replyToUserId: replyToUserId,
 );
 
 /// Edit (replace) one of your own messages.
@@ -386,14 +390,18 @@ Future<void> sendReply({
 /// and whose `m.relates_to` is an `m.replace` pointing at the original event.
 /// Tuwunel relays edits (MSC2676); the displayed edit history is aggregated
 /// client-side by `get_messages` (see `Relation::Replacement` parsing).
-Future<void> editMessage({
+Future<String> editMessage({
   required String roomId,
   required String eventId,
-  required String newText,
+  required FormattedMessageInput message,
+  required List<String> previousMentionedUserIds,
+  required bool previousMentionsRoom,
 }) => RustLib.instance.api.crateApiMatrixEditMessage(
   roomId: roomId,
   eventId: eventId,
-  newText: newText,
+  message: message,
+  previousMentionedUserIds: previousMentionedUserIds,
+  previousMentionsRoom: previousMentionsRoom,
 );
 
 /// Send an emoji reaction (m.annotation) to an event.
@@ -570,7 +578,17 @@ class ChatMessage {
   final String senderId;
   final String senderName;
   final String content;
+
+  /// Sanitized Matrix HTML for text-like messages.
+  final String? formattedBody;
   final String? caption;
+
+  /// Sanitized Matrix HTML for media captions.
+  final String? captionFormattedBody;
+
+  /// Intentional mentions carried by `m.mentions`.
+  final List<String> mentionedUserIds;
+  final bool mentionsRoom;
   final String timestamp;
   final bool isMe;
   final MessageType msgType;
@@ -605,7 +623,11 @@ class ChatMessage {
     required this.senderId,
     required this.senderName,
     required this.content,
+    this.formattedBody,
     this.caption,
+    this.captionFormattedBody,
+    required this.mentionedUserIds,
+    required this.mentionsRoom,
     required this.timestamp,
     required this.isMe,
     required this.msgType,
@@ -627,7 +649,11 @@ class ChatMessage {
       senderId.hashCode ^
       senderName.hashCode ^
       content.hashCode ^
+      formattedBody.hashCode ^
       caption.hashCode ^
+      captionFormattedBody.hashCode ^
+      mentionedUserIds.hashCode ^
+      mentionsRoom.hashCode ^
       timestamp.hashCode ^
       isMe.hashCode ^
       msgType.hashCode ^
@@ -651,7 +677,11 @@ class ChatMessage {
           senderId == other.senderId &&
           senderName == other.senderName &&
           content == other.content &&
+          formattedBody == other.formattedBody &&
           caption == other.caption &&
+          captionFormattedBody == other.captionFormattedBody &&
+          mentionedUserIds == other.mentionedUserIds &&
+          mentionsRoom == other.mentionsRoom &&
           timestamp == other.timestamp &&
           isMe == other.isMe &&
           msgType == other.msgType &&
@@ -804,6 +834,41 @@ class EncryptionRecoveryInfo {
           runtimeType == other.runtimeType &&
           state == other.state &&
           deviceVerified == other.deviceVerified;
+}
+
+/// A Matrix text message compiled by the Flutter authoring layer.
+///
+/// `body` is always the readable plain-text fallback. `formatted_body`, when
+/// present, is Matrix HTML and is sanitized again in Rust before sending.
+class FormattedMessageInput {
+  final String body;
+  final String? formattedBody;
+  final List<String> mentionedUserIds;
+  final bool mentionsRoom;
+
+  const FormattedMessageInput({
+    required this.body,
+    this.formattedBody,
+    required this.mentionedUserIds,
+    required this.mentionsRoom,
+  });
+
+  @override
+  int get hashCode =>
+      body.hashCode ^
+      formattedBody.hashCode ^
+      mentionedUserIds.hashCode ^
+      mentionsRoom.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FormattedMessageInput &&
+          runtimeType == other.runtimeType &&
+          body == other.body &&
+          formattedBody == other.formattedBody &&
+          mentionedUserIds == other.mentionedUserIds &&
+          mentionsRoom == other.mentionsRoom;
 }
 
 /// A single member's read receipt on a message.

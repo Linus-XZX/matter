@@ -15,6 +15,8 @@ rust.ChatMessage _message({
   senderId: '@alice:example.org',
   senderName: 'Alice',
   content: content ?? id,
+  mentionedUserIds: const [],
+  mentionsRoom: false,
   timestamp: timestamp,
   isMe: false,
   msgType: msgType,

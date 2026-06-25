@@ -15,6 +15,8 @@ void main() {
     senderId: '@alice:example.org',
     senderName: 'Alice',
     content: id,
+    mentionedUserIds: const [],
+    mentionsRoom: false,
     timestamp: timestamp,
     isMe: false,
     msgType: MessageType.text,
@@ -70,7 +72,11 @@ void main() {
       senderId: '@alice:example.org',
       senderName: 'Alice',
       content: 'hello',
+      formattedBody: '<strong>hello</strong>',
       caption: 'image description',
+      captionFormattedBody: '<em>image description</em>',
+      mentionedUserIds: ['@bob:example.org'],
+      mentionsRoom: true,
       timestamp: '1781798400000',
       isMe: true,
       msgType: MessageType.text,
@@ -93,7 +99,11 @@ void main() {
     final restored = chatMessageFromMap(chatMessageToMap(message));
 
     expect(restored.id, message.id);
+    expect(restored.formattedBody, message.formattedBody);
     expect(restored.caption, message.caption);
+    expect(restored.captionFormattedBody, message.captionFormattedBody);
+    expect(restored.mentionedUserIds, message.mentionedUserIds);
+    expect(restored.mentionsRoom, isTrue);
     expect(restored.inReplyTo, message.inReplyTo);
     expect(restored.isEdited, isTrue);
     expect(restored.editHistory, message.editHistory);
@@ -111,6 +121,8 @@ void main() {
         senderId: sticker.senderId,
         senderName: sticker.senderName,
         content: sticker.content,
+        mentionedUserIds: const [],
+        mentionsRoom: false,
         timestamp: sticker.timestamp,
         isMe: sticker.isMe,
         msgType: MessageType.sticker,

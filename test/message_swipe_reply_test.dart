@@ -12,6 +12,8 @@ ChatMessage _message({required String id, required bool isMe}) => ChatMessage(
   senderId: isMe ? '@me:example.org' : '@alice:example.org',
   senderName: isMe ? '我' : 'Alice',
   content: '测试消息',
+  mentionedUserIds: const [],
+  mentionsRoom: false,
   timestamp: '100',
   isMe: isMe,
   msgType: MessageType.text,

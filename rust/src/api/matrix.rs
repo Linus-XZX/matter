@@ -943,6 +943,19 @@ pub struct MessageReader {
     pub avatar_url: Option<String>,
 }
 
+/// A Matrix text message compiled by the Flutter authoring layer.
+///
+/// `body` is always the readable plain-text fallback. `formatted_body`, when
+/// present, is Matrix HTML and is sanitized again in Rust before sending.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct FormattedMessageInput {
+    pub body: String,
+    pub formatted_body: Option<String>,
+    pub mentioned_user_ids: Vec<String>,
+    pub mentions_room: bool,
+}
+
 #[frb]
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
@@ -950,7 +963,14 @@ pub struct ChatMessage {
     pub sender_id: String,
     pub sender_name: String,
     pub content: String,
+    /// Sanitized Matrix HTML for text-like messages.
+    pub formatted_body: Option<String>,
     pub caption: Option<String>,
+    /// Sanitized Matrix HTML for media captions.
+    pub caption_formatted_body: Option<String>,
+    /// Intentional mentions carried by `m.mentions`.
+    pub mentioned_user_ids: Vec<String>,
+    pub mentions_room: bool,
     pub timestamp: String,
     pub is_me: bool,
     pub msg_type: MessageType,
@@ -2902,8 +2922,8 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
                         rep,
                     )) = &o.content.relates_to
                     {
-                        if let Some(edited) = extract_edit_text(&rep.new_content) {
-                            return Some(edited);
+                        if let Some(edited) = extract_edit_content(&rep.new_content) {
+                            return Some(edited.body);
                         }
                     }
                     match &o.content.msgtype {
@@ -2989,280 +3009,177 @@ fn strip_reply_fallback(body: &str) -> String {
     body.to_string()
 }
 
-fn message_body_from_formatted(
+fn sanitized_formatted_body(
     formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
-    fallback: &str,
-) -> String {
-    formatted
-        .map(|body| html_message_to_text(&body.body))
-        .filter(|body| !body.trim().is_empty())
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-fn media_caption_from_formatted(
-    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
-    fallback: Option<&str>,
 ) -> Option<String> {
-    let text = formatted
-        .map(|body| html_message_to_text(&body.body))
-        .or_else(|| fallback.map(ToString::to_string))?;
-    let text = text.trim().to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-fn html_message_to_text(html: &str) -> String {
-    let mut output = String::new();
-    let mut index = 0;
-    while index < html.len() {
-        let rest = &html[index..];
-        if !rest.starts_with('<') {
-            let Some(ch) = rest.chars().next() else {
-                break;
-            };
-            output.push(ch);
-            index += ch.len_utf8();
-            continue;
-        }
-
-        let Some(tag_end_rel) = rest.find('>') else {
-            output.push_str(rest);
-            break;
-        };
-        let tag = &rest[1..tag_end_rel];
-        let tag_lower = tag.trim().to_ascii_lowercase();
-        let after_tag = index + tag_end_rel + 1;
-
-        if is_opening_html_tag(&tag_lower, "mx-reply") {
-            if let Some(reply_end_rel) =
-                find_ascii_case_insensitive(&html[after_tag..], "</mx-reply>")
-            {
-                index = after_tag + reply_end_rel + "</mx-reply>".len();
-                continue;
-            }
-        }
-
-        if is_opening_html_tag(&tag_lower, "a") && is_matrix_mention_anchor(&tag_lower) {
-            if let Some(anchor_end_rel) = find_ascii_case_insensitive(&html[after_tag..], "</a>") {
-                let inner = &html[after_tag..after_tag + anchor_end_rel];
-                let rendered = html_message_to_text(inner);
-                let fallback = mention_fallback_from_anchor(&tag_lower);
-                output.push_str(&mention_display_text(&rendered, fallback.as_deref()));
-                index = after_tag + anchor_end_rel + "</a>".len();
-                continue;
-            }
-        }
-
-        if tag_lower.starts_with("br")
-            || is_closing_html_tag(&tag_lower, "p")
-            || is_closing_html_tag(&tag_lower, "div")
-        {
-            output.push('\n');
-        }
-        index = after_tag;
-    }
-    normalize_rendered_text(&decode_html_entities(&output))
-}
-
-fn is_opening_html_tag(tag_lower: &str, name: &str) -> bool {
-    !tag_lower.starts_with('/') && (tag_lower == name || tag_lower.starts_with(&format!("{name} ")))
-}
-
-fn is_closing_html_tag(tag_lower: &str, name: &str) -> bool {
-    tag_lower == format!("/{name}")
-}
-
-fn is_matrix_mention_anchor(tag_lower: &str) -> bool {
-    tag_lower.contains("matrix.to/#/@")
-        || tag_lower.contains("matrix.to/#/%40")
-        || tag_lower.contains("href=\"@")
-        || tag_lower.contains("href='@")
-}
-
-fn mention_fallback_from_anchor(tag_lower: &str) -> Option<String> {
-    let href = extract_html_attr(tag_lower, "href")?;
-    let decoded = percent_decode_minimal(&href);
-    let user_id = decoded
-        .split("#/")
-        .nth(1)
-        .unwrap_or(&decoded)
-        .split('?')
-        .next()
-        .unwrap_or(&decoded);
-    if !user_id.starts_with('@') {
+    let formatted = formatted?;
+    if !matches!(
+        &formatted.format,
+        matrix_sdk::ruma::events::room::message::MessageFormat::Html
+    ) {
         return None;
     }
-    Some(
-        user_id
-            .split(':')
-            .next()
-            .unwrap_or(user_id)
-            .trim_start_matches('@')
-            .to_string(),
+    let html = matrix_sdk::ruma::html::sanitize_html(
+        &formatted.body,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::RemoveReplyFallback::No,
+    );
+    (!html.trim().is_empty()).then_some(html)
+}
+
+fn sanitized_reply_formatted_body(
+    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
+) -> Option<String> {
+    let formatted = formatted?;
+    if !matches!(
+        &formatted.format,
+        matrix_sdk::ruma::events::room::message::MessageFormat::Html
+    ) {
+        return None;
+    }
+    let html = matrix_sdk::ruma::html::sanitize_html(
+        &formatted.body,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::RemoveReplyFallback::Yes,
+    );
+    (!html.trim().is_empty()).then_some(html)
+}
+
+fn media_caption_parts(
+    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
+    fallback: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let caption = fallback
+        .map(str::trim)
+        .filter(|caption| !caption.is_empty())
+        .map(ToString::to_string);
+    (caption, sanitized_formatted_body(formatted))
+}
+
+fn mentions_parts(
+    mentions: Option<&matrix_sdk::ruma::events::Mentions>,
+) -> (Vec<String>, bool) {
+    let Some(mentions) = mentions else {
+        return (Vec::new(), false);
+    };
+    (
+        mentions.user_ids.iter().map(ToString::to_string).collect(),
+        mentions.room,
     )
 }
 
-fn extract_html_attr(tag: &str, attr: &str) -> Option<String> {
-    let key = format!("{attr}=");
-    let start = tag.find(&key)? + key.len();
-    let quote = tag[start..].chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let value_start = start + quote.len_utf8();
-    let value_end = tag[value_start..].find(quote)? + value_start;
-    Some(tag[value_start..value_end].to_string())
-}
-
-fn mention_display_text(rendered: &str, fallback: Option<&str>) -> String {
-    let text = rendered.trim();
-    let text = if text.is_empty() {
-        fallback.unwrap_or("")
+fn text_message_parts(
+    body: &str,
+    formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
+    mentions: Option<&matrix_sdk::ruma::events::Mentions>,
+    is_reply: bool,
+) -> (String, Option<String>, Vec<String>, bool) {
+    let body = if is_reply {
+        strip_reply_fallback(body)
     } else {
-        text
+        body.to_string()
     };
-    if text.is_empty() || text.starts_with('@') {
-        text.to_string()
+    let formatted_body = if is_reply {
+        sanitized_reply_formatted_body(formatted)
     } else {
-        format!("@{text}")
-    }
+        sanitized_formatted_body(formatted)
+    };
+    let (mentioned_user_ids, mentions_room) = mentions_parts(mentions);
+    (body, formatted_body, mentioned_user_ids, mentions_room)
 }
 
-fn percent_decode_minimal(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+#[derive(Clone, Debug)]
+struct EditedTextContent {
+    body: String,
+    formatted_body: Option<String>,
+    mentioned_user_ids: Vec<String>,
+    mentions_room: bool,
 }
 
-fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
-    let haystack = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    for index in 0..=haystack.len() - needle.len() {
-        let matches = needle.iter().enumerate().all(|(offset, expected)| {
-            haystack[index + offset].eq_ignore_ascii_case(expected)
-        });
-        if matches {
-            return Some(index);
+fn extract_edit_content(
+    new_content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation,
+) -> Option<EditedTextContent> {
+    let (body, formatted) = match &new_content.msgtype {
+        matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
+            Some((t.body.clone(), t.formatted.as_ref()))
         }
-    }
-    None
-}
-
-fn decode_html_entities(value: &str) -> String {
-    let mut output = String::new();
-    let mut index = 0;
-    while index < value.len() {
-        let rest = &value[index..];
-        if !rest.starts_with('&') {
-            let Some(ch) = rest.chars().next() else {
-                break;
-            };
-            output.push(ch);
-            index += ch.len_utf8();
-            continue;
+        matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
+            Some((t.body.clone(), t.formatted.as_ref()))
         }
-        let Some(end_rel) = rest.find(';') else {
-            output.push('&');
-            index += 1;
-            continue;
-        };
-        let entity = &rest[1..end_rel];
-        if let Some(decoded) = decode_html_entity(entity) {
-            output.push(decoded);
-            index += end_rel + 1;
-        } else {
-            output.push('&');
-            index += 1;
-        }
-    }
-    output
-}
-
-fn decode_html_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "nbsp" => Some(' '),
-        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-            u32::from_str_radix(&entity[2..], 16)
-                .ok()
-                .and_then(char::from_u32)
-        }
-        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
         _ => None,
-    }
-}
-
-fn normalize_rendered_text(value: &str) -> String {
-    let mut lines = value.lines().map(str::trim_end).collect::<Vec<_>>();
-    while lines.first().is_some_and(|line| line.trim().is_empty()) {
-        lines.remove(0);
-    }
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    lines.join("\n")
+    }?;
+    let (mentioned_user_ids, mentions_room) = mentions_parts(new_content.mentions.as_ref());
+    Some(EditedTextContent {
+        body,
+        formatted_body: sanitized_formatted_body(formatted),
+        mentioned_user_ids,
+        mentions_room,
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{html_message_to_text, media_caption_from_formatted};
-    use matrix_sdk::ruma::events::room::message::FormattedBody;
+mod formatted_message_tests {
+    use super::{
+        FormattedMessageInput, build_text_content, text_message_parts,
+    };
+    use matrix_sdk::ruma::events::{
+        Mentions,
+        room::message::{FormattedBody, RoomMessageEventContent},
+    };
 
     #[test]
-    fn html_message_mentions_render_with_at_prefix() {
-        let html = r#"hello <a href="https://matrix.to/#/@alice:example.org">Alice</a> &amp; team"#;
+    fn outgoing_html_is_sanitized_and_mentions_are_serialized() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "Hello Alice".to_string(),
+            formatted_body: Some(
+                r#"<strong>Hello</strong><script>bad()</script>"#.to_string(),
+            ),
+            mentioned_user_ids: vec!["@alice:example.org".to_string()],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
 
-        assert_eq!(html_message_to_text(html), "hello @Alice & team");
+        assert_eq!(json["body"], "Hello Alice");
+        assert_eq!(json["format"], "org.matrix.custom.html");
+        assert!(json["formatted_body"].as_str().unwrap().contains("<strong>"));
+        assert!(!json["formatted_body"].as_str().unwrap().contains("<script"));
+        assert_eq!(json["m.mentions"]["user_ids"][0], "@alice:example.org");
     }
 
     #[test]
-    fn html_message_strips_reply_fallback_block() {
-        let html = r#"<mx-reply><blockquote>old</blockquote></mx-reply><a href="https://matrix.to/#/%40bob%3Aexample.org">Bob</a>"#;
+    fn incoming_formatted_body_keeps_plain_fallback_separate() {
+        let formatted = FormattedBody::html("<strong>Hello</strong>".to_string());
+        let mentions = Mentions::with_user_ids(vec![
+            matrix_sdk::ruma::UserId::parse("@alice:example.org").unwrap(),
+        ]);
+        let (body, html, user_ids, room) =
+            text_message_parts("Hello", Some(&formatted), Some(&mentions), false);
 
-        assert_eq!(html_message_to_text(html), "@Bob");
+        assert_eq!(body, "Hello");
+        assert_eq!(html.as_deref(), Some("<strong>Hello</strong>"));
+        assert_eq!(user_ids, ["@alice:example.org"]);
+        assert!(!room);
     }
 
     #[test]
-    fn formatted_caption_prefers_rendered_html() {
-        let formatted = FormattedBody::html(
-            r#"<a href="https://matrix.to/#/@alice:example.org">Alice</a> 的图片"#.to_string(),
-        );
+    fn empty_formatting_sends_plain_text_with_empty_mentions_object() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "Hello".to_string(),
+            formatted_body: None,
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
 
-        assert_eq!(
-            media_caption_from_formatted(Some(&formatted), Some("fallback")),
-            Some("@Alice 的图片".to_string()),
-        );
-    }
-}
-
-/// Extract edit text from a replacement relation's new_content.
-fn extract_edit_text(
-    new_content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation,
-) -> Option<String> {
-    match &new_content.msgtype {
-        matrix_sdk::ruma::events::room::message::MessageType::Text(t) => Some(t.body.clone()),
-        matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => Some(t.body.clone()),
-        _ => None,
+        assert_eq!(json["body"], "Hello");
+        assert!(json.get("formatted_body").is_none());
+        assert_eq!(json["m.mentions"], serde_json::json!({}));
+        assert!(matches!(
+            content,
+            RoomMessageEventContent { mentions: Some(_), .. }
+        ));
     }
 }
 
@@ -3278,7 +3195,11 @@ fn unable_to_decrypt_message(
         sender_id,
         sender_name,
         content: "无法解密此消息（缺少会话密钥）".to_string(),
+        formatted_body: None,
         caption: None,
+        caption_formatted_body: None,
+        mentioned_user_ids: Vec::new(),
+        mentions_room: false,
         timestamp,
         is_me,
         msg_type: MessageType::Text,
@@ -3351,7 +3272,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let room = get_room_by_id(&client, &room_id)?;
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
-    let mut edits: HashMap<String, Vec<String>> = HashMap::new();
+    let mut edits: HashMap<String, Vec<EditedTextContent>> = HashMap::new();
     // event_id (of the annotated message) → (reaction key → (sender ids, my reaction event id))
     let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> =
         HashMap::new();
@@ -3413,7 +3334,7 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                     replacement,
                 )) = &original.content.relates_to
                 {
-                    if let Some(edit_text) = extract_edit_text(&replacement.new_content) {
+                    if let Some(edit_text) = extract_edit_content(&replacement.new_content) {
                         edits
                             .entry(replacement.event_id.to_string())
                             .or_default()
@@ -3432,18 +3353,23 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
                 let chat_msg = match &original.content.msgtype {
                     matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
-                        let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
-                        let content = if in_reply_to.is_some() {
-                            strip_reply_fallback(&content)
-                        } else {
-                            content
-                        };
+                        let (content, formatted_body, mentioned_user_ids, mentions_room) =
+                            text_message_parts(
+                                &t.body,
+                                t.formatted.as_ref(),
+                                original.content.mentions.as_ref(),
+                                in_reply_to.is_some(),
+                            );
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            formatted_body,
                             caption: None,
+                            caption_formatted_body: None,
+                            mentioned_user_ids,
+                            mentions_room,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3461,18 +3387,23 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                     }
                     matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
                         let name = sender_name.clone();
-                        let body = message_body_from_formatted(t.formatted.as_ref(), &t.body);
-                        let content = if in_reply_to.is_some() {
-                            format!("* {} {}", name, strip_reply_fallback(&body))
-                        } else {
-                            format!("* {} {}", name, body)
-                        };
+                        let (body, _, mentioned_user_ids, mentions_room) = text_message_parts(
+                            &t.body,
+                            t.formatted.as_ref(),
+                            original.content.mentions.as_ref(),
+                            in_reply_to.is_some(),
+                        );
+                        let content = format!("* {} {}", name, body);
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            formatted_body: None,
                             caption: None,
+                            caption_formatted_body: None,
+                            mentioned_user_ids,
+                            mentions_room,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3489,18 +3420,23 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         }
                     }
                     matrix_sdk::ruma::events::room::message::MessageType::Notice(t) => {
-                        let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
-                        let content = if in_reply_to.is_some() {
-                            strip_reply_fallback(&content)
-                        } else {
-                            content
-                        };
+                        let (content, formatted_body, mentioned_user_ids, mentions_room) =
+                            text_message_parts(
+                                &t.body,
+                                t.formatted.as_ref(),
+                                original.content.mentions.as_ref(),
+                                in_reply_to.is_some(),
+                            );
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            formatted_body,
                             caption: None,
+                            caption_formatted_body: None,
+                            mentioned_user_ids,
+                            mentions_room,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Text,
@@ -3524,15 +3460,20 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             _ => None,
                         };
                         let (image_width, image_height) = image_info_dimensions(t.info.as_ref());
+                        let (caption, caption_formatted_body) =
+                            media_caption_parts(t.formatted_caption(), t.caption());
+                        let (mentioned_user_ids, mentions_room) =
+                            mentions_parts(original.content.mentions.as_ref());
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content: t.filename().to_string(),
-                            caption: media_caption_from_formatted(
-                                t.formatted_caption(),
-                                t.caption(),
-                            ),
+                            formatted_body: None,
+                            caption,
+                            caption_formatted_body,
+                            mentioned_user_ids,
+                            mentions_room,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Image,
@@ -3560,15 +3501,20 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             .as_ref()
                             .map(|info| (uint_to_i32(info.width), uint_to_i32(info.height)))
                             .unwrap_or((None, None));
+                        let (caption, caption_formatted_body) =
+                            media_caption_parts(t.formatted_caption(), t.caption());
+                        let (mentioned_user_ids, mentions_room) =
+                            mentions_parts(original.content.mentions.as_ref());
                         ChatMessage {
                             id: event_id_str.clone(),
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content: t.filename().to_string(),
-                            caption: media_caption_from_formatted(
-                                t.formatted_caption(),
-                                t.caption(),
-                            ),
+                            formatted_body: None,
+                            caption,
+                            caption_formatted_body,
+                            mentioned_user_ids,
+                            mentions_room,
                             timestamp: timestamp.clone(),
                             is_me,
                             msg_type: MessageType::Video,
@@ -3584,26 +3530,36 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             total_members: 0,
                         }
                     }
-                    matrix_sdk::ruma::events::room::message::MessageType::File(t) => ChatMessage {
-                        id: event_id_str.clone(),
-                        sender_id: sender_id.clone(),
-                        sender_name: sender_name.clone(),
-                        content: format!("\u{6587}\u{4EF6}: {}", t.filename()),
-                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
-                        timestamp: timestamp.clone(),
-                        is_me,
-                        msg_type: MessageType::Text,
-                        image_url: None,
-                        media_source_json: None,
-                        image_width: None,
-                        image_height: None,
-                        in_reply_to,
-                        is_edited: false,
-                        edit_history: Vec::new(),
-                        reactions: Vec::new(),
-                        readers: Vec::new(),
-                        total_members: 0,
-                    },
+                    matrix_sdk::ruma::events::room::message::MessageType::File(t) => {
+                        let (caption, caption_formatted_body) =
+                            media_caption_parts(t.formatted_caption(), t.caption());
+                        let (mentioned_user_ids, mentions_room) =
+                            mentions_parts(original.content.mentions.as_ref());
+                        ChatMessage {
+                            id: event_id_str.clone(),
+                            sender_id: sender_id.clone(),
+                            sender_name: sender_name.clone(),
+                            content: format!("\u{6587}\u{4EF6}: {}", t.filename()),
+                            formatted_body: None,
+                            caption,
+                            caption_formatted_body,
+                            mentioned_user_ids,
+                            mentions_room,
+                            timestamp: timestamp.clone(),
+                            is_me,
+                            msg_type: MessageType::Text,
+                            image_url: None,
+                            media_source_json: None,
+                            image_width: None,
+                            image_height: None,
+                            in_reply_to,
+                            is_edited: false,
+                            edit_history: Vec::new(),
+                            reactions: Vec::new(),
+                            readers: Vec::new(),
+                            total_members: 0,
+                        }
+                    }
                     _ => {
                         continue; // skip unknown message types
                     }
@@ -3640,7 +3596,11 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                         sender_id: sender_id.clone(),
                         sender_name: sender_name.clone(),
                         content: original.content.body.clone(),
+                        formatted_body: None,
                         caption: None,
+                        caption_formatted_body: None,
+                        mentioned_user_ids: Vec::new(),
+                        mentions_room: false,
                         timestamp: timestamp.clone(),
                         is_me,
                         msg_type: MessageType::Sticker,
@@ -3748,7 +3708,11 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
                             sender_id: sender_id.clone(),
                             sender_name: sender_name.clone(),
                             content,
+                            formatted_body: None,
                             caption: None,
+                            caption_formatted_body: None,
+                            mentioned_user_ids: Vec::new(),
+                            mentions_room: false,
                             timestamp: timestamp.clone(),
                             is_me: false,
                             msg_type: MessageType::Event,
@@ -3785,8 +3749,13 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
             // Prepend original content so edit_history = [original, edit1, edit2, ...]
             let original = msg.content.clone();
             let mut full_history = vec![original];
-            full_history.extend(history);
-            msg.content = full_history.last().unwrap().clone();
+            full_history.extend(history.iter().map(|edit| edit.body.clone()));
+            if let Some(latest) = history.last() {
+                msg.content = latest.body.clone();
+                msg.formatted_body = latest.formatted_body.clone();
+                msg.mentioned_user_ids = latest.mentioned_user_ids.clone();
+                msg.mentions_room = latest.mentions_room;
+            }
             msg.edit_history = full_history;
         }
         // Apply aggregated reactions (dedupe senders per key defensively).
@@ -4006,15 +3975,61 @@ pub async fn get_sticker_packs(room_id: String) -> Result<Vec<StickerPack>, Stri
     Ok(packs)
 }
 
+fn build_mentions(
+    user_ids: &[String],
+    room: bool,
+) -> Result<matrix_sdk::ruma::events::Mentions, String> {
+    let mut mentions = matrix_sdk::ruma::events::Mentions::new();
+    mentions.room = room;
+    for user_id in user_ids {
+        mentions.user_ids.insert(
+            matrix_sdk::ruma::UserId::parse(user_id)
+                .map_err(|e| format!("Invalid mentioned user ID {user_id}: {e}"))?,
+        );
+    }
+    Ok(mentions)
+}
+
+fn build_text_content(
+    message: FormattedMessageInput,
+) -> Result<matrix_sdk::ruma::events::room::message::RoomMessageEventContent, String> {
+    let mentions = build_mentions(&message.mentioned_user_ids, message.mentions_room)?;
+    let formatted_body = message
+        .formatted_body
+        .map(|html| {
+            matrix_sdk::ruma::html::sanitize_html(
+                &html,
+                matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+                matrix_sdk::ruma::html::RemoveReplyFallback::No,
+            )
+        })
+        .filter(|html| !html.trim().is_empty());
+    let mut content = if let Some(formatted_body) = formatted_body {
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_html(
+            message.body,
+            formatted_body,
+        )
+    } else {
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(message.body)
+    };
+    // Always set m.mentions, including an empty object, to avoid legacy
+    // implicit-mention push rules.
+    content.mentions = Some(mentions);
+    Ok(content)
+}
+
 #[frb]
-pub async fn send_message(room_id: String, message: String) -> Result<(), String> {
+pub async fn send_message(
+    room_id: String,
+    message: FormattedMessageInput,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let content =
-        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
+    let content = build_text_content(message)?;
 
-    room.send(content)
+    let response = room
+        .send(content)
         .await
         .map_err(|e| format!("Send failed: {e}"))?;
 
@@ -4023,7 +4038,7 @@ pub async fn send_message(room_id: String, message: String) -> Result<(), String
     notify_sync_event(SyncEvent::MessageSent {
         room_id: room_id.clone(),
     });
-    Ok(())
+    Ok(response.response.event_id.to_string())
 }
 
 /// Send an image message to a room.
@@ -4704,9 +4719,10 @@ pub async fn get_contacts() -> Result<Vec<Contact>, String> {
 #[frb]
 pub async fn send_reply(
     room_id: String,
-    message: String,
+    message: FormattedMessageInput,
     reply_to_event_id: String,
-) -> Result<(), String> {
+    reply_to_user_id: Option<String>,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -4714,15 +4730,22 @@ pub async fn send_reply(
     let event_id = matrix_sdk::ruma::EventId::parse(&reply_to_event_id)
         .map_err(|e| format!("Invalid event ID: {e}"))?;
 
-    // Build the reply content
-    let content =
-        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
-    let mut reply_content = content;
+    let mut reply_content = build_text_content(message)?;
+    if let Some(reply_to_user_id) = reply_to_user_id {
+        let reply_to_user_id = matrix_sdk::ruma::UserId::parse(&reply_to_user_id)
+            .map_err(|e| format!("Invalid reply user ID: {e}"))?;
+        reply_content
+            .mentions
+            .get_or_insert_with(matrix_sdk::ruma::events::Mentions::new)
+            .user_ids
+            .insert(reply_to_user_id);
+    }
     reply_content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Reply(
         matrix_sdk::ruma::events::relation::Reply::with_event_id(event_id),
     ));
 
-    room.send(reply_content)
+    let response = room
+        .send(reply_content)
         .await
         .map_err(|e| format!("Reply failed: {e}"))?;
 
@@ -4735,7 +4758,7 @@ pub async fn send_reply(
     notify_sync_event(SyncEvent::MessageSent {
         room_id: room_id.clone(),
     });
-    Ok(())
+    Ok(response.response.event_id.to_string())
 }
 
 /// Edit (replace) one of your own messages.
@@ -4748,21 +4771,26 @@ pub async fn send_reply(
 pub async fn edit_message(
     room_id: String,
     event_id: String,
-    new_text: String,
-) -> Result<(), String> {
+    message: FormattedMessageInput,
+    previous_mentioned_user_ids: Vec<String>,
+    previous_mentions_room: bool,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
         .map_err(|e| format!("Invalid event ID: {e}"))?;
 
-    // Build the replacement: new body in m.new_content + m.replace relation.
     use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
-    let content =
-        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&new_text)
-            .make_replacement(ReplacementMetadata::new(parsed_event_id, None));
+    let previous_mentions =
+        build_mentions(&previous_mentioned_user_ids, previous_mentions_room)?;
+    let content = build_text_content(message)?.make_replacement(ReplacementMetadata::new(
+        parsed_event_id,
+        Some(previous_mentions),
+    ));
 
-    room.send(content)
+    let response = room
+        .send(content)
         .await
         .map_err(|e| format!("Edit failed: {e}"))?;
 
@@ -4775,7 +4803,7 @@ pub async fn edit_message(
     notify_sync_event(SyncEvent::MessageSent {
         room_id: room_id.clone(),
     });
-    Ok(())
+    Ok(response.response.event_id.to_string())
 }
 
 /// Send an emoji reaction (m.annotation) to an event.
@@ -4928,7 +4956,7 @@ pub async fn get_messages_before(
     let room = get_room_by_id(&client, &room_id)?;
 
     let mut raw_messages: Vec<(String, ChatMessage)> = Vec::new();
-    let mut edits: HashMap<String, Vec<String>> = HashMap::new();
+    let mut edits: HashMap<String, Vec<EditedTextContent>> = HashMap::new();
     let mut reactions: HashMap<String, HashMap<String, (Vec<String>, Option<String>)>> =
         HashMap::new();
 
@@ -5043,7 +5071,11 @@ pub async fn get_messages_before(
                         sender_id,
                         sender_name,
                         content: original.content.body.clone(),
+                        formatted_body: None,
                         caption: None,
+                        caption_formatted_body: None,
+                        mentioned_user_ids: Vec::new(),
+                        mentions_room: false,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Sticker,
@@ -5095,7 +5127,7 @@ pub async fn get_messages_before(
                 replacement,
             )) = &original.content.relates_to
             {
-                if let Some(edit_text) = extract_edit_text(&replacement.new_content) {
+                if let Some(edit_text) = extract_edit_content(&replacement.new_content) {
                     edits
                         .entry(replacement.event_id.to_string())
                         .or_default()
@@ -5114,18 +5146,23 @@ pub async fn get_messages_before(
 
             let chat_msg = match &original.content.msgtype {
                 matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
-                    let content = message_body_from_formatted(t.formatted.as_ref(), &t.body);
-                    let content = if in_reply_to.is_some() {
-                        strip_reply_fallback(&content)
-                    } else {
-                        content
-                    };
+                    let (content, formatted_body, mentioned_user_ids, mentions_room) =
+                        text_message_parts(
+                            &t.body,
+                            t.formatted.as_ref(),
+                            original.content.mentions.as_ref(),
+                            in_reply_to.is_some(),
+                        );
                     ChatMessage {
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
                         content,
+                        formatted_body,
                         caption: None,
+                        caption_formatted_body: None,
+                        mentioned_user_ids,
+                        mentions_room,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Text,
@@ -5149,12 +5186,20 @@ pub async fn get_messages_before(
                         _ => None,
                     };
                     let (image_width, image_height) = image_info_dimensions(t.info.as_ref());
+                    let (caption, caption_formatted_body) =
+                        media_caption_parts(t.formatted_caption(), t.caption());
+                    let (mentioned_user_ids, mentions_room) =
+                        mentions_parts(original.content.mentions.as_ref());
                     ChatMessage {
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
                         content: t.filename().to_string(),
-                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
+                        formatted_body: None,
+                        caption,
+                        caption_formatted_body,
+                        mentioned_user_ids,
+                        mentions_room,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Image,
@@ -5182,12 +5227,20 @@ pub async fn get_messages_before(
                         .as_ref()
                         .map(|info| (uint_to_i32(info.width), uint_to_i32(info.height)))
                         .unwrap_or((None, None));
+                    let (caption, caption_formatted_body) =
+                        media_caption_parts(t.formatted_caption(), t.caption());
+                    let (mentioned_user_ids, mentions_room) =
+                        mentions_parts(original.content.mentions.as_ref());
                     ChatMessage {
                         id: event_id.clone(),
                         sender_id,
                         sender_name,
                         content: t.filename().to_string(),
-                        caption: media_caption_from_formatted(t.formatted_caption(), t.caption()),
+                        formatted_body: None,
+                        caption,
+                        caption_formatted_body,
+                        mentioned_user_ids,
+                        mentions_room,
                         timestamp,
                         is_me,
                         msg_type: MessageType::Video,
@@ -5227,8 +5280,13 @@ pub async fn get_messages_before(
             msg.is_edited = true;
             let original = msg.content.clone();
             let mut full_history = vec![original];
-            full_history.extend(history);
-            msg.content = full_history.last().unwrap().clone();
+            full_history.extend(history.iter().map(|edit| edit.body.clone()));
+            if let Some(latest) = history.last() {
+                msg.content = latest.body.clone();
+                msg.formatted_body = latest.formatted_body.clone();
+                msg.mentioned_user_ids = latest.mentioned_user_ids.clone();
+                msg.mentions_room = latest.mentions_room;
+            }
             msg.edit_history = full_history;
         }
         if let Some(by_key) = reactions.remove(&event_id) {

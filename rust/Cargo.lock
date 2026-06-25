@@ -3010,6 +3010,7 @@ dependencies = [
  "js_int",
  "js_option",
  "ruma-common",
+ "ruma-html",
  "ruma-macros",
  "serde",
  "serde_json",
@@ -3028,6 +3029,7 @@ checksum = "48d33a944650f4bbd2188dd204d39dd87a9a1498f14b3a13252910c90ed7cd43"
 dependencies = [
  "as_variant",
  "html5ever",
+ "ruma-common",
  "tracing",
  "wildmatch",
 ]
