@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/markdown/markdown_source_store.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
+import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
@@ -14,6 +15,7 @@ import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
 import 'image_message_bubble.dart';
+import 'link_preview.dart';
 import 'message_insert_animation.dart';
 import 'message_text.dart';
 import 'video_message_bubble.dart';
@@ -485,6 +487,9 @@ class MessageGroupWidget extends ConsumerWidget {
       fontSize: 15,
       height: 1.35,
     );
+    final urlMatches = detectMessageUrls(message.content);
+    final previewUri = urlMatches.isEmpty ? null : urlMatches.first.uri;
+    const linkRouter = MatrixLinkRouter();
     final metadata = _buildMessageMetadata(context, ref, message);
     final bubble = Container(
       key: ValueKey('text-bubble:${message.id}'),
@@ -536,6 +541,19 @@ class MessageGroupWidget extends ConsumerWidget {
               metadata: metadata,
               metadataWidth: _messageMetadataWidth(context, message),
               maxWidth: maxBubbleWidth - 28,
+              linkColor: isMe ? Colors.white : AppColors.secondary,
+              onUrlTap: linkRouter.open,
+            ),
+          if (previewUri != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: LinkPreviewCard(
+                key: ValueKey('link-preview:${message.id}:$previewUri'),
+                uri: previewUri,
+                isMe: isMe,
+                width: maxBubbleWidth - 28,
+                onOpen: linkRouter.open,
+              ),
             ),
         ],
       ),
@@ -1368,11 +1386,7 @@ class _FormattedBodyMetadata extends StatelessWidget {
                     child: content,
                   ),
                 ),
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: metadata,
-                ),
+                Positioned(right: 0, bottom: 0, child: metadata),
               ],
             ),
           ),
@@ -1388,6 +1402,8 @@ class _AdaptiveTextMetadata extends StatelessWidget {
   final Widget metadata;
   final double metadataWidth;
   final double maxWidth;
+  final Color linkColor;
+  final MessageUrlTapHandler? onUrlTap;
 
   const _AdaptiveTextMetadata({
     super.key,
@@ -1396,6 +1412,8 @@ class _AdaptiveTextMetadata extends StatelessWidget {
     required this.metadata,
     required this.metadataWidth,
     required this.maxWidth,
+    required this.linkColor,
+    this.onUrlTap,
   });
 
   @override
@@ -1440,7 +1458,18 @@ class _AdaptiveTextMetadata extends StatelessWidget {
           height: height,
           child: Stack(
             children: [
-              Positioned(left: 0, top: 0, width: width, child: Text.rich(span)),
+              Positioned(
+                left: 0,
+                top: 0,
+                width: width,
+                child: MessageText(
+                  text,
+                  style: textStyle,
+                  mentionColor: AppColors.secondary,
+                  linkColor: linkColor,
+                  onUrlTap: onUrlTap,
+                ),
+              ),
               Positioned(
                 key: ValueKey(inline ? 'metadata-inline' : 'metadata-below'),
                 right: 0,

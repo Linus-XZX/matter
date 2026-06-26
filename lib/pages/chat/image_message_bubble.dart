@@ -4,6 +4,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
+import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
@@ -421,12 +422,12 @@ class _ImageCaption extends StatelessWidget {
               style: style,
               accentColor: isMe ? Colors.white : AppColors.secondary,
             )
-          : Text.rich(
-              messageTextSpan(
-                text,
-                style: style,
-                mentionColor: isMe ? Colors.white : AppColors.secondary,
-              ),
+          : MessageText(
+              text,
+              style: style,
+              mentionColor: isMe ? Colors.white : AppColors.secondary,
+              linkColor: isMe ? Colors.white : AppColors.secondary,
+              onUrlTap: const MatrixLinkRouter().open,
             ),
     );
   }
