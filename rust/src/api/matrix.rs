@@ -5094,6 +5094,35 @@ pub async fn search_rooms(query: String) -> Result<Vec<ChatRoom>, String> {
     Ok(filtered)
 }
 
+async fn pagination_token_before_event(room: &Room, event_id: &str) -> Option<String> {
+    let event_id = match matrix_sdk::ruma::EventId::parse(event_id) {
+        Ok(event_id) => event_id,
+        Err(error) => {
+            app_log(
+                "warn",
+                "rooms",
+                format!("Cannot restore pagination token for invalid event id {event_id}: {error}"),
+            );
+            return None;
+        }
+    };
+
+    match room
+        .event_with_context(&event_id, false, 0u32.into(), None)
+        .await
+    {
+        Ok(context) => context.prev_batch_token,
+        Err(error) => {
+            app_log(
+                "warn",
+                "rooms",
+                format!("Failed to restore pagination token before {event_id}: {error}"),
+            );
+            None
+        }
+    }
+}
+
 /// Load more messages (paginated) from before a given event.
 #[frb]
 pub async fn get_messages_before(
@@ -5117,14 +5146,20 @@ pub async fn get_messages_before(
             .get(&pagination_boundary_key(&room_id, &from_event_id))
             .cloned()
     };
-    let Some(from) = from else {
-        return Ok(Vec::new());
+    let mut from = match from {
+        Some(from) => from,
+        None => match pagination_token_before_event(&room, &from_event_id).await {
+            Some(from) => from,
+            None => return Ok(Vec::new()),
+        },
     };
 
-    let msg_resp = load_room_messages_with_key_recovery(&client, &room, Some(from.clone()), limit)
-        .await
-        .map_err(|e| format!("Failed to load older messages: {e}"))?;
-    {
+    let next_from = loop {
+        let msg_resp =
+            load_room_messages_with_key_recovery(&client, &room, Some(from.clone()), limit)
+                .await
+                .map_err(|e| format!("Failed to load older messages: {e}"))?;
+
         for timeline_event in msg_resp.chunk.iter().rev() {
             let raw = timeline_event.kind.raw();
             let Ok(any_ev) = raw.deserialize() else {
@@ -5413,17 +5448,26 @@ pub async fn get_messages_before(
             };
             raw_messages.push((event_id, chat_msg));
         }
-    }
 
-    let next_from = msg_resp.end.clone().filter(|token| token != &from);
-    {
-        let mut tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
-        if let Some(next_from) = next_from.clone() {
-            tokens.insert(room_id.clone(), next_from);
-        } else {
-            tokens.remove(&room_id);
+        let page_next = msg_resp.end.clone().filter(|token| token != &from);
+        {
+            let mut tokens = MESSAGE_PAGINATION_TOKENS.lock().await;
+            if let Some(next_from) = page_next.clone() {
+                tokens.insert(room_id.clone(), next_from);
+            } else {
+                tokens.remove(&room_id);
+            }
         }
-    }
+
+        if !raw_messages.is_empty() {
+            break page_next;
+        }
+        let Some(next_token) = page_next.clone() else {
+            break page_next;
+        };
+        from = next_token;
+    };
+
     remove_pagination_boundary_token(&room_id, &from_event_id).await;
 
     // Apply edits

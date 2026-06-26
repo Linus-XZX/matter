@@ -94,8 +94,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   bool _keepPickerDuringKeyboardOpen = false;
   bool _keyboardWasVisible = false;
 
-  static const double _olderLoadTriggerDistance = 24.0;
-  static const double _olderLoadRearmDistance = 240.0;
+  static const double _olderLoadTriggerMinDistance = 1200.0;
+  static const double _olderLoadTriggerViewportMultiplier = 2.0;
+  static const double _olderLoadRearmDistance = 480.0;
   static const int _maxMessagesPerRenderGroup = 12;
   static const Duration _sentNoticeDuration = Duration(milliseconds: 2800);
   static const Duration _insertionAnimationLifetime = Duration(
@@ -157,6 +158,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     return math.max(0, metrics.pixels - metrics.minScrollExtent);
   }
 
+  double _distanceFromOlderEdge(ScrollMetrics metrics) {
+    return math.max(0, metrics.maxScrollExtent - metrics.pixels);
+  }
+
+  double _olderLoadTriggerDistance(ScrollMetrics metrics) {
+    return math.max(
+      _olderLoadTriggerMinDistance,
+      metrics.viewportDimension * _olderLoadTriggerViewportMultiplier,
+    );
+  }
+
   void _updateLatestMessageControl(ScrollMetrics metrics) {
     final shouldShow = shouldShowLatestMessageControl(
       distanceFromLatest: _distanceFromLatest(metrics),
@@ -177,27 +189,32 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   bool _handleScrollNotification(ScrollNotification notification) {
     final metrics = notification.metrics;
     _updateLatestMessageControl(metrics);
-    final distanceFromOlderEdge = metrics.maxScrollExtent - metrics.pixels;
-    if (distanceFromOlderEdge > _olderLoadRearmDistance) {
+    _maybeLoadOlderMessages(metrics);
+    return false;
+  }
+
+  void _maybeLoadOlderMessages(ScrollMetrics metrics) {
+    final distanceFromOlderEdge = _distanceFromOlderEdge(metrics);
+    final triggerDistance = _olderLoadTriggerDistance(metrics);
+    if (distanceFromOlderEdge > triggerDistance + _olderLoadRearmDistance) {
       _olderLoadArmed = true;
     }
 
-    if (notification is ScrollEndNotification &&
-        _olderLoadArmed &&
+    if (_olderLoadArmed &&
         !_isLoadingOlder &&
         _hasMoreMessages &&
         _displayedMessages.isNotEmpty &&
-        distanceFromOlderEdge <= _olderLoadTriggerDistance) {
+        distanceFromOlderEdge <= triggerDistance) {
       _olderLoadArmed = false;
-      _loadOlderMessages();
+      unawaited(_loadOlderMessages());
     }
-    return false;
   }
 
   bool _handleScrollMetricsNotification(
     ScrollMetricsNotification notification,
   ) {
     _updateLatestMessageControl(notification.metrics);
+    _maybeLoadOlderMessages(notification.metrics);
     return false;
   }
 
@@ -275,11 +292,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       return;
     }
 
+    final fromEventId = _displayedMessages.first.id;
     setState(() => _isLoadingOlder = true);
     try {
       final older = await getMessagesBefore(
         roomId: widget.roomId,
-        fromEventId: _displayedMessages.first.id,
+        fromEventId: fromEventId,
         limit: 100,
       );
       if (!mounted) return;
@@ -310,10 +328,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         _olderMessages.insertAll(0, newMessages);
         if (newMessages.isNotEmpty) {
           _olderMessagesRevision++;
+          _olderLoadArmed = true;
         }
         _hasMoreMessages = older.isNotEmpty;
         _isLoadingOlder = false;
       });
+      if (newMessages.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          _maybeLoadOlderMessages(_scrollController.position);
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _isLoadingOlder = false);
