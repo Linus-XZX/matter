@@ -414,13 +414,153 @@ void main() {
       final metadataRect = tester.getRect(
         find.byKey(const ValueKey(r'message-metadata:$formatted-reply')),
       );
+      final bodyRect = tester.getRect(find.text('光环新作', findRichText: true));
 
-      expect(find.byKey(const ValueKey('metadata-inline')), findsOneWidget);
-      expect(find.byKey(const ValueKey('metadata-below')), findsNothing);
+      expect(metadataRect.top, lessThan(bodyRect.bottom));
       expect(bubbleRect.right - metadataRect.right, closeTo(14, 0.1));
       expect(bubbleRect.bottom - metadataRect.bottom, closeTo(10, 0.1));
     },
   );
+
+  testWidgets(
+    'reply preview width keeps structured rich text metadata on its last line',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 640));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      const original = ChatMessage(
+        id: r'$structured-original',
+        senderId: '@alice:example.org',
+        senderName: 'Alice',
+        content: '这是一条很长很长的被回复消息内容，用来把回复预览撑到接近气泡最大宽度',
+        mentionedUserIds: [],
+        mentionsRoom: false,
+        timestamp: '90',
+        isMe: false,
+        msgType: MessageType.text,
+        isEdited: false,
+        editHistory: [],
+        reactions: [],
+        readers: [],
+        totalMembers: 2,
+      );
+      const reply = ChatMessage(
+        id: r'$structured-reply',
+        senderId: '@me:example.org',
+        senderName: '我',
+        content: '第一项\n第二项',
+        formattedBody: '<ul><li>第一项</li><li><strong>第二项</strong></li></ul>',
+        mentionedUserIds: [],
+        mentionsRoom: false,
+        timestamp: '100',
+        isMe: true,
+        msgType: MessageType.text,
+        inReplyTo: r'$structured-original',
+        isEdited: false,
+        editHistory: [],
+        reactions: [],
+        readers: [],
+        totalMembers: 2,
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: MessageGroupWidget(
+                group: MessageGroup(
+                  senderId: reply.senderId,
+                  senderName: reply.senderName,
+                  isMe: true,
+                  messages: const [reply],
+                ),
+                roomId: '!room:example.org',
+                messageIndex: const {
+                  r'$structured-original': original,
+                  r'$structured-reply': reply,
+                },
+                showAvatar: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final bubbleRect = tester.getRect(
+        find.byKey(const ValueKey(r'text-bubble:$structured-reply')),
+      );
+      final bodyRect = tester.getRect(find.text('第二项', findRichText: true));
+      final metadataRect = tester.getRect(
+        find.byKey(const ValueKey(r'message-metadata:$structured-reply')),
+      );
+
+      expect(metadataRect.top, lessThan(bodyRect.bottom));
+      expect(bubbleRect.right - metadataRect.right, closeTo(14, 0.1));
+      expect(bubbleRect.bottom - metadataRect.bottom, closeTo(10, 0.1));
+    },
+  );
+
+  testWidgets('metadata survives formatted body structure changes', (
+    tester,
+  ) async {
+    Widget buildMessage(String content, String? formattedBody) {
+      final message = ChatMessage(
+        id: r'$structure-change',
+        senderId: '@me:example.org',
+        senderName: '我',
+        content: content,
+        formattedBody: formattedBody,
+        mentionedUserIds: const [],
+        mentionsRoom: false,
+        timestamp: '100',
+        isMe: true,
+        msgType: MessageType.text,
+        isEdited: false,
+        editHistory: const [],
+        reactions: const [],
+        readers: const [],
+        totalMembers: 2,
+      );
+      return ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: message.senderId,
+                senderName: message.senderName,
+                isMe: true,
+                messages: [message],
+              ),
+              roomId: '!room:example.org',
+              messageIndex: {message.id: message},
+              showAvatar: false,
+            ),
+          ),
+        ),
+      );
+    }
+
+    const bodies = [
+      ('段落', '<p>段落</p>'),
+      ('第一项\n第二项', '<ul><li>第一项</li><li>第二项</li></ul>'),
+      ('引用', '<blockquote><p>引用</p></blockquote>'),
+      ('code', '<pre><code>code</code></pre>'),
+      ('普通文本', null),
+      ('标题', '<h1>标题</h1>'),
+      ('链接', '<p><a href="https://example.org">链接</a></p>'),
+    ];
+
+    for (final body in bodies) {
+      await tester.pumpWidget(buildMessage(body.$1, body.$2));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey(r'message-metadata:$structure-change')),
+        findsOneWidget,
+      );
+    }
+  });
 
   testWidgets('own text bubble keeps read-indicator space before member data', (
     tester,

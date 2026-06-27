@@ -6,8 +6,6 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/markdown/markdown_source_store.dart';
-import '../../features/matrix_html/matrix_html_node.dart';
-import '../../features/matrix_html/matrix_html_parser.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/chat_provider.dart';
@@ -43,20 +41,6 @@ class MessageGroup {
 }
 
 class MessageGroupWidget extends ConsumerWidget {
-  static const _htmlParser = MatrixHtmlParser();
-  static const _inlineHtmlTags = {
-    'p',
-    'strong',
-    'b',
-    'em',
-    'i',
-    'del',
-    's',
-    'code',
-    'br',
-    'a',
-  };
-
   final MessageGroup group;
   final bool showAvatar;
   final String roomId;
@@ -510,9 +494,6 @@ class MessageGroupWidget extends ConsumerWidget {
     final metadataWidth = _messageMetadataWidth(context, message);
     final hasReply = message.inReplyTo != null;
     final hasFormattedBody = message.formattedBody?.isNotEmpty == true;
-    final formattedLayoutText = hasFormattedBody
-        ? _simpleFormattedLayoutText(message.formattedBody!, message.content)
-        : null;
     final replyContent = hasReply ? _getReplyContent(message.inReplyTo!) : null;
     final replyPreviewWidth = replyContent == null
         ? 0.0
@@ -549,20 +530,13 @@ class MessageGroupWidget extends ConsumerWidget {
         if (replyContent != null)
           _buildReplyPreview(context, replyContent, isMe),
         if (hasFormattedBody)
-          _FormattedBodyMetadata(
+          MatrixHtmlMessage(
             key: ValueKey('formatted-body-metadata:${message.id}'),
-            content: MatrixHtmlMessage(
-              key: ValueKey('matrix-html:${message.id}'),
-              html: message.formattedBody!,
-              style: textStyle,
-              accentColor: isMe ? Colors.white : AppColors.secondary,
-            ),
-            metadata: metadata,
-            metadataWidth: metadataWidth,
-            maxWidth: maxBubbleWidth - 28,
+            html: message.formattedBody!,
+            style: textStyle,
+            accentColor: isMe ? Colors.white : AppColors.secondary,
+            trailingMetadata: metadata,
             minWidth: replyPreviewWidth,
-            layoutText: formattedLayoutText,
-            textStyle: textStyle,
           )
         else
           _AdaptiveTextMetadata(
@@ -809,22 +783,6 @@ class MessageGroupWidget extends ConsumerWidget {
       return '${found.senderName}: ${found.content}';
     }
     return '...';
-  }
-
-  String? _simpleFormattedLayoutText(String html, String fallback) {
-    final nodes = _htmlParser.parse(html);
-    if (nodes.length != 1) return null;
-    final node = nodes.single;
-    if (!_isInlineFormattedNode(node, root: true)) return null;
-    return fallback;
-  }
-
-  bool _isInlineFormattedNode(MatrixHtmlNode node, {bool root = false}) {
-    if (node is MatrixTextNode) return true;
-    final element = node as MatrixElementNode;
-    if (!_inlineHtmlTags.contains(element.tag)) return false;
-    if (root && element.tag != 'p') return false;
-    return element.children.every(_isInlineFormattedNode);
   }
 
   IconData _eventIcon(ChatMessage message) {
@@ -1420,109 +1378,6 @@ class _SwipeToReplyState extends State<_SwipeToReply>
           );
         },
       ),
-    );
-  }
-}
-
-/// Renders rich HTML/Markdown content with trailing metadata without forcing
-/// the bubble to fill its maximum width. The bubble width hugs the content
-/// while still right-aligning the metadata.
-class _FormattedBodyMetadata extends StatelessWidget {
-  final Widget content;
-  final Widget metadata;
-  final double metadataWidth;
-  final double maxWidth;
-  final double minWidth;
-  final String? layoutText;
-  final TextStyle? textStyle;
-
-  const _FormattedBodyMetadata({
-    super.key,
-    required this.content,
-    required this.metadata,
-    required this.metadataWidth,
-    required this.maxWidth,
-    this.minWidth = 0,
-    this.layoutText,
-    this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final availableWidth = constraints.maxWidth.isFinite
-            ? math.min(constraints.maxWidth, maxWidth)
-            : maxWidth;
-        final textScaler = MediaQuery.textScalerOf(context);
-        final metadataHeight = math.max(15.0, textScaler.scale(10.5));
-        const gap = 4.0;
-        final layoutText = this.layoutText;
-        final textStyle = this.textStyle;
-        if (layoutText != null && textStyle != null) {
-          final textPainter = TextPainter(
-            text: TextSpan(text: layoutText, style: textStyle),
-            textDirection: Directionality.of(context),
-            textScaler: textScaler,
-          )..layout(maxWidth: availableWidth);
-          final lines = textPainter.computeLineMetrics();
-          final lastLineWidth = lines.isEmpty ? 0.0 : lines.last.width;
-          final widestLine = lines.fold<double>(
-            0,
-            (width, line) => math.max(width, line.width),
-          );
-          final inline = lastLineWidth + 8.0 + metadataWidth <= availableWidth;
-          final naturalWidth = lines.length > 1
-              ? availableWidth
-              : math.min(
-                  availableWidth,
-                  math.max(widestLine, lastLineWidth + 8.0 + metadataWidth),
-                );
-          final width = math.min(
-            availableWidth,
-            math.max(minWidth, naturalWidth),
-          );
-          final height = inline
-              ? math.max(textPainter.height, metadataHeight)
-              : textPainter.height + 3 + metadataHeight;
-
-          return SizedBox(
-            width: width,
-            height: height,
-            child: Stack(
-              children: [
-                Positioned(left: 0, top: 0, width: width, child: content),
-                Positioned(
-                  key: ValueKey(inline ? 'metadata-inline' : 'metadata-below'),
-                  right: 0,
-                  bottom: 0,
-                  child: metadata,
-                ),
-              ],
-            ),
-          );
-        }
-
-        return ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: availableWidth),
-          child: IntrinsicWidth(
-            child: Stack(
-              children: [
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minWidth: math.max(metadataWidth, minWidth),
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: metadataHeight + gap),
-                    child: content,
-                  ),
-                ),
-                Positioned(right: 0, bottom: 0, child: metadata),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }

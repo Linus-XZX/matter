@@ -1,4 +1,7 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import 'matrix_html_node.dart';
 import 'matrix_html_parser.dart';
@@ -9,6 +12,8 @@ class MatrixHtmlMessage extends StatefulWidget {
   final TextStyle style;
   final Color accentColor;
   final MatrixLinkHandler? onLinkTap;
+  final Widget? trailingMetadata;
+  final double minWidth;
 
   const MatrixHtmlMessage({
     super.key,
@@ -16,6 +21,8 @@ class MatrixHtmlMessage extends StatefulWidget {
     required this.style,
     required this.accentColor,
     this.onLinkTap,
+    this.trailingMetadata,
+    this.minWidth = 0,
   });
 
   @override
@@ -48,6 +55,43 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
       accentColor: widget.accentColor,
       onLinkTap: widget.onLinkTap ?? const MatrixLinkRouter().open,
     );
+    final trailingMetadata = widget.trailingMetadata;
+    if (trailingMetadata != null) {
+      final inline = renderer.singleInlineBlock(_nodes);
+      if (inline != null) {
+        return SelectionArea(
+          child: _InlineRichTextMetadata(
+            text: inline.span,
+            metadata: trailingMetadata,
+            minWidth: widget.minWidth,
+          ),
+        );
+      }
+
+      final blocks = renderer.renderBlocksWithTrailing(
+        _nodes,
+        trailingMetadata,
+      );
+      if (blocks.isEmpty) return trailingMetadata;
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : MediaQuery.sizeOf(context).width;
+          return SizedBox(
+            width: width,
+            child: SelectionArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: blocks,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     final blocks = renderer.renderBlocks(_nodes);
     if (blocks.isEmpty) return const SizedBox.shrink();
     return SelectionArea(
@@ -82,6 +126,78 @@ class _MatrixNodeRenderer {
       widgets.add(widget);
     }
     return widgets;
+  }
+
+  _InlineBlock? singleInlineBlock(List<MatrixHtmlNode> nodes) {
+    final meaningful = nodes.where(
+      (node) => node is! MatrixTextNode || node.text.trim().isNotEmpty,
+    );
+    if (meaningful.length != 1) return null;
+    return _inlineBlockForNode(meaningful.single);
+  }
+
+  List<Widget> renderBlocksWithTrailing(
+    List<MatrixHtmlNode> nodes,
+    Widget metadata,
+  ) {
+    final renderable = <(MatrixHtmlNode, Widget)>[];
+    for (final node in nodes) {
+      final widget = _renderBlock(node);
+      if (widget != null) renderable.add((node, widget));
+    }
+    if (renderable.isEmpty) {
+      return [Align(alignment: Alignment.centerRight, child: metadata)];
+    }
+
+    final widgets = <Widget>[];
+    for (final entry in renderable.indexed) {
+      if (widgets.isNotEmpty) widgets.add(const SizedBox(height: 7));
+      final isLast = entry.$1 == renderable.length - 1;
+      widgets.add(
+        isLast ? _renderBlockWithTrailing(entry.$2.$1, metadata) : entry.$2.$2,
+      );
+    }
+    return widgets;
+  }
+
+  Widget _renderBlockWithTrailing(MatrixHtmlNode node, Widget metadata) {
+    final inline = _inlineBlockForNode(node);
+    if (inline != null) {
+      return _InlineRichTextMetadata(text: inline.span, metadata: metadata);
+    }
+
+    final element = node as MatrixElementNode;
+    switch (element.tag) {
+      case 'blockquote':
+        return Container(
+          padding: const EdgeInsets.only(left: 10, top: 3),
+          decoration: BoxDecoration(
+            border: Border(left: BorderSide(color: accentColor, width: 3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: renderBlocksWithTrailing(element.children, metadata),
+          ),
+        );
+      case 'ul':
+      case 'ol':
+        return _renderList(
+          element,
+          ordered: element.tag == 'ol',
+          trailingMetadata: metadata,
+        );
+      default:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _renderBlock(node)!,
+            const SizedBox(height: 3),
+            Align(alignment: Alignment.centerRight, child: metadata),
+          ],
+        );
+    }
   }
 
   Widget? _renderBlock(MatrixHtmlNode node) {
@@ -150,17 +266,30 @@ class _MatrixNodeRenderer {
     }
   }
 
-  Widget _renderList(MatrixElementNode list, {required bool ordered}) {
-    final items = list.children.whereType<MatrixElementNode>().where(
-      (node) => node.tag == 'li',
-    );
+  Widget _renderList(
+    MatrixElementNode list, {
+    required bool ordered,
+    Widget? trailingMetadata,
+  }) {
+    final items = list.children
+        .whereType<MatrixElementNode>()
+        .where((node) => node.tag == 'li')
+        .toList();
+    if (items.isEmpty && trailingMetadata != null) {
+      return Align(alignment: Alignment.centerRight, child: trailingMetadata);
+    }
     final start = int.tryParse(list.attributes['start'] ?? '') ?? 1;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (final entry in items.indexed)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
+            padding: EdgeInsets.only(
+              top: 2,
+              bottom: trailingMetadata != null && entry.$1 == items.length - 1
+                  ? 0
+                  : 2,
+            ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -175,8 +304,17 @@ class _MatrixNodeRenderer {
                 const SizedBox(width: 7),
                 Expanded(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: renderBlocks(entry.$2.children),
+                    crossAxisAlignment: trailingMetadata != null
+                        ? CrossAxisAlignment.stretch
+                        : CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children:
+                        trailingMetadata != null && entry.$1 == items.length - 1
+                        ? renderBlocksWithTrailing(
+                            entry.$2.children,
+                            trailingMetadata,
+                          )
+                        : renderBlocks(entry.$2.children),
                   ),
                 ),
               ],
@@ -187,9 +325,48 @@ class _MatrixNodeRenderer {
   }
 
   Widget _richText(List<MatrixHtmlNode> nodes, TextStyle style) {
-    return Text.rich(
+    return Text.rich(_inlineBlock(nodes, style).span, softWrap: true);
+  }
+
+  _InlineBlock? _inlineBlockForNode(MatrixHtmlNode node) {
+    if (node is MatrixTextNode) {
+      if (node.text.trim().isEmpty) return null;
+      return _inlineBlock([node], baseStyle);
+    }
+
+    final element = node as MatrixElementNode;
+    switch (element.tag) {
+      case 'p':
+        return _inlineBlock(element.children, baseStyle);
+      case 'h1':
+      case 'h2':
+      case 'h3':
+      case 'h4':
+      case 'h5':
+      case 'h6':
+        final level = int.parse(element.tag.substring(1));
+        return _inlineBlock(
+          element.children,
+          baseStyle.copyWith(
+            fontSize: (22 - level * 1.5).clamp(15, 21).toDouble(),
+            fontWeight: FontWeight.w800,
+            height: 1.25,
+          ),
+        );
+      case 'blockquote':
+      case 'ul':
+      case 'ol':
+      case 'pre':
+      case 'hr':
+        return null;
+      default:
+        return _inlineBlock([element], baseStyle);
+    }
+  }
+
+  _InlineBlock _inlineBlock(List<MatrixHtmlNode> nodes, TextStyle style) {
+    return _InlineBlock(
       TextSpan(style: style, children: _inlineSpans(nodes, style)),
-      softWrap: true,
     );
   }
 
@@ -255,5 +432,147 @@ class _MatrixNodeRenderer {
       spans.addAll(_inlineSpans(element.children, style));
     }
     return spans;
+  }
+}
+
+class _InlineBlock {
+  final InlineSpan span;
+
+  const _InlineBlock(this.span);
+}
+
+class _InlineRichTextMetadata extends StatelessWidget {
+  final InlineSpan text;
+  final Widget metadata;
+  final double minWidth;
+
+  const _InlineRichTextMetadata({
+    required this.text,
+    required this.metadata,
+    this.minWidth = 0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _InlineRichTextMetadataRenderWidget(
+      text: RichText(
+        text: text,
+        softWrap: true,
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+      ),
+      metadata: metadata,
+      minWidth: minWidth,
+    );
+  }
+}
+
+class _InlineRichTextMetadataRenderWidget extends MultiChildRenderObjectWidget {
+  final double minWidth;
+
+  _InlineRichTextMetadataRenderWidget({
+    required Widget text,
+    required Widget metadata,
+    required this.minWidth,
+  }) : super(children: [text, metadata]);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderInlineRichTextMetadata(minWidth: minWidth);
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderInlineRichTextMetadata renderObject,
+  ) {
+    renderObject.minWidth = minWidth;
+  }
+}
+
+class _InlineRichTextMetadataParentData
+    extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderInlineRichTextMetadata extends RenderBox
+    with
+        ContainerRenderObjectMixin<
+          RenderBox,
+          _InlineRichTextMetadataParentData
+        >,
+        RenderBoxContainerDefaultsMixin<
+          RenderBox,
+          _InlineRichTextMetadataParentData
+        > {
+  static const _horizontalGap = 8.0;
+  static const _verticalGap = 3.0;
+
+  _RenderInlineRichTextMetadata({required this._minWidth});
+
+  double _minWidth;
+
+  double get minWidth => _minWidth;
+
+  set minWidth(double value) {
+    if (_minWidth == value) return;
+    _minWidth = value;
+    markNeedsLayout();
+  }
+
+  RenderParagraph get _text => firstChild! as RenderParagraph;
+
+  RenderBox get _metadata => childAfter(_text)!;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _InlineRichTextMetadataParentData) {
+      child.parentData = _InlineRichTextMetadataParentData();
+    }
+  }
+
+  @override
+  void performLayout() {
+    final childConstraints = constraints.loosen();
+    _metadata.layout(childConstraints, parentUsesSize: true);
+    _text.layout(childConstraints, parentUsesSize: true);
+
+    // The paragraph is a direct child laid out with parentUsesSize. Do not
+    // inspect deeper render descendants here; scrollable blocks make that illegal.
+    final textLength = _text.text.toPlainText().length;
+    final trailingOffset = _text.getOffsetForCaret(
+      TextPosition(offset: textLength),
+      Rect.zero,
+    );
+    final trailingWidth =
+        trailingOffset.dx + _horizontalGap + _metadata.size.width;
+    final width = constraints.constrainWidth(
+      math.max(minWidth, math.max(_text.size.width, trailingWidth)),
+    );
+    final inline = trailingWidth <= width + 0.001;
+    final height = inline
+        ? math.max(_text.size.height, _metadata.size.height)
+        : _text.size.height + _verticalGap + _metadata.size.height;
+    size = constraints.constrain(Size(width, height));
+
+    final textParentData =
+        _text.parentData! as _InlineRichTextMetadataParentData;
+    textParentData.offset = Offset.zero;
+    final metadataParentData =
+        _metadata.parentData! as _InlineRichTextMetadataParentData;
+    metadataParentData.offset = Offset(
+      math.max(0, size.width - _metadata.size.width),
+      inline
+          ? math.max(0, size.height - _metadata.size.height)
+          : _text.size.height + _verticalGap,
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    defaultPaint(context, offset);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return defaultHitTestChildren(result, position: position);
   }
 }
