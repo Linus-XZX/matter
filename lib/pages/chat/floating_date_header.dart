@@ -53,6 +53,7 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
   bool _visible = false;
   double? _lastPixels;
   bool _scrollingTowardOlder = false;
+  bool _updateScheduled = false;
   Timer? _hideTimer;
 
   static const _hideDelay = Duration(milliseconds: 1600);
@@ -99,15 +100,24 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
       }
       _lastPixels = pixels;
     }
-    final label = _computeCurrentLabel();
-    if (!_visible || label != _currentLabel) {
-      setState(() {
-        _visible = true;
-        _currentLabel = label;
+    // Scroll listeners can run while keyed sliver children are being moved.
+    // Their layout offsets are only safe to inspect after the frame's layout.
+    if (_updateScheduled) return;
+    _updateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateScheduled = false;
+      if (!mounted) return;
+      final label = _computeCurrentLabel();
+      if (!_visible || label != _currentLabel) {
+        setState(() {
+          _visible = true;
+          _currentLabel = label;
+        });
+      }
+      _hideTimer?.cancel();
+      _hideTimer = Timer(_hideDelay, () {
+        if (mounted) setState(() => _visible = false);
       });
-    }
-    _hideTimer = Timer(_hideDelay, () {
-      if (mounted) setState(() => _visible = false);
     });
   }
 
@@ -117,7 +127,9 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
     final viewportBox =
         widget.scrollViewportKey.currentContext?.findRenderObject()
             as RenderBox?;
-    if (viewportBox == null || !viewportBox.hasSize) return _currentLabel;
+    if (viewportBox == null || !viewportBox.attached || !viewportBox.hasSize) {
+      return _currentLabel;
+    }
 
     // Pick the nearest rendered day separator at or above the viewport top.
     const activationLine = 1.0;
@@ -126,7 +138,7 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
     final keys = widget.separatorKeys;
     for (var i = 0; i < widget.boundaries.length && i < keys.length; i++) {
       final box = keys[i].currentContext?.findRenderObject() as RenderBox?;
-      if (box == null || !box.hasSize) continue;
+      if (box == null || !box.attached || !box.hasSize) continue;
       final top = box.localToGlobal(Offset.zero, ancestor: viewportBox).dy;
       if (top <= activationLine && top >= bestTop) {
         bestTop = top;
@@ -150,7 +162,9 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
 
   @override
   Widget build(BuildContext context) {
-    final label = _currentLabel ?? _computeCurrentLabel();
+    final label =
+        _currentLabel ??
+        (widget.boundaries.isEmpty ? null : widget.boundaries.last.label);
     final show = _visible && label != null;
     return Positioned(
       top: 10,
