@@ -67,6 +67,11 @@ jobs:
       - name: Get Flutter dependencies
         run: flutter pub get
 
+      - name: Generate Flutter Rust Bridge bindings
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 2.12.0
+          flutter_rust_bridge_codegen generate
+
       - name: Prepare signing files
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
