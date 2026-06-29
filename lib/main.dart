@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'app.dart';
+import 'features/app_update/app_update_service.dart';
+import 'features/app_update/update_dialog.dart';
 import 'pages/login/login_page.dart';
 import 'pages/chat/decrypted_video_source.dart';
 import 'providers/auth_provider.dart';
@@ -52,6 +54,7 @@ class _AppRoot extends ConsumerStatefulWidget {
 }
 
 class _AppRootState extends ConsumerState<_AppRoot> {
+  final _navigatorKey = GlobalKey<NavigatorState>();
   late bool _hasSessions;
 
   @override
@@ -62,6 +65,34 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       _restoreSessionsInBackground();
     } else {
       ref.read(sessionReadyProvider.notifier).value = true;
+    }
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _checkForUpdatesAtStartup(),
+    );
+  }
+
+  Future<void> _checkForUpdatesAtStartup() async {
+    if (!appUpdateService.isSupported) return;
+    try {
+      final result = await appUpdateService.checkForUpdate();
+      final update = result.update;
+      final updateContext = _navigatorKey.currentContext;
+      if (!mounted ||
+          result.status != UpdateCheckStatus.available ||
+          update == null ||
+          updateContext == null ||
+          !updateContext.mounted) {
+        return;
+      }
+      await showAvailableUpdateDialog(
+        updateContext,
+        service: appUpdateService,
+        current: result.current,
+        update: update,
+      );
+    } catch (error) {
+      // Automatic checks stay silent; users can retry from Settings.
+      debugPrint('Automatic update check failed: $error');
     }
   }
 
@@ -158,6 +189,7 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     final showMainApp = isLoggedIn || (_hasSessions && !sessionReady);
 
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'Matter',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,

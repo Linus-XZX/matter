@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/app_update/app_update_service.dart';
+import '../../features/app_update/update_dialog.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
@@ -20,11 +22,62 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   List<rust.AccountInfo> _accounts = [];
+  String _versionLabel = '读取中…';
+  bool _checkingForUpdate = false;
 
   @override
   void initState() {
     super.initState();
     _loadAccounts();
+    _loadAppVersion();
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final version = await appUpdateService.getCurrentVersion();
+      if (mounted) setState(() => _versionLabel = version.displayName);
+    } catch (error) {
+      debugPrint('Failed to load app version: $error');
+      if (mounted) setState(() => _versionLabel = '版本信息不可用');
+    }
+  }
+
+  Future<void> _checkForUpdate() async {
+    if (_checkingForUpdate) return;
+    setState(() => _checkingForUpdate = true);
+    try {
+      final result = await appUpdateService.checkForUpdate(force: true);
+      if (!mounted) return;
+      switch (result.status) {
+        case UpdateCheckStatus.available:
+          await showAvailableUpdateDialog(
+            context,
+            service: appUpdateService,
+            current: result.current,
+            update: result.update!,
+          );
+        case UpdateCheckStatus.upToDate:
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${result.current.displayName} 已是最新版本'),
+              duration: const Duration(milliseconds: 1200),
+            ),
+          );
+        case UpdateCheckStatus.unsupported:
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('当前平台暂不支持应用内更新')));
+        case UpdateCheckStatus.skipped:
+          break;
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('检查更新失败：$error')));
+    } finally {
+      if (mounted) setState(() => _checkingForUpdate = false);
+    }
   }
 
   Future<void> _loadAccounts() async {
@@ -363,16 +416,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       _SettingItem(
                         icon: Icons.info_rounded,
                         iconColor: AppColors.onSurfaceVariant,
-                        title: '版本',
-                        subtitle: 'Matter v0.1.0',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Matter v0.1.0'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
+                        title: '当前版本',
+                        subtitle: _versionLabel,
+                        onTap:
+                            appUpdateService.isSupported && !_checkingForUpdate
+                            ? _checkForUpdate
+                            : null,
+                        trailing: _checkingForUpdate
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : null,
                       ),
                       _SettingItem(
                         icon: Icons.code_rounded,
