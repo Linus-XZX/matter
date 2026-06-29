@@ -9,6 +9,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/message_cache_persistence.dart';
 import '../../providers/message_ordering.dart';
+import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
@@ -44,6 +45,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
 class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
+  late final MutableState<String?> _currentRoomIdNotifier;
   final List<ChatMessage> _olderMessages = [];
   final List<MessageGroup> _groupedMessages = [];
   final Map<String, ChatMessage> _messageIndex = {};
@@ -122,9 +124,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
   @override
   void initState() {
     super.initState();
+    _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
-      ref.read(currentRoomIdProvider.notifier).value = widget.roomId;
+      _currentRoomIdNotifier.value = widget.roomId;
       // Subscribe Rust-side typing events for this room.
       subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
         debugPrint('subscribeTypingForRoom failed: $e');
@@ -148,6 +152,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   @override
   void dispose() {
+    final currentRoomIdNotifier = _currentRoomIdNotifier;
+    final roomId = widget.roomId;
+    Future.microtask(() {
+      if (currentRoomIdNotifier.value == roomId) {
+        currentRoomIdNotifier.value = null;
+      }
+    });
+    unawaited(
+      unsubscribeTyping().catchError((e) {
+        debugPrint('unsubscribeTyping failed: $e');
+      }),
+    );
     _pickerResizeTimer?.cancel();
     _sentNoticeTimer?.cancel();
     _scrollController.dispose();
@@ -633,23 +649,6 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
         setState(() => _isPickerResizing = false);
       }
     });
-  }
-
-  @override
-  void deactivate() {
-    // Clear current room and stop typing tracking — defer to avoid modifying
-    // provider during build.
-    Future.microtask(() {
-      try {
-        ref.read(currentRoomIdProvider.notifier).value = null;
-      } catch (e) {
-        debugPrint('deactivate: clear currentRoomId failed: $e');
-      }
-      unsubscribeTyping().catchError((e) {
-        debugPrint('unsubscribeTyping failed: $e');
-      });
-    });
-    super.deactivate();
   }
 
   bool _isEventGroup(MessageGroup group) {

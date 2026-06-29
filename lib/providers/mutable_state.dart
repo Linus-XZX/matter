@@ -8,5 +8,7 @@ class MutableState<T> extends Notifier<T> {
   @override
   T build() => _initialValue;
 
+  T get value => state;
+
   set value(T value) => state = value;
 }
