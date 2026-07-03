@@ -1079,68 +1079,6 @@ class MessageGroupWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildQuickReactions(
-    BuildContext context,
-    WidgetRef ref,
-    ChatMessage message,
-  ) {
-    const quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            ...quickEmojis.map(
-              (emoji) => _quickEmoji(context, ref, message, emoji),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(AppRadii.tag),
-                onTap: () {
-                  // Close the context menu, then open the full emoji picker.
-                  Navigator.of(context).pop();
-                  _showEmojiPicker(context, ref, message);
-                },
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Icon(
-                    Icons.add_rounded,
-                    color: AppColors.onSurfaceVariant,
-                    size: 22,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _quickEmoji(
-    BuildContext context,
-    WidgetRef ref,
-    ChatMessage message,
-    String emoji,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(AppRadii.tag),
-        onTap: () async {
-          Navigator.of(context).pop();
-          await _sendReactionAndRefresh(context, ref, message.id, emoji);
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: Text(emoji, style: const TextStyle(fontSize: 22)),
-        ),
-      ),
-    );
-  }
-
   Future<void> _sendReactionAndRefresh(
     BuildContext context,
     WidgetRef ref,
@@ -1234,105 +1172,75 @@ class MessageGroupWidget extends ConsumerWidget {
     WidgetRef ref,
     ChatMessage message,
   ) {
-    final pageContext = context;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) => Container(
-        margin: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(AppRadii.surface),
-        ),
-        child: SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Quick emoji reaction bar (not for system/event messages).
-              if (message.msgType != MessageType.event)
-                _buildQuickReactions(context, ref, message),
-              if (message.msgType == MessageType.text)
-                _MenuItem(
-                  icon: Icons.copy_rounded,
-                  label: '复制',
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: message.content));
-                    Navigator.of(context).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('已复制'),
-                        duration: Duration(seconds: 1),
-                      ),
-                    );
-                  },
-                ),
-              _MenuItem(
-                icon: Icons.reply_rounded,
-                label: '回复',
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _startReply(ref, message);
-                },
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final overlayContext = overlay.context;
+    // Geometry of the long-pressed bubble, for popover positioning.
+    final renderObject = context.findRenderObject();
+    final Rect? bubbleRect = renderObject is RenderBox && renderObject.hasSize
+        ? (renderObject.localToGlobal(Offset.zero) & renderObject.size)
+        : null;
+
+    late OverlayEntry entry;
+    void close() {
+      entry.remove();
+    }
+
+    entry = OverlayEntry(
+      builder: (_) => _FloatingMessageMenu(
+        message: message,
+        isMe: message.isMe,
+        bubbleRect: bubbleRect,
+        onClose: close,
+        onCopy: () async {
+          await Clipboard.setData(ClipboardData(text: message.content));
+          if (overlayContext.mounted) {
+            ScaffoldMessenger.of(overlayContext).showSnackBar(
+              const SnackBar(
+                content: Text('已复制'),
+                duration: Duration(seconds: 1),
               ),
-              if (message.msgType != MessageType.event)
-                _MenuItem(
-                  icon: Icons.forward_rounded,
-                  label: '转发',
-                  onTap: () async {
-                    Navigator.of(context).pop();
-                    final targetRoom = await showForwardMessageSheet(
-                      context: pageContext,
-                      sourceRoomId: roomId,
-                      message: message,
-                    );
-                    if (targetRoom != null) {
-                      onMessageForwarded?.call(targetRoom);
-                    }
-                  },
+            );
+          }
+        },
+        onReply: () => _startReply(ref, message),
+        onForward: () async {
+          final targetRoom = await showForwardMessageSheet(
+            context: overlayContext,
+            sourceRoomId: roomId,
+            message: message,
+          );
+          if (targetRoom != null) {
+            onMessageForwarded?.call(targetRoom);
+          }
+        },
+        onEdit: () {
+          ref.read(editingMessageProvider(roomId).notifier).value = message;
+        },
+        onRecall: () async {
+          try {
+            await redactMessage(ref, roomId, message.id);
+            await const MarkdownSourceStore().delete(
+              roomId: roomId,
+              eventId: message.id,
+            );
+          } catch (e) {
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text('撤回失败: $e'),
+                  duration: const Duration(seconds: 2),
                 ),
-              if (message.isMe) ...[
-                const Divider(color: AppColors.surfaceVariant, height: 0.5),
-                if (message.msgType == MessageType.text)
-                  _MenuItem(
-                    icon: Icons.edit_outlined,
-                    label: '编辑',
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      ref.read(editingMessageProvider(roomId).notifier).value =
-                          message;
-                    },
-                  ),
-                _MenuItem(
-                  icon: Icons.delete_outline_rounded,
-                  label: '撤回',
-                  iconColor: AppColors.error,
-                  textColor: AppColors.error,
-                  onTap: () async {
-                    Navigator.of(context).pop();
-                    try {
-                      await redactMessage(ref, roomId, message.id);
-                      await const MarkdownSourceStore().delete(
-                        roomId: roomId,
-                        eventId: message.id,
-                      );
-                    } catch (e) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('撤回失败: $e'),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
-                      }
-                    }
-                  },
-                ),
-              ],
-            ],
-          ),
-        ),
+              );
+            }
+          }
+        },
+        onReact: (emoji) =>
+            _sendReactionAndRefresh(overlayContext, ref, message.id, emoji),
+        onShowFullEmojiPicker: () =>
+            _showEmojiPicker(overlayContext, ref, message),
       ),
     );
+    overlay.insert(entry);
   }
 
   void _startReply(WidgetRef ref, ChatMessage message) {
@@ -1599,43 +1507,313 @@ class _AdaptiveTextMetadata extends StatelessWidget {
   }
 }
 
-class _MenuItem extends StatelessWidget {
+/// An icon-over-text action button used inside the floating message menu.
+class _IconTextAction extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  final Color? iconColor;
-  final Color? textColor;
+  final Color? color;
 
-  const _MenuItem({
+  const _IconTextAction({
     required this.icon,
     required this.label,
     required this.onTap,
-    this.iconColor,
-    this.textColor,
+    this.color,
   });
 
   @override
   Widget build(BuildContext context) {
+    final c = color ?? AppColors.onSurface;
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(AppRadii.surface),
+      borderRadius: BorderRadius.circular(AppRadii.tag),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        child: Row(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: iconColor ?? AppColors.onSurface, size: 22),
-            const SizedBox(width: 14),
+            Icon(icon, color: c, size: 22),
+            const SizedBox(height: 3),
             Text(
               label,
               style: TextStyle(
-                color: textColor ?? AppColors.onBackground,
-                fontSize: 16,
+                color: color ?? AppColors.onBackground,
+                fontSize: 12,
                 fontWeight: FontWeight.w500,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// A floating popover menu anchored near a long-pressed message bubble.
+///
+/// Renders as an [OverlayEntry] with a full-screen dismiss barrier. It measures
+/// its own size on the first frame (off-screen, invisible), then repositions
+/// itself above or below the bubble and fades in.
+class _FloatingMessageMenu extends StatefulWidget {
+  final ChatMessage message;
+  final bool isMe;
+  final Rect? bubbleRect;
+  final VoidCallback onClose;
+  final VoidCallback onCopy;
+  final VoidCallback onReply;
+  final VoidCallback onForward;
+  final VoidCallback onEdit;
+  final VoidCallback onRecall;
+  final void Function(String emoji) onReact;
+  final VoidCallback onShowFullEmojiPicker;
+
+  const _FloatingMessageMenu({
+    required this.message,
+    required this.isMe,
+    required this.bubbleRect,
+    required this.onClose,
+    required this.onCopy,
+    required this.onReply,
+    required this.onForward,
+    required this.onEdit,
+    required this.onRecall,
+    required this.onReact,
+    required this.onShowFullEmojiPicker,
+  });
+
+  @override
+  State<_FloatingMessageMenu> createState() => _FloatingMessageMenuState();
+}
+
+class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
+  static const _quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+  static const _gap = 8.0;
+
+  final _menuKey = GlobalKey();
+  double? _left;
+  double? _top;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureAndPosition());
+  }
+
+  void _measureAndPosition() {
+    final ro = _menuKey.currentContext?.findRenderObject();
+    if (ro is! RenderBox || !ro.hasSize) return;
+    final pos = _resolvePosition(ro.size);
+    if (mounted) {
+      setState(() {
+        _left = pos.left;
+        _top = pos.top;
+        _ready = true;
+      });
+    }
+  }
+
+  ({double left, double top}) _resolvePosition(Size size) {
+    final mq = MediaQuery.of(context);
+    final w = mq.size.width;
+    final h = mq.size.height;
+    final safe = mq.padding;
+    final mLeft = safe.left + 8;
+    final mRight = w - safe.right - 8;
+
+    final b = widget.bubbleRect;
+    if (b == null) {
+      final left = (w - size.width) / 2;
+      return (left: left.clamp(mLeft, mRight - size.width), top: safe.top + 16);
+    }
+
+    final spaceAbove = b.top - safe.top;
+    final spaceBelow = h - b.bottom - safe.bottom;
+    final placeAbove =
+        spaceAbove >= size.height + _gap || spaceAbove >= spaceBelow;
+    final top = placeAbove ? b.top - _gap - size.height : b.bottom + _gap;
+
+    var left = widget.isMe ? b.right - size.width : b.left;
+    if (left < mLeft) left = mLeft;
+    if (left + size.width > mRight) left = mRight - size.width;
+    if (left < mLeft) left = mLeft;
+
+    return (left: left, top: top);
+  }
+
+  Widget _buildEmojiRow() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ..._quickEmojis.map((emoji) => _emojiButton(emoji)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(AppRadii.tag),
+                onTap: () {
+                  widget.onClose();
+                  widget.onShowFullEmojiPicker();
+                },
+                child: const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Icon(
+                    Icons.add_rounded,
+                    color: AppColors.onSurfaceVariant,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _emojiButton(String emoji) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadii.tag),
+        onTap: () {
+          widget.onClose();
+          widget.onReact(emoji);
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(emoji, style: const TextStyle(fontSize: 22)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionRow() {
+    final msg = widget.message;
+    final isEvent = msg.msgType == MessageType.event;
+    final isText = msg.msgType == MessageType.text;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isText)
+              _IconTextAction(
+                icon: Icons.copy_rounded,
+                label: '复制',
+                onTap: () {
+                  widget.onClose();
+                  widget.onCopy();
+                },
+              ),
+            _IconTextAction(
+              icon: Icons.reply_rounded,
+              label: '回复',
+              onTap: () {
+                widget.onClose();
+                widget.onReply();
+              },
+            ),
+            if (!isEvent)
+              _IconTextAction(
+                icon: Icons.forward_rounded,
+                label: '转发',
+                onTap: () {
+                  widget.onClose();
+                  widget.onForward();
+                },
+              ),
+            if (widget.isMe && isText)
+              _IconTextAction(
+                icon: Icons.edit_outlined,
+                label: '编辑',
+                onTap: () {
+                  widget.onClose();
+                  widget.onEdit();
+                },
+              ),
+            if (widget.isMe)
+              _IconTextAction(
+                icon: Icons.delete_outline_rounded,
+                label: '撤回',
+                color: AppColors.error,
+                onTap: () {
+                  widget.onClose();
+                  widget.onRecall();
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMenu() {
+    final msg = widget.message;
+    final isEvent = msg.msgType == MessageType.event;
+    return Container(
+      key: _menuKey,
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadii.surface),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.4),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!isEvent) _buildEmojiRow(),
+          if (!isEvent)
+            const Divider(color: AppColors.surfaceVariant, height: 0.5),
+          _buildActionRow(),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        // Full-screen dismiss barrier.
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onClose,
+            child: const SizedBox.expand(),
+          ),
+        ),
+        Positioned(
+          left: _left ?? 0,
+          top: _top ?? 0,
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: _ready ? 1 : 0),
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut,
+            builder: (_, v, child) => Opacity(
+              opacity: v,
+              child: Transform.scale(
+                scale: 0.92 + 0.08 * v,
+                alignment: widget.isMe
+                    ? Alignment.centerRight
+                    : Alignment.centerLeft,
+                child: child,
+              ),
+            ),
+            child: _buildMenu(),
+          ),
+        ),
+      ],
     );
   }
 }
