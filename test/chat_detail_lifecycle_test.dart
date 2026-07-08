@@ -11,6 +11,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
   int unsubscribeTypingCalls = 0;
+  int subscribeRoomCalls = 0;
+  int unsubscribeRoomCalls = 0;
 
   @override
   Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async {
@@ -25,6 +27,20 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<void> crateApiMatrixUnsubscribeTyping() async {
     unsubscribeTypingCalls++;
+  }
+
+  @override
+  Future<void> crateApiMatrixSubscribeRoomForReceipts({
+    required String roomId,
+  }) async {
+    subscribeRoomCalls++;
+  }
+
+  @override
+  Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
+    required String roomId,
+  }) async {
+    unsubscribeRoomCalls++;
   }
 
   @override
@@ -64,6 +80,8 @@ void main() {
 
   setUp(() {
     rustApi.unsubscribeTypingCalls = 0;
+    rustApi.subscribeRoomCalls = 0;
+    rustApi.unsubscribeRoomCalls = 0;
     SharedPreferences.setMockInitialValues({});
   });
 
@@ -96,6 +114,8 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(container.read(currentRoomIdProvider), isNull);
     expect(rustApi.unsubscribeTypingCalls, 1);
+    expect(rustApi.subscribeRoomCalls, 1);
+    expect(rustApi.unsubscribeRoomCalls, 1);
   });
 
   testWidgets('disposing an old chat does not clear its replacement room', (
@@ -119,12 +139,16 @@ void main() {
 
     await tester.pumpWidget(buildChat('!old:example.org'));
     await tester.pump();
+    expect(rustApi.subscribeRoomCalls, 1, reason: 'entering old room subscribes');
 
     await tester.pumpWidget(buildChat('!new:example.org'));
     await tester.pump();
 
     expect(tester.takeException(), isNull);
     expect(container.read(currentRoomIdProvider), '!new:example.org');
+    // old room disposed (unsubscribes), new room initialized (subscribes).
+    expect(rustApi.subscribeRoomCalls, 2, reason: 'entering new room subscribes');
+    expect(rustApi.unsubscribeRoomCalls, 1, reason: 'old room unsubscribe on dispose');
 
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -133,6 +157,7 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(rustApi.unsubscribeRoomCalls, 2, reason: 'new room unsubscribe on dispose');
   });
 
   testWidgets('waits for initial members before rendering cached messages', (

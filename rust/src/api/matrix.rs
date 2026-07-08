@@ -175,6 +175,35 @@ struct SyncTask {
 /// Exactly one account owns the app-wide background sync task at a time.
 static SYNC_TASK: Lazy<Mutex<Option<SyncTask>>> = Lazy::new(|| Mutex::new(None));
 
+/// Runtime Sliding Sync subscription state for the active room screen.
+///
+/// Both the live `SlidingSync` handle and the room the Dart side wants
+/// subscribed live behind a single lock, so `subscribe`/`unsubscribe` FFI
+/// calls and the sync loop's (re)build/replay all observe a consistent pair —
+/// a late-finishing old call can't overwrite a newer room, and a cancel can't
+/// race a re-subscribe. Without an explicit subscription, a room with no
+/// recent timeline activity may be absent from sync responses, so its
+/// read-receipt deltas get dropped by the receipts extension (which only
+/// processes rooms present in the response). Subscribing the active room keeps
+/// it in every sync roundtrip — critical on homeservers (e.g. Tuwunel) whose
+/// Sliding Sync receipt extension only emits per-room receipts when the room
+/// is part of the response.
+struct RoomSubscriptionState {
+    /// The room the open chat screen wants subscribed, applied (re)applied
+    /// whenever a live instance is set, including after reconnect rebuilds.
+    desired: Option<String>,
+    /// The live Sliding Sync instance, present once the sync loop has built
+    /// one (and reset to `None` when it's stopped).
+    active: Option<matrix_sdk::sliding_sync::SlidingSync>,
+}
+
+static ROOM_SUBSCRIPTION: Lazy<tokio::sync::Mutex<RoomSubscriptionState>> = Lazy::new(|| {
+    tokio::sync::Mutex::new(RoomSubscriptionState {
+        desired: None,
+        active: None,
+    })
+});
+
 /// Server pagination token for the next older page in each room.
 static MESSAGE_PAGINATION_TOKENS: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -225,6 +254,12 @@ async fn stop_sync_task(user_id: Option<&str>) {
                 format!("Stopped sync loop for user {}", running.user_id),
             );
         }
+        // Drop the published Sliding Sync handle and the desired room so
+        // stale subscribers can't route room subscriptions to a dead
+        // instance, and a later session doesn't replay an old room.
+        let mut sub = ROOM_SUBSCRIPTION.lock().await;
+        sub.active = None;
+        sub.desired = None;
     }
 }
 
@@ -809,7 +844,7 @@ fn room_image_pack_to_sticker_pack(
     if stickers.is_empty() {
         return None;
     }
-    stickers.sort_by(|a, b| a.body.to_lowercase().cmp(&b.body.to_lowercase()));
+    stickers.sort_by_key(|a| a.body.to_lowercase());
 
     let title = content
         .pack
@@ -903,7 +938,7 @@ fn account_image_pack_to_sticker_pack(
     if stickers.is_empty() {
         return None;
     }
-    stickers.sort_by(|a, b| a.body.to_lowercase().cmp(&b.body.to_lowercase()));
+    stickers.sort_by_key(|a| a.body.to_lowercase());
 
     let title = content
         .pack
@@ -2563,6 +2598,24 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
                     continue;
                 }
             };
+            // Atomically publish the live instance and replay the open
+            // room's subscription onto it. The old instance (and its sticky
+            // subscriptions) is gone after a reconnect, so without replay the
+            // current room would stop receiving receipt deltas until the user
+            // re-enters it. subscribe_to_rooms is synchronous, so we do it
+            // under the same lock to keep desired/active consistent.
+            let mut sub_state = ROOM_SUBSCRIPTION.lock().await;
+            sub_state.active = Some(sliding_sync.clone());
+            if let Some(room_id) = sub_state.desired.clone() {
+                if let Ok(parsed) = matrix_sdk::ruma::RoomId::parse(room_id.as_str()) {
+                    use matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription;
+                    use matrix_sdk::ruma::UInt;
+                    let mut sub = RoomSubscription::default();
+                    sub.timeline_limit = UInt::from(50u32);
+                    sliding_sync.subscribe_to_rooms(&[&parsed], Some(sub), false);
+                }
+            }
+            drop(sub_state);
 
             let stream = sliding_sync.sync();
             futures_util::pin_mut!(stream);
@@ -2580,6 +2633,10 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
                     Err(e) => {
                         app_log("error", "sync", format!("Sliding Sync error: {e}"));
                         set_connection_status(ConnectionStatus::Disconnected);
+                        // The instance has failed; drop the published handle
+                        // so subscribe/unsubscribe calls during the retry
+                        // delay don't mutate a stale, soon-discarded instance.
+                        ROOM_SUBSCRIPTION.lock().await.active = None;
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 }
@@ -2590,6 +2647,10 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
                 "Sliding Sync stream ended; restarting".to_string(),
             );
             set_connection_status(ConnectionStatus::Disconnected);
+            // The stream ended (e.g. server closed the connection); the
+            // instance is no longer live, so clear the handle before the
+            // retry delay to avoid routing room subscriptions to it.
+            ROOM_SUBSCRIPTION.lock().await.active = None;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
@@ -2633,24 +2694,33 @@ static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> = Laz
 static TYPING_TASK: Lazy<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
 
+/// A member's read-receipt data, kept in the per-room receipt cache.
+///
+/// `unthreaded`/`main_thread` are the (target_event_id, receipt_ts) pairs for
+/// the two receipt threads, if present. The choice between them is deferred
+/// to attach time (where timeline position is known) rather than picked here
+/// by `ts`, because in federated rooms the two targets may come from
+/// different homeservers whose clocks aren't aligned.
+#[derive(Clone, Debug)]
+struct ReaderRecord {
+    user_id: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    unthreaded: Option<(String, i64)>,
+    main_thread: Option<(String, i64)>,
+}
+
 /// Cache of per-room read-receipt records, keyed by room id.
 ///
 /// `get_messages` recomputes receipts on every sync (≥500 ms), but receipts
 /// only change when someone reads — so a short TTL avoids re-querying the
 /// SDK store for every member on every sync. Value = (records, total_members,
 /// fetched_at).
-static RECEIPT_CACHE: Lazy<
-    tokio::sync::Mutex<
-        HashMap<
-            String,
-            (
-                Vec<(String, String, Option<String>, i64)>,
-                i32,
-                std::time::Instant,
-            ),
-        >,
-    >,
-> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+/// Snapshot of receipts for one room, stored in [`RECEIPT_CACHE`].
+type ReceiptCacheEntry = (Vec<ReaderRecord>, i32, std::time::Instant);
+
+static RECEIPT_CACHE: Lazy<tokio::sync::Mutex<HashMap<String, ReceiptCacheEntry>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 /// Last event for which this client sent a read receipt, keyed by account and
 /// room. Message refreshes must not continuously re-send the same receipt.
@@ -2721,6 +2791,56 @@ pub async fn unsubscribe_typing() {
     if let Some(handle) = task.take() {
         handle.abort();
     }
+}
+
+/// Subscribe to the given room in the Sliding Sync instance so that it is
+/// included in every sync roundtrip, ensuring read-receipt deltas for it are
+/// always delivered. Call when entering a room screen.
+///
+/// If Sliding Sync is not yet ready (startup race / account switch), the
+/// desire is recorded and applied automatically once the sync loop publishes
+/// an instance; this function never fails for that reason.
+///
+/// `desired`/`active` are updated under a single lock so concurrent calls
+/// can't interleave (a late-finishing old subscribe can't overwrite a newer
+/// room).
+#[frb]
+pub async fn subscribe_room_for_receipts(room_id: String) -> Result<(), String> {
+    let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
+        .map_err(|e| format!("Invalid room id: {e}"))?;
+    let mut state = ROOM_SUBSCRIPTION.lock().await;
+    state.desired = Some(room_id);
+    if let Some(sliding_sync) = state.active.as_ref() {
+        use matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription;
+        use matrix_sdk::ruma::UInt;
+        let mut sub = RoomSubscription::default();
+        sub.timeline_limit = UInt::from(50u32);
+        sliding_sync.subscribe_to_rooms(&[&parsed], Some(sub), false);
+    }
+    Ok(())
+}
+
+/// Unsubscribe the given room from Sliding Sync (e.g. when leaving the room
+/// screen). Receipts for it will still arrive when the room has timeline
+/// activity, but not on every roundtrip. Uses `unsubscribe_to_rooms` (not a
+/// no-op re-subscribe) so the subscription is actually removed, keeping sync
+/// cost bounded as the user visits different rooms.
+///
+/// The desire is only cleared when it matches `room_id`, and the unsubscribe
+/// runs under the same single lock as subscribe, so a cancel can't race a
+/// re-subscribe for the same or a newer room.
+#[frb]
+pub async fn unsubscribe_room_for_receipts(room_id: String) -> Result<(), String> {
+    let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
+        .map_err(|e| format!("Invalid room id: {e}"))?;
+    let mut state = ROOM_SUBSCRIPTION.lock().await;
+    if state.desired.as_deref() == Some(room_id.as_str()) {
+        state.desired = None;
+    }
+    if let Some(sliding_sync) = state.active.as_ref() {
+        sliding_sync.unsubscribe_to_rooms(&[&parsed], false);
+    }
+    Ok(())
 }
 
 /// Check if background sync is alive.
@@ -3929,83 +4049,390 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     // re-querying the store for every member on every sync.
     let now = std::time::Instant::now();
     let cached_receipts = RECEIPT_CACHE.lock().await.get(&room_id).cloned();
-    let reader_records: Vec<(String, String, Option<String>, i64)> =
-        if let Some((records, members, _)) = cached_receipts
-            .filter(|(_, _, fetched_at)| now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL)
-        {
-            total_members = members;
-            records
-        } else {
-            // Do not hold the global cache lock during SDK/store awaits. A
-            // slow room must not block receipt refreshes in every other room.
-            let mut records: Vec<(String, String, Option<String>, i64)> = Vec::new();
-            if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
-                total_members = joined.len() as i32;
-                let my_user_id = client.user_id();
-                for member in joined {
-                    let uid = member.user_id();
-                    if my_user_id == Some(uid) {
-                        continue;
-                    }
-                    let unthreaded = room
-                        .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
-                        .await
-                        .ok()
-                        .flatten();
-                    let main = room
-                        .load_user_receipt(ReceiptType::Read, ReceiptThread::Main, uid)
-                        .await
-                        .ok()
-                        .flatten();
-                    let read_ts = unthreaded
-                        .as_ref()
-                        .and_then(|(_, r)| r.ts)
-                        .map(|ts| i64::from(ts.0))
-                        .into_iter()
-                        .chain(
-                            main.as_ref()
-                                .and_then(|(_, r)| r.ts)
-                                .map(|ts| i64::from(ts.0))
-                                .into_iter(),
-                        )
-                        .max();
-                    if let Some(read_ts) = read_ts {
-                        let name = member.name().to_string();
-                        let display_name = if name == uid.as_str() {
-                            uid.localpart().to_string()
-                        } else {
-                            name
-                        };
-                        let avatar = member.avatar_url().map(|u| u.to_string());
-                        records.push((uid.to_string(), display_name, avatar, read_ts));
-                    }
+    let reader_records: Vec<ReaderRecord> = if let Some((records, members, _)) = cached_receipts
+        .filter(|(_, _, fetched_at)| now.duration_since(*fetched_at) < RECEIPT_CACHE_TTL)
+    {
+        total_members = members;
+        records
+    } else {
+        // Do not hold the global cache lock during SDK/store awaits. A
+        // slow room must not block receipt refreshes in every other room.
+        let mut records: Vec<ReaderRecord> = Vec::new();
+        if let Ok(joined) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+            total_members = joined.len() as i32;
+            let my_user_id = client.user_id();
+            for member in joined {
+                let uid = member.user_id();
+                if my_user_id == Some(uid) {
+                    continue;
                 }
+                let unthreaded = room
+                    .load_user_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, uid)
+                    .await
+                    .ok()
+                    .flatten();
+                let main = room
+                    .load_user_receipt(ReceiptType::Read, ReceiptThread::Main, uid)
+                    .await
+                    .ok()
+                    .flatten();
+                // Keep both unthreaded and main-thread candidates as
+                // (event_id, ts) pairs. We don't pick a "best" here:
+                // the right tiebreak is *timeline position* (which event
+                // is later in the room), not `ts` — in federated rooms the
+                // two receipts may target events from different
+                // homeservers whose clocks aren't aligned, so a later event
+                // can carry a smaller `ts`. Position is only known later,
+                // at attach time, so we defer the choice there. `ts` is
+                // kept as a fallback for targets outside the loaded window.
+                let unthreaded_cand = unthreaded
+                    .map(|(eid, r)| (eid.to_string(), r.ts.map(|ts| i64::from(ts.0)).unwrap_or(0)));
+                let main_cand = main
+                    .map(|(eid, r)| (eid.to_string(), r.ts.map(|ts| i64::from(ts.0)).unwrap_or(0)));
+                if unthreaded_cand.is_none() && main_cand.is_none() {
+                    continue;
+                }
+                let name = member.name().to_string();
+                let display_name = if name == uid.as_str() {
+                    uid.localpart().to_string()
+                } else {
+                    name
+                };
+                let avatar = member.avatar_url().map(|u| u.to_string());
+                records.push(ReaderRecord {
+                    user_id: uid.to_string(),
+                    display_name,
+                    avatar_url: avatar,
+                    unthreaded: unthreaded_cand,
+                    main_thread: main_cand,
+                });
             }
-            RECEIPT_CACHE
-                .lock()
-                .await
-                .insert(room_id.clone(), (records.clone(), total_members, now));
-            records
-        };
+        }
+        RECEIPT_CACHE
+            .lock()
+            .await
+            .insert(room_id.clone(), (records.clone(), total_members, now));
+        records
+    };
 
-    // Attach readers to each of our own messages.
+    // Build a timeline-position table over the *full* loaded chunk — not
+    // just the rendered `messages`. Receipts can target events that we filter
+    // out of the message list (edits, reactions, state events); those event
+    // ids are still valid read positions and must resolve to a position, or
+    // they'd fall back to the cross-clock `ts` comparison. Position is
+    // oldest-to-newest (0 = oldest).
+    let event_position: std::collections::HashMap<String, usize> =
+        msg_resp
+            .chunk
+            .iter()
+            .rev()
+            .filter_map(|te| {
+                te.kind.raw().deserialize().ok().map(
+                    |ev: matrix_sdk::ruma::events::AnySyncTimelineEvent| ev.event_id().to_string(),
+                )
+            })
+            .enumerate()
+            .map(|(idx, eid)| (eid, idx))
+            .collect();
+
+    // Attach readers to each of our own messages. The message's own timeline
+    // position is looked up in `event_position` (the full-chunk table) — not
+    // its index in the filtered `messages` list — so that receipt positions
+    // and the message position share one coordinate system even when events
+    // (edits, reactions, state) between messages have been filtered out.
     for msg in messages.iter_mut() {
         msg.total_members = total_members;
         if msg.is_me {
+            let msg_pos = event_position.get(&msg.id).copied();
             let msg_ts = msg.timestamp.parse::<i64>().unwrap_or(0);
             msg.readers = reader_records
                 .iter()
-                .filter(|(_, _, _, read_ts)| *read_ts >= msg_ts)
-                .map(|(uid, name, avatar, _)| MessageReader {
-                    user_id: uid.clone(),
-                    display_name: name.clone(),
-                    avatar_url: avatar.clone(),
+                .filter(|rec| {
+                    reader_has_read(
+                        rec.unthreaded.as_ref(),
+                        rec.main_thread.as_ref(),
+                        &event_position,
+                        msg_pos,
+                        msg_ts,
+                    )
+                })
+                .map(|rec| MessageReader {
+                    user_id: rec.user_id.clone(),
+                    display_name: rec.display_name.clone(),
+                    avatar_url: rec.avatar_url.clone(),
                 })
                 .collect();
         }
     }
 
     Ok(messages)
+}
+
+/// Whether a reader has seen a given message.
+///
+/// The reader may have an unthreaded and/or a main-thread receipt, each
+/// pointing at an event with its own `ts`. We resolve which receipt to use as
+/// follows:
+///
+/// - If either target event is in the loaded window, pick the one with the
+///   *later timeline position* (not `ts`): in federated rooms the two targets
+///   may come from different homeservers whose clocks aren't aligned, so a
+///   later event can carry a smaller `origin_server_ts`. Position is the true
+///   read order and matches what other clients (Element) display.
+/// - If neither target is in the window, fall back to the larger `ts` and
+///   compare it against the message's `origin_server_ts`. This crosses clocks
+///   (reader client vs sender server) and is best-effort.
+fn reader_has_read(
+    unthreaded: Option<&(String, i64)>,
+    main: Option<&(String, i64)>,
+    event_position: &std::collections::HashMap<String, usize>,
+    msg_pos: Option<usize>,
+    msg_ts: i64,
+) -> bool {
+    let resolve = |cand: Option<&(String, i64)>| -> (Option<usize>, i64) {
+        match cand {
+            Some((eid, ts)) => (event_position.get(eid).copied(), *ts),
+            None => (None, 0),
+        }
+    };
+    let (u_pos, u_ts) = resolve(unthreaded);
+    let (m_pos, m_ts) = resolve(main);
+
+    // No receipt at all (no unthreaded, no main) => definitely not read.
+    // (The caller filters these out, but keep the function self-consistent.)
+    if unthreaded.is_none() && main.is_none() {
+        return false;
+    }
+
+    // Without the message's own position we can't do a positional compare;
+    // fall back to ts (best-effort). This only happens if the message id
+    // itself is absent from the chunk (shouldn't occur in practice).
+    let Some(msg_pos) = msg_pos else {
+        return u_ts.max(m_ts) >= msg_ts;
+    };
+
+    match (u_pos, m_pos) {
+        // Both targets in-window: the later position wins.
+        (Some(up), Some(mp)) => up.max(mp) >= msg_pos,
+        // Only one in-window: use it.
+        (Some(up), None) => up >= msg_pos,
+        (None, Some(mp)) => mp >= msg_pos,
+        // Neither in-window: fall back to the larger ts.
+        (None, None) => u_ts.max(m_ts) >= msg_ts,
+    }
+}
+
+#[cfg(test)]
+mod read_receipt_tests {
+    use super::reader_has_read;
+    use std::collections::HashMap;
+
+    // Helper: build a position table mapping event ids to timeline indices.
+    fn positions(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
+        pairs.iter().map(|(e, i)| (e.to_string(), *i)).collect()
+    }
+
+    // A receipt candidate: (event_id, ts).
+    fn cand(eid: &str, ts: i64) -> (String, i64) {
+        (eid.to_string(), ts)
+    }
+
+    #[test]
+    fn target_at_or_after_message_counts_as_read() {
+        let pos = positions(&[("$a", 2), ("$b", 3)]);
+        assert!(reader_has_read(
+            Some(&cand("$a", 0)),
+            None,
+            &pos,
+            Some(2),
+            0
+        ));
+        assert!(reader_has_read(
+            Some(&cand("$b", 0)),
+            None,
+            &pos,
+            Some(2),
+            0
+        ));
+    }
+
+    #[test]
+    fn target_before_message_is_not_read() {
+        let pos = positions(&[("$a", 1), ("$msg", 2)]);
+        assert!(!reader_has_read(
+            Some(&cand("$a", 0)),
+            None,
+            &pos,
+            Some(2),
+            0
+        ));
+    }
+
+    #[test]
+    fn timeline_position_wins_over_timestamps() {
+        // Federated clock-skew: the target event is later in the timeline
+        // (pos 3 > msg pos 2) but carries an *older* timestamp (90 < 100).
+        // By position the reader HAS read it; a timestamp comparison would
+        // wrongly say they haven't.
+        let pos = positions(&[("$late", 3), ("$early", 1)]);
+        assert!(reader_has_read(
+            Some(&cand("$late", 90)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+        // Target earlier in the timeline => not read, regardless of ts.
+        assert!(!reader_has_read(
+            Some(&cand("$early", 200)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+    }
+
+    #[test]
+    fn later_position_wins_between_unthreaded_and_main() {
+        // unthreaded targets pos 1, main targets pos 4; main is later so the
+        // reader is considered to have read up to pos 4.
+        let pos = positions(&[("$u", 1), ("$m", 4)]);
+        assert!(reader_has_read(
+            Some(&cand("$u", 500)),
+            Some(&cand("$m", 50)),
+            &pos,
+            Some(3),
+            100,
+        ));
+        // Both before the message => not read.
+        assert!(!reader_has_read(
+            Some(&cand("$u", 500)),
+            Some(&cand("$m", 50)),
+            &pos,
+            Some(5),
+            100,
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_ts_when_targets_are_out_of_window() {
+        let pos = positions(&[]);
+        assert!(reader_has_read(
+            Some(&cand("$x", 100)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+        assert!(reader_has_read(
+            Some(&cand("$x", 101)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+        assert!(!reader_has_read(
+            Some(&cand("$x", 99)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+    }
+
+    #[test]
+    fn target_filtered_from_messages_still_resolves_by_position() {
+        // The receipt targets an edit/reaction event that is in the chunk
+        // but filtered out of `messages`; it must still resolve to a position
+        // instead of falling back to cross-clock ts.
+        let pos = positions(&[("$edit", 4), ("$msg", 2)]);
+        assert!(reader_has_read(
+            Some(&cand("$edit", 90)),
+            None,
+            &pos,
+            Some(2),
+            100
+        ));
+    }
+
+    #[test]
+    fn filtered_events_between_messages_do_not_shift_coordinate_system() {
+        // Regression: two messages with a filtered event (an edit) between
+        // them. In the full chunk the edit is pos 1 and the later message is
+        // pos 2. If the code had used the *filtered* `messages` index, the
+        // later message would be index 1 instead of 2 — and a receipt at the
+        // edit (pos 1) would wrongly count as having read it. Using the
+        // message's own chunk position (2), the receipt at pos 1 has NOT read
+        // it, which is correct.
+        let pos = positions(&[("$msg0", 0), ("$edit", 1), ("$msg1", 2)]);
+        // Receipt targets the edit (pos 1); later message $msg1 is at pos 2.
+        // 1 < 2 => not read.
+        assert!(!reader_has_read(
+            Some(&cand("$edit", 0)),
+            None,
+            &pos,
+            Some(2),
+            0,
+        ));
+        // Receipt at the later message itself => read.
+        assert!(reader_has_read(
+            Some(&cand("$msg1", 0)),
+            None,
+            &pos,
+            Some(2),
+            0,
+        ));
+    }
+
+    #[test]
+    fn both_receipts_none_is_not_read() {
+        let pos = positions(&[("$msg", 0)]);
+        assert!(!reader_has_read(None, None, &pos, Some(0), 0));
+    }
+
+    #[test]
+    fn missing_msg_pos_falls_back_to_ts() {
+        // Message id absent from the chunk table (shouldn't happen in
+        // practice) — must fall back to the larger ts, not panic.
+        let pos = positions(&[]);
+        assert!(reader_has_read(
+            Some(&cand("$u", 100)),
+            None,
+            &pos,
+            None,
+            100
+        ));
+        assert!(!reader_has_read(
+            Some(&cand("$u", 99)),
+            None,
+            &pos,
+            None,
+            100
+        ));
+    }
+
+    #[test]
+    fn one_receipt_in_window_one_out_uses_in_window() {
+        // unthreaded in-window at pos 1, main out-of-window; msg at pos 2.
+        // The in-window target decides: 1 < 2 => not read.
+        let pos = positions(&[("$in", 1)]);
+        assert!(!reader_has_read(
+            Some(&cand("$in", 0)),
+            Some(&cand("$out", 999)),
+            &pos,
+            Some(2),
+            0,
+        ));
+        // unthreaded in-window at pos 5 => read.
+        let pos2 = positions(&[("$in", 5)]);
+        assert!(reader_has_read(
+            Some(&cand("$in", 0)),
+            Some(&cand("$out", 0)),
+            &pos2,
+            Some(2),
+            0,
+        ));
+    }
 }
 
 #[frb]
