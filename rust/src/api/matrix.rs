@@ -3717,6 +3717,218 @@ pub async fn send_image_message(
     Ok(())
 }
 
+/// Send an arbitrary file (document) attachment to a room.
+#[frb]
+pub async fn send_file_message(
+    room_id: String,
+    file_data: Vec<u8>,
+    filename: String,
+    mime_type: Option<String>,
+    size: Option<i32>,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = get_room_by_id(&client, &room_id)?;
+
+    let mime_type: mime::Mime = mime_type
+        .and_then(|value| value.trim().parse::<mime::Mime>().ok())
+        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+
+    app_log(
+        "info",
+        "media",
+        format!(
+            "Uploading file: {} ({} bytes, mime: {})",
+            filename,
+            file_data.len(),
+            mime_type
+        ),
+    );
+
+    use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo};
+
+    let info = BaseFileInfo {
+        size: size
+            .filter(|value| *value > 0)
+            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
+            .or_else(|| matrix_sdk::ruma::UInt::new(file_data.len() as u64)),
+    };
+    let config = AttachmentConfig::new().info(AttachmentInfo::File(info));
+
+    room.send_attachment(&filename, &mime_type, file_data, config)
+        .await
+        .map_err(|e| format!("Send file message failed: {e}"))?;
+
+    app_log("info", "rooms", format!("File message sent to {}", room_id));
+    info!("File message sent to {}", room_id);
+
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
+    Ok(())
+}
+
+/// Send a video attachment to a room.
+#[frb]
+#[allow(clippy::too_many_arguments)]
+pub async fn send_video_message(
+    room_id: String,
+    video_data: Vec<u8>,
+    filename: String,
+    mime_type: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    duration_ms: Option<i32>,
+    size: Option<i32>,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = get_room_by_id(&client, &room_id)?;
+
+    let mime_type: mime::Mime = mime_type
+        .and_then(|value| value.trim().parse::<mime::Mime>().ok())
+        .unwrap_or_else(|| {
+            if filename.ends_with(".mov") {
+                "video/quicktime".parse().unwrap()
+            } else {
+                "video/mp4".parse().unwrap()
+            }
+        });
+
+    app_log(
+        "info",
+        "media",
+        format!(
+            "Uploading video: {} ({} bytes, mime: {})",
+            filename,
+            video_data.len(),
+            mime_type
+        ),
+    );
+
+    use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseVideoInfo};
+
+    let info = BaseVideoInfo {
+        width: width
+            .filter(|value| *value > 0)
+            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
+        height: height
+            .filter(|value| *value > 0)
+            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
+        duration: duration_ms
+            .filter(|value| *value > 0)
+            .map(|value| matrix_sdk::ruma::time::Duration::from_millis(value as u64)),
+        size: size
+            .filter(|value| *value > 0)
+            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
+            .or_else(|| matrix_sdk::ruma::UInt::new(video_data.len() as u64)),
+        ..Default::default()
+    };
+    let config = AttachmentConfig::new().info(AttachmentInfo::Video(info));
+
+    room.send_attachment(&filename, &mime_type, video_data, config)
+        .await
+        .map_err(|e| format!("Send video message failed: {e}"))?;
+
+    app_log(
+        "info",
+        "rooms",
+        format!("Video message sent to {}", room_id),
+    );
+    info!("Video message sent to {}", room_id);
+
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
+    Ok(())
+}
+
+/// Share a geographic location as a Matrix `m.location` event.
+///
+/// `geo_uri` follows RFC 5870, e.g. `geo:37.786971,-122.399677`.
+#[frb]
+pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = get_room_by_id(&client, &room_id)?;
+
+    use matrix_sdk::ruma::events::location::{LocationContent, LocationEventContent};
+
+    let location = LocationContent::new(geo_uri.clone());
+    let content = LocationEventContent::with_plain_text(
+        if body.trim().is_empty() {
+            geo_uri
+        } else {
+            body
+        },
+        location,
+    );
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Send location failed: {e}"))?;
+
+    app_log(
+        "info",
+        "rooms",
+        format!("Location message sent to {}", room_id),
+    );
+    info!("Location message sent to {}", room_id);
+
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
+    Ok(())
+}
+
+/// Start a poll in a room (Matrix `m.poll.start`, MSC3381).
+#[frb]
+pub async fn send_poll(
+    room_id: String,
+    question: String,
+    answers: Vec<String>,
+    disclosed: bool,
+) -> Result<(), String> {
+    use matrix_sdk::ruma::events::{
+        message::TextContentBlock,
+        poll::start::{PollAnswer, PollAnswers, PollContentBlock, PollKind, PollStartEventContent},
+    };
+
+    let mut answer_list = Vec::with_capacity(answers.len());
+    for (index, label) in answers.into_iter().enumerate() {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        answer_list.push(PollAnswer::new(
+            index.to_string(),
+            TextContentBlock::plain(trimmed),
+        ));
+    }
+    let poll_answers = PollAnswers::try_from(answer_list)
+        .map_err(|_| "A poll needs between 1 and 20 answers.".to_string())?;
+
+    let mut poll = PollContentBlock::new(TextContentBlock::plain(question.trim()), poll_answers);
+    poll.kind = if disclosed {
+        PollKind::Disclosed
+    } else {
+        PollKind::Undisclosed
+    };
+
+    let content = PollStartEventContent::with_plain_text("poll", poll);
+
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = get_room_by_id(&client, &room_id)?;
+    room.send(content)
+        .await
+        .map_err(|e| format!("Send poll failed: {e}"))?;
+
+    app_log("info", "rooms", format!("Poll message sent to {}", room_id));
+    info!("Poll message sent to {}", room_id);
+
+    notify_sync_event(SyncEvent::MessageSent {
+        room_id: room_id.clone(),
+    });
+    Ok(())
+}
+
 #[frb]
 pub async fn send_sticker(
     room_id: String,

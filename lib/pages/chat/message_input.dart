@@ -3,7 +3,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
 import '../../features/markdown/markdown_composer.dart';
 import '../../features/markdown/markdown_source_store.dart';
 import '../../providers/auth_provider.dart';
@@ -12,7 +11,7 @@ import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import '../../widgets/liquid_glass.dart';
-import 'chat_image_editor_page.dart';
+import 'attachment_picker.dart';
 import 'composer_picker_panel.dart';
 import 'latest_message_control.dart';
 import 'send_flight.dart';
@@ -93,7 +92,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   bool _isSending = false;
   Timer? _typingTimer;
   bool _isTyping = false;
-  final _imagePicker = ImagePicker();
   ComposerPickerTab _pickerTab = ComposerPickerTab.emoji;
   int _pickerInstance = 0;
 
@@ -453,70 +451,18 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
   }
 
-  Future<void> _pickImage() async {
-    if (_isSending) return;
-
-    try {
-      final pickedFile = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
-        maxWidth: 4096,
-        maxHeight: 4096,
-        imageQuality: 95,
-      );
-      if (pickedFile == null) return;
-
-      final sourceBytes = await pickedFile.readAsBytes();
-      if (!mounted) return;
-      final bytes = await Navigator.of(context).push<Uint8List>(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => ChatImageEditorPage(imageBytes: sourceBytes),
+  Future<void> _openAttachmentPicker() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => AttachmentPicker(
+          roomId: widget.roomId,
+          onRefresh: (roomId) => refreshMessages(ref, roomId),
+          resolveSendPresentation: widget.resolveSendPresentation,
+          onMessageSent: widget.onMessageSent,
         ),
-      );
-      if (bytes == null || !mounted) return;
-
-      final sendPresentation = widget.resolveSendPresentation();
-      setState(() => _isSending = true);
-
-      final filename = 'edited_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final imageSize = await _decodeImageSize(bytes);
-
-      await rust.sendImageMessage(
-        roomId: widget.roomId,
-        imageData: bytes,
-        filename: filename,
-        width: imageSize?.width.round(),
-        height: imageSize?.height.round(),
-      );
-
-      await refreshMessages(ref, widget.roomId);
-      if (!mounted) return;
-      widget.onMessageSent(sendPresentation, false);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('发送图片失败: $e'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSending = false);
-    }
-  }
-
-  Future<Size?> _decodeImageSize(Uint8List bytes) async {
-    try {
-      final completer = Completer<ui.Image>();
-      ui.decodeImageFromList(bytes, completer.complete);
-      final image = await completer.future;
-      final size = Size(image.width.toDouble(), image.height.toDouble());
-      image.dispose();
-      return size;
-    } catch (_) {
-      return null;
-    }
+      ),
+    );
   }
 
   void _insertEmoji(String emoji) {
@@ -799,15 +745,15 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                                     SizedBox.square(
                                       dimension: 44,
                                       child: IconButton(
-                                        tooltip: '文件发送暂仅支持图片',
+                                        tooltip: '附件',
                                         onPressed: _isSending
                                             ? null
-                                            : _pickImage,
+                                            : _openAttachmentPicker,
                                         padding: EdgeInsets.zero,
                                         icon: const Icon(
-                                          Icons.attach_file_rounded,
+                                          Icons.add_rounded,
                                           color: AppColors.onSurfaceVariant,
-                                          size: 24,
+                                          size: 26,
                                         ),
                                       ),
                                     ),
