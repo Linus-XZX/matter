@@ -381,6 +381,7 @@ fn timeline_item_to_message(
                         image_width,
                         image_height,
                         filename: None,
+                        file_size: None,
                         geo_uri: None,
                         poll: None,
                         in_reply_to,
@@ -425,6 +426,7 @@ fn timeline_item_to_message(
             image_width: None,
             image_height: None,
             filename: None,
+            file_size: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -452,6 +454,7 @@ fn timeline_item_to_message(
             image_width: None,
             image_height: None,
             filename: None,
+            file_size: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -632,6 +635,7 @@ fn message_to_chat_message(
             result.caption = caption;
             result.caption_formatted_body = caption_formatted_body;
             result.filename = Some(filename);
+            result.file_size = file.info.as_deref().and_then(|info| uint_to_i32(info.size));
             result.image_url = image_url;
             result.media_source_json = serde_json::to_string(&file.source).ok();
             result
@@ -661,6 +665,10 @@ fn message_to_chat_message(
             result.caption = caption;
             result.caption_formatted_body = caption_formatted_body;
             result.filename = Some(filename);
+            result.file_size = audio
+                .info
+                .as_deref()
+                .and_then(|info| uint_to_i32(info.size));
             result.image_url = image_url;
             result.media_source_json = serde_json::to_string(&audio.source).ok();
             result
@@ -732,6 +740,7 @@ fn base_message(
         image_width: None,
         image_height: None,
         filename: None,
+        file_size: None,
         geo_uri: None,
         poll: None,
         in_reply_to,
@@ -772,14 +781,12 @@ fn poll_message(
 
     let disclosed = result.kind == matrix_sdk::ruma::events::poll::start::PollKind::Disclosed;
     let ended = result.end_time.is_some();
-    let reveal = disclosed || ended;
-
     // Aggregate per-answer tallies and detect the current user's selections.
     let mut my_answer_ids = Vec::new();
     let mut tally: HashMap<&str, i32> = HashMap::new();
     let mut voters: HashMap<&str, ()> = HashMap::new();
     for (answer_id, voters_for_answer) in &result.votes {
-        let count = voters_for_answer.len() as i32;
+        let count = i32::try_from(voters_for_answer.len()).unwrap_or(i32::MAX);
         tally.insert(answer_id.as_str(), count);
         for voter in voters_for_answer {
             voters.insert(voter.as_str(), ());
@@ -815,16 +822,12 @@ fn poll_message(
         question: result.question,
         answers,
         disclosed,
-        max_selections: result.max_selections as i32,
+        max_selections: i32::try_from(result.max_selections).unwrap_or(i32::MAX),
         my_answer_ids,
         results,
-        total_voters: voters.len() as i32,
+        total_voters: i32::try_from(voters.len()).unwrap_or(i32::MAX),
         ended,
     });
-    // Hide tallies until revealed (disclosed poll while open, or any poll
-    // once ended). The Dart side reads `reveal` via ended/disclosed to decide
-    // whether to draw bars.
-    let _ = reveal;
     Some(message)
 }
 
@@ -899,6 +902,7 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{messages_before, reader_ids_for_position, resolve_receipt_position};
+    use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
     use std::collections::HashMap;
 
@@ -921,6 +925,7 @@ mod tests {
             image_width: None,
             image_height: None,
             filename: None,
+            file_size: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -984,5 +989,18 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn file_sizes_cross_the_bridge_as_saturating_i32() {
+        assert_eq!(
+            uint_to_i32(matrix_sdk::ruma::UInt::new(64 * 1024 * 1024)),
+            Some(64 * 1024 * 1024)
+        );
+        assert_eq!(
+            uint_to_i32(matrix_sdk::ruma::UInt::new(i32::MAX as u64 + 1)),
+            Some(i32::MAX)
+        );
+        assert_eq!(uint_to_i32(None), None);
     }
 }

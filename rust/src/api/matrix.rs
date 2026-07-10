@@ -776,7 +776,7 @@ fn usage_allows_sticker(usage: &BTreeSet<ruma::events::image_pack::PackUsage>) -
 }
 
 fn uint_to_i32(value: Option<matrix_sdk::ruma::UInt>) -> Option<i32> {
-    value.and_then(|value| u64::from(value).try_into().ok())
+    value.map(|value| i32::try_from(u64::from(value)).unwrap_or(i32::MAX))
 }
 
 fn image_info_dimensions(
@@ -1124,6 +1124,8 @@ pub struct ChatMessage {
     pub image_height: Option<i32>,
     /// Original filename for file/audio attachments.
     pub filename: Option<String>,
+    /// Declared file size in bytes for file/audio attachments.
+    pub file_size: Option<i32>,
     /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
     pub geo_uri: Option<String>,
     /// Poll data when `msg_type == Poll`.
@@ -3171,45 +3173,24 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
             let preview = match any_ev {
                 matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                     matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
-                ) => msg.as_original().and_then(|o| {
-                    // An edit (m.replace) carries the new text in new_content,
-                    // and its own body is conventionally prefixed with "* ".
-                    // Use the new_content text so the preview stays clean.
-                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(
-                        rep,
-                    )) = &o.content.relates_to
-                    {
-                        if let Some(edited) = extract_edit_content(&rep.new_content) {
-                            return Some(edited.body);
-                        }
-                    }
-                    match &o.content.msgtype {
-                        matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
-                            let is_reply = matches!(
-                                &o.content.relates_to,
-                                Some(matrix_sdk::ruma::events::room::message::Relation::Reply(_))
-                            );
-                            Some(if is_reply {
-                                strip_reply_fallback(&t.body)
-                            } else {
-                                t.body.clone()
-                            })
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Image(t) => {
-                            Some(format!("[图片] {}", t.body))
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Video(t) => {
-                            Some(format!("[视频] {}", t.filename()))
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::File(t) => {
-                            Some(format!("[文件] {}", t.body))
-                        }
-                        matrix_sdk::ruma::events::room::message::MessageType::Emote(t) => {
-                            Some(t.body.clone())
-                        }
-                        _ => None,
-                    }
-                }),
+                ) => msg
+                    .as_original()
+                    .and_then(|event| room_message_preview(&event.content)),
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::UnstablePollStart(poll),
+                ) => poll
+                    .as_original()
+                    .and_then(|event| unstable_poll_preview(&event.content)),
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::UnstablePollResponse(
+                        response,
+                    ),
+                ) => response
+                    .as_original()
+                    .map(|_| "[投票] 有人投票".to_string()),
+                matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                    matrix_sdk::ruma::events::AnySyncMessageLikeEvent::UnstablePollEnd(end),
+                ) => end.as_original().map(|_| "[投票] 投票已结束".to_string()),
                 matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                     matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Sticker(sticker),
                 ) => sticker
@@ -3238,6 +3219,65 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
     }
 
     (last_msg, None, last_time)
+}
+
+fn room_message_preview(
+    content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
+) -> Option<String> {
+    // An edit carries the new text in new_content, while its fallback body is
+    // conventionally prefixed with "* ".
+    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) =
+        &content.relates_to
+    {
+        if let Some(edited) = extract_edit_content(&replacement.new_content) {
+            return Some(edited.body);
+        }
+    }
+
+    match &content.msgtype {
+        matrix_sdk::ruma::events::room::message::MessageType::Text(text) => {
+            let is_reply = matches!(
+                &content.relates_to,
+                Some(matrix_sdk::ruma::events::room::message::Relation::Reply(_))
+            );
+            Some(if is_reply {
+                strip_reply_fallback(&text.body)
+            } else {
+                text.body.clone()
+            })
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::Image(image) => {
+            Some(format!("[图片] {}", image.body))
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::Video(video) => {
+            Some(format!("[视频] {}", video.filename()))
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::File(file) => {
+            Some(format!("[文件] {}", file.filename()))
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::Audio(audio) => {
+            Some(format!("[音频] {}", audio.filename()))
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::Location(location) => {
+            let label = if location.body.trim().is_empty() {
+                &location.geo_uri
+            } else {
+                &location.body
+            };
+            Some(format!("[位置] {label}"))
+        }
+        matrix_sdk::ruma::events::room::message::MessageType::Emote(emote) => {
+            Some(emote.body.clone())
+        }
+        _ => None,
+    }
+}
+
+fn unstable_poll_preview(
+    content: &matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent,
+) -> Option<String> {
+    let question = content.poll_start().question.text.trim();
+    (!question.is_empty()).then(|| format!("[投票] {question}"))
 }
 
 /// Strip the Matrix reply fallback prefix from a message body.
@@ -3453,6 +3493,7 @@ fn unable_to_decrypt_message(
         image_width: None,
         image_height: None,
         filename: None,
+        file_size: None,
         geo_uri: None,
         poll: None,
         in_reply_to: None,
@@ -3615,6 +3656,20 @@ pub async fn send_message(
     Ok(response.response.event_id.to_string())
 }
 
+fn poll_start_for_forward(
+    content: &matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent,
+) -> Result<matrix_sdk::ruma::events::poll::unstable_start::NewUnstablePollStartEventContent, String>
+{
+    use matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent;
+
+    let UnstablePollStartEventContent::New(content) = content else {
+        return Err("无法将投票编辑事件作为新投票转发".to_string());
+    };
+    let mut content = content.clone();
+    content.relates_to = None;
+    Ok(content)
+}
+
 /// Forward a message-like event into another room as a new event.
 ///
 /// Text uses the already-aggregated content supplied by Flutter so edits are
@@ -3689,6 +3744,21 @@ pub async fn forward_message(
                 .event_id
                 .to_string()
         }
+        matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+            matrix_sdk::ruma::events::AnySyncMessageLikeEvent::UnstablePollStart(poll),
+        ) => {
+            let Some(original) = poll.as_original() else {
+                return Err("无法转发已撤回的投票".to_string());
+            };
+            let content = poll_start_for_forward(&original.content)?;
+            target_room
+                .send(content)
+                .await
+                .map_err(|e| format!("Forward failed: {e}"))?
+                .response
+                .event_id
+                .to_string()
+        }
         _ => return Err("该消息类型暂不支持转发".to_string()),
     };
 
@@ -3703,6 +3773,88 @@ pub async fn forward_message(
     Ok(event_id)
 }
 
+fn parse_supplied_mime_type(value: Option<String>) -> Result<Option<mime::Mime>, String> {
+    let Some(value) = value.map(|value| value.trim().to_owned()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<mime::Mime>()
+        .map(Some)
+        .map_err(|error| format!("Invalid MIME type: {error}"))
+}
+
+fn image_mime_type(filename: &str, supplied: Option<String>) -> Result<mime::Mime, String> {
+    let mime_type = if let Some(mime_type) = parse_supplied_mime_type(supplied)? {
+        mime_type
+    } else {
+        let extension = filename
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase());
+        match extension.as_deref() {
+            Some("png") => mime::IMAGE_PNG,
+            Some("gif") => mime::IMAGE_GIF,
+            Some("webp") => "image/webp".parse().expect("valid static MIME type"),
+            Some("avif") => "image/avif".parse().expect("valid static MIME type"),
+            Some("heic") => "image/heic".parse().expect("valid static MIME type"),
+            Some("heif") => "image/heif".parse().expect("valid static MIME type"),
+            Some("tif" | "tiff") => "image/tiff".parse().expect("valid static MIME type"),
+            Some("bmp") => "image/bmp".parse().expect("valid static MIME type"),
+            _ => mime::IMAGE_JPEG,
+        }
+    };
+    if mime_type.type_() != mime::IMAGE {
+        return Err(format!("Expected an image MIME type, got {mime_type}"));
+    }
+    Ok(mime_type)
+}
+
+fn video_mime_type(filename: &str, supplied: Option<String>) -> Result<mime::Mime, String> {
+    let mime_type = if let Some(mime_type) = parse_supplied_mime_type(supplied)? {
+        mime_type
+    } else {
+        let extension = filename
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase());
+        let fallback = match extension.as_deref() {
+            Some("mov") => "video/quicktime",
+            Some("webm") => "video/webm",
+            Some("mkv") => "video/x-matroska",
+            Some("3gp") => "video/3gpp",
+            Some("3g2") => "video/3gpp2",
+            Some("avi") => "video/x-msvideo",
+            Some("mpg" | "mpeg") => "video/mpeg",
+            Some("ogv") => "video/ogg",
+            _ => "video/mp4",
+        };
+        fallback.parse().expect("valid static MIME type")
+    };
+    if mime_type.type_() != mime::VIDEO {
+        return Err(format!("Expected a video MIME type, got {mime_type}"));
+    }
+    Ok(mime_type)
+}
+
+fn file_message_content(
+    filename: String,
+    mime_type: &mime::Mime,
+    size: Option<matrix_sdk::ruma::UInt>,
+    source: matrix_sdk::ruma::events::room::MediaSource,
+) -> matrix_sdk::ruma::events::room::message::RoomMessageEventContent {
+    use matrix_sdk::ruma::events::room::message::{
+        FileInfo, FileMessageEventContent, MessageType, RoomMessageEventContent,
+    };
+
+    let mut info = FileInfo::new();
+    info.mimetype = Some(mime_type.to_string());
+    info.size = size;
+    RoomMessageEventContent::new(MessageType::File(
+        FileMessageEventContent::new(filename, source).info(Box::new(info)),
+    ))
+}
+
 /// Send an image message to a room.
 /// `image_data` is the raw bytes of the image file.
 /// `filename` is the original file name (e.g. "photo.jpg").
@@ -3711,22 +3863,13 @@ pub async fn send_image_message(
     room_id: String,
     image_data: Vec<u8>,
     filename: String,
+    mime_type: Option<String>,
     width: Option<i32>,
     height: Option<i32>,
 ) -> Result<(), String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-
-    // Detect MIME type from filename extension
-    let mime_type: mime::Mime = if filename.ends_with(".png") {
-        mime::IMAGE_PNG
-    } else if filename.ends_with(".gif") {
-        mime::IMAGE_GIF
-    } else if filename.ends_with(".webp") {
-        "image/webp".parse().unwrap_or(mime::IMAGE_JPEG)
-    } else {
-        mime::IMAGE_JPEG
-    };
+    let mime_type = image_mime_type(&filename, mime_type)?;
 
     app_log(
         "info",
@@ -3784,9 +3927,11 @@ pub async fn send_file_message(
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let mime_type: mime::Mime = mime_type
-        .and_then(|value| value.trim().parse::<mime::Mime>().ok())
-        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let mime_type = parse_supplied_mime_type(mime_type)?.unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let file_size = size
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
+        .or_else(|| matrix_sdk::ruma::UInt::new(file_data.len() as u64));
 
     app_log(
         "info",
@@ -3799,17 +3944,31 @@ pub async fn send_file_message(
         ),
     );
 
-    use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo};
+    use matrix_sdk::ruma::events::room::MediaSource;
+    use std::io::Cursor;
 
-    let info = BaseFileInfo {
-        size: size
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
-            .or_else(|| matrix_sdk::ruma::UInt::new(file_data.len() as u64)),
+    let source = if room
+        .latest_encryption_state()
+        .await
+        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .is_encrypted()
+    {
+        let mut reader = Cursor::new(file_data.as_slice());
+        let encrypted_file = client
+            .upload_encrypted_file(&mut reader)
+            .await
+            .map_err(|error| format!("Encrypted file upload failed: {error}"))?;
+        MediaSource::Encrypted(Box::new(encrypted_file))
+    } else {
+        let upload = client
+            .media()
+            .upload(&mime_type, file_data, None)
+            .await
+            .map_err(|error| format!("File upload failed: {error}"))?;
+        MediaSource::Plain(upload.content_uri)
     };
-    let config = AttachmentConfig::new().info(AttachmentInfo::File(info));
-
-    room.send_attachment(&filename, &mime_type, file_data, config)
+    let content = file_message_content(filename, &mime_type, file_size, source);
+    room.send(content)
         .await
         .map_err(|e| format!("Send file message failed: {e}"))?;
 
@@ -3838,15 +3997,7 @@ pub async fn send_video_message(
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let mime_type: mime::Mime = mime_type
-        .and_then(|value| value.trim().parse::<mime::Mime>().ok())
-        .unwrap_or_else(|| {
-            if filename.ends_with(".mov") {
-                "video/quicktime".parse().unwrap()
-            } else {
-                "video/mp4".parse().unwrap()
-            }
-        });
+    let mime_type = video_mime_type(&filename, mime_type)?;
 
     app_log(
         "info",
@@ -3896,27 +4047,77 @@ pub async fn send_video_message(
     Ok(())
 }
 
-/// Share a geographic location.
-///
-/// Sent as a legacy `m.room.message` with `msgtype: m.location`, which is
-/// what `matrix-sdk-ui` 0.18 surfaces on the timeline. The extensible
-/// top-level `m.location` event type is not parsed by this SDK version.
-///
-/// `geo_uri` follows RFC 5870, e.g. `geo:37.786971,-122.399677`.
-#[frb]
-pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Result<(), String> {
+/// Validate the RFC 5870 subset supported by the attachment composer.
+fn validated_geo_uri(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let uri = url::Url::parse(value).map_err(|error| format!("Invalid geo URI: {error}"))?;
+    if uri.scheme() != "geo" || uri.query().is_some() || uri.fragment().is_some() {
+        return Err("Location must be a geo: URI without a query or fragment.".to_string());
+    }
+
+    let coordinate_part = uri.path().split(';').next().unwrap_or_default();
+    let coordinates = coordinate_part.split(',').collect::<Vec<_>>();
+    if !(2..=3).contains(&coordinates.len()) {
+        return Err("Location must contain latitude and longitude.".to_string());
+    }
+    if coordinates
+        .iter()
+        .any(|coordinate| coordinate.contains(['e', 'E']))
+    {
+        return Err("Location coordinates must use decimal notation.".to_string());
+    }
+    let latitude = coordinates[0]
+        .parse::<f64>()
+        .map_err(|_| "Invalid latitude.".to_string())?;
+    let longitude = coordinates[1]
+        .parse::<f64>()
+        .map_err(|_| "Invalid longitude.".to_string())?;
+    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
+        return Err("Latitude must be between -90 and 90.".to_string());
+    }
+    if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
+        return Err("Longitude must be between -180 and 180.".to_string());
+    }
+    if coordinates.len() == 3
+        && coordinates[2]
+            .parse::<f64>()
+            .ok()
+            .filter(|altitude| altitude.is_finite())
+            .is_none()
+    {
+        return Err("Invalid altitude.".to_string());
+    }
+    Ok(value.to_owned())
+}
+
+fn location_message_content(
+    body: &str,
+    geo_uri: &str,
+) -> Result<matrix_sdk::ruma::events::room::message::RoomMessageEventContent, String> {
     use matrix_sdk::ruma::events::room::message::{
         LocationMessageEventContent, MessageType, RoomMessageEventContent,
     };
 
-    let label = if body.trim().is_empty() {
+    let geo_uri = validated_geo_uri(geo_uri)?;
+    let body = body.trim();
+    let label = if body.is_empty() {
         geo_uri.clone()
     } else {
-        body
+        body.to_owned()
     };
-    let content = RoomMessageEventContent::new(MessageType::Location(
+    Ok(RoomMessageEventContent::new(MessageType::Location(
         LocationMessageEventContent::new(label, geo_uri),
-    ));
+    )))
+}
+
+/// Share a geographic location as legacy `m.room.message` / `m.location`.
+///
+/// The extensible top-level `m.location` event is not parsed by the current
+/// `matrix-sdk-ui` version. `geo_uri` follows RFC 5870, for example
+/// `geo:37.786971,-122.399677`.
+#[frb]
+pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Result<(), String> {
+    let content = location_message_content(&body, &geo_uri)?;
 
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
@@ -3937,20 +4138,12 @@ pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Re
     Ok(())
 }
 
-/// Start a poll in a room (Matrix `m.poll.start`, MSC3381).
-#[frb]
-/// Start a poll in a room.
-///
-/// Uses the **unstable** `org.matrix.msc3381.poll.start` event type, which is
-/// what `matrix-sdk-ui` 0.18 surfaces on the timeline. The stable
-/// `m.poll.start` type is not parsed by this SDK version and would vanish.
-#[frb]
-pub async fn send_poll(
-    room_id: String,
-    question: String,
+/// Build a validated unstable poll start event with a plain-text fallback.
+fn poll_start_content(
+    question: &str,
     answers: Vec<String>,
     disclosed: bool,
-) -> Result<(), String> {
+) -> Result<matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent, String> {
     use matrix_sdk::ruma::events::poll::{
         start::PollKind,
         unstable_start::{
@@ -3959,25 +4152,53 @@ pub async fn send_poll(
         },
     };
 
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("A poll question cannot be empty.".to_string());
+    }
+
     let mut answer_list = Vec::with_capacity(answers.len());
-    for (index, label) in answers.into_iter().enumerate() {
-        let trimmed = label.trim();
-        if trimmed.is_empty() {
+    for label in answers {
+        let label = label.trim();
+        if label.is_empty() {
             continue;
         }
-        answer_list.push(UnstablePollAnswer::new(index.to_string(), trimmed));
+        answer_list.push(UnstablePollAnswer::new(
+            answer_list.len().to_string(),
+            label,
+        ));
+    }
+    if !(2..=20).contains(&answer_list.len()) {
+        return Err("A poll needs between 2 and 20 answers.".to_string());
+    }
+    let mut fallback = question.to_owned();
+    for (index, answer) in answer_list.iter().enumerate() {
+        fallback.push_str(&format!("\n{}. {}", index + 1, answer.text));
     }
     let poll_answers = UnstablePollAnswers::try_from(answer_list)
-        .map_err(|_| "A poll needs between 1 and 20 answers.".to_string())?;
+        .map_err(|_| "A poll needs between 2 and 20 answers.".to_string())?;
 
-    let mut poll_start = UnstablePollStartContentBlock::new(question.trim(), poll_answers);
+    let mut poll_start = UnstablePollStartContentBlock::new(question, poll_answers);
     poll_start.kind = if disclosed {
         PollKind::Disclosed
     } else {
         PollKind::Undisclosed
     };
-    let content: matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent =
-        NewUnstablePollStartEventContent::new(poll_start).into();
+    Ok(NewUnstablePollStartEventContent::plain_text(fallback, poll_start).into())
+}
+
+/// Start a poll using the unstable `org.matrix.msc3381.poll.start` event.
+///
+/// This is the poll type surfaced by the current `matrix-sdk-ui` version; its
+/// stable counterpart is not parsed there yet.
+#[frb]
+pub async fn send_poll(
+    room_id: String,
+    question: String,
+    answers: Vec<String>,
+    disclosed: bool,
+) -> Result<(), String> {
+    let content = poll_start_content(&question, answers, disclosed)?;
 
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
@@ -3994,6 +4215,17 @@ pub async fn send_poll(
     Ok(())
 }
 
+fn validate_poll_answer_ids(answer_ids: &[String]) -> Result<(), String> {
+    if answer_ids.is_empty()
+        || answer_ids.len() > 20
+        || answer_ids.iter().any(|answer_id| answer_id.is_empty())
+        || answer_ids.iter().collect::<BTreeSet<_>>().len() != answer_ids.len()
+    {
+        return Err("A poll response needs 1 to 20 unique answer ids.".to_string());
+    }
+    Ok(())
+}
+
 /// Submit a vote on a poll. Replaces the current user's previous response on
 /// the same poll start event.
 #[frb]
@@ -4004,6 +4236,7 @@ pub async fn send_poll_response(
 ) -> Result<(), String> {
     use matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent;
 
+    validate_poll_answer_ids(&answer_ids)?;
     let event_id = matrix_sdk::ruma::EventId::parse(poll_start_event_id.as_str())
         .map_err(|e| format!("Invalid poll event id: {e}"))?;
 
@@ -4041,6 +4274,154 @@ pub async fn end_poll(room_id: String, poll_start_event_id: String) -> Result<()
         room_id: room_id.clone(),
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod attachment_message_tests {
+    use super::{
+        file_message_content, image_mime_type, location_message_content, poll_start_content,
+        poll_start_for_forward, room_message_preview, unstable_poll_preview,
+        validate_poll_answer_ids, video_mime_type,
+    };
+    use matrix_sdk::ruma::{
+        events::{
+            poll::unstable_start::UnstablePollStartEventContent,
+            room::{
+                message::{AudioMessageEventContent, MessageType, RoomMessageEventContent},
+                MediaSource,
+            },
+            StaticEventContent,
+        },
+        OwnedMxcUri, UInt,
+    };
+
+    fn mxc_uri() -> OwnedMxcUri {
+        OwnedMxcUri::from("mxc://example.org/media")
+    }
+
+    #[test]
+    fn media_mime_validation_is_case_insensitive_and_type_safe() {
+        assert_eq!(
+            image_mime_type("PHOTO.HEIC", None).unwrap().essence_str(),
+            "image/heic"
+        );
+        assert!(image_mime_type("photo.jpg", Some("application/pdf".to_owned())).is_err());
+        assert_eq!(
+            video_mime_type("clip.MOV", None).unwrap().essence_str(),
+            "video/quicktime"
+        );
+        assert_eq!(
+            video_mime_type("clip.WebM", None).unwrap().essence_str(),
+            "video/webm"
+        );
+        assert!(video_mime_type("clip.mp4", Some("image/jpeg".to_owned())).is_err());
+    }
+
+    #[test]
+    fn file_content_stays_m_file_even_for_audio_mime() {
+        let content = file_message_content(
+            "track.mp3".to_owned(),
+            &"audio/mpeg".parse().unwrap(),
+            UInt::new(3),
+            MediaSource::Plain(mxc_uri()),
+        );
+        let json = serde_json::to_value(content).unwrap();
+
+        assert_eq!(json["msgtype"], "m.file");
+        assert_eq!(json["body"], "track.mp3");
+        assert_eq!(json["url"], "mxc://example.org/media");
+        assert_eq!(json["info"]["mimetype"], "audio/mpeg");
+        assert_eq!(json["info"]["size"], 3);
+    }
+
+    #[test]
+    fn location_content_uses_legacy_wire_format_and_validates_ranges() {
+        let content = location_message_content("Office", "geo:39.9,116.4").unwrap();
+        let json = serde_json::to_value(content).unwrap();
+
+        assert_eq!(json["msgtype"], "m.location");
+        assert_eq!(json["body"], "Office");
+        assert_eq!(json["geo_uri"], "geo:39.9,116.4");
+        assert!(location_message_content("", "geo:91,0").is_err());
+        assert!(location_message_content("", "geo:1e1,20").is_err());
+        assert!(location_message_content("", "https://example.org").is_err());
+    }
+
+    #[test]
+    fn poll_content_uses_unstable_wire_format_with_fallback() {
+        let content = poll_start_content(
+            " Lunch? ",
+            vec![" Noodles ".to_owned(), String::new(), "Rice".to_owned()],
+            true,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+        let poll = &json["org.matrix.msc3381.poll.start"];
+
+        assert_eq!(
+            <UnstablePollStartEventContent as StaticEventContent>::TYPE,
+            "org.matrix.msc3381.poll.start"
+        );
+        assert_eq!(
+            json["org.matrix.msc1767.text"],
+            "Lunch?\n1. Noodles\n2. Rice"
+        );
+        assert_eq!(poll["question"]["org.matrix.msc1767.text"], "Lunch?");
+        assert_eq!(poll["answers"].as_array().unwrap().len(), 2);
+        assert_eq!(poll["answers"][0]["id"], "0");
+        assert_eq!(poll["answers"][1]["id"], "1");
+        assert!(poll_start_content("", vec!["yes".to_owned()], false).is_err());
+        assert!(poll_start_content("Question", vec!["yes".to_owned()], false).is_err());
+    }
+
+    #[test]
+    fn previews_cover_audio_location_and_poll() {
+        let audio = RoomMessageEventContent::new(MessageType::Audio(
+            AudioMessageEventContent::plain("clip.mp3".to_owned(), mxc_uri()),
+        ));
+        let location = location_message_content("", "geo:39.9,116.4").unwrap();
+        let poll = poll_start_content(
+            "Lunch?",
+            vec!["Rice".to_owned(), "Noodles".to_owned()],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            room_message_preview(&audio).as_deref(),
+            Some("[音频] clip.mp3")
+        );
+        assert_eq!(
+            room_message_preview(&location).as_deref(),
+            Some("[位置] geo:39.9,116.4")
+        );
+        assert_eq!(
+            unstable_poll_preview(&poll).as_deref(),
+            Some("[投票] Lunch?")
+        );
+    }
+
+    #[test]
+    fn forwarded_poll_is_a_new_start_without_relation() {
+        let poll = poll_start_content(
+            "Lunch?",
+            vec!["Rice".to_owned(), "Noodles".to_owned()],
+            false,
+        )
+        .unwrap();
+        let forwarded = poll_start_for_forward(&poll).unwrap();
+
+        assert!(forwarded.relates_to.is_none());
+        assert_eq!(forwarded.poll_start.question.text, "Lunch?");
+    }
+
+    #[test]
+    fn poll_response_ids_must_be_nonempty_and_unique() {
+        assert!(validate_poll_answer_ids(&["0".to_owned()]).is_ok());
+        assert!(validate_poll_answer_ids(&[]).is_err());
+        assert!(validate_poll_answer_ids(&["0".to_owned(), "0".to_owned()]).is_err());
+        assert!(validate_poll_answer_ids(&[String::new()]).is_err());
+    }
 }
 
 #[frb]

@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `encryption_settings`, `extract_edit_content`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `load_room_sticker_packs`, `media_caption_parts`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`, `wait_for_e2ee_initialization`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `encryption_settings`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `EditedTextContent`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `VerificationSession`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -338,12 +338,14 @@ Future<void> sendImageMessage({
   required String roomId,
   required List<int> imageData,
   required String filename,
+  String? mimeType,
   int? width,
   int? height,
 }) => RustLib.instance.api.crateApiMatrixSendImageMessage(
   roomId: roomId,
   imageData: imageData,
   filename: filename,
+  mimeType: mimeType,
   width: width,
   height: height,
 );
@@ -384,13 +386,11 @@ Future<void> sendVideoMessage({
   size: size,
 );
 
-/// Share a geographic location.
+/// Share a geographic location as legacy `m.room.message` / `m.location`.
 ///
-/// Sent as a legacy `m.room.message` with `msgtype: m.location`, which is
-/// what `matrix-sdk-ui` 0.18 surfaces on the timeline. The extensible
-/// top-level `m.location` event type is not parsed by this SDK version.
-///
-/// `geo_uri` follows RFC 5870, e.g. `geo:37.786971,-122.399677`.
+/// The extensible top-level `m.location` event is not parsed by the current
+/// `matrix-sdk-ui` version. `geo_uri` follows RFC 5870, for example
+/// `geo:37.786971,-122.399677`.
 Future<void> sendLocation({
   required String roomId,
   required String body,
@@ -401,12 +401,10 @@ Future<void> sendLocation({
   geoUri: geoUri,
 );
 
-/// Start a poll in a room (Matrix `m.poll.start`, MSC3381).
-/// Start a poll in a room.
+/// Start a poll using the unstable `org.matrix.msc3381.poll.start` event.
 ///
-/// Uses the **unstable** `org.matrix.msc3381.poll.start` event type, which is
-/// what `matrix-sdk-ui` 0.18 surfaces on the timeline. The stable
-/// `m.poll.start` type is not parsed by this SDK version and would vanish.
+/// This is the poll type surfaced by the current `matrix-sdk-ui` version; its
+/// stable counterpart is not parsed there yet.
 Future<void> sendPoll({
   required String roomId,
   required String question,
@@ -763,6 +761,9 @@ class ChatMessage {
   /// Original filename for file/audio attachments.
   final String? filename;
 
+  /// Declared file size in bytes for file/audio attachments.
+  final int? fileSize;
+
   /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
   final String? geoUri;
 
@@ -806,6 +807,7 @@ class ChatMessage {
     this.imageWidth,
     this.imageHeight,
     this.filename,
+    this.fileSize,
     this.geoUri,
     this.poll,
     this.inReplyTo,
@@ -835,6 +837,7 @@ class ChatMessage {
       imageWidth.hashCode ^
       imageHeight.hashCode ^
       filename.hashCode ^
+      fileSize.hashCode ^
       geoUri.hashCode ^
       poll.hashCode ^
       inReplyTo.hashCode ^
@@ -866,6 +869,7 @@ class ChatMessage {
           imageWidth == other.imageWidth &&
           imageHeight == other.imageHeight &&
           filename == other.filename &&
+          fileSize == other.fileSize &&
           geoUri == other.geoUri &&
           poll == other.poll &&
           inReplyTo == other.inReplyTo &&

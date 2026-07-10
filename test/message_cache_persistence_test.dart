@@ -138,6 +138,107 @@ void main() {
     expect(chatMessageFromMap(map).msgType, MessageType.sticker);
   });
 
+  test('message cache round-trips file and location fields', () {
+    final file = chatMessageFromMap(
+      chatMessageToMap(
+        const ChatMessage(
+          id: r'$file',
+          senderId: '@alice:example.org',
+          senderName: 'Alice',
+          content: 'report.pdf',
+          mentionedUserIds: [],
+          mentionsRoom: false,
+          timestamp: '100',
+          isMe: false,
+          msgType: MessageType.file,
+          mediaSourceJson: '{"url":"mxc://example.org/file"}',
+          filename: 'report.pdf',
+          fileSize: 1234,
+          isEdited: false,
+          editHistory: [],
+          reactions: [],
+          readers: [],
+          totalMembers: 2,
+        ),
+      ),
+    );
+    final location = chatMessageFromMap(
+      chatMessageToMap(
+        const ChatMessage(
+          id: r'$location',
+          senderId: '@alice:example.org',
+          senderName: 'Alice',
+          content: '公司',
+          mentionedUserIds: [],
+          mentionsRoom: false,
+          timestamp: '200',
+          isMe: false,
+          msgType: MessageType.location,
+          geoUri: 'geo:39.9,116.4',
+          isEdited: false,
+          editHistory: [],
+          reactions: [],
+          readers: [],
+          totalMembers: 2,
+        ),
+      ),
+    );
+
+    expect(file.msgType, MessageType.file);
+    expect(file.filename, 'report.pdf');
+    expect(file.fileSize, 1234);
+    expect(file.mediaSourceJson, '{"url":"mxc://example.org/file"}');
+    expect(location.msgType, MessageType.location);
+    expect(location.geoUri, 'geo:39.9,116.4');
+  });
+
+  test('message cache round-trips poll data', () {
+    final restored = chatMessageFromMap(
+      chatMessageToMap(
+        const ChatMessage(
+          id: r'$poll',
+          senderId: '@alice:example.org',
+          senderName: 'Alice',
+          content: '午饭吃什么？',
+          mentionedUserIds: [],
+          mentionsRoom: false,
+          timestamp: '300',
+          isMe: false,
+          msgType: MessageType.poll,
+          poll: PollInfo(
+            question: '午饭吃什么？',
+            answers: [
+              PollAnswerInfo(id: '0', text: '面条'),
+              PollAnswerInfo(id: '1', text: '米饭'),
+            ],
+            disclosed: true,
+            maxSelections: 2,
+            myAnswerIds: ['0'],
+            results: [
+              PollAnswerResult(answerId: '0', count: 2, isMine: true),
+              PollAnswerResult(answerId: '1', count: 1, isMine: false),
+            ],
+            totalVoters: 2,
+            ended: true,
+          ),
+          isEdited: false,
+          editHistory: [],
+          reactions: [],
+          readers: [],
+          totalMembers: 2,
+        ),
+      ),
+    );
+
+    expect(restored.msgType, MessageType.poll);
+    expect(restored.poll?.question, '午饭吃什么？');
+    expect(restored.poll?.answers.map((answer) => answer.text), ['面条', '米饭']);
+    expect(restored.poll?.myAnswerIds, ['0']);
+    expect(restored.poll?.results.first.count, 2);
+    expect(restored.poll?.totalVoters, 2);
+    expect(restored.poll?.ended, isTrue);
+  });
+
   group('disk cache round-trip', () {
     test('saveCachedMessages persists messages to SharedPreferences', () async {
       const roomId = '!room:example.org';

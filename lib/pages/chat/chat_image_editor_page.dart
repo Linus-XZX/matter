@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pro_image_editor/pro_image_editor.dart';
@@ -6,9 +8,23 @@ import '../../theme/app_theme.dart';
 
 /// Full image editor shown before a gallery image is sent to a chat room.
 class ChatImageEditorPage extends StatelessWidget {
-  const ChatImageEditorPage({super.key, required this.imageBytes});
+  const ChatImageEditorPage({
+    super.key,
+    required this.imagePath,
+    this.mimeType,
+  });
 
-  final Uint8List imageBytes;
+  final String imagePath;
+  final String? mimeType;
+
+  @visibleForTesting
+  ImageGenerationConfigs get imageGenerationConfigs => ImageGenerationConfigs(
+    enableUseOriginalBytes: true,
+    captureImageByteFormat: ui.ImageByteFormat.rawStraightRgba,
+    jpegQuality: 100,
+    maxOutputSize: Size.infinite,
+    outputFormat: _editorOutputFormat(mimeType),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -22,8 +38,8 @@ class ChatImageEditorPage extends StatelessWidget {
       ),
     );
 
-    return ProImageEditor.memory(
-      imageBytes,
+    return ProImageEditor.file(
+      imagePath,
       callbacks: ProImageEditorCallbacks(
         onImageEditingComplete: (bytes) async {
           if (context.mounted) Navigator.of(context).pop(bytes);
@@ -120,15 +136,19 @@ class ChatImageEditorPage extends StatelessWidget {
             previewSelectedTextColor: AppColors.primary,
           ),
         ),
-        imageGeneration: const ImageGenerationConfigs(
-          enableUseOriginalBytes: false,
-          jpegQuality: 90,
-          maxOutputSize: Size(2560, 2560),
-          outputFormat: OutputFormat.jpg,
-        ),
+        imageGeneration: imageGenerationConfigs,
       ),
     );
   }
+}
+
+OutputFormat _editorOutputFormat(String? mimeType) {
+  return switch (mimeType?.toLowerCase()) {
+    'image/png' || 'image/gif' || 'image/webp' => OutputFormat.png,
+    'image/tiff' => OutputFormat.tiff,
+    'image/bmp' => OutputFormat.bmp,
+    _ => OutputFormat.jpg,
+  };
 }
 
 const _imageEditorI18n = I18n(

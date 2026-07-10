@@ -1,9 +1,8 @@
-import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -55,10 +54,9 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
   AttachmentTab _tab = AttachmentTab.media;
   bool _isSending = false;
 
-  /// Maximum bytes for non-image attachments (video / arbitrary file).
-  static const int _maxFileBytes = 256 * 1024 * 1024; // 256 MB
-  /// Longer edge cap for image downscaling (restores the old 4096px cap that
-  /// the mandatory-editor flow used to enforce, and bounds upload memory).
+  /// Every Dart/FRB upload buffer is capped to avoid multiplying a very large
+  /// allocation while it crosses the bridge into Rust.
+  static const int _maxBufferedBytes = 64 * 1024 * 1024;
   static const int _maxImageEdge = 4096;
   static const int _maxImageQuality = 92;
 
@@ -77,13 +75,16 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     if (file == null) throw '无法读取文件';
     final title = (await asset.titleAsync).trim();
     final filename = title.isEmpty ? 'asset_${asset.id}' : title;
+    String? declaredMime;
+    try {
+      declaredMime = await asset.mimeTypeAsync;
+    } catch (_) {
+      // The filename fallback below is enough when a platform has no MIME API.
+    }
+    final mime = resolveAttachmentMime(filename, declaredMime);
 
     if (asset.type == AssetType.video) {
-      final len = await file.length();
-      if (len > _maxFileBytes) {
-        throw '视频超过 ${_maxFileBytes ~/ 1024 ~/ 1024}MB 限制';
-      }
-      final bytes = await file.readAsBytes();
+      final bytes = await _readFileBytes(file, '视频');
       final size = asset.size;
       await rust.sendVideoMessage(
         roomId: widget.roomId,
@@ -93,45 +94,28 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         height: size.height.round(),
         durationMs: asset.videoDuration.inMilliseconds,
         size: bytes.length,
-        mimeType: _guessMime(filename),
+        mimeType: mime?.startsWith('video/') == true ? mime : null,
       );
       return;
     }
 
-    final mime = _guessMime(filename);
-    if (mime != null && mime.startsWith('image/')) {
-      // Downscale via the native compressor (handles HEIC, low peak memory)
-      // before loading full-res bytes into the FRB buffer.
-      Uint8List bytes;
-      try {
-        final compressed = await FlutterImageCompress.compressWithFile(
-          file.path,
-          minWidth: _maxImageEdge,
-          minHeight: _maxImageEdge,
-          quality: _maxImageQuality,
-          format: CompressFormat.jpeg,
-        );
-        bytes = compressed ?? await file.readAsBytes();
-      } catch (_) {
-        // Compressor can't handle some formats (e.g. exotic raw); send the
-        // original rather than dropping the whole send.
-        bytes = await file.readAsBytes();
-      }
-      final finalName = _withExtension(filename, 'jpg');
-      final dim = await _decodeImageSize(bytes);
+    if (asset.type == AssetType.image) {
+      final prepared = await _prepareAssetImage(
+        asset: asset,
+        file: file,
+        filename: filename,
+        mimeType: mime,
+      );
       await rust.sendImageMessage(
         roomId: widget.roomId,
-        imageData: bytes,
-        filename: finalName,
-        width: dim?.width.round(),
-        height: dim?.height.round(),
+        imageData: prepared.bytes,
+        filename: prepared.filename,
+        mimeType: prepared.mimeType,
+        width: prepared.width,
+        height: prepared.height,
       );
     } else {
-      final len = await file.length();
-      if (len > _maxFileBytes) {
-        throw '文件超过 ${_maxFileBytes ~/ 1024 ~/ 1024}MB 限制';
-      }
-      final bytes = await file.readAsBytes();
+      final bytes = await _readFileBytes(file, '文件');
       await rust.sendFileMessage(
         roomId: widget.roomId,
         fileData: bytes,
@@ -142,64 +126,250 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     }
   }
 
-  Future<void> _sendXFiles(List<XFile> files) => _runBatch(
+  Future<void> _sendMediaXFiles(List<XFile> files) => _runBatch(
     files
         .map(
-          (f) =>
-              () => _sendSingleXFile(f),
+          (file) =>
+              () => _sendSingleMediaXFile(file),
         )
         .toList(),
     files,
   );
 
-  Future<void> _sendSingleXFile(XFile f) async {
-    final len = await f.length();
-    if (len > _maxFileBytes) {
-      throw '文件超过 ${_maxFileBytes ~/ 1024 ~/ 1024}MB 限制';
-    }
-    final mime = _guessMime(f.name) ?? f.mimeType;
-    if (mime != null && mime.startsWith('image/')) {
-      final original = await f.readAsBytes();
-      Uint8List bytes;
-      try {
-        bytes = await FlutterImageCompress.compressWithList(
-          original,
-          minWidth: _maxImageEdge,
-          minHeight: _maxImageEdge,
-          quality: _maxImageQuality,
-          format: CompressFormat.jpeg,
-        );
-      } catch (_) {
-        bytes = original;
-      }
-      final dim = await _decodeImageSize(bytes);
+  Future<void> _sendFiles(List<XFile> files) => _runBatch(
+    files
+        .map(
+          (file) =>
+              () => _sendSingleFile(file),
+        )
+        .toList(),
+    files,
+  );
+
+  Future<void> _sendSingleMediaXFile(XFile file) async {
+    final mime = resolveAttachmentMime(file.name, file.mimeType);
+    final kind = classifyAttachmentMime(mime);
+    final original = await _readXFileBytes(file);
+
+    if (kind == AttachmentMediaKind.image) {
+      final prepared = await _prepareBufferedImage(
+        original,
+        filename: file.name,
+        mimeType: mime!,
+      );
       await rust.sendImageMessage(
         roomId: widget.roomId,
-        imageData: bytes,
-        filename: _withExtension(f.name, 'jpg'),
-        width: dim?.width.round(),
-        height: dim?.height.round(),
+        imageData: prepared.bytes,
+        filename: prepared.filename,
+        mimeType: prepared.mimeType,
+        width: prepared.width,
+        height: prepared.height,
+      );
+    } else if (kind == AttachmentMediaKind.video) {
+      await rust.sendVideoMessage(
+        roomId: widget.roomId,
+        videoData: original,
+        filename: file.name,
+        mimeType: mime,
+        size: original.length,
       );
     } else {
-      final bytes = await f.readAsBytes();
       await rust.sendFileMessage(
         roomId: widget.roomId,
-        fileData: bytes,
-        filename: f.name,
-        mimeType: f.mimeType,
-        size: bytes.length,
+        fileData: original,
+        filename: file.name,
+        mimeType: mime,
+        size: original.length,
       );
     }
   }
 
-  Future<void> _sendEditedImage(Uint8List bytes) => _runBatch([
+  Future<void> _sendSingleFile(XFile file) async {
+    final bytes = await _readXFileBytes(file);
+    await rust.sendFileMessage(
+      roomId: widget.roomId,
+      fileData: bytes,
+      filename: file.name,
+      mimeType: resolveAttachmentMime(file.name, file.mimeType),
+      size: bytes.length,
+    );
+  }
+
+  Future<Uint8List> _readXFileBytes(XFile file) async {
+    _ensureBufferedSize(await file.length(), '文件');
+    final bytes = await file.readAsBytes();
+    _ensureBufferedSize(bytes.length, '文件');
+    return bytes;
+  }
+
+  Future<_PreparedImage> _prepareAssetImage({
+    required AssetEntity asset,
+    required File file,
+    required String filename,
+    required String? mimeType,
+  }) async {
+    final sourceSize = asset.size;
+    if (sourceSize.width <= 0 || sourceSize.height <= 0) {
+      final original = await _readFileBytes(file, '图片');
+      final detectedMime = mimeType ?? _guessMime(filename);
+      if (detectedMime?.startsWith('image/') != true) {
+        throw '无法识别图片格式';
+      }
+      return _prepareBufferedImage(
+        original,
+        filename: filename,
+        mimeType: detectedMime!,
+      );
+    }
+
+    final target = _boundedImageSize(sourceSize);
+    final shouldConvert =
+        !_canSendOriginalImageMime(mimeType) ||
+        sourceSize.width > _maxImageEdge ||
+        sourceSize.height > _maxImageEdge;
+    if (shouldConvert) {
+      try {
+        final compressed = await FlutterImageCompress.compressWithFile(
+          file.path,
+          minWidth: target.width,
+          minHeight: target.height,
+          quality: _maxImageQuality,
+          format: CompressFormat.jpeg,
+        );
+        if (compressed != null && compressed.isNotEmpty) {
+          return _jpegImage(
+            compressed,
+            filename: filename,
+            expectedSize: target,
+          );
+        }
+      } catch (_) {
+        // A correctly typed original is still safe when it is already bounded.
+      }
+    }
+
+    if (sourceSize.width > _maxImageEdge || sourceSize.height > _maxImageEdge) {
+      throw '图片缩放失败';
+    }
+    if (mimeType?.startsWith('image/') != true) {
+      throw '无法识别图片格式';
+    }
+    final original = await _readFileBytes(file, '图片');
+    return _PreparedImage(
+      bytes: original,
+      filename: filename,
+      mimeType: mimeType!,
+      width: sourceSize.width.round(),
+      height: sourceSize.height.round(),
+    );
+  }
+
+  Future<_PreparedImage> _prepareBufferedImage(
+    Uint8List original, {
+    required String filename,
+    required String mimeType,
+  }) async {
+    final sourceSize = await _decodeImageSize(original);
+    if (sourceSize == null) throw '无法读取图片尺寸';
+    final target = _boundedImageSize(sourceSize);
+    final shouldConvert =
+        !_canSendOriginalImageMime(mimeType) ||
+        sourceSize.width > _maxImageEdge ||
+        sourceSize.height > _maxImageEdge;
+    if (!shouldConvert) {
+      return _PreparedImage(
+        bytes: original,
+        filename: filename,
+        mimeType: mimeType,
+        width: sourceSize.width.round(),
+        height: sourceSize.height.round(),
+      );
+    }
+
+    try {
+      final compressed = await FlutterImageCompress.compressWithList(
+        original,
+        minWidth: target.width,
+        minHeight: target.height,
+        quality: _maxImageQuality,
+        format: CompressFormat.jpeg,
+      );
+      if (compressed.isNotEmpty) {
+        return _jpegImage(compressed, filename: filename, expectedSize: target);
+      }
+    } catch (_) {
+      // Preserve a correctly typed original only when it is already bounded.
+    }
+
+    if (sourceSize.width > _maxImageEdge || sourceSize.height > _maxImageEdge) {
+      throw '图片缩放失败';
+    }
+    return _PreparedImage(
+      bytes: original,
+      filename: filename,
+      mimeType: mimeType,
+      width: sourceSize.width.round(),
+      height: sourceSize.height.round(),
+    );
+  }
+
+  Future<_PreparedImage> _jpegImage(
+    Uint8List bytes, {
+    required String filename,
+    required ({int width, int height}) expectedSize,
+  }) async {
+    _ensureBufferedSize(bytes.length, '图片');
+    final actual = await _decodeImageSize(bytes);
+    final width = actual?.width.round() ?? expectedSize.width;
+    final height = actual?.height.round() ?? expectedSize.height;
+    if (width > _maxImageEdge || height > _maxImageEdge) {
+      throw '图片缩放后仍超过 ${_maxImageEdge}px';
+    }
+    return _PreparedImage(
+      bytes: bytes,
+      filename: _withExtension(filename, 'jpg'),
+      mimeType: 'image/jpeg',
+      width: width,
+      height: height,
+    );
+  }
+
+  Future<Uint8List> _readFileBytes(File file, String label) async {
+    _ensureBufferedSize(await file.length(), label);
+    final bytes = await file.readAsBytes();
+    _ensureBufferedSize(bytes.length, label);
+    return bytes;
+  }
+
+  void _ensureBufferedSize(int length, String label) {
+    if (length > _maxBufferedBytes) {
+      throw '$label超过 ${_maxBufferedBytes ~/ 1024 ~/ 1024}MB 限制';
+    }
+  }
+
+  Future<void> _sendEditedImage(
+    Uint8List bytes, {
+    required String originalFilename,
+    required String? originalMimeType,
+  }) => _runBatch([
     () async {
-      final filename = 'edited_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      _ensureBufferedSize(bytes.length, '图片');
+      final mimeType =
+          detectImageMime(bytes) ??
+          resolveAttachmentMime(originalFilename, originalMimeType);
+      if (mimeType?.startsWith('image/') != true) {
+        throw '无法识别编辑后的图片格式';
+      }
+      final filename = _withExtension(
+        originalFilename,
+        _imageExtensionForMime(mimeType!),
+      );
       final imageSize = await _decodeImageSize(bytes);
       await rust.sendImageMessage(
         roomId: widget.roomId,
         imageData: bytes,
         filename: filename,
+        mimeType: mimeType,
         width: imageSize?.width.round(),
         height: imageSize?.height.round(),
       );
@@ -251,7 +421,9 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
           }
           if (mounted) setState(() {});
         } catch (e) {
-          await _finishBatch(presentation, sent, e);
+          if (sent > 0) {
+            await _finishBatch(presentation, closePicker: false);
+          }
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -263,19 +435,18 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
           return;
         }
       }
-      await _finishBatch(presentation, sent, null);
+      await _finishBatch(presentation, closePicker: true);
     } finally {
-      if (mounted) setState(() => _isSending = false);
+      if (mounted && _isSending) setState(() => _isSending = false);
     }
   }
 
   /// Best-effort refresh + completion callback. A refresh error is swallowed
   /// (it does not invalidate already-sent messages).
   Future<void> _finishBatch(
-    MessageSendPresentation presentation,
-    int sent,
-    Object? partialFailure,
-  ) async {
+    MessageSendPresentation presentation, {
+    required bool closePicker,
+  }) async {
     try {
       await widget.onRefresh(widget.roomId);
     } catch (_) {
@@ -283,7 +454,12 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     }
     if (!mounted) return;
     widget.onMessageSent(presentation, false);
-    if (partialFailure == null && mounted) Navigator.of(context).maybePop();
+    if (closePicker) {
+      setState(() => _isSending = false);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).maybePop();
+      });
+    }
   }
 
   @override
@@ -294,64 +470,73 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
       AttachmentTab.poll: '投票',
       AttachmentTab.location: '位置',
     };
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
+    final tabs = <Widget>[
+      photoManagerSupported
+          ? _MediaTabBody(
+              isSending: _isSending,
+              onSendAssets: _sendMediaAssets,
+              onOpenEditor: (source) async {
+                final edited = await Navigator.of(context).push<Uint8List>(
+                  MaterialPageRoute(
+                    fullscreenDialog: true,
+                    builder: (_) => ChatImageEditorPage(
+                      imagePath: source.path,
+                      mimeType: source.mimeType,
+                    ),
+                  ),
+                );
+                if (edited != null && mounted) {
+                  await _sendEditedImage(
+                    edited,
+                    originalFilename: source.filename,
+                    originalMimeType: source.mimeType,
+                  );
+                }
+              },
+            )
+          : _MediaFallback(
+              isSending: _isSending,
+              onSendFiles: _sendMediaXFiles,
+            ),
+      _FileTabBody(isSending: _isSending, onSendFiles: _sendFiles),
+      _PollTabBody(isSending: _isSending, onSendPoll: _sendPoll),
+      _LocationTabBody(isSending: _isSending, onSendLocation: _sendLocation),
+    ];
+    return PopScope(
+      canPop: !_isSending,
+      child: Scaffold(
         backgroundColor: AppColors.background,
-        foregroundColor: AppColors.onBackground,
-        elevation: 0,
-        title: Text(titles[_tab]!),
-        leading: IconButton(
-          icon: const Icon(Icons.close_rounded),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-      ),
-      body: Stack(
-        children: [
-          switch (_tab) {
-            AttachmentTab.media =>
-              photoManagerSupported
-                  ? _MediaTabBody(
-                      isSending: _isSending,
-                      onSendAssets: _sendMediaAssets,
-                      onOpenEditor: (bytes) async {
-                        final edited = await Navigator.of(context)
-                            .push<Uint8List>(
-                              MaterialPageRoute(
-                                fullscreenDialog: true,
-                                builder: (_) =>
-                                    ChatImageEditorPage(imageBytes: bytes),
-                              ),
-                            );
-                        if (edited != null && mounted) {
-                          await _sendEditedImage(edited);
-                        }
-                      },
-                    )
-                  : _MediaFallback(onSendFiles: _sendXFiles),
-            AttachmentTab.file => _FileTabBody(
-              isSending: _isSending,
-              onSendFiles: _sendXFiles,
-            ),
-            AttachmentTab.poll => _PollTabBody(
-              isSending: _isSending,
-              onSendPoll: _sendPoll,
-            ),
-            AttachmentTab.location => _LocationTabBody(
-              isSending: _isSending,
-              onSendLocation: _sendLocation,
-            ),
-          },
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: _FrostedTabBar(
-              tab: _tab,
-              onTabChanged: (t) => setState(() => _tab = t),
-            ),
+        appBar: AppBar(
+          backgroundColor: AppColors.background,
+          foregroundColor: AppColors.onBackground,
+          elevation: 0,
+          title: Text(titles[_tab]!),
+          leading: IconButton(
+            icon: const Icon(Icons.close_rounded),
+            onPressed: _isSending
+                ? null
+                : () => Navigator.of(context).maybePop(),
           ),
-        ],
+        ),
+        body: Stack(
+          children: [
+            IndexedStack(index: _tab.index, children: tabs),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: _FrostedTabBar(
+                  tab: _tab,
+                  onTabChanged: _isSending
+                      ? null
+                      : (tab) => setState(() => _tab = tab),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -361,7 +546,7 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
 
 class _FrostedTabBar extends StatelessWidget {
   final AttachmentTab tab;
-  final ValueChanged<AttachmentTab> onTabChanged;
+  final ValueChanged<AttachmentTab>? onTabChanged;
 
   const _FrostedTabBar({required this.tab, required this.onTabChanged});
 
@@ -391,7 +576,9 @@ class _FrostedTabBar extends StatelessWidget {
                 _TabButton(
                   item: item,
                   selected: tab == item.tab,
-                  onTap: () => onTabChanged(item.tab),
+                  onTap: onTabChanged == null
+                      ? null
+                      : () => onTabChanged!(item.tab),
                 ),
             ],
           ),
@@ -411,7 +598,7 @@ class _TabItem {
 class _TabButton extends StatelessWidget {
   final _TabItem item;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _TabButton({
     required this.item,
@@ -442,10 +629,12 @@ class _TabButton extends StatelessWidget {
 
 // ── Media tab: gallery grid + multi-select ───────────────────────────
 
+typedef _ImageEditorSource = ({String path, String filename, String? mimeType});
+
 class _MediaTabBody extends StatefulWidget {
   final bool isSending;
   final Future<void> Function(List<AssetEntity> assets) onSendAssets;
-  final Future<void> Function(Uint8List bytes) onOpenEditor;
+  final Future<void> Function(_ImageEditorSource source) onOpenEditor;
 
   const _MediaTabBody({
     required this.isSending,
@@ -474,6 +663,7 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
   Future<void> _init() async {
     try {
       final perm = await PhotoManager.requestPermissionExtend();
+      if (!mounted) return;
       if (!perm.hasAccess) {
         setState(() {
           _loading = false;
@@ -485,6 +675,11 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
         type: RequestType.common,
         hasAll: true,
       );
+      if (!mounted) return;
+      if (albums.isEmpty) {
+        setState(() => _loading = false);
+        return;
+      }
       final album = albums.firstWhere(
         (a) => a.isAll,
         orElse: () => albums.first,
@@ -506,17 +701,27 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
   }
 
   Future<void> _fetchMore() async {
-    if (_fetchingMore || _album == null) return;
-    final total = await _album!.assetCountAsync;
-    if (_assets.length >= total) return;
+    final album = _album;
+    if (_fetchingMore || album == null || !mounted) return;
     setState(() => _fetchingMore = true);
     try {
-      final next = await _album!.getAssetListPaged(
+      final total = await album.assetCountAsync;
+      if (!mounted || _assets.length >= total) return;
+      final next = await album.getAssetListPaged(
         page: _assets.length ~/ 100,
         size: 100,
       );
       if (!mounted) return;
       setState(() => _assets.addAll(next));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('加载更多媒体失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _fetchingMore = false);
     }
@@ -533,6 +738,7 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
   }
 
   void _toggleSelect(AssetEntity asset) {
+    if (widget.isSending) return;
     setState(() {
       if (_selected.contains(asset)) {
         _selected.remove(asset);
@@ -546,11 +752,34 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
       _selected.indexOf(asset) + 1; // 0 means not selected
 
   Future<void> _openEditor(AssetEntity asset) async {
-    final file = await asset.originFile;
-    if (file == null) return;
-    final bytes = await file.readAsBytes();
-    if (!mounted) return;
-    await widget.onOpenEditor(bytes);
+    if (widget.isSending || asset.type != AssetType.image) return;
+    try {
+      final file = await asset.originFile;
+      if (file == null) throw '无法读取原图';
+      final title = (await asset.titleAsync).trim();
+      final filename = title.isEmpty ? 'asset_${asset.id}' : title;
+      String? declaredMime;
+      try {
+        declaredMime = await asset.mimeTypeAsync;
+      } catch (_) {
+        // The filename fallback is enough when MIME metadata is unavailable.
+      }
+      if (!mounted || widget.isSending) return;
+      await widget.onOpenEditor((
+        path: file.path,
+        filename: filename,
+        mimeType: resolveAttachmentMime(filename, declaredMime),
+      ));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('打开图片失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -576,82 +805,96 @@ class _MediaTabBodyState extends State<_MediaTabBody> {
         Expanded(
           child: NotificationListener<ScrollNotification>(
             onNotification: _onScroll,
-            child: GridView.builder(
-              padding: const EdgeInsets.fromLTRB(2, 2, 2, 96),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 4,
-                mainAxisSpacing: 2,
-                crossAxisSpacing: 2,
-              ),
-              itemCount: _assets.length + (_fetchingMore ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (index >= _assets.length) {
-                  return const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(16),
-                      child: SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppColors.onSurfaceVariant,
-                        ),
-                      ),
+            child: _assets.isEmpty
+                ? const Center(
+                    child: Text(
+                      '没有可用的图片或视频',
+                      style: TextStyle(color: AppColors.onSurfaceVariant),
                     ),
-                  );
-                }
-                final asset = _assets[index];
-                final order = _selectionIndex(asset);
-                final selected = order > 0;
-                final isVideo = asset.type == AssetType.video;
-                return GestureDetector(
-                  // Tapping a video must not open the image editor: it would
-                  // feed video bytes to the image decoder. Videos toggle
-                  // selection instead; only images open the editor.
-                  onTap: isVideo
-                      ? () => _toggleSelect(asset)
-                      : () => _openEditor(asset),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        color: selected
-                            ? AppColors.background
-                            : Colors.transparent,
-                        padding: selected
-                            ? const EdgeInsets.all(6)
-                            : EdgeInsets.zero,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(selected ? 8 : 0),
-                          child: _AssetThumbnail(asset: asset),
+                  )
+                : GridView.builder(
+                    padding: const EdgeInsets.fromLTRB(2, 2, 2, 96),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 4,
+                          mainAxisSpacing: 2,
+                          crossAxisSpacing: 2,
                         ),
-                      ),
-                      Positioned(
-                        top: 4,
-                        right: 4,
-                        child: GestureDetector(
-                          onTap: () => _toggleSelect(asset),
-                          child: _SelectionBadge(
-                            selected: selected,
-                            order: order,
+                    itemCount: _assets.length + (_fetchingMore ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index >= _assets.length) {
+                        return const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(16),
+                            child: SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.onSurfaceVariant,
+                              ),
+                            ),
                           ),
+                        );
+                      }
+                      final asset = _assets[index];
+                      final order = _selectionIndex(asset);
+                      final selected = order > 0;
+                      final isVideo = asset.type == AssetType.video;
+                      return GestureDetector(
+                        // Tapping a video must not open the image editor: it would
+                        // feed video bytes to the image decoder. Videos toggle
+                        // selection instead; only images open the editor.
+                        onTap: widget.isSending
+                            ? null
+                            : isVideo
+                            ? () => _toggleSelect(asset)
+                            : () => _openEditor(asset),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 150),
+                              color: selected
+                                  ? AppColors.background
+                                  : Colors.transparent,
+                              padding: selected
+                                  ? const EdgeInsets.all(6)
+                                  : EdgeInsets.zero,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                  selected ? 8 : 0,
+                                ),
+                                child: _AssetThumbnail(asset: asset),
+                              ),
+                            ),
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: GestureDetector(
+                                onTap: widget.isSending
+                                    ? null
+                                    : () => _toggleSelect(asset),
+                                child: _SelectionBadge(
+                                  selected: selected,
+                                  order: order,
+                                ),
+                              ),
+                            ),
+                            if (isVideo)
+                              const Positioned(
+                                bottom: 4,
+                                left: 4,
+                                child: Icon(
+                                  Icons.play_circle_fill,
+                                  color: Colors.white70,
+                                  size: 18,
+                                ),
+                              ),
+                          ],
                         ),
-                      ),
-                      if (isVideo)
-                        const Positioned(
-                          bottom: 4,
-                          left: 4,
-                          child: Icon(
-                            Icons.play_circle_fill,
-                            color: Colors.white70,
-                            size: 18,
-                          ),
-                        ),
-                    ],
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ),
         if (_selected.isNotEmpty)
@@ -788,9 +1031,10 @@ class _SendBar extends StatelessWidget {
 // ── Media fallback (Web/Linux/Windows: no photo_manager) ─────────────
 
 class _MediaFallback extends StatefulWidget {
+  final bool isSending;
   final Future<void> Function(List<XFile> files) onSendFiles;
 
-  const _MediaFallback({required this.onSendFiles});
+  const _MediaFallback({required this.isSending, required this.onSendFiles});
 
   @override
   State<_MediaFallback> createState() => _MediaFallbackState();
@@ -810,6 +1054,10 @@ class _MediaFallbackState extends State<_MediaFallback> {
         'webp',
         'heic',
         'heif',
+        'avif',
+        'tiff',
+        'tif',
+        'bmp',
         'mp4',
         'mov',
         'm4v',
@@ -821,9 +1069,18 @@ class _MediaFallbackState extends State<_MediaFallback> {
   ];
 
   Future<void> _pick() async {
-    final files = await openFiles(acceptedTypeGroups: _groups);
-    if (files.isEmpty) return;
-    setState(() => _picked.addAll(files));
+    if (widget.isSending) return;
+    try {
+      final files = await openFiles(acceptedTypeGroups: _groups);
+      if (!mounted || widget.isSending || files.isEmpty) return;
+      setState(() => _picked.addAll(files));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('选择媒体失败: $e')));
+      }
+    }
   }
 
   @override
@@ -831,49 +1088,60 @@ class _MediaFallbackState extends State<_MediaFallback> {
     return Column(
       children: [
         Expanded(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.photo_library_outlined,
-                    size: 48,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 120),
+            children: [
+              const Icon(
+                Icons.photo_library_outlined,
+                size: 48,
+                color: AppColors.onSurfaceVariant,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                '此平台的相册网格不可用，请选择图片或视频',
+                style: TextStyle(color: AppColors.onSurfaceVariant),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              Center(
+                child: OutlinedButton(
+                  onPressed: widget.isSending ? null : _pick,
+                  child: const Text('选择图片 / 视频'),
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (var index = 0; index < _picked.length; index++)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.insert_drive_file_rounded,
                     color: AppColors.onSurfaceVariant,
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    '此平台的相册网格不可用，请选择图片或视频',
-                    style: TextStyle(color: AppColors.onSurfaceVariant),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 16),
-                  OutlinedButton(
-                    onPressed: _pick,
-                    child: const Text('选择图片 / 视频'),
-                  ),
-                  const SizedBox(height: 12),
-                  for (final f in _picked)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Text(
-                        f.name,
-                        style: const TextStyle(
-                          color: AppColors.onSurface,
-                          fontSize: 13,
-                        ),
-                      ),
+                  title: Text(
+                    _picked[index].name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.onSurface,
+                      fontSize: 13,
                     ),
-                ],
-              ),
-            ),
+                  ),
+                  trailing: IconButton(
+                    tooltip: '移除',
+                    onPressed: widget.isSending
+                        ? null
+                        : () => setState(() => _picked.removeAt(index)),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ),
+            ],
           ),
         ),
         if (_picked.isNotEmpty)
           _SendBar(
             count: _picked.length,
-            isSending: false,
+            isSending: widget.isSending,
             onSend: () => widget.onSendFiles(_picked),
           ),
       ],
@@ -897,9 +1165,18 @@ class _FileTabBodyState extends State<_FileTabBody> {
   List<XFile> _picked = const [];
 
   Future<void> _pick() async {
-    final files = await openFiles();
-    if (files.isEmpty) return;
-    setState(() => _picked = files);
+    if (widget.isSending) return;
+    try {
+      final files = await openFiles();
+      if (!mounted || widget.isSending || files.isEmpty) return;
+      setState(() => _picked = List.of(files));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('选择文件失败: $e')));
+      }
+    }
   }
 
   @override
@@ -926,7 +1203,7 @@ class _FileTabBodyState extends State<_FileTabBody> {
                         ),
                         const SizedBox(height: 16),
                         OutlinedButton(
-                          onPressed: _pick,
+                          onPressed: widget.isSending ? null : _pick,
                           child: const Text('选择文件'),
                         ),
                       ],
@@ -952,8 +1229,9 @@ class _FileTabBodyState extends State<_FileTabBody> {
                           Icons.close_rounded,
                           color: AppColors.onSurfaceVariant,
                         ),
-                        onPressed: () =>
-                            setState(() => _picked.removeAt(index)),
+                        onPressed: widget.isSending
+                            ? null
+                            : () => setState(() => _picked.removeAt(index)),
                       ),
                     );
                   },
@@ -963,7 +1241,7 @@ class _FileTabBodyState extends State<_FileTabBody> {
           _SendBar(
             count: _picked.length,
             isSending: widget.isSending,
-            onSend: () => widget.onSendFiles(List.of(_picked)),
+            onSend: () => widget.onSendFiles(_picked),
           ),
       ],
     );
@@ -1007,7 +1285,7 @@ class _PollTabBodyState extends State<_PollTabBody> {
   bool get _canSend {
     if (_question.text.trim().isEmpty) return false;
     final valid = _answers.where((c) => c.text.trim().isNotEmpty).length;
-    return valid >= 1;
+    return valid >= 2;
   }
 
   List<String> get _validAnswers =>
@@ -1023,6 +1301,7 @@ class _PollTabBodyState extends State<_PollTabBody> {
             children: [
               TextField(
                 controller: _question,
+                enabled: !widget.isSending,
                 style: const TextStyle(color: AppColors.onBackground),
                 decoration: const InputDecoration(
                   labelText: '问题',
@@ -1045,6 +1324,7 @@ class _PollTabBodyState extends State<_PollTabBody> {
                       Expanded(
                         child: TextField(
                           controller: _answers[i],
+                          enabled: !widget.isSending,
                           style: const TextStyle(color: AppColors.onBackground),
                           decoration: InputDecoration(
                             hintText: '选项 ${i + 1}',
@@ -1069,22 +1349,24 @@ class _PollTabBodyState extends State<_PollTabBody> {
                             Icons.remove_circle_outline_rounded,
                             color: AppColors.onSurfaceVariant,
                           ),
-                          onPressed: () {
-                            setState(() {
-                              _answers[i].dispose();
-                              _answers.removeAt(i);
-                            });
-                          },
+                          onPressed: widget.isSending
+                              ? null
+                              : () {
+                                  setState(() {
+                                    _answers[i].dispose();
+                                    _answers.removeAt(i);
+                                  });
+                                },
                         ),
                     ],
                   ),
                 ),
               TextButton.icon(
-                onPressed: _answers.length >= 20
+                onPressed: widget.isSending || _answers.length >= 20
                     ? null
                     : () =>
                           setState(() => _answers.add(TextEditingController())),
-                icon: const Icon(Icons.add_rounded, color: AppColors.primary),
+                icon: const Icon(Icons.add_rounded),
                 label: const Text(
                   '添加选项',
                   style: TextStyle(color: AppColors.primary),
@@ -1096,7 +1378,9 @@ class _PollTabBodyState extends State<_PollTabBody> {
                   style: TextStyle(color: AppColors.onBackground),
                 ),
                 value: _disclosed,
-                onChanged: (v) => setState(() => _disclosed = v),
+                onChanged: widget.isSending
+                    ? null
+                    : (v) => setState(() => _disclosed = v),
                 activeThumbColor: AppColors.primary,
               ),
             ],
@@ -1137,19 +1421,7 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
   final _lng = TextEditingController();
   final _body = TextEditingController();
 
-  String get _geoUri {
-    final lat = _lat.text.trim();
-    final lng = _lng.text.trim();
-    final latVal = double.tryParse(lat);
-    final lngVal = double.tryParse(lng);
-    if (latVal == null ||
-        lngVal == null ||
-        latVal.abs() > 90 ||
-        lngVal.abs() > 180) {
-      return '';
-    }
-    return 'geo:$latVal,$lngVal';
-  }
+  String get _geoUri => canonicalGeoUri(_lat.text, _lng.text) ?? '';
 
   bool get _canSend => _geoUri.isNotEmpty;
 
@@ -1174,6 +1446,7 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
                   Expanded(
                     child: TextField(
                       controller: _lat,
+                      enabled: !widget.isSending,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                         signed: true,
@@ -1200,6 +1473,7 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
                   Expanded(
                     child: TextField(
                       controller: _lng,
+                      enabled: !widget.isSending,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                         signed: true,
@@ -1227,6 +1501,7 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
               const SizedBox(height: 12),
               TextField(
                 controller: _body,
+                enabled: !widget.isSending,
                 style: const TextStyle(color: AppColors.onBackground),
                 decoration: const InputDecoration(
                   labelText: '描述（可选）',
@@ -1255,6 +1530,97 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+enum AttachmentMediaKind { image, video, file }
+
+class _PreparedImage {
+  final Uint8List bytes;
+  final String filename;
+  final String mimeType;
+  final int width;
+  final int height;
+
+  const _PreparedImage({
+    required this.bytes,
+    required this.filename,
+    required this.mimeType,
+    required this.width,
+    required this.height,
+  });
+}
+
+@visibleForTesting
+String? resolveAttachmentMime(String filename, String? declaredMime) {
+  final declared = declaredMime?.split(';').first.trim().toLowerCase();
+  if (declared != null &&
+      declared.isNotEmpty &&
+      declared != 'application/octet-stream') {
+    return declared;
+  }
+  return _guessMime(filename) ?? (declared?.isEmpty == false ? declared : null);
+}
+
+@visibleForTesting
+AttachmentMediaKind classifyAttachmentMime(String? mimeType) {
+  if (mimeType?.startsWith('image/') == true) {
+    return AttachmentMediaKind.image;
+  }
+  if (mimeType?.startsWith('video/') == true) {
+    return AttachmentMediaKind.video;
+  }
+  return AttachmentMediaKind.file;
+}
+
+bool _canSendOriginalImageMime(String? mimeType) => const {
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+}.contains(mimeType);
+
+({int width, int height}) _boundedImageSize(Size source) {
+  if (source.width <= 0 || source.height <= 0) {
+    return (
+      width: _AttachmentPickerState._maxImageEdge,
+      height: _AttachmentPickerState._maxImageEdge,
+    );
+  }
+  final longest = source.width > source.height ? source.width : source.height;
+  final scale = longest > _AttachmentPickerState._maxImageEdge
+      ? _AttachmentPickerState._maxImageEdge / longest
+      : 1.0;
+  final width = (source.width * scale).floor();
+  final height = (source.height * scale).floor();
+  return (width: width > 0 ? width : 1, height: height > 0 ? height : 1);
+}
+
+final _decimalCoordinate = RegExp(r'^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$');
+
+double? _parseCoordinate(String raw, {required double maxAbsolute}) {
+  final valueText = raw.trim();
+  if (!_decimalCoordinate.hasMatch(valueText)) return null;
+  final value = double.tryParse(valueText);
+  if (value == null || !value.isFinite || value.abs() > maxAbsolute) {
+    return null;
+  }
+  return value;
+}
+
+String _formatCoordinate(double value) {
+  if (value == 0) return '0';
+  var result = value.toStringAsFixed(12);
+  result = result.replaceFirst(RegExp(r'0+$'), '');
+  return result.replaceFirst(RegExp(r'\.$'), '');
+}
+
+@visibleForTesting
+String? canonicalGeoUri(String latitude, String longitude) {
+  final lat = _parseCoordinate(latitude, maxAbsolute: 90);
+  final lng = _parseCoordinate(longitude, maxAbsolute: 180);
+  if (lat == null || lng == null) return null;
+  return 'geo:${_formatCoordinate(lat)},${_formatCoordinate(lng)}';
+}
+
 String? _guessMime(String filename) {
   final lower = filename.toLowerCase();
   final dot = lower.lastIndexOf('.');
@@ -1280,11 +1646,73 @@ String? _guessMime(String filename) {
     'webm': 'video/webm',
     'mkv': 'video/x-matroska',
     '3gp': 'video/3gpp',
+    // Audio
+    'mp3': 'audio/mpeg',
+    'm4a': 'audio/mp4',
+    'aac': 'audio/aac',
+    'ogg': 'audio/ogg',
+    'opus': 'audio/ogg',
+    'wav': 'audio/wav',
+    'flac': 'audio/flac',
     // Common documents
     'pdf': 'application/pdf',
     'txt': 'text/plain',
     'zip': 'application/zip',
   }[ext];
+}
+
+@visibleForTesting
+String? detectImageMime(Uint8List bytes) {
+  bool matches(int offset, List<int> signature) {
+    if (bytes.length < offset + signature.length) return false;
+    for (var index = 0; index < signature.length; index++) {
+      if (bytes[offset + index] != signature[index]) return false;
+    }
+    return true;
+  }
+
+  if (matches(0, const [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (matches(0, const [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'image/png';
+  }
+  if (matches(0, 'GIF87a'.codeUnits) || matches(0, 'GIF89a'.codeUnits)) {
+    return 'image/gif';
+  }
+  if (matches(0, 'RIFF'.codeUnits) && matches(8, 'WEBP'.codeUnits)) {
+    return 'image/webp';
+  }
+  if (matches(0, 'BM'.codeUnits)) return 'image/bmp';
+  if (matches(0, const [0x49, 0x49, 0x2a, 0x00]) ||
+      matches(0, const [0x4d, 0x4d, 0x00, 0x2a])) {
+    return 'image/tiff';
+  }
+  if (matches(4, 'ftyp'.codeUnits) && bytes.length >= 12) {
+    final brand = String.fromCharCodes(bytes.sublist(8, 12)).toLowerCase();
+    if (brand == 'avif' || brand == 'avis') return 'image/avif';
+    if ({'heic', 'heix', 'hevc', 'hevx'}.contains(brand)) {
+      return 'image/heic';
+    }
+    if (brand == 'heif' || brand == 'mif1' || brand == 'msf1') {
+      return 'image/heif';
+    }
+  }
+  return null;
+}
+
+String _imageExtensionForMime(String mimeType) {
+  return const {
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'image/webp': 'webp',
+        'image/heic': 'heic',
+        'image/heif': 'heif',
+        'image/avif': 'avif',
+        'image/tiff': 'tiff',
+        'image/bmp': 'bmp',
+      }[mimeType.toLowerCase()] ??
+      'jpg';
 }
 
 /// Replace the extension of [name] with [ext]. Used when re-encoding a picked
@@ -1295,14 +1723,16 @@ String _withExtension(String name, String ext) {
 }
 
 Future<Size?> _decodeImageSize(Uint8List bytes) async {
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? descriptor;
   try {
-    final completer = Completer<ui.Image>();
-    ui.decodeImageFromList(bytes, completer.complete);
-    final image = await completer.future;
-    final size = Size(image.width.toDouble(), image.height.toDouble());
-    image.dispose();
-    return size;
+    buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    descriptor = await ui.ImageDescriptor.encoded(buffer);
+    return Size(descriptor.width.toDouble(), descriptor.height.toDouble());
   } catch (_) {
     return null;
+  } finally {
+    descriptor?.dispose();
+    buffer?.dispose();
   }
 }
