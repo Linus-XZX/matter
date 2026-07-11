@@ -17,6 +17,7 @@ ruma = { version = "0.16", features = [
   "client-api-c",
   "html-matrix",
   "unstable-msc2545",
+  "unstable-msc3381",
 ] }
 tokio = { version = "1", features = [
   "rt",

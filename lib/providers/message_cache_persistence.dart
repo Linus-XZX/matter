@@ -41,6 +41,31 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'mediaSourceJson': message.mediaSourceJson,
     'imageWidth': message.imageWidth,
     'imageHeight': message.imageHeight,
+    'filename': message.filename,
+    'fileSize': message.fileSize,
+    'geoUri': message.geoUri,
+    'poll': message.poll == null
+        ? null
+        : {
+            'question': message.poll!.question,
+            'answers': message.poll!.answers
+                .map((answer) => {'id': answer.id, 'text': answer.text})
+                .toList(),
+            'disclosed': message.poll!.disclosed,
+            'maxSelections': message.poll!.maxSelections,
+            'myAnswerIds': message.poll!.myAnswerIds,
+            'results': message.poll!.results
+                .map(
+                  (result) => {
+                    'answerId': result.answerId,
+                    'count': result.count,
+                    'isMine': result.isMine,
+                  },
+                )
+                .toList(),
+            'totalVoters': message.poll!.totalVoters,
+            'ended': message.poll!.ended,
+          },
     'inReplyTo': message.inReplyTo,
     'isEdited': message.isEdited,
     'editHistory': message.editHistory,
@@ -76,6 +101,15 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     case 'video':
       msgType = rust.MessageType.video;
       break;
+    case 'file':
+      msgType = rust.MessageType.file;
+      break;
+    case 'location':
+      msgType = rust.MessageType.location;
+      break;
+    case 'poll':
+      msgType = rust.MessageType.poll;
+      break;
     case 'event':
       msgType = rust.MessageType.event;
       break;
@@ -85,6 +119,38 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
 
   final reactionsRaw = (map['reactions'] as List?) ?? const [];
   final readersRaw = (map['readers'] as List?) ?? const [];
+  final pollRaw = map['poll'];
+  final rust.PollInfo? poll = pollRaw is Map<String, dynamic>
+      ? rust.PollInfo(
+          question: (pollRaw['question'] as String?) ?? '',
+          answers: ((pollRaw['answers'] as List?) ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(
+                (answer) => rust.PollAnswerInfo(
+                  id: (answer['id'] as String?) ?? '',
+                  text: (answer['text'] as String?) ?? '',
+                ),
+              )
+              .toList(),
+          disclosed: (pollRaw['disclosed'] as bool?) ?? false,
+          maxSelections: (pollRaw['maxSelections'] as num?)?.toInt() ?? 1,
+          myAnswerIds: ((pollRaw['myAnswerIds'] as List?) ?? const [])
+              .map((id) => '$id')
+              .toList(),
+          results: ((pollRaw['results'] as List?) ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(
+                (result) => rust.PollAnswerResult(
+                  answerId: (result['answerId'] as String?) ?? '',
+                  count: (result['count'] as num?)?.toInt() ?? 0,
+                  isMine: (result['isMine'] as bool?) ?? false,
+                ),
+              )
+              .toList(),
+          totalVoters: (pollRaw['totalVoters'] as num?)?.toInt() ?? 0,
+          ended: (pollRaw['ended'] as bool?) ?? false,
+        )
+      : null;
 
   return rust.ChatMessage(
     id: (map['id'] as String?) ?? '',
@@ -105,6 +171,10 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     mediaSourceJson: map['mediaSourceJson'] as String?,
     imageWidth: (map['imageWidth'] as num?)?.toInt(),
     imageHeight: (map['imageHeight'] as num?)?.toInt(),
+    filename: map['filename'] as String?,
+    fileSize: (map['fileSize'] as num?)?.toInt(),
+    geoUri: map['geoUri'] as String?,
+    poll: poll,
     inReplyTo: map['inReplyTo'] as String?,
     isEdited: (map['isEdited'] as bool?) ?? false,
     editHistory: ((map['editHistory'] as List?) ?? const [])

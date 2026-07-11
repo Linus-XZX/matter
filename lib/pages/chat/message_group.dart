@@ -14,11 +14,14 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
+import 'file_message_bubble.dart';
 import 'forward_message_sheet.dart';
 import 'image_message_bubble.dart';
 import 'link_preview.dart';
+import 'location_message_bubble.dart';
 import 'message_insert_animation.dart';
 import 'message_text.dart';
+import 'poll_message_bubble.dart';
 import 'video_message_bubble.dart';
 import 'message_input.dart';
 import 'send_flight.dart';
@@ -337,6 +340,35 @@ class MessageGroupWidget extends ConsumerWidget {
               isLast: isLast,
             ),
             onLoaded: onImageLoaded,
+          )
+        : message.msgType == MessageType.poll && message.poll != null
+        ? PollMessageBubble(
+            key: ValueKey('poll-bubble:${message.id}'),
+            roomId: roomId,
+            pollStartEventId: message.id,
+            poll: message.poll!,
+            isMe: isMe,
+            metadata: metadata,
+          )
+        : message.msgType == MessageType.location && message.geoUri != null
+        ? LocationMessageBubble(
+            key: ValueKey('location-bubble:${message.id}'),
+            body: message.content,
+            geoUri: message.geoUri!,
+            isMe: isMe,
+            metadata: metadata,
+          )
+        : message.msgType == MessageType.file &&
+              (message.mediaSourceJson != null || message.imageUrl != null)
+        ? FileMessageBubble(
+            key: ValueKey('file-bubble:${message.id}'),
+            filename: message.filename ?? message.content,
+            caption: message.caption,
+            fileSize: message.fileSize,
+            mediaSourceJson: message.mediaSourceJson,
+            imageUrl: message.imageUrl,
+            isMe: isMe,
+            metadata: metadata,
           )
         : _buildTextBubble(
             context,

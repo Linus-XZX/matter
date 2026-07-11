@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `app_log`, `apply_desired_room_subscription`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `clear_receipt_cache`, `clear_sent_read_receipts_for_user`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `encryption_settings`, `extract_edit_content`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `load_room_messages_with_key_recovery`, `load_room_sticker_packs`, `media_caption_parts`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `pagination_boundary_key`, `pagination_token_before_event`, `reader_has_read`, `remove_dir_all_if_exists`, `remove_pagination_boundary_token`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_pagination_boundary_token`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `usage_allows_sticker`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `EditedTextContent`, `PendingEntry`, `SyncNotification`, `SyncTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `encryption_settings`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_verification_event_handler`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ClientEntry`, `EditedTextContent`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -216,6 +216,10 @@ Future<void> unsubscribeTyping() =>
 /// If Sliding Sync is not yet ready (startup race / account switch), the
 /// desire is recorded and applied automatically once the sync loop publishes
 /// an instance; this function never fails for that reason.
+///
+/// `desired`/`active` are updated under a single lock so concurrent calls
+/// can't interleave (a late-finishing old subscribe can't overwrite a newer
+/// room).
 Future<void> subscribeRoomForReceipts({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixSubscribeRoomForReceipts(roomId: roomId);
 
@@ -224,6 +228,10 @@ Future<void> subscribeRoomForReceipts({required String roomId}) =>
 /// activity, but not on every roundtrip. Uses `unsubscribe_to_rooms` (not a
 /// no-op re-subscribe) so the subscription is actually removed, keeping sync
 /// cost bounded as the user visits different rooms.
+///
+/// The room is removed only after its last mounted owner unsubscribes. The
+/// update runs under the same lock as subscribe, so overlapping routes cannot
+/// cancel each other's subscription.
 Future<void> unsubscribeRoomForReceipts({required String roomId}) => RustLib
     .instance
     .api
@@ -330,14 +338,104 @@ Future<void> sendImageMessage({
   required String roomId,
   required List<int> imageData,
   required String filename,
+  String? mimeType,
   int? width,
   int? height,
 }) => RustLib.instance.api.crateApiMatrixSendImageMessage(
   roomId: roomId,
   imageData: imageData,
   filename: filename,
+  mimeType: mimeType,
   width: width,
   height: height,
+);
+
+/// Send an arbitrary file (document) attachment to a room.
+Future<void> sendFileMessage({
+  required String roomId,
+  required List<int> fileData,
+  required String filename,
+  String? mimeType,
+  int? size,
+}) => RustLib.instance.api.crateApiMatrixSendFileMessage(
+  roomId: roomId,
+  fileData: fileData,
+  filename: filename,
+  mimeType: mimeType,
+  size: size,
+);
+
+/// Send a video attachment to a room.
+Future<void> sendVideoMessage({
+  required String roomId,
+  required List<int> videoData,
+  required String filename,
+  String? mimeType,
+  int? width,
+  int? height,
+  int? durationMs,
+  int? size,
+}) => RustLib.instance.api.crateApiMatrixSendVideoMessage(
+  roomId: roomId,
+  videoData: videoData,
+  filename: filename,
+  mimeType: mimeType,
+  width: width,
+  height: height,
+  durationMs: durationMs,
+  size: size,
+);
+
+/// Share a geographic location as legacy `m.room.message` / `m.location`.
+///
+/// The extensible top-level `m.location` event is not parsed by the current
+/// `matrix-sdk-ui` version. `geo_uri` follows RFC 5870, for example
+/// `geo:37.786971,-122.399677`.
+Future<void> sendLocation({
+  required String roomId,
+  required String body,
+  required String geoUri,
+}) => RustLib.instance.api.crateApiMatrixSendLocation(
+  roomId: roomId,
+  body: body,
+  geoUri: geoUri,
+);
+
+/// Start a poll using the unstable `org.matrix.msc3381.poll.start` event.
+///
+/// This is the poll type surfaced by the current `matrix-sdk-ui` version; its
+/// stable counterpart is not parsed there yet.
+Future<void> sendPoll({
+  required String roomId,
+  required String question,
+  required List<String> answers,
+  required bool disclosed,
+}) => RustLib.instance.api.crateApiMatrixSendPoll(
+  roomId: roomId,
+  question: question,
+  answers: answers,
+  disclosed: disclosed,
+);
+
+/// Submit a vote on a poll. Replaces the current user's previous response on
+/// the same poll start event.
+Future<void> sendPollResponse({
+  required String roomId,
+  required String pollStartEventId,
+  required List<String> answerIds,
+}) => RustLib.instance.api.crateApiMatrixSendPollResponse(
+  roomId: roomId,
+  pollStartEventId: pollStartEventId,
+  answerIds: answerIds,
+);
+
+/// Close a poll so no further votes are accepted.
+Future<void> endPoll({
+  required String roomId,
+  required String pollStartEventId,
+}) => RustLib.instance.api.crateApiMatrixEndPoll(
+  roomId: roomId,
+  pollStartEventId: pollStartEventId,
 );
 
 Future<void> sendSticker({
@@ -660,6 +758,18 @@ class ChatMessage {
   final int? imageWidth;
   final int? imageHeight;
 
+  /// Original filename for file/audio attachments.
+  final String? filename;
+
+  /// Declared file size in bytes for file/audio attachments.
+  final int? fileSize;
+
+  /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
+  final String? geoUri;
+
+  /// Poll data when `msg_type == Poll`.
+  final PollInfo? poll;
+
   /// Event ID this message is replying to, if any.
   final String? inReplyTo;
 
@@ -696,6 +806,10 @@ class ChatMessage {
     this.mediaSourceJson,
     this.imageWidth,
     this.imageHeight,
+    this.filename,
+    this.fileSize,
+    this.geoUri,
+    this.poll,
     this.inReplyTo,
     required this.isEdited,
     required this.editHistory,
@@ -722,6 +836,10 @@ class ChatMessage {
       mediaSourceJson.hashCode ^
       imageWidth.hashCode ^
       imageHeight.hashCode ^
+      filename.hashCode ^
+      fileSize.hashCode ^
+      geoUri.hashCode ^
+      poll.hashCode ^
       inReplyTo.hashCode ^
       isEdited.hashCode ^
       editHistory.hashCode ^
@@ -750,6 +868,10 @@ class ChatMessage {
           mediaSourceJson == other.mediaSourceJson &&
           imageWidth == other.imageWidth &&
           imageHeight == other.imageHeight &&
+          filename == other.filename &&
+          fileSize == other.fileSize &&
+          geoUri == other.geoUri &&
+          poll == other.poll &&
           inReplyTo == other.inReplyTo &&
           isEdited == other.isEdited &&
           editHistory == other.editHistory &&
@@ -978,8 +1100,126 @@ enum MessageType {
   sticker,
   video,
 
+  /// A generic document / file attachment (m.file, or m.audio rendered as
+  /// a downloadable file).
+  file,
+
+  /// An m.poll.start (unstable org.matrix.msc3381) poll.
+  poll,
+
+  /// A legacy m.location message.
+  location,
+
   /// State/member change event (join, leave, etc.)
   event,
+}
+
+/// One selectable answer of a poll.
+class PollAnswerInfo {
+  final String id;
+  final String text;
+
+  const PollAnswerInfo({required this.id, required this.text});
+
+  @override
+  int get hashCode => id.hashCode ^ text.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PollAnswerInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          text == other.text;
+}
+
+/// Per-answer tally for a poll.
+class PollAnswerResult {
+  final String answerId;
+
+  /// Number of users who selected this answer.
+  final int count;
+
+  /// Whether the current user selected this answer.
+  final bool isMine;
+
+  const PollAnswerResult({
+    required this.answerId,
+    required this.count,
+    required this.isMine,
+  });
+
+  @override
+  int get hashCode => answerId.hashCode ^ count.hashCode ^ isMine.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PollAnswerResult &&
+          runtimeType == other.runtimeType &&
+          answerId == other.answerId &&
+          count == other.count &&
+          isMine == other.isMine;
+}
+
+/// Poll data carried by a `MessageType::Poll` message.
+class PollInfo {
+  final String question;
+  final List<PollAnswerInfo> answers;
+
+  /// Whether results are revealed while voting is open.
+  final bool disclosed;
+
+  /// Max selections allowed per voter.
+  final int maxSelections;
+
+  /// Answer ids the current user has already selected.
+  final List<String> myAnswerIds;
+
+  /// Per-answer tallies (only meaningful when disclosed or ended).
+  final List<PollAnswerResult> results;
+
+  /// Total distinct users who have voted.
+  final int totalVoters;
+
+  /// Whether the poll has been closed.
+  final bool ended;
+
+  const PollInfo({
+    required this.question,
+    required this.answers,
+    required this.disclosed,
+    required this.maxSelections,
+    required this.myAnswerIds,
+    required this.results,
+    required this.totalVoters,
+    required this.ended,
+  });
+
+  @override
+  int get hashCode =>
+      question.hashCode ^
+      answers.hashCode ^
+      disclosed.hashCode ^
+      maxSelections.hashCode ^
+      myAnswerIds.hashCode ^
+      results.hashCode ^
+      totalVoters.hashCode ^
+      ended.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PollInfo &&
+          runtimeType == other.runtimeType &&
+          question == other.question &&
+          answers == other.answers &&
+          disclosed == other.disclosed &&
+          maxSelections == other.maxSelections &&
+          myAnswerIds == other.myAnswerIds &&
+          results == other.results &&
+          totalVoters == other.totalVoters &&
+          ended == other.ended;
 }
 
 /// A single emoji reaction aggregated on a message.
