@@ -7,6 +7,7 @@ import 'features/app_update/app_update_service.dart';
 import 'features/app_update/update_dialog.dart';
 import 'pages/login/login_page.dart';
 import 'pages/chat/decrypted_video_source.dart';
+import 'pages/chat/chat_detail_page.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'src/rust/api/matrix.dart' as rust;
@@ -191,6 +192,7 @@ class _AppRootState extends ConsumerState<_AppRoot> {
 
     return MaterialApp(
       navigatorKey: _navigatorKey,
+      navigatorObservers: [chatRouteObserver],
       title: 'Matter',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,

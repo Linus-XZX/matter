@@ -10,6 +10,7 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
+  int subscribeTypingCalls = 0;
   int unsubscribeTypingCalls = 0;
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
@@ -22,7 +23,9 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<void> crateApiMatrixSubscribeTypingForRoom({
     required String roomId,
-  }) async {}
+  }) async {
+    subscribeTypingCalls++;
+  }
 
   @override
   Future<void> crateApiMatrixUnsubscribeTyping() async {
@@ -79,6 +82,7 @@ void main() {
   tearDownAll(RustLib.dispose);
 
   setUp(() {
+    rustApi.subscribeTypingCalls = 0;
     rustApi.unsubscribeTypingCalls = 0;
     rustApi.subscribeRoomCalls = 0;
     rustApi.unsubscribeRoomCalls = 0;
@@ -158,6 +162,46 @@ void main() {
     );
     await tester.pump();
     expect(rustApi.unsubscribeRoomCalls, 2, reason: 'new room unsubscribe on dispose');
+  });
+
+  testWidgets('returning to a chat restores its room subscriptions', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(roomId: '!a:example.org', roomName: 'A'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              const ChatDetailPage(roomId: '!b:example.org', roomName: 'B'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(container.read(currentRoomIdProvider), '!b:example.org');
+
+    navigator.pop();
+    await tester.pump();
+    await tester.pump();
+
+    expect(container.read(currentRoomIdProvider), '!a:example.org');
+    expect(rustApi.subscribeTypingCalls, 3);
+    expect(rustApi.subscribeRoomCalls, 3);
   });
 
   testWidgets('waits for initial members before rendering cached messages', (

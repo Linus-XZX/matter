@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:matter/providers/auth_provider.dart';
+import 'package:matter/features/markdown/markdown_source_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -237,13 +238,77 @@ void main() {
       expect(prefs.getString('active_user_id'), '@bob:matrix.org');
     });
 
-    test('clearAllSessions wipes everything', () async {
+    test('removeSession clears that account markdown source cache', () async {
+      const store = MarkdownSourceStore();
       await addSession(
         homeserver: 'https://example.org',
         accessToken: 'token-a',
         userId: '@alice:example.org',
         deviceId: 'DEVICE_A',
         displayName: 'Alice',
+      );
+      await addSession(
+        homeserver: 'https://matrix.org',
+        accessToken: 'token-b',
+        userId: '@bob:matrix.org',
+        deviceId: 'DEVICE_B',
+        displayName: 'Bob',
+      );
+      for (final userId in ['@alice:example.org', '@bob:matrix.org']) {
+        await store.save(
+          userId: userId,
+          roomId: '!room:example.org',
+          eventId: r'$event',
+          source: '**$userId**',
+          body: userId,
+          formattedBody: null,
+          persist: true,
+        );
+      }
+
+      await removeSession('@alice:example.org');
+
+      expect(
+        await store.load(
+          userId: '@alice:example.org',
+          roomId: '!room:example.org',
+          eventId: r'$event',
+          body: '@alice:example.org',
+          formattedBody: null,
+          allowPersistence: true,
+        ),
+        isNull,
+      );
+      expect(
+        await store.load(
+          userId: '@bob:matrix.org',
+          roomId: '!room:example.org',
+          eventId: r'$event',
+          body: '@bob:matrix.org',
+          formattedBody: null,
+          allowPersistence: true,
+        ),
+        '**@bob:matrix.org**',
+      );
+    });
+
+    test('clearAllSessions wipes everything', () async {
+      const store = MarkdownSourceStore();
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+      await store.save(
+        userId: '@alice:example.org',
+        roomId: '!room:example.org',
+        eventId: r'$event',
+        source: '**hello**',
+        body: 'hello',
+        formattedBody: null,
+        persist: true,
       );
 
       await clearAllSessions();
@@ -256,6 +321,17 @@ void main() {
       final secure = FlutterSecureStorage();
       final all = await secure.readAll();
       expect(all, isEmpty);
+      expect(
+        await store.load(
+          userId: '@alice:example.org',
+          roomId: '!room:example.org',
+          eventId: r'$event',
+          body: 'hello',
+          formattedBody: null,
+          allowPersistence: true,
+        ),
+        isNull,
+      );
     });
 
     test('migrateLegacySession converts old keys to multi-session', () async {

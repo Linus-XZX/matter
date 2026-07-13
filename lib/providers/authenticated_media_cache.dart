@@ -10,6 +10,19 @@ bool isMatrixAuthenticatedMediaUrl(String url) {
   return uri != null && uri.path.startsWith('/_matrix/client/');
 }
 
+bool isCurrentHomeserverMatrixMediaUrl(String url, String? homeserver) {
+  final mediaUri = Uri.tryParse(url);
+  final homeserverUri = homeserver == null
+      ? null
+      : Uri.tryParse(homeserver.trim());
+  if (mediaUri == null || homeserverUri == null) return false;
+  if (!mediaUri.isScheme('http') && !mediaUri.isScheme('https')) return false;
+  return isMatrixAuthenticatedMediaUrl(url) &&
+      mediaUri.scheme == homeserverUri.scheme &&
+      mediaUri.host == homeserverUri.host &&
+      mediaUri.port == homeserverUri.port;
+}
+
 String? authenticatedMediaCacheKey({
   required String url,
   required String? userId,

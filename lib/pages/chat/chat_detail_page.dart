@@ -23,6 +23,8 @@ import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
 import 'message_input.dart';
 
+final chatRouteObserver = RouteObserver<ModalRoute<dynamic>>();
+
 class ChatDetailPage extends ConsumerStatefulWidget {
   final String roomId;
   final String roomName;
@@ -43,10 +45,12 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   ConsumerState<ChatDetailPage> createState() => _ChatDetailPageState();
 }
 
-class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
+class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
+    with RouteAware {
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
   late final MutableState<String?> _currentRoomIdNotifier;
+  ModalRoute<dynamic>? _route;
   final List<ChatMessage> _olderMessages = [];
   final List<MessageGroup> _groupedMessages = [];
   final Map<String, ChatMessage> _messageIndex = {};
@@ -137,24 +141,46 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
-      _currentRoomIdNotifier.value = widget.roomId;
-      // Subscribe Rust-side typing events for this room.
+      _activateRoom();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route == _route) return;
+    if (_route != null) chatRouteObserver.unsubscribe(this);
+    _route = route;
+    if (route != null) chatRouteObserver.subscribe(this, route);
+  }
+
+  @override
+  void didPopNext() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _activateRoom();
+    });
+  }
+
+  void _activateRoom() {
+    _currentRoomIdNotifier.value = widget.roomId;
+    unawaited(
       subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
         debugPrint('subscribeTypingForRoom failed: $e');
-      });
-      // Keep this room in every Sliding Sync roundtrip so read-receipt deltas
-      // for it are always delivered (homeservers only emit per-room receipts
-      // for rooms present in the sync response).
+      }),
+    );
+    unawaited(
       subscribeRoomForReceipts(roomId: widget.roomId).catchError((e) {
         debugPrint('subscribeRoomForReceipts failed: $e');
-      });
-      // Prime the message cache from disk so the previous snapshot renders
-      // instantly, then refresh from the network in the background.
-      primeMessageCache(ref, widget.roomId).then((_) {
-        if (!mounted) return;
-        refreshMessagesFromNetwork(ref, widget.roomId);
-      });
-    });
+      }),
+    );
+    unawaited(_primeAndRefreshMessages());
+  }
+
+  Future<void> _primeAndRefreshMessages() async {
+    await primeMessageCache(ref, widget.roomId);
+    if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
+    await refreshMessagesFromNetwork(ref, widget.roomId);
   }
 
   Map<String, String?> _buildAvatarMap(List<Contact> members) {
@@ -167,6 +193,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
 
   @override
   void dispose() {
+    chatRouteObserver.unsubscribe(this);
     final currentRoomIdNotifier = _currentRoomIdNotifier;
     final roomId = widget.roomId;
     Future.microtask(() {
