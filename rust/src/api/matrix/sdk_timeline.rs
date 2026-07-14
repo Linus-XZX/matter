@@ -203,10 +203,10 @@ async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatM
     // processed, so it also covers the race where the timeline's background
     // receipt task has not drained before this snapshot.
     //
-    // A receipt whose target is inside the loaded window resolves to that
-    // event's position; one outside the window clamps to 0 (oldest), so the
-    // existing `>=` accumulation treats the member as having read every visible
-    // message.
+    // A store receipt only supplies a position when its target is in this
+    // snapshot. An unknown target can be either older or newer than the
+    // window, so inventing a position would show a false receipt. Check both
+    // unthreaded and main receipts: clients can write either one.
     let member_receipts = futures_util::future::join_all(
         members
             .iter()
@@ -219,31 +219,28 @@ async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatM
                 let room = room.clone();
                 let event_positions = &event_positions;
                 Some(async move {
-                    let receipt = room
-                        .load_user_receipt(
+                    let (unthreaded, main) = tokio::join!(
+                        room.load_user_receipt(
                             EventReceiptType::Read,
                             ReceiptThread::Unthreaded,
                             &user_id,
-                        )
-                        .await
-                        .ok()
-                        .flatten();
-                    let receipt = match receipt {
-                        Some(r) => r,
-                        None => room
-                            .load_user_receipt(
-                                EventReceiptType::Read,
-                                ReceiptThread::Main,
-                                &user_id,
-                            )
-                            .await
-                            .ok()
-                            .flatten()?,
-                    };
-                    Some((
-                        user_id.to_string(),
-                        resolve_receipt_position(&receipt.0, event_positions),
-                    ))
+                        ),
+                        room.load_user_receipt(
+                            EventReceiptType::Read,
+                            ReceiptThread::Main,
+                            &user_id,
+                        ),
+                    );
+                    let unthreaded = unthreaded.ok().flatten();
+                    let main = main.ok().flatten();
+                    let position = newest_receipt_position(
+                        [unthreaded.as_ref(), main.as_ref()]
+                            .into_iter()
+                            .flatten()
+                            .map(|receipt| receipt.0.as_ref()),
+                        event_positions,
+                    )?;
+                    Some((user_id.to_string(), position))
                 })
             })
             .collect::<Vec<_>>(),
@@ -338,14 +335,21 @@ fn record_latest_receipt_position(
         .or_insert(position);
 }
 
+fn newest_receipt_position<'a>(
+    receipt_event_ids: impl IntoIterator<Item = &'a matrix_sdk::ruma::EventId>,
+    event_positions: &HashMap<String, usize>,
+) -> Option<usize> {
+    receipt_event_ids
+        .into_iter()
+        .filter_map(|event_id| resolve_receipt_position(event_id, event_positions))
+        .max()
+}
+
 fn resolve_receipt_position(
     receipt_event_id: &matrix_sdk::ruma::EventId,
     event_positions: &HashMap<String, usize>,
-) -> usize {
-    event_positions
-        .get(receipt_event_id.as_str())
-        .copied()
-        .unwrap_or(0)
+) -> Option<usize> {
+    event_positions.get(receipt_event_id.as_str()).copied()
 }
 
 fn reader_ids_for_position(
@@ -946,8 +950,8 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        messages_before, reader_ids_for_position, record_latest_receipt_position,
-        resolve_receipt_position,
+        messages_before, newest_receipt_position, reader_ids_for_position,
+        record_latest_receipt_position, resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
@@ -1022,30 +1026,49 @@ mod tests {
     }
 
     #[test]
-    fn resolve_receipt_position_clamps_outside_window_to_oldest() {
+    fn store_receipts_use_the_newest_known_main_timeline_position() {
         use matrix_sdk::ruma::EventId;
 
         let positions = HashMap::from([
             ("$a:example.org".to_owned(), 0),
-            ("$b:example.org".to_owned(), 1),
+            ("$unthreaded:example.org".to_owned(), 1),
+            ("$main:example.org".to_owned(), 4),
         ]);
+        let unthreaded = EventId::parse("$unthreaded:example.org").unwrap();
+        let main = EventId::parse("$main:example.org").unwrap();
 
-        // Inside the window resolves to the event's real position.
         assert_eq!(
-            resolve_receipt_position(
-                EventId::parse("$b:example.org").unwrap().as_ref(),
-                &positions
-            ),
-            1
+            newest_receipt_position([unthreaded.as_ref(), main.as_ref()], &positions),
+            Some(4)
         );
-        // Outside the window clamps to 0 (oldest) — the member is treated as
-        // having read every visible message.
+    }
+
+    #[test]
+    fn unknown_receipt_target_does_not_mark_the_oldest_message_as_read() {
+        use matrix_sdk::ruma::EventId;
+
+        let positions = HashMap::from([("$a:example.org".to_owned(), 0)]);
+
         assert_eq!(
             resolve_receipt_position(
                 EventId::parse("$outside:example.org").unwrap().as_ref(),
                 &positions
             ),
-            0
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_unthreaded_receipt_does_not_hide_a_known_main_receipt() {
+        use matrix_sdk::ruma::EventId;
+
+        let positions = HashMap::from([("$main:example.org".to_owned(), 4)]);
+        let unthreaded = EventId::parse("$outside:example.org").unwrap();
+        let main = EventId::parse("$main:example.org").unwrap();
+
+        assert_eq!(
+            newest_receipt_position([unthreaded.as_ref(), main.as_ref()], &positions),
+            Some(4)
         );
     }
 
