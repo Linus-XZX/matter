@@ -62,15 +62,16 @@ post_install do |installer|
       set -euo pipefail
 
       cd "${SRCROOT}/../rust"
-      cargo build --target aarch64-apple-ios
 
       if [ "$CONFIGURATION" = "Debug" ]; then
         PROFILE="debug"
+        cargo build --target aarch64-apple-ios --debug
       else
         PROFILE="release"
+        cargo build --target aarch64-apple-ios --release
       fi
 
-      FRAMEWORK_DIR="${SRCROOT}/../rust/target/rust_lib_matter.framework"
+      FRAMEWORK_DIR="${SRCROOT}/../rust/target/aarch64-apple-ios/rust_lib_matter.framework"
 
       # Ensure framework skeleton exists (prepare_command should have
       # created it at pod install time, but be safe if it was cleaned).
@@ -80,10 +81,15 @@ post_install do |installer|
       fi
 
       # Copy the built dylib into the framework
-      cp -f "${SRCROOT}/../rust/target/$RUST_TARGET/$PROFILE/librust_lib_matter.dylib" \
+      cp -f "${SRCROOT}/../rust/target/aarch64-apple-ios/$PROFILE/librust_lib_matter.dylib" \
         "$FRAMEWORK_DIR/rust_lib_matter"
       install_name_tool -id "@rpath/rust_lib_matter.framework/rust_lib_matter" \
         "$FRAMEWORK_DIR/rust_lib_matter"
+
+      # Code sign the framework
+      if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+        /usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none --preserve-metadata=identifier,entitlements "$FRAMEWORK_DIR"
+      fi
 
       # Copy the fully-populated framework into the app bundle's Frameworks dir.
       # $TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH is the correct path on the
