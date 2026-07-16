@@ -65,7 +65,14 @@ const _kSessions = 'multi_sessions'; // JSON list of StoredSession
 const _kSessionDisplayNames =
     'session_display_names'; // JSON map: user_id -> display_name
 const _kActiveUserId = 'active_user_id';
-const _secureStorage = FlutterSecureStorage();
+final _secureStorage = defaultTargetPlatform == TargetPlatform.macOS
+    ? FlutterSecureStorage(
+        mOptions: MacOsOptions(
+          accessibility: KeychainAccessibility.first_unlock_this_device,
+          usesDataProtectionKeychain: false,
+        ),
+      )
+    : const FlutterSecureStorage();
 
 String _tokenKey(String userId) =>
     'matrix_access_token_${base64Url.encode(utf8.encode(userId))}';
