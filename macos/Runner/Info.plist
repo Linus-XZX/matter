@@ -24,13 +24,13 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>$(PRODUCT_COPYRIGHT)</string>
-	<key>NSMainNibFile</key>
-	<string>MainMenu</string>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 	<key>NSLocationUsageDescription</key>
 	<string>需要访问您的位置以在聊天中分享当前位置。</string>
+	<key>NSMainNibFile</key>
+	<string>MainMenu</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>需要访问照片图库以选择要发送的图片和视频。</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>
