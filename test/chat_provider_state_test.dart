@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -52,6 +53,10 @@ rust.ChatRoom _room(String id, {bool isEncrypted = false}) => rust.ChatRoom(
   roomType: 'group',
   isEncrypted: isEncrypted,
   roomState: 'joined',
+);
+
+final _refreshMessagesRefProvider = FutureProvider.family<void, String>(
+  (ref, roomId) => refreshMessagesRef(ref, roomId),
 );
 
 void main() {
@@ -170,6 +175,76 @@ void main() {
 
       // No persisted cache exists, but priming was skipped so the provider stays empty.
       expect(ref.read(messageCacheProvider(roomId)), isEmpty);
+    });
+  });
+
+  group('message refresh', () {
+    testWidgets('drops a network refresh after an account switch', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final pendingMessages = Completer<List<rust.ChatMessage>>();
+      WidgetRef? ref;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            messagesProvider(
+              roomId,
+            ).overrideWith((ref) => pendingMessages.future),
+          ],
+          child: Consumer(
+            builder: (context, r, _) {
+              ref = r;
+              return Container();
+            },
+          ),
+        ),
+      );
+      final widgetRef = ref!;
+      widgetRef.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      final refresh = refreshMessagesFromNetwork(widgetRef, roomId);
+      widgetRef.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+      pendingMessages.complete([_message(r'$alice', '100')]);
+      await refresh;
+
+      expect(widgetRef.read(messageCacheProvider(roomId)), isEmpty);
+      expect(widgetRef.read(messageCacheOwnerProvider(roomId)), isNull);
+    });
+
+    testWidgets('drops a sync refresh after an account switch', (tester) async {
+      const roomId = '!room:example.org';
+      final pendingMessages = Completer<List<rust.ChatMessage>>();
+      WidgetRef? ref;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            messagesProvider(
+              roomId,
+            ).overrideWith((ref) => pendingMessages.future),
+          ],
+          child: Consumer(
+            builder: (context, r, _) {
+              ref = r;
+              return Container();
+            },
+          ),
+        ),
+      );
+      final widgetRef = ref!;
+      widgetRef.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      final refresh = widgetRef.read(
+        _refreshMessagesRefProvider(roomId).future,
+      );
+      widgetRef.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+      pendingMessages.complete([_message(r'$alice', '100')]);
+      await refresh;
+
+      expect(widgetRef.read(messageCacheProvider(roomId)), isEmpty);
+      expect(widgetRef.read(messageCacheOwnerProvider(roomId)), isNull);
     });
   });
 

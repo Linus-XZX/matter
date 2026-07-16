@@ -135,11 +135,15 @@ class _AppAvatarState extends ConsumerState<AppAvatar> {
   }
 
   String get _initials {
-    final parts = widget.fallback.trim().split(' ');
+    final parts = widget.fallback
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList();
     if (parts.length >= 2) {
       return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
     }
-    return widget.fallback.isNotEmpty ? widget.fallback[0].toUpperCase() : '?';
+    return parts.isNotEmpty ? parts.first[0].toUpperCase() : '?';
   }
 }
 
@@ -176,8 +180,7 @@ class _AuthenticatedImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isMatrixMedia =
-        Uri.tryParse(url)?.path.startsWith('/_matrix/client/') ?? false;
+    final isMatrixMedia = isCurrentHomeserverMatrixMediaUrl(url, homeserver);
     final cacheKey = authenticatedMediaCacheKey(
       url: url,
       userId: userId,

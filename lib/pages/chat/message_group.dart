@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/markdown/markdown_source_store.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
@@ -1269,6 +1270,10 @@ class MessageGroupWidget extends ConsumerWidget {
           try {
             await redactMessage(ref, roomId, message.id);
             await const MarkdownSourceStore().delete(
+              userId:
+                  ref.read(activeUserIdProvider) ??
+                  ref.read(currentUserProvider)?.id ??
+                  'anonymous',
               roomId: roomId,
               eventId: message.id,
             );

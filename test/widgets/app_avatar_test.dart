@@ -35,6 +35,20 @@ void main() {
       expect(find.text('AS'), findsOneWidget);
     });
 
+    testWidgets('collapses whitespace when building initials', (tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(body: AppAvatar(fallback: 'Alice  Bob')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('AB'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('shows question mark for empty fallback', (tester) async {
       await tester.pumpWidget(
         const ProviderScope(

@@ -328,11 +328,13 @@ Future<void> primeMessageCache(WidgetRef ref, String roomId) async {
 /// the in-memory cache and the disk snapshot. Used by the UI in place of a
 /// bare [messagesProvider] watch so the list never goes blank mid-fetch.
 Future<void> refreshMessagesFromNetwork(WidgetRef ref, String roomId) async {
+  final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
   ref.invalidate(messagesProvider(roomId));
   try {
     final latest = await ref.read(messagesProvider(roomId).future);
-    final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
+    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
     final allowDiskCache = await _canPersistMessagesForRoom(ref.read, roomId);
+    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
     ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
     final reconciled = updateMessageCache(ref, roomId, latest);
     // Persist off the widget tree so a slow disk write never blocks the UI.
@@ -468,37 +470,34 @@ String markLocalOutgoingMessageSent(
   return sentId;
 }
 
-Future<void> refreshMessagesRef(Ref ref, String roomId) {
+Future<void> refreshMessagesRef(Ref ref, String roomId) async {
+  final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
   ref.invalidate(messagesProvider(roomId));
   // Reconcile the fresh fetch into the in-memory cache + disk snapshot so the
   // UI (which watches messageCacheProvider) never has to flip through a
   // loading state. This is the path used by syncStreamProvider.
-  return ref
-      .read(messagesProvider(roomId).future)
-      .then((latest) async {
-        final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
-        final allowDiskCache = await _canPersistMessagesForRoom(
-          ref.read,
-          roomId,
-        );
-        ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
-        final current = ref.read(messageCacheProvider(roomId));
-        final reconciled = reconcileMessageSnapshot(current, latest);
-        if (!identical(reconciled, current)) {
-          ref.read(messageCacheProvider(roomId).notifier).value = reconciled;
-        }
-        unawaited(
-          saveCachedMessages(
-            namespace: namespace,
-            roomId: roomId,
-            messages: reconciled,
-            persistToDisk: allowDiskCache,
-          ),
-        );
-      })
-      .catchError((_) {
-        // Keep the existing snapshot on failure.
-      });
+  try {
+    final latest = await ref.read(messagesProvider(roomId).future);
+    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
+    final allowDiskCache = await _canPersistMessagesForRoom(ref.read, roomId);
+    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
+    ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
+    final current = ref.read(messageCacheProvider(roomId));
+    final reconciled = reconcileMessageSnapshot(current, latest);
+    if (!identical(reconciled, current)) {
+      ref.read(messageCacheProvider(roomId).notifier).value = reconciled;
+    }
+    unawaited(
+      saveCachedMessages(
+        namespace: namespace,
+        roomId: roomId,
+        messages: reconciled,
+        persistToDisk: allowDiskCache,
+      ),
+    );
+  } catch (_) {
+    // Keep the existing snapshot on failure.
+  }
 }
 
 Future<void> refreshMessages(WidgetRef ref, String roomId) {

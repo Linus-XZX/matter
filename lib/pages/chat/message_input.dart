@@ -322,12 +322,15 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           message: compiled.toRust(),
         );
       }
+      final persistMarkdownSource = await _canPersistMarkdownSource();
       await _markdownSourceStore.save(
+        userId: _draftKey.userId,
         roomId: widget.roomId,
         eventId: editing?.id ?? remoteEventId,
         source: compiled.source,
         body: compiled.body,
         formattedBody: compiled.formattedBody,
+        persist: persistMarkdownSource,
       );
       if (!mounted) return;
       _stopTyping();
@@ -931,11 +934,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   Future<void> _prefillEditingSource(rust.ChatMessage editing) async {
+    final allowPersistence = await _canPersistMarkdownSource();
     final source = await _markdownSourceStore.load(
+      userId: _draftKey.userId,
       roomId: widget.roomId,
       eventId: editing.id,
       body: editing.content,
       formattedBody: editing.formattedBody,
+      allowPersistence: allowPersistence,
     );
     if (!mounted || _lastEditingId != editing.id) return;
     _controller.text = source ?? editing.content;
@@ -943,6 +949,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       TextPosition(offset: _controller.text.length),
     );
     setState(() => _hasText = _controller.text.trim().isNotEmpty);
+  }
+
+  Future<bool> _canPersistMarkdownSource() async {
+    try {
+      return !await rust.isRoomEncrypted(roomId: widget.roomId);
+    } catch (_) {
+      return false;
+    }
   }
 
   void _restoreDraft() {
