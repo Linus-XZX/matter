@@ -65,7 +65,7 @@ post_install do |installer|
 
       if [ "$CONFIGURATION" = "Debug" ]; then
         PROFILE="debug"
-        cargo build --target aarch64-apple-ios --debug
+        cargo build --target aarch64-apple-ios
       else
         PROFILE="release"
         cargo build --target aarch64-apple-ios --release
