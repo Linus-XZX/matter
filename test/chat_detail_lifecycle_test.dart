@@ -13,6 +13,7 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
+  int subscribeTypingCalls = 0;
   int unsubscribeTypingCalls = 0;
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
@@ -31,6 +32,8 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
     required bool typing,
   }) async {}
+  String? activeTypingRoom;
+  Completer<void>? typingUnsubscribeBarrier;
 
   @override
   Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async {
@@ -40,11 +43,17 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<void> crateApiMatrixSubscribeTypingForRoom({
     required String roomId,
-  }) async {}
+  }) async {
+    subscribeTypingCalls++;
+    activeTypingRoom = roomId;
+  }
 
   @override
-  Future<void> crateApiMatrixUnsubscribeTyping() async {
+  Future<void> crateApiMatrixUnsubscribeTyping({required String roomId}) async {
     unsubscribeTypingCalls++;
+    final barrier = typingUnsubscribeBarrier;
+    if (barrier != null) await barrier.future;
+    if (activeTypingRoom == roomId) activeTypingRoom = null;
   }
 
   @override
@@ -127,10 +136,13 @@ void main() {
   tearDownAll(RustLib.dispose);
 
   setUp(() {
+    rustApi.subscribeTypingCalls = 0;
     rustApi.unsubscribeTypingCalls = 0;
     rustApi.subscribeRoomCalls = 0;
     rustApi.unsubscribeRoomCalls = 0;
     rustApi.pendingSend = null;
+    rustApi.activeTypingRoom = null;
+    rustApi.typingUnsubscribeBarrier = null;
     SharedPreferences.setMockInitialValues({});
   });
 
@@ -223,6 +235,51 @@ void main() {
       2,
       reason: 'new room unsubscribe on dispose',
     );
+  });
+
+  testWidgets('returning to a chat restores its room subscriptions', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(roomId: '!a:example.org', roomName: 'A'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              const ChatDetailPage(roomId: '!b:example.org', roomName: 'B'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(container.read(currentRoomIdProvider), '!b:example.org');
+
+    final unsubscribeBarrier = Completer<void>();
+    rustApi.typingUnsubscribeBarrier = unsubscribeBarrier;
+    navigator.pop();
+    await tester.pumpAndSettle();
+
+    expect(container.read(currentRoomIdProvider), '!a:example.org');
+    expect(rustApi.subscribeTypingCalls, 3);
+    expect(rustApi.subscribeRoomCalls, 3);
+
+    unsubscribeBarrier.complete();
+    await tester.pump();
+    expect(rustApi.activeTypingRoom, '!a:example.org');
   });
 
   testWidgets('waits for initial members before rendering cached messages', (

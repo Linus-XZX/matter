@@ -17,6 +17,31 @@ void main() {
     );
   });
 
+  test('only trusts Matrix media on the active homeserver', () {
+    const homeserver = 'https://matrix.example.org:8448';
+    expect(
+      isCurrentHomeserverMatrixMediaUrl(
+        'https://matrix.example.org:8448/_matrix/client/v1/media/download/s/id',
+        homeserver,
+      ),
+      isTrue,
+    );
+    expect(
+      isCurrentHomeserverMatrixMediaUrl(
+        'https://attacker.example/_matrix/client/v1/media/download/s/id',
+        homeserver,
+      ),
+      isFalse,
+    );
+    expect(
+      isCurrentHomeserverMatrixMediaUrl(
+        'http://matrix.example.org:8448/_matrix/client/v1/media/download/s/id',
+        homeserver,
+      ),
+      isFalse,
+    );
+  });
+
   test('cache key is scoped by account and homeserver', () {
     const url = 'https://example.org/_matrix/client/v1/media/download/s/id';
 

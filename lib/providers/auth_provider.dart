@@ -7,6 +7,7 @@ import '../src/rust/api/matrix.dart' as rust;
 import 'authenticated_media_cache.dart';
 import 'message_cache_persistence.dart';
 import 'mutable_state.dart';
+import '../features/markdown/markdown_source_store.dart';
 
 class CurrentUser {
   final String id;
@@ -149,6 +150,7 @@ Future<void> addSession({
 /// Load all saved sessions.
 Future<List<rust.StoredSession>> loadAllSessions() async {
   final prefs = await SharedPreferences.getInstance();
+  await MarkdownSourceStore.clearLegacyEntries();
   final raw = prefs.getString(_kSessions);
   if (raw == null) return [];
 
@@ -267,6 +269,7 @@ Future<void> removeSession(String userId) async {
   await _secureStorage.delete(key: _tokenKey(userId));
   await _secureStorage.delete(key: _refreshTokenKey(userId));
   await clearCachedMessagesForNamespace(userId);
+  await const MarkdownSourceStore().clearForUser(userId);
   for (final session in removedSessions) {
     await clearAuthenticatedMediaCacheForSession(
       userId: session.userId,
@@ -297,11 +300,13 @@ Future<void> clearAllSessions() async {
     await _secureStorage.delete(key: _tokenKey(session.userId));
     await _secureStorage.delete(key: _refreshTokenKey(session.userId));
     await clearCachedMessagesForNamespace(session.userId);
+    await const MarkdownSourceStore().clearForUser(session.userId);
     await clearAuthenticatedMediaCacheForSession(
       userId: session.userId,
       homeserver: session.homeserverUrl,
     );
   }
+  await const MarkdownSourceStore().clearAll();
   await prefs.remove(_kSessions);
   await prefs.remove(_kSessionDisplayNames);
   await prefs.remove(_kActiveUserId);
