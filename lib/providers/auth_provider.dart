@@ -3,6 +3,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import 'dart:io';
 import '../src/rust/api/matrix.dart' as rust;
 import 'authenticated_media_cache.dart';
 import 'message_cache_persistence.dart';
@@ -65,7 +66,14 @@ const _kSessions = 'multi_sessions'; // JSON list of StoredSession
 const _kSessionDisplayNames =
     'session_display_names'; // JSON map: user_id -> display_name
 const _kActiveUserId = 'active_user_id';
-const _secureStorage = FlutterSecureStorage();
+final _secureStorage = Platform.isMacOS
+    ? FlutterSecureStorage(
+        mOptions: MacOsOptions(
+          accessibility: KeychainAccessibility.first_unlock_this_device,
+          usesDataProtectionKeychain: false,
+        ),
+      )
+    : const FlutterSecureStorage();
 
 String _tokenKey(String userId) =>
     'matrix_access_token_${base64Url.encode(utf8.encode(userId))}';
