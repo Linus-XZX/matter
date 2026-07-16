@@ -161,6 +161,7 @@ class _AuthenticatedImage extends StatelessWidget {
   final double? height;
   final int? cacheWidth;
   final int? cacheHeight;
+  final bool useOldImageOnUrlChange;
 
   const _AuthenticatedImage({
     super.key,
@@ -176,6 +177,7 @@ class _AuthenticatedImage extends StatelessWidget {
     this.height,
     this.cacheWidth,
     this.cacheHeight,
+    this.useOldImageOnUrlChange = false,
   });
 
   @override
@@ -205,6 +207,7 @@ class _AuthenticatedImage extends StatelessWidget {
       memCacheHeight: cacheHeight,
       maxWidthDiskCache: cacheWidth,
       maxHeightDiskCache: cacheHeight,
+      useOldImageOnUrlChange: useOldImageOnUrlChange,
       fadeInDuration: Duration.zero,
       fadeOutDuration: Duration.zero,
       imageBuilder: (context, imageProvider) {
@@ -289,6 +292,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
       onError: onError,
       cacheWidth: cacheWidth,
       cacheHeight: cacheHeight,
+      useOldImageOnUrlChange: true,
     );
 
     if (onTap != null) {
