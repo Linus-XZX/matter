@@ -104,6 +104,8 @@ void main() {
       tester.getSize(find.byType(Ink)).width,
       greaterThan(collapsedSize.width),
     );
+    final decoration = tester.widget<Ink>(find.byType(Ink)).decoration!;
+    expect((decoration as BoxDecoration).boxShadow, isNull);
 
     await pumpControl(false);
     await tester.pump(const Duration(milliseconds: 500));
