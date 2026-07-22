@@ -130,7 +130,8 @@ Future<void> bootstrapActiveSessionSync(
   }
 
   if (!initialSyncSucceeded) {
-    ref.read(connectionProvider.notifier).value = AppConnectionState.connecting;
+    ref.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
   }
 
   try {

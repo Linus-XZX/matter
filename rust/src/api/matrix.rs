@@ -2592,7 +2592,6 @@ pub async fn start_sync() -> Result<(), String> {
         .subscribe()
         .map_err(|e| format!("Failed to subscribe to the event cache: {e}"))?;
 
-    set_connection_status(ConnectionStatus::Connecting);
     stop_sync_task(None).await;
 
     // Try Sliding Sync first
