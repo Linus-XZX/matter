@@ -2574,6 +2574,7 @@ pub async fn sync_once() -> Result<(), String> {
 pub async fn start_sync() -> Result<(), String> {
     let client = get_client().await.ok_or_else(|| {
         app_log("error", "sync", "start_sync: no client created".to_string());
+        set_connection_status(ConnectionStatus::Disconnected);
         "No client created.".to_string()
     })?;
     let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
@@ -2587,10 +2588,10 @@ pub async fn start_sync() -> Result<(), String> {
         ),
     );
 
-    client
-        .event_cache()
-        .subscribe()
-        .map_err(|e| format!("Failed to subscribe to the event cache: {e}"))?;
+    client.event_cache().subscribe().map_err(|e| {
+        set_connection_status(ConnectionStatus::Disconnected);
+        format!("Failed to subscribe to the event cache: {e}")
+    })?;
 
     stop_sync_task(None).await;
 
@@ -2647,6 +2648,7 @@ pub async fn start_sync() -> Result<(), String> {
     let active_user = ACTIVE_USER.read().await.clone();
     if active_user.as_deref() != Some(&user_id) {
         handle.abort();
+        set_connection_status(ConnectionStatus::Disconnected);
         return Err("Active account changed while starting sync.".to_string());
     }
 
