@@ -121,6 +121,8 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
   }
 
   Future<void> _saveName() async {
+    if (_saving) return;
+
     final name = _nameController.text.trim();
     if (name.isEmpty) {
       ScaffoldMessenger.of(
@@ -275,7 +277,7 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
                         ),
                       ),
                       textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _saveName(),
+                      onSubmitted: _saving ? null : (_) => _saveName(),
                     ),
 
                     const SizedBox(height: 24),

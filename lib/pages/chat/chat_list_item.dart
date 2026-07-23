@@ -64,9 +64,7 @@ class ChatListItem extends ConsumerWidget {
         : chatListPreview(room);
 
     return InkWell(
-      borderRadius: onRoomSelected != null
-          ? BorderRadius.circular(AppRadii.button)
-          : null,
+      borderRadius: BorderRadius.circular(AppRadii.button),
       onTap: () {
         if (isPendingMembership) return;
         if (onRoomSelected case final onRoomSelected?) {
