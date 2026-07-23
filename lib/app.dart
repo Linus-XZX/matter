@@ -16,6 +16,7 @@ import 'src/rust/api/matrix.dart' as rust;
 import 'theme/app_theme.dart';
 import 'widgets/app_avatar.dart';
 import 'widgets/liquid_glass.dart';
+import 'widgets/max_content_width.dart';
 
 enum _DesktopRoomSource { directMessages, ungroupedRooms, space }
 
@@ -354,7 +355,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                       ],
                     ],
                   )
-                : _pages[navigationIndex],
+                : MaxContentWidth(child: _pages[navigationIndex]),
           ),
         ],
       ),
