@@ -129,6 +129,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
     _hasText = draft.trim().isNotEmpty;
     _controller.addListener(_onTextChanged);
+    _focusNode.onKeyEvent = _handleKeyEvent;
     _focusNode.addListener(() {
       if (_focusNode.hasFocus && mounted) {
         widget.onPanelModeChanged(InputPanelMode.keyboard);
@@ -213,6 +214,28 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       debugPrint('sendTypingNotice failed: $e');
     });
   }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_isEnterKey(event) ||
+        HardwareKeyboard.instance.isShiftPressed ||
+        _isComposingText) {
+      return KeyEventResult.ignored;
+    }
+
+    if (event is KeyDownEvent) {
+      unawaited(_sendMessage());
+    }
+    return KeyEventResult.handled;
+  }
+
+  bool get _isComposingText {
+    final composing = _controller.value.composing;
+    return composing.isValid && !composing.isCollapsed;
+  }
+
+  bool _isEnterKey(KeyEvent event) =>
+      event.logicalKey == LogicalKeyboardKey.enter ||
+      event.logicalKey == LogicalKeyboardKey.numpadEnter;
 
   void _togglePicker([ComposerPickerTab? tab]) {
     final nextTab = tab ?? _pickerTab;

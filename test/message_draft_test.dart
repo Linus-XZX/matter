@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/message_input.dart';
@@ -133,6 +135,51 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('Enter sends a message from an Android hardware keyboard', (
+    tester,
+  ) async {
+    await _runWithTargetPlatform(TargetPlatform.android, () async {
+      const roomId = '!enter:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(_messageInput(container, roomId));
+      await tester.enterText(find.byType(TextField), 'send with Enter');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+
+      expect(_inputText(tester), isEmpty);
+      expect(rustApi.pendingSend, isNotNull);
+
+      await tester.pumpWidget(_home(container));
+      rustApi.pendingSend!.complete(r'$sent');
+      await tester.pump();
+    });
+  });
+
+  testWidgets('Shift+Enter does not send from an Android hardware keyboard', (
+    tester,
+  ) async {
+    await _runWithTargetPlatform(TargetPlatform.android, () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(_messageInput(container, '!newline:example.org'));
+      await tester.enterText(find.byType(TextField), 'first line');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+
+      expect(_inputText(tester), 'first line');
+      expect(rustApi.pendingSend, isNull);
+    });
+  });
+
   testWidgets('editing a message does not overwrite the room draft', (
     tester,
   ) async {
@@ -222,4 +269,16 @@ Widget _home(ProviderContainer container) {
 
 String _inputText(WidgetTester tester) {
   return tester.widget<TextField>(find.byType(TextField)).controller!.text;
+}
+
+Future<void> _runWithTargetPlatform(
+  TargetPlatform platform,
+  Future<void> Function() body,
+) async {
+  debugDefaultTargetPlatformOverride = platform;
+  try {
+    await body();
+  } finally {
+    debugDefaultTargetPlatformOverride = null;
+  }
 }
