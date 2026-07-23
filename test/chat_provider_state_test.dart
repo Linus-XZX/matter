@@ -108,6 +108,81 @@ void main() {
     });
   });
 
+  group('bootstrapActiveSessionSync', () {
+    testWidgets('retries until the third sync attempt succeeds', (
+      tester,
+    ) async {
+      final ref = await _captureRef(tester);
+      var syncAttempts = 0;
+      var startSyncCalls = 0;
+      final delays = <Duration>[];
+
+      await bootstrapActiveSessionSyncForTest(
+        ref,
+        attemptLabel: 'test sync',
+        startSyncLabel: 'test start sync',
+        syncOnce: () async {
+          syncAttempts++;
+          if (syncAttempts < 3) throw StateError('transient failure');
+        },
+        startSync: () async {
+          startSyncCalls++;
+        },
+        delay: (duration) async {
+          delays.add(duration);
+        },
+      );
+
+      expect(syncAttempts, 3);
+      expect(delays, const [Duration(seconds: 2), Duration(seconds: 4)]);
+      expect(startSyncCalls, 1);
+      expect(ref.read(connectionProvider), AppConnectionState.connected);
+    });
+
+    testWidgets('reports disconnected after all initial sync attempts fail', (
+      tester,
+    ) async {
+      final ref = await _captureRef(tester);
+      var syncAttempts = 0;
+      var startSyncCalls = 0;
+
+      await bootstrapActiveSessionSyncForTest(
+        ref,
+        attemptLabel: 'test sync',
+        startSyncLabel: 'test start sync',
+        syncOnce: () async {
+          syncAttempts++;
+          throw StateError('offline');
+        },
+        startSync: () async {
+          startSyncCalls++;
+        },
+        delay: (_) async {},
+      );
+
+      expect(syncAttempts, 3);
+      expect(startSyncCalls, 1);
+      expect(ref.read(connectionProvider), AppConnectionState.disconnected);
+    });
+
+    testWidgets('reports disconnected when starting the sync loop fails', (
+      tester,
+    ) async {
+      final ref = await _captureRef(tester);
+
+      await bootstrapActiveSessionSyncForTest(
+        ref,
+        attemptLabel: 'test sync',
+        startSyncLabel: 'test start sync',
+        syncOnce: () async {},
+        startSync: () async => throw StateError('start failed'),
+        delay: (_) async {},
+      );
+
+      expect(ref.read(connectionProvider), AppConnectionState.disconnected);
+    });
+  });
+
   group('primeMessageCache', () {
     testWidgets('loads the persisted snapshot into the cache', (tester) async {
       const roomId = '!room:example.org';

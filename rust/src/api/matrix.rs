@@ -2507,7 +2507,7 @@ pub struct SyncNotification {
     pub rooms_updated: i32,
 }
 
-/// Perform an initial sync with a 30-second timeout.
+/// Perform an initial sync with a 10-second timeout.
 /// Uses traditional /sync for the initial load (Sliding Sync needs
 /// this data in the state store first).
 #[frb]
@@ -2534,7 +2534,7 @@ pub async fn sync_once() -> Result<(), String> {
         .map_err(|e| format!("Failed to subscribe to the event cache: {e}"))?;
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(10),
         client.sync_once(matrix_sdk::config::SyncSettings::default()),
     )
     .await;
@@ -2558,12 +2558,12 @@ pub async fn sync_once() -> Result<(), String> {
         }
         Err(_) => {
             let msg = format!(
-                "sync_once: timed out after 30s for user {} (homeserver: {hs})",
+                "sync_once: timed out after 10s for user {} (homeserver: {hs})",
                 user_id
             );
             app_log("error", "sync", msg.clone());
             set_connection_status(ConnectionStatus::Disconnected);
-            Err("Sync timed out after 30 seconds. Check your network connection and homeserver URL.".to_string())
+            Err("Sync timed out after 10 seconds. Check your network connection and homeserver URL.".to_string())
         }
     }
 }
@@ -2574,6 +2574,7 @@ pub async fn sync_once() -> Result<(), String> {
 pub async fn start_sync() -> Result<(), String> {
     let client = get_client().await.ok_or_else(|| {
         app_log("error", "sync", "start_sync: no client created".to_string());
+        set_connection_status(ConnectionStatus::Disconnected);
         "No client created.".to_string()
     })?;
     let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
@@ -2587,10 +2588,10 @@ pub async fn start_sync() -> Result<(), String> {
         ),
     );
 
-    client
-        .event_cache()
-        .subscribe()
-        .map_err(|e| format!("Failed to subscribe to the event cache: {e}"))?;
+    client.event_cache().subscribe().map_err(|e| {
+        set_connection_status(ConnectionStatus::Disconnected);
+        format!("Failed to subscribe to the event cache: {e}")
+    })?;
 
     stop_sync_task(None).await;
 
@@ -2647,6 +2648,7 @@ pub async fn start_sync() -> Result<(), String> {
     let active_user = ACTIVE_USER.read().await.clone();
     if active_user.as_deref() != Some(&user_id) {
         handle.abort();
+        set_connection_status(ConnectionStatus::Disconnected);
         return Err("Active account changed while starting sync.".to_string());
     }
 

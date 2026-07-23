@@ -111,11 +111,28 @@ Future<void> bootstrapActiveSessionSync(
   WidgetRef ref, {
   required String attemptLabel,
   required String startSyncLabel,
+}) => bootstrapActiveSessionSyncForTest(
+  ref,
+  attemptLabel: attemptLabel,
+  startSyncLabel: startSyncLabel,
+  syncOnce: rust.syncOnce,
+  startSync: rust.startSync,
+  delay: (duration) => Future<void>.delayed(duration),
+);
+
+@visibleForTesting
+Future<void> bootstrapActiveSessionSyncForTest(
+  WidgetRef ref, {
+  required String attemptLabel,
+  required String startSyncLabel,
+  required Future<void> Function() syncOnce,
+  required Future<void> Function() startSync,
+  required Future<void> Function(Duration duration) delay,
 }) async {
   var initialSyncSucceeded = false;
   for (var attempt = 0; attempt < 3; attempt++) {
     try {
-      await rust.syncOnce();
+      await syncOnce();
       initialSyncSucceeded = true;
       ref.read(connectionProvider.notifier).value =
           AppConnectionState.connected;
@@ -124,7 +141,7 @@ Future<void> bootstrapActiveSessionSync(
     } catch (e) {
       debugPrint('$attemptLabel ${attempt + 1} failed: $e');
       if (attempt < 2) {
-        await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
+        await delay(Duration(seconds: 2 * (attempt + 1)));
       }
     }
   }
@@ -135,9 +152,11 @@ Future<void> bootstrapActiveSessionSync(
   }
 
   try {
-    await rust.startSync();
+    await startSync();
   } catch (e) {
     debugPrint('$startSyncLabel: $e');
+    ref.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
   }
   invalidateSessionCollections(ref);
 }

@@ -209,13 +209,6 @@ class _LatestMessageControlState extends State<LatestMessageControl>
                         ),
                         borderRadius: BorderRadius.circular(AppRadii.surface),
                         border: Border.all(color: AppColors.glassBorder),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x52000000),
-                            blurRadius: 18,
-                            offset: Offset(0, 7),
-                          ),
-                        ],
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(AppRadii.surface),
