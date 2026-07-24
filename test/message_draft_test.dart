@@ -180,6 +180,20 @@ void main() {
     });
   });
 
+  testWidgets('tool buttons do not overflow while shrinking for send', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, '!toolbar:example.org'));
+    await tester.enterText(find.byType(TextField), 'message');
+    await tester.pump(const Duration(milliseconds: 90));
+
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('editing a message does not overwrite the room draft', (
     tester,
   ) async {

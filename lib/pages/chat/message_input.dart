@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -129,7 +130,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
     _hasText = draft.trim().isNotEmpty;
     _controller.addListener(_onTextChanged);
-    _focusNode.onKeyEvent = _handleKeyEvent;
+    if (defaultTargetPlatform != TargetPlatform.linux) {
+      _focusNode.onKeyEvent = _handleKeyEvent;
+    }
     _focusNode.addListener(() {
       if (_focusNode.hasFocus && mounted) {
         widget.onPanelModeChanged(InputPanelMode.keyboard);
@@ -801,46 +804,51 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                                         ),
                                 ),
                               )
-                            : SizedBox(
-                                key: const ValueKey('tools'),
-                                width: 94,
-                                height: 44,
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    SizedBox.square(
-                                      dimension: 44,
-                                      child: IconButton(
-                                        tooltip: '附件',
-                                        onPressed: _isSending
-                                            ? null
-                                            : _toggleAttachmentPicker,
-                                        padding: EdgeInsets.zero,
-                                        icon: Icon(
-                                          Icons.add_rounded,
-                                          color:
-                                              widget.panelMode ==
-                                                  InputPanelMode.attachment
-                                              ? AppColors.primary
-                                              : AppColors.onSurfaceVariant,
-                                          size: 26,
+                            : OverflowBox(
+                                alignment: Alignment.centerRight,
+                                minWidth: 94,
+                                maxWidth: 94,
+                                child: SizedBox(
+                                  key: const ValueKey('tools'),
+                                  width: 94,
+                                  height: 44,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      SizedBox.square(
+                                        dimension: 44,
+                                        child: IconButton(
+                                          tooltip: '附件',
+                                          onPressed: _isSending
+                                              ? null
+                                              : _toggleAttachmentPicker,
+                                          padding: EdgeInsets.zero,
+                                          icon: Icon(
+                                            Icons.add_rounded,
+                                            color:
+                                                widget.panelMode ==
+                                                    InputPanelMode.attachment
+                                                ? AppColors.primary
+                                                : AppColors.onSurfaceVariant,
+                                            size: 26,
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                    SizedBox.square(
-                                      dimension: 44,
-                                      child: IconButton(
-                                        tooltip: '语音消息暂未提供',
-                                        icon: const Icon(
-                                          Icons.mic_none_rounded,
-                                          color: AppColors.onSurfaceVariant,
-                                          size: 25,
+                                      SizedBox.square(
+                                        dimension: 44,
+                                        child: IconButton(
+                                          tooltip: '语音消息暂未提供',
+                                          icon: const Icon(
+                                            Icons.mic_none_rounded,
+                                            color: AppColors.onSurfaceVariant,
+                                            size: 25,
+                                          ),
+                                          onPressed: null,
+                                          padding: EdgeInsets.zero,
                                         ),
-                                        onPressed: null,
-                                        padding: EdgeInsets.zero,
                                       ),
-                                    ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
                               ),
                       ),
