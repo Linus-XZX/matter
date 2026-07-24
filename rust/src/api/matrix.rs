@@ -55,6 +55,86 @@ static LOG_RING: Lazy<std::sync::Mutex<VecDeque<AppLogEntry>>> =
     Lazy::new(|| std::sync::Mutex::new(VecDeque::new()));
 const LOG_RING_CAP: usize = 5_000;
 
+/// Directory where logs are persisted (`{data_dir}/logs`), set once the first
+/// client is created or restored.
+static LOG_DIR: Lazy<std::sync::RwLock<Option<std::path::PathBuf>>> =
+    Lazy::new(|| std::sync::RwLock::new(None));
+
+/// Open handle to the current log file plus its size so writes can trigger
+/// rotation. Writes are appended and flushed per entry so a crash loses at
+/// most the line being written.
+struct ActiveLogFile {
+    file: std::fs::File,
+    written: u64,
+}
+
+static LOG_FILE: Lazy<std::sync::Mutex<Option<ActiveLogFile>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
+/// Rotate `matter.log` to a single `matter.log.1` backup past this size.
+const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Point log persistence at `{data_dir}/logs`, rotating an oversized log.
+/// Called when a client is created or restored; safe to call repeatedly.
+fn init_log_store(data_dir: &str) {
+    let log_dir = std::path::Path::new(data_dir).join("logs");
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        warn!("Failed to create log dir {}: {e}", log_dir.display());
+        return;
+    }
+    let path = log_dir.join("matter.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > LOG_FILE_MAX_BYTES {
+            let _ = std::fs::rename(&path, log_dir.join("matter.log.1"));
+        }
+    }
+    let written = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            if let Ok(mut dir) = LOG_DIR.write() {
+                *dir = Some(log_dir);
+            }
+            if let Ok(mut guard) = LOG_FILE.lock() {
+                *guard = Some(ActiveLogFile { file, written });
+            }
+        }
+        Err(e) => warn!("Failed to open log file {}: {e}", path.display()),
+    }
+}
+
+/// Format epoch milliseconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC) without pulling
+/// in a date library.
+fn format_utc(millis: i64) -> String {
+    let secs = millis.div_euclid(1000);
+    let day_secs = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        day_secs / 3600,
+        (day_secs % 3600) / 60,
+        day_secs % 60
+    )
+}
+
+/// Howard Hinnant's civil-from-days algorithm: days since Unix epoch →
+/// (year, month, day).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 fn app_log(level: &str, tag: &str, message: String) {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -74,6 +154,37 @@ fn app_log(level: &str, tag: &str, message: String) {
     }
     // Push to broadcast (live listeners)
     let _ = APP_LOG_TX.send(entry.clone());
+    // Persist to the log file (survives restarts, not limited by the ring cap)
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        if let Some(active) = guard.as_mut() {
+            use std::io::Write as _;
+            let line = format!(
+                "{} [{}] [{}] {}\n",
+                format_utc(ts),
+                level.to_uppercase(),
+                tag,
+                entry.message.replace('\n', "\n    ")
+            );
+            let _ = active.file.write_all(line.as_bytes());
+            let _ = active.file.flush();
+            active.written += line.len() as u64;
+            if active.written > LOG_FILE_MAX_BYTES {
+                // Close the handle before renaming (required on Windows).
+                guard.take();
+                if let Some(dir) = LOG_DIR.read().ok().and_then(|d| d.clone()) {
+                    let path = dir.join("matter.log");
+                    let _ = std::fs::rename(&path, dir.join("matter.log.1"));
+                    if let Ok(file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        *guard = Some(ActiveLogFile { file, written: 0 });
+                    }
+                }
+            }
+        }
+    }
     // Push to ring buffer (for get_recent_logs)
     if let Ok(mut ring) = LOG_RING.lock() {
         if ring.len() >= LOG_RING_CAP {
@@ -123,6 +234,31 @@ pub fn clear_app_logs() {
     }
 }
 
+/// A persisted log file's name and contents.
+pub struct LogFileContent {
+    pub name: String,
+    pub content: String,
+}
+
+/// Read the persisted app logs (`matter.log` and its rotated backup), oldest
+/// first, for the log bundle export. Unlike `get_recent_logs`, these are not
+/// limited to the 5,000-entry ring buffer.
+#[frb]
+pub async fn read_log_files() -> Vec<LogFileContent> {
+    let dir = LOG_DIR.read().ok().and_then(|d| d.clone());
+    let Some(dir) = dir else { return vec![] };
+    let mut files = Vec::new();
+    for name in ["matter.log.1", "matter.log"] {
+        if let Ok(content) = tokio::fs::read_to_string(dir.join(name)).await {
+            files.push(LogFileContent {
+                name: name.to_string(),
+                content,
+            });
+        }
+    }
+    files
+}
+
 // ── Connection state tracking ──────────────────────────────────────
 
 static CONNECTION_STATE: Lazy<std::sync::RwLock<ConnectionStatus>> =
@@ -150,8 +286,59 @@ static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> = Lazy::ne
     tx
 });
 
+#[frb]
+#[derive(Clone, Debug)]
+pub struct SessionTokenUpdate {
+    pub user_id: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+static SESSION_TOKEN_TX: Lazy<tokio::sync::broadcast::Sender<SessionTokenUpdate>> =
+    Lazy::new(|| tokio::sync::broadcast::channel(16).0);
+
 fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
+}
+
+fn install_session_token_callback(client: &Client) -> Result<(), String> {
+    client
+        .set_session_callbacks(
+            Box::new(|client| {
+                client
+                    .session_tokens()
+                    .ok_or_else(|| std::io::Error::other("Session tokens are unavailable").into())
+            }),
+            Box::new(|client| {
+                let session = client
+                    .matrix_auth()
+                    .session()
+                    .ok_or_else(|| std::io::Error::other("Session is unavailable"))?;
+                let _ = SESSION_TOKEN_TX.send(SessionTokenUpdate {
+                    user_id: session.meta.user_id.to_string(),
+                    access_token: session.tokens.access_token,
+                    refresh_token: session.tokens.refresh_token,
+                });
+                Ok(())
+            }),
+        )
+        .map_err(|error| format!("Failed to install session token callback: {error}"))
+}
+
+#[frb]
+pub fn watch_session_token_updates(sink: crate::frb_generated::StreamSink<SessionTokenUpdate>) {
+    let mut rx = SESSION_TOKEN_TX.subscribe();
+    std::thread::spawn(move || loop {
+        match rx.blocking_recv() {
+            Ok(update) => {
+                if sink.add(update).is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    });
 }
 
 async fn clear_timeline_cache() {
@@ -590,6 +777,7 @@ async fn finalize_pending() -> Result<String, String> {
             return Err(format!("Failed to create per-user client: {error}"));
         }
     };
+    install_session_token_callback(&new_client)?;
 
     app_log(
         "info",
@@ -1395,6 +1583,7 @@ fn friendly_auth_error(raw: &str, fallback: &str) -> String {
 /// after which it is automatically migrated to a per-user store.
 #[frb]
 pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(), String> {
+    init_log_store(&data_dir);
     app_log(
         "info",
         "auth",
@@ -1427,6 +1616,7 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
             app_log("error", "auth", msg.clone());
             msg
         })?;
+    install_session_token_callback(&client)?;
 
     app_log(
         "info",
@@ -2043,6 +2233,7 @@ pub async fn get_session() -> Option<StoredSession> {
 /// Uses a per-user store directory so multiple accounts coexist.
 #[frb]
 pub async fn restore_session(session: StoredSession, data_dir: String) -> Result<(), String> {
+    init_log_store(&data_dir);
     app_log(
         "info",
         "auth",
@@ -2076,6 +2267,7 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
             app_log("error", "auth", msg.clone());
             msg
         })?;
+    install_session_token_callback(&client)?;
 
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id).map_err(|e| {
         let msg = format!("Invalid user ID: {e}");
