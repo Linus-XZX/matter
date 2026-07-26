@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use futures_util::StreamExt;
 use matrix_sdk::{
+    event_cache::EventsOrigin,
     ruma::{
         api::client::receipt::create_receipt::v3::ReceiptType,
         events::{
@@ -72,15 +72,42 @@ fn remote_event_count(items: &[Arc<TimelineItem>]) -> usize {
         .count()
 }
 
-fn has_any_expected_event<'a>(
-    loaded_ids: impl IntoIterator<Item = &'a str>,
+fn loaded_expected_event_count<I, S>(
+    loaded_ids: I,
     expected_ids: &[&matrix_sdk::ruma::EventId],
+) -> usize
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    loaded_expected_event_ids(loaded_ids, expected_ids).len()
+}
+
+fn loaded_expected_event_ids<I, S>(
+    loaded_ids: I,
+    expected_ids: &[&matrix_sdk::ruma::EventId],
+) -> std::collections::HashSet<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let loaded_ids: std::collections::HashSet<_> = loaded_ids
+        .into_iter()
+        .map(|event_id| event_id.as_ref().to_owned())
+        .collect();
+    expected_ids
+        .iter()
+        .filter(|expected_id| loaded_ids.contains(expected_id.as_str()))
+        .map(|event_id| event_id.to_string())
+        .collect()
+}
+
+fn pinned_events_ready(
+    loaded_expected_events: usize,
+    expected_events: usize,
+    saw_network_update: bool,
 ) -> bool {
-    loaded_ids.into_iter().any(|loaded_id| {
-        expected_ids
-            .iter()
-            .any(|expected_id| expected_id.as_str() == loaded_id)
-    })
+    loaded_expected_events == expected_events || (saw_network_update && loaded_expected_events > 0)
 }
 
 async fn ensure_initial_window(timeline: &Timeline, target: usize) -> Result<(), String> {
@@ -141,7 +168,7 @@ pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<()
     clear_marked_unread(room).await
 }
 
-/// Load all currently pinned events through the SDK's event-focused cache.
+/// Load pinned events through the SDK's event-focused cache, up to its limit.
 pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
     let pinned_ids = room
         .load_pinned_events()
@@ -163,38 +190,69 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         .take(max_events_to_load)
         .map(|event_id| event_id.as_ref())
         .collect();
+    if expected_pinned_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (room_event_cache, _event_cache_drop_handles) = room
+        .event_cache()
+        .await
+        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
+    let (events, mut updates) = room_event_cache
+        .subscribe_to_pinned_events()
+        .await
+        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
+    let mut events: matrix_sdk_ui::eyeball_im::Vector<_> = events.into();
+    let wait_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut saw_network_update = false;
+        loop {
+            let loaded_ids = loaded_expected_event_ids(
+                events.iter().filter_map(|event| event.event_id()),
+                &expected_pinned_ids,
+            );
+            if pinned_events_ready(
+                loaded_ids.len(),
+                expected_pinned_ids.len(),
+                saw_network_update,
+            ) {
+                break;
+            }
+
+            let update = updates.recv().await.map_err(|error| error.to_string())?;
+            let came_from_sync = matches!(update.origin, EventsOrigin::Sync);
+            for diff in update.diffs {
+                diff.apply(&mut events);
+            }
+            if came_from_sync {
+                let updated_ids = loaded_expected_event_ids(
+                    events.iter().filter_map(|event| event.event_id()),
+                    &expected_pinned_ids,
+                );
+                saw_network_update |= updated_ids != loaded_ids;
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await;
+
+    let loaded_count = loaded_expected_event_count(
+        events.iter().filter_map(|event| event.event_id()),
+        &expected_pinned_ids,
+    );
+    if loaded_count == 0 {
+        return Err(match wait_result {
+            Ok(Err(error)) => format!("Failed to load pinned messages: {error}"),
+            Err(_) => "Timed out while loading pinned messages.".to_owned(),
+            Ok(Ok(())) => "Failed to load any pinned messages.".to_owned(),
+        });
+    }
 
     let timeline = TimelineBuilder::new(room)
         .with_focus(TimelineFocus::PinnedEvents)
         .build()
         .await
         .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
-
-    let (mut items, mut updates) = timeline.subscribe().await;
-    let _ = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if has_any_expected_event(
-                items
-                    .iter()
-                    .filter_map(|item| item.as_event())
-                    .filter_map(|event| event.event_id())
-                    .map(|event_id| event_id.as_str()),
-                &expected_pinned_ids,
-            ) {
-                break;
-            }
-
-            let Some(diffs) = updates.next().await else {
-                break;
-            };
-            for diff in diffs {
-                diff.apply(&mut items);
-            }
-        }
-    })
-    .await;
-
-    let items: Vec<_> = items.into_iter().collect();
+    let items = snapshot(&timeline).await;
     let messages = convert_snapshot(room, &items).await;
     let by_id: HashMap<String, ChatMessage> = messages
         .into_iter()
@@ -1102,7 +1160,8 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_any_expected_event, messages_before, newest_receipt_position, reader_ids_for_position,
+        loaded_expected_event_count, loaded_expected_event_ids, messages_before,
+        newest_receipt_position, pinned_events_ready, reader_ids_for_position,
         record_latest_receipt_position, resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
@@ -1153,18 +1212,56 @@ mod tests {
     }
 
     #[test]
-    fn one_loaded_pinned_event_is_enough_to_return_partial_results() {
+    fn counts_only_expected_loaded_events() {
         use matrix_sdk::ruma::EventId;
 
         let first = EventId::parse("$first:example.org").unwrap();
         let missing = EventId::parse("$missing:example.org").unwrap();
         let expected = [first.as_ref(), missing.as_ref()];
 
-        assert!(has_any_expected_event(
-            [first.as_str()].into_iter(),
-            &expected
+        assert_eq!(
+            loaded_expected_event_count([first.as_str(), "$other"].into_iter(), &expected),
+            1
+        );
+        assert_eq!(
+            loaded_expected_event_count(std::iter::empty::<&str>(), &expected),
+            0
+        );
+    }
+
+    #[test]
+    fn complete_cache_is_ready_without_a_network_update() {
+        assert!(pinned_events_ready(2, 2, false));
+    }
+
+    #[test]
+    fn partial_cache_waits_for_a_network_update() {
+        assert!(!pinned_events_ready(1, 2, false));
+        assert!(pinned_events_ready(1, 2, true));
+    }
+
+    #[test]
+    fn unrelated_sync_update_does_not_release_partial_cache() {
+        use matrix_sdk::ruma::EventId;
+
+        let first = EventId::parse("$first:example.org").unwrap();
+        let missing = EventId::parse("$missing:example.org").unwrap();
+        let expected = [first.as_ref(), missing.as_ref()];
+        let cached = loaded_expected_event_ids([first.as_str()], &expected);
+        let after_relation =
+            loaded_expected_event_ids([first.as_str(), "$reaction:example.org"], &expected);
+
+        assert_eq!(cached, after_relation);
+        assert!(!pinned_events_ready(
+            after_relation.len(),
+            expected.len(),
+            after_relation != cached,
         ));
-        assert!(!has_any_expected_event([].into_iter(), &expected));
+    }
+
+    #[test]
+    fn empty_network_result_is_not_ready() {
+        assert!(!pinned_events_ready(0, 2, true));
     }
 
     #[test]

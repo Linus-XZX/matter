@@ -29,8 +29,16 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     _messages = rust.getPinnedMessages(roomId: widget.roomId);
   }
 
-  void _reload() {
-    setState(() => _messages = rust.getPinnedMessages(roomId: widget.roomId));
+  Future<void> _reload() async {
+    final messages = rust.getPinnedMessages(roomId: widget.roomId);
+    setState(() {
+      _messages = messages;
+    });
+    try {
+      await messages;
+    } catch (_) {
+      // FutureBuilder renders the retry state for this same future.
+    }
   }
 
   @override
@@ -96,17 +104,30 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
               )
               .toList();
           if (messages.isEmpty) {
-            return const Center(
-              child: Text(
-                '暂无置顶消息',
-                style: TextStyle(color: AppColors.onSurfaceVariant),
+            return RefreshIndicator(
+              color: AppColors.primary,
+              onRefresh: _reload,
+              child: const CustomScrollView(
+                physics: AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
+                      child: Text(
+                        '暂无置顶消息',
+                        style: TextStyle(color: AppColors.onSurfaceVariant),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             );
           }
           return RefreshIndicator(
             color: AppColors.primary,
-            onRefresh: () async => _reload(),
+            onRefresh: _reload,
             child: ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
               itemCount: messages.length,
               separatorBuilder: (_, _) =>
