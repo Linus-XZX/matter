@@ -858,6 +858,8 @@ pub struct ChatRoom {
     pub last_message_sender: Option<String>,
     pub last_message_time: String,
     pub unread_count: i32,
+    /// Whether the user explicitly marked this room as unread.
+    pub is_marked_unread: bool,
     /// "dm", "group", or "space"
     pub room_type: String,
     pub is_encrypted: bool,
@@ -906,6 +908,17 @@ pub struct SpaceDetails {
     pub topic: Option<String>,
 }
 
+/// Mutable metadata for a joined non-space room.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct RoomDetails {
+    pub id: String,
+    pub name: String,
+    pub has_explicit_name: bool,
+    pub avatar_url: Option<String>,
+    pub topic: Option<String>,
+}
+
 #[frb]
 #[derive(Clone, Debug)]
 pub struct Contact {
@@ -913,6 +926,16 @@ pub struct Contact {
     pub name: String,
     pub avatar_url: Option<String>,
     pub status: String,
+}
+
+/// A pending request to join a knock-enabled room.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct KnockRequest {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub reason: Option<String>,
 }
 
 async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
@@ -931,6 +954,13 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
+    let is_marked_unread = room
+        .account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.deserialize().ok())
+        .is_some_and(|event| event.content.unread);
     let (last_message, last_message_sender_id, last_message_time) = get_last_message_info(room);
     let last_message_sender = if let Some(sender_id) = last_message_sender_id {
         let is_me = room
@@ -979,6 +1009,7 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         last_message_sender,
         last_message_time,
         unread_count,
+        is_marked_unread,
         room_type,
         is_encrypted,
         room_state: room_state_label(room.state()).to_string(),
@@ -5098,6 +5129,315 @@ pub async fn withdraw_room_knock(room_id: String) -> Result<(), String> {
     room.leave()
         .await
         .map_err(|e| format!("Withdraw knock failed: {e}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+fn joined_non_space_room(client: &Client, room_id: &str) -> Result<Room, String> {
+    let room = get_room_by_id(client, room_id)?;
+    if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
+        return Err(format!("Room is not a joined non-space room: {room_id}"));
+    }
+    Ok(room)
+}
+
+/// Leave a joined non-space room.
+#[frb]
+pub async fn leave_room(room_id: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    room.leave()
+        .await
+        .map_err(|error| format!("Leave room failed: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Return the editable state of a joined non-space room.
+#[frb]
+pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let has_explicit_name = room.name().is_some_and(|name| !name.trim().is_empty());
+    Ok(RoomDetails {
+        id: room_id,
+        name: room_display_name(&room),
+        has_explicit_name,
+        avatar_url: room.avatar_url().map(|url| url.to_string()),
+        topic: room
+            .topic()
+            .map(|topic| topic.trim().to_string())
+            .filter(|topic| !topic.is_empty()),
+    })
+}
+
+/// Invite a Matrix user to a joined non-space room.
+#[frb]
+pub async fn invite_user_to_room(room_id: String, user_id: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
+        .map_err(|error| format!("Invalid user ID: {error}"))?;
+    room.invite_user_by_id(&user_id)
+        .await
+        .map_err(|error| format!("Invite user failed: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Update a joined non-space room's name and topic.
+#[frb]
+pub async fn update_room_details(
+    room_id: String,
+    name: String,
+    update_name: bool,
+    topic: Option<String>,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let name = name.trim();
+    if update_name {
+        if name.is_empty() {
+            return Err("Room name cannot be empty.".to_string());
+        }
+        room.set_name(name.to_owned())
+            .await
+            .map_err(|error| format!("Failed to update room name: {error}"))?;
+    }
+    let new_topic = topic.unwrap_or_default().trim().to_owned();
+    let current_topic = room.topic().unwrap_or_default().trim().to_owned();
+    if new_topic != current_topic {
+        room.set_room_topic(&new_topic)
+            .await
+            .map_err(|error| format!("Failed to update room topic: {error}"))?;
+    }
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Upload and apply a new avatar for a joined non-space room.
+#[frb]
+pub async fn upload_room_avatar(
+    room_id: String,
+    content_type: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let mime: mime::Mime = content_type
+        .parse()
+        .map_err(|error| format!("Invalid content type '{content_type}': {error}"))?;
+    if mime.type_() != mime::IMAGE {
+        return Err(format!("Expected an image MIME type, got {mime}"));
+    }
+    room.upload_avatar(&mime, data, None)
+        .await
+        .map_err(|error| format!("Failed to update room avatar: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Return whether a room has an explicit mute push rule.
+#[frb]
+pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let settings = client.notification_settings().await;
+    Ok(settings
+        .get_user_defined_room_notification_mode(room.room_id())
+        .await
+        == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute))
+}
+
+/// Create or remove an explicit mute push rule for a room.
+#[frb]
+pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let settings = client.notification_settings().await;
+    if muted {
+        settings
+            .set_room_notification_mode(
+                room.room_id(),
+                matrix_sdk::notification_settings::RoomNotificationMode::Mute,
+            )
+            .await
+            .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
+    } else {
+        let is_encrypted = room
+            .latest_encryption_state()
+            .await
+            .map(|state| state.is_encrypted())
+            .unwrap_or(false);
+        let is_one_to_one = room.is_direct().await.unwrap_or(false);
+        settings
+            .unmute_room(
+                room.room_id(),
+                matrix_sdk::notification_settings::IsEncrypted::from(is_encrypted),
+                matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
+            )
+            .await
+            .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
+    }
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Toggle a message's membership in `m.room.pinned_events`.
+#[frb]
+pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<bool, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let event_id = matrix_sdk::ruma::EventId::parse(event_id)
+        .map_err(|error| format!("Invalid event ID: {error}"))?;
+    let pinned = room
+        .pin_event(&event_id)
+        .await
+        .map_err(|error| format!("Failed to pin message: {error}"))?;
+    if !pinned {
+        room.unpin_event(&event_id)
+            .await
+            .map_err(|error| format!("Failed to unpin message: {error}"))?;
+    }
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(pinned)
+}
+
+/// Load the full content of every pinned message in display order.
+#[frb]
+pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    sdk_timeline::get_pinned_messages(&room).await
+}
+
+/// Explicitly mark all currently loaded messages in a room as read.
+#[frb]
+pub async fn mark_room_as_read(room_id: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    sdk_timeline::mark_room_as_read(&client, &room).await?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Persist an explicit unread marker for a room in room account data.
+#[frb]
+pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
+    use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
+
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    room.set_account_data(MarkedUnreadEventContent::new(true))
+        .await
+        .map_err(|error| format!("Failed to mark room unread: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// List the Matrix user IDs in the current account's ignored-user list.
+#[frb]
+pub async fn get_ignored_users() -> Result<Vec<String>, String> {
+    use matrix_sdk::ruma::events::ignored_user_list::IgnoredUserListEventContent;
+
+    let client = get_client().await.ok_or("No client created.")?;
+    let content = client
+        .account()
+        .fetch_account_data_static::<IgnoredUserListEventContent>()
+        .await
+        .map_err(|error| format!("Failed to load ignored users: {error}"))?
+        .map(|raw| raw.deserialize())
+        .transpose()
+        .map_err(|error| format!("Failed to decode ignored users: {error}"))?
+        .unwrap_or_default();
+    Ok(content
+        .ignored_users
+        .into_keys()
+        .map(|user_id| user_id.to_string())
+        .collect())
+}
+
+/// Add or remove one user from the account's ignored-user list.
+#[frb]
+pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<(), String> {
+    use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
+
+    let client = get_client().await.ok_or("No client created.")?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
+        .map_err(|error| format!("Invalid user ID: {error}"))?
+        .to_owned();
+    let account = client.account();
+    let mut content = account
+        .fetch_account_data_static::<IgnoredUserListEventContent>()
+        .await
+        .map_err(|error| format!("Failed to load ignored users: {error}"))?
+        .map(|raw| raw.deserialize())
+        .transpose()
+        .map_err(|error| format!("Failed to decode ignored users: {error}"))?
+        .unwrap_or_default();
+    if ignored {
+        content.ignored_users.insert(user_id, IgnoredUser::new());
+    } else {
+        content.ignored_users.remove(&user_id);
+    }
+    account
+        .set_account_data(content)
+        .await
+        .map_err(|error| format!("Failed to update ignored users: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// List current requests to join a knock-enabled room.
+#[frb]
+pub async fn get_room_knock_requests(room_id: String) -> Result<Vec<KnockRequest>, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let members = room
+        .members(matrix_sdk::RoomMemberships::KNOCK)
+        .await
+        .map_err(|error| format!("Failed to load knock requests: {error}"))?;
+    Ok(members
+        .into_iter()
+        .map(|member| {
+            let user_id = member.user_id().to_string();
+            KnockRequest {
+                display_name: member
+                    .display_name()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| user_id.clone()),
+                avatar_url: member.avatar_url().map(ToString::to_string),
+                reason: member.event().reason().map(ToOwned::to_owned),
+                user_id,
+            }
+        })
+        .collect())
+}
+
+/// Accept a knock request by inviting the requester to the room.
+#[frb]
+pub async fn approve_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
+        .map_err(|error| format!("Invalid user ID: {error}"))?;
+    room.invite_user_by_id(&user_id)
+        .await
+        .map_err(|error| format!("Failed to approve knock: {error}"))?;
+    notify_sync_event(SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Decline a knock request by removing the requester from the room.
+#[frb]
+pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
+        .map_err(|error| format!("Invalid user ID: {error}"))?;
+    room.kick_user(&user_id, None)
+        .await
+        .map_err(|error| format!("Failed to reject knock: {error}"))?;
     notify_sync_event(SyncEvent::SyncCompleted);
     Ok(())
 }

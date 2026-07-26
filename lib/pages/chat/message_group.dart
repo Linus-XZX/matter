@@ -1297,6 +1297,31 @@ class MessageGroupWidget extends ConsumerWidget {
             }
           }
         },
+        onPin: () async {
+          try {
+            final pinned = await togglePinnedMessage(
+              roomId: roomId,
+              eventId: message.id,
+            );
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text(pinned ? '消息已置顶' : '已取消置顶'),
+                  duration: const Duration(seconds: 1),
+                ),
+              );
+            }
+          } catch (error) {
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text('置顶操作失败: $error'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+          }
+        },
         onReact: (emoji) =>
             _sendReactionAndRefresh(overlayContext, ref, message.id, emoji),
         onShowFullEmojiPicker: () =>
@@ -1630,6 +1655,7 @@ class _FloatingMessageMenu extends StatefulWidget {
   final VoidCallback onForward;
   final VoidCallback onEdit;
   final VoidCallback onRecall;
+  final VoidCallback onPin;
   final void Function(String emoji) onReact;
   final VoidCallback onShowFullEmojiPicker;
 
@@ -1643,6 +1669,7 @@ class _FloatingMessageMenu extends StatefulWidget {
     required this.onForward,
     required this.onEdit,
     required this.onRecall,
+    required this.onPin,
     required this.onReact,
     required this.onShowFullEmojiPicker,
   });
@@ -1784,6 +1811,12 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
                 icon: Icons.forward_rounded,
                 label: '转发',
                 onTap: () => _select(widget.onForward),
+              ),
+            if (!isEvent)
+              _IconTextAction(
+                icon: Icons.push_pin_outlined,
+                label: '置顶',
+                onTap: () => _select(widget.onPin),
               ),
             if (widget.isMe && isText)
               _IconTextAction(

@@ -13,6 +13,7 @@ ChatRoom room({
   lastMessageSender: sender,
   lastMessageTime: '0',
   unreadCount: 0,
+  isMarkedUnread: false,
   roomType: type,
   isEncrypted: false,
   roomState: state,

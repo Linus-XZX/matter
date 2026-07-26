@@ -4,17 +4,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/chat_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
+import 'room_management_page.dart';
 
 class DesktopRoomDetailsPanel extends ConsumerWidget {
   final String roomId;
   final String roomName;
   final String? avatarUrl;
+  final VoidCallback? onRoomLeft;
 
   const DesktopRoomDetailsPanel({
     super.key,
     required this.roomId,
     required this.roomName,
     this.avatarUrl,
+    this.onRoomLeft,
   });
 
   @override
@@ -46,6 +49,24 @@ class DesktopRoomDetailsPanel extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  tooltip: '房间管理',
+                  icon: const Icon(
+                    Icons.settings_rounded,
+                    color: AppColors.onSurfaceVariant,
+                    size: 20,
+                  ),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => RoomManagementPage(
+                        roomId: roomId,
+                        roomName: roomName,
+                        avatarUrl: avatarUrl,
+                        onRoomLeft: onRoomLeft,
+                      ),
+                    ),
                   ),
                 ),
               ],

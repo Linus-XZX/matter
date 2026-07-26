@@ -22,6 +22,7 @@ void main() {
       lastMessage: lastMessage,
       lastMessageTime: lastMessageTime,
       unreadCount: unreadCount,
+      isMarkedUnread: false,
       roomType: roomType,
       isEncrypted: false,
       roomState: roomState,
@@ -178,6 +179,24 @@ void main() {
       await tester.pump();
 
       expect(find.byIcon(Icons.account_tree_rounded), findsOneWidget);
+    });
+
+    testWidgets('does not show room read actions for spaces', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(roomType: 'space')),
+            ),
+          ),
+        ),
+      );
+
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('标记为已读'), findsNothing);
+      expect(find.text('标记为未读'), findsNothing);
     });
 
     testWidgets('uses the dense layout when requested', (tester) async {

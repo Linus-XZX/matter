@@ -57,11 +57,19 @@ final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
   return contacts;
 });
 
+/// Server-backed ignore list. Chat timelines filter these senders immediately,
+/// while the Matrix SDK applies the same policy to future sync events.
+final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
+  if (!ref.watch(sessionReadyProvider)) return const <String>{};
+  return (await rust.getIgnoredUsers()).toSet();
+});
+
 void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(chatRoomsProvider);
   ref.invalidate(spacesProvider);
   ref.invalidate(ungroupedRoomsProvider);
   ref.invalidate(contactsProvider);
+  ref.invalidate(ignoredUserIdsProvider);
 }
 
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
@@ -890,6 +898,7 @@ final syncStreamProvider =
         switch (event) {
           case rust.SyncEvent_SyncCompleted():
             scheduleRoomRefresh();
+            ref.invalidate(ignoredUserIdsProvider);
             final currentRoomId = ref.read(currentRoomIdProvider);
             if (currentRoomId != null) {
               scheduleMessageRefresh(currentRoomId);

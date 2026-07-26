@@ -163,6 +163,13 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     setState(() => _selectedRoom = room);
   }
 
+  void _clearSelectedRoom() {
+    setState(() {
+      _selectedRoom = null;
+      _showRoomDetails = false;
+    });
+  }
+
   void _showDirectMessages() {
     ref.read(navigationIndexProvider.notifier).value = 0;
     setState(() {
@@ -340,6 +347,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                             !_showRoomDetails,
                                       )
                                     : null,
+                                onRoomLeft: _clearSelectedRoom,
                               ),
                       ),
                       if (showRoomDetails) ...[
@@ -350,6 +358,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                             roomId: selectedRoom.id,
                             roomName: selectedRoom.name,
                             avatarUrl: selectedRoom.avatarUrl,
+                            onRoomLeft: _clearSelectedRoom,
                           ),
                         ),
                       ],

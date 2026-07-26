@@ -50,6 +50,7 @@ rust.ChatRoom _room(String id, {bool isEncrypted = false}) => rust.ChatRoom(
   lastMessage: '',
   lastMessageTime: '0',
   unreadCount: 0,
+  isMarkedUnread: false,
   roomType: 'group',
   isEncrypted: isEncrypted,
   roomState: 'joined',

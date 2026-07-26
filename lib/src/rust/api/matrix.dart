@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `encryption_settings`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `encryption_settings`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -499,6 +499,112 @@ Future<void> rejectRoomInvite({required String roomId}) =>
 Future<void> withdrawRoomKnock({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixWithdrawRoomKnock(roomId: roomId);
 
+/// Leave a joined non-space room.
+Future<void> leaveRoom({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixLeaveRoom(roomId: roomId);
+
+/// Return the editable state of a joined non-space room.
+Future<RoomDetails> getRoomDetails({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomDetails(roomId: roomId);
+
+/// Invite a Matrix user to a joined non-space room.
+Future<void> inviteUserToRoom({
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixInviteUserToRoom(
+  roomId: roomId,
+  userId: userId,
+);
+
+/// Update a joined non-space room's name and topic.
+Future<void> updateRoomDetails({
+  required String roomId,
+  required String name,
+  required bool updateName,
+  String? topic,
+}) => RustLib.instance.api.crateApiMatrixUpdateRoomDetails(
+  roomId: roomId,
+  name: name,
+  updateName: updateName,
+  topic: topic,
+);
+
+/// Upload and apply a new avatar for a joined non-space room.
+Future<void> uploadRoomAvatar({
+  required String roomId,
+  required String contentType,
+  required List<int> data,
+}) => RustLib.instance.api.crateApiMatrixUploadRoomAvatar(
+  roomId: roomId,
+  contentType: contentType,
+  data: data,
+);
+
+/// Return whether a room has an explicit mute push rule.
+Future<bool> isRoomMuted({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixIsRoomMuted(roomId: roomId);
+
+/// Create or remove an explicit mute push rule for a room.
+Future<void> setRoomMuted({required String roomId, required bool muted}) =>
+    RustLib.instance.api.crateApiMatrixSetRoomMuted(
+      roomId: roomId,
+      muted: muted,
+    );
+
+/// Toggle a message's membership in `m.room.pinned_events`.
+Future<bool> togglePinnedMessage({
+  required String roomId,
+  required String eventId,
+}) => RustLib.instance.api.crateApiMatrixTogglePinnedMessage(
+  roomId: roomId,
+  eventId: eventId,
+);
+
+/// Load the full content of every pinned message in display order.
+Future<List<ChatMessage>> getPinnedMessages({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetPinnedMessages(roomId: roomId);
+
+/// Explicitly mark all currently loaded messages in a room as read.
+Future<void> markRoomAsRead({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixMarkRoomAsRead(roomId: roomId);
+
+/// Persist an explicit unread marker for a room in room account data.
+Future<void> markRoomUnread({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixMarkRoomUnread(roomId: roomId);
+
+/// List the Matrix user IDs in the current account's ignored-user list.
+Future<List<String>> getIgnoredUsers() =>
+    RustLib.instance.api.crateApiMatrixGetIgnoredUsers();
+
+/// Add or remove one user from the account's ignored-user list.
+Future<void> setUserIgnored({required String userId, required bool ignored}) =>
+    RustLib.instance.api.crateApiMatrixSetUserIgnored(
+      userId: userId,
+      ignored: ignored,
+    );
+
+/// List current requests to join a knock-enabled room.
+Future<List<KnockRequest>> getRoomKnockRequests({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomKnockRequests(roomId: roomId);
+
+/// Accept a knock request by inviting the requester to the room.
+Future<void> approveRoomKnock({
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixApproveRoomKnock(
+  roomId: roomId,
+  userId: userId,
+);
+
+/// Decline a knock request by removing the requester from the room.
+Future<void> rejectRoomKnock({
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixRejectRoomKnock(
+  roomId: roomId,
+  userId: userId,
+);
+
 Future<List<Space>> getSpaces() =>
     RustLib.instance.api.crateApiMatrixGetSpaces();
 
@@ -907,6 +1013,9 @@ class ChatRoom {
   final String lastMessageTime;
   final int unreadCount;
 
+  /// Whether the user explicitly marked this room as unread.
+  final bool isMarkedUnread;
+
   /// "dm", "group", or "space"
   final String roomType;
   final bool isEncrypted;
@@ -922,6 +1031,7 @@ class ChatRoom {
     this.lastMessageSender,
     required this.lastMessageTime,
     required this.unreadCount,
+    required this.isMarkedUnread,
     required this.roomType,
     required this.isEncrypted,
     required this.roomState,
@@ -936,6 +1046,7 @@ class ChatRoom {
       lastMessageSender.hashCode ^
       lastMessageTime.hashCode ^
       unreadCount.hashCode ^
+      isMarkedUnread.hashCode ^
       roomType.hashCode ^
       isEncrypted.hashCode ^
       roomState.hashCode;
@@ -952,6 +1063,7 @@ class ChatRoom {
           lastMessageSender == other.lastMessageSender &&
           lastMessageTime == other.lastMessageTime &&
           unreadCount == other.unreadCount &&
+          isMarkedUnread == other.isMarkedUnread &&
           roomType == other.roomType &&
           isEncrypted == other.isEncrypted &&
           roomState == other.roomState;
@@ -1080,6 +1192,38 @@ class FormattedMessageInput {
           formattedBody == other.formattedBody &&
           mentionedUserIds == other.mentionedUserIds &&
           mentionsRoom == other.mentionsRoom;
+}
+
+/// A pending request to join a knock-enabled room.
+class KnockRequest {
+  final String userId;
+  final String displayName;
+  final String? avatarUrl;
+  final String? reason;
+
+  const KnockRequest({
+    required this.userId,
+    required this.displayName,
+    this.avatarUrl,
+    this.reason,
+  });
+
+  @override
+  int get hashCode =>
+      userId.hashCode ^
+      displayName.hashCode ^
+      avatarUrl.hashCode ^
+      reason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KnockRequest &&
+          runtimeType == other.runtimeType &&
+          userId == other.userId &&
+          displayName == other.displayName &&
+          avatarUrl == other.avatarUrl &&
+          reason == other.reason;
 }
 
 /// A persisted log file's name and contents.
@@ -1284,6 +1428,42 @@ class Reaction {
           key == other.key &&
           senders == other.senders &&
           myEventId == other.myEventId;
+}
+
+/// Mutable metadata for a joined non-space room.
+class RoomDetails {
+  final String id;
+  final String name;
+  final bool hasExplicitName;
+  final String? avatarUrl;
+  final String? topic;
+
+  const RoomDetails({
+    required this.id,
+    required this.name,
+    required this.hasExplicitName,
+    this.avatarUrl,
+    this.topic,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      hasExplicitName.hashCode ^
+      avatarUrl.hashCode ^
+      topic.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomDetails &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          hasExplicitName == other.hasExplicitName &&
+          avatarUrl == other.avatarUrl &&
+          topic == other.topic;
 }
 
 class SessionTokenUpdate {

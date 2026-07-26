@@ -62,6 +62,7 @@ class ChatListItem extends ConsumerWidget {
     final preview = hasDraft
         ? draft.trim().replaceAll(RegExp(r'\s+'), ' ')
         : chatListPreview(room);
+    final hasUnread = room.unreadCount > 0 || room.isMarkedUnread;
 
     return InkWell(
       borderRadius: BorderRadius.circular(AppRadii.button),
@@ -93,6 +94,9 @@ class ChatListItem extends ConsumerWidget {
           ),
         );
       },
+      onLongPress: room.roomState == 'joined' && room.roomType != 'space'
+          ? () => _showRoomListActions(context, ref, room)
+          : null,
       child: Container(
         margin: onRoomSelected != null
             ? const EdgeInsets.symmetric(horizontal: 8)
@@ -140,11 +144,11 @@ class ChatListItem extends ConsumerWidget {
                       Text(
                         formatChatListTime(room.lastMessageTime),
                         style: TextStyle(
-                          color: room.unreadCount > 0
+                          color: hasUnread
                               ? AppColors.primary
                               : AppColors.onSurfaceVariant,
                           fontSize: 12,
-                          fontWeight: room.unreadCount > 0
+                          fontWeight: hasUnread
                               ? FontWeight.w600
                               : FontWeight.w400,
                         ),
@@ -178,7 +182,7 @@ class ChatListItem extends ConsumerWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if (room.unreadCount > 0) ...[
+                      if (hasUnread) ...[
                         const SizedBox(width: 8),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -189,16 +193,18 @@ class ChatListItem extends ConsumerWidget {
                             color: AppColors.primary,
                             borderRadius: BorderRadius.circular(AppRadii.tag),
                           ),
-                          child: Text(
-                            room.unreadCount > 99
-                                ? '99+'
-                                : '${room.unreadCount}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          child: room.unreadCount > 0
+                              ? Text(
+                                  room.unreadCount > 99
+                                      ? '99+'
+                                      : '${room.unreadCount}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                )
+                              : const SizedBox(width: 7, height: 14),
                         ),
                       ],
                     ],
@@ -234,6 +240,95 @@ class ChatListItem extends ConsumerWidget {
         color: AppColors.onSurfaceVariant,
       ),
     };
+  }
+
+  void _showRoomListActions(
+    BuildContext context,
+    WidgetRef ref,
+    ChatRoom room,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Container(
+        margin: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadii.surface),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(
+                  Icons.done_all_rounded,
+                  color: AppColors.primary,
+                ),
+                title: const Text(
+                  '标记为已读',
+                  style: TextStyle(color: AppColors.onBackground),
+                ),
+                onTap: () => _runRoomListAction(
+                  context,
+                  sheetContext,
+                  ref,
+                  room.id,
+                  markRoomAsRead,
+                  '已标记为已读',
+                ),
+              ),
+              ListTile(
+                leading: const Icon(
+                  Icons.mark_unread_chat_alt_rounded,
+                  color: AppColors.primary,
+                ),
+                title: const Text(
+                  '标记为未读',
+                  style: TextStyle(color: AppColors.onBackground),
+                ),
+                onTap: () => _runRoomListAction(
+                  context,
+                  sheetContext,
+                  ref,
+                  room.id,
+                  markRoomUnread,
+                  '已标记为未读',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _runRoomListAction(
+    BuildContext context,
+    BuildContext sheetContext,
+    WidgetRef ref,
+    String roomId,
+    Future<void> Function({required String roomId}) action,
+    String successMessage,
+  ) async {
+    try {
+      await action(roomId: roomId);
+      ref.invalidate(chatRoomsProvider);
+      ref.invalidate(ungroupedRoomsProvider);
+      ref.invalidate(spaceChildrenProvider);
+      ref.invalidate(searchRoomsProvider);
+      if (!sheetContext.mounted || !context.mounted) return;
+      Navigator.of(sheetContext).pop();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(successMessage)));
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('操作失败: $error')));
+      }
+    }
   }
 }
 

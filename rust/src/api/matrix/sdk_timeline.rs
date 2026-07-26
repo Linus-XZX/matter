@@ -13,7 +13,7 @@ use matrix_sdk::{
 };
 use matrix_sdk_ui::timeline::{
     EventTimelineItem, MembershipChange, MsgLikeKind, Profile, ReactionStatus, Timeline,
-    TimelineBuilder, TimelineDetails, TimelineItem, TimelineItemContent,
+    TimelineBuilder, TimelineDetails, TimelineFocus, TimelineItem, TimelineItemContent,
     TimelineReadReceiptTracking,
 };
 use once_cell::sync::Lazy;
@@ -97,32 +97,17 @@ pub(super) async fn get_messages(client: &Client, room: &Room) -> Result<Vec<Cha
     let timeline = get_or_create_timeline(client, room).await?;
     ensure_initial_window(&timeline, LIVE_WINDOW).await?;
 
-    // The Timeline guards against moving either marker backwards.
-    match timeline.mark_as_read(ReceiptType::Read).await {
-        Ok(true) => super::app_log(
-            "info",
-            "receipts",
-            format!("Sent explicit read receipt for room {}", room.room_id()),
-        ),
-        Ok(false) => {}
-        Err(error) => super::app_log(
-            "warn",
-            "receipts",
-            format!(
-                "Failed to send explicit read receipt for room {}: {error}",
-                room.room_id()
-            ),
-        ),
-    }
-    if let Err(error) = timeline.mark_as_read(ReceiptType::FullyRead).await {
-        super::app_log(
-            "warn",
-            "receipts",
-            format!(
-                "Failed to update fully-read marker for room {}: {error}",
-                room.room_id()
-            ),
-        );
+    if mark_as_read(&timeline, room).await.is_ok() {
+        if let Err(error) = clear_marked_unread_if_set(room).await {
+            super::app_log(
+                "warn",
+                "receipts",
+                format!(
+                    "Failed to clear marked-unread flag for room {}: {error}",
+                    room.room_id()
+                ),
+            );
+        }
     }
 
     let mut messages = convert_snapshot(room, &snapshot(&timeline).await).await;
@@ -130,6 +115,125 @@ pub(super) async fn get_messages(client: &Client, room: &Room) -> Result<Vec<Cha
         messages.drain(..messages.len() - LIVE_WINDOW);
     }
     Ok(messages)
+}
+
+/// Explicitly advance both Matrix read markers to the latest timeline event.
+pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<(), String> {
+    let timeline = get_or_create_timeline(client, room).await?;
+    ensure_initial_window(&timeline, 100).await?;
+    mark_as_read(&timeline, room).await?;
+    clear_marked_unread(room).await
+}
+
+/// Load all currently pinned events through the SDK's event-focused cache.
+pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
+    let pinned_ids = room
+        .load_pinned_events()
+        .await
+        .map_err(|error| format!("Failed to load pinned messages: {error}"))?
+        .unwrap_or_default();
+    if pinned_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let timeline = TimelineBuilder::new(room)
+        .with_focus(TimelineFocus::PinnedEvents)
+        .build()
+        .await
+        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
+
+    let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
+    let by_id: HashMap<String, ChatMessage> = messages
+        .into_iter()
+        .map(|message| (message.id.clone(), message))
+        .collect();
+    Ok(pinned_ids
+        .iter()
+        .filter_map(|event_id| by_id.get(event_id.as_str()).cloned())
+        .collect())
+}
+
+async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
+    // The Timeline guards against moving either marker backwards.
+    let read_error = match timeline.mark_as_read(ReceiptType::Read).await {
+        Ok(sent) => {
+            if sent {
+                super::app_log(
+                    "info",
+                    "receipts",
+                    format!("Sent explicit read receipt for room {}", room.room_id()),
+                );
+            }
+            None
+        }
+        Err(error) => {
+            let error = error.to_string();
+            super::app_log(
+                "warn",
+                "receipts",
+                format!(
+                    "Failed to send explicit read receipt for room {}: {error}",
+                    room.room_id()
+                ),
+            );
+            Some(error)
+        }
+    };
+    let fully_read_error = match timeline.mark_as_read(ReceiptType::FullyRead).await {
+        Ok(_) => None,
+        Err(error) => {
+            let error = error.to_string();
+            super::app_log(
+                "warn",
+                "receipts",
+                format!(
+                    "Failed to update fully-read marker for room {}: {error}",
+                    room.room_id()
+                ),
+            );
+            Some(error)
+        }
+    };
+    match (read_error, fully_read_error) {
+        (None, None) => Ok(()),
+        (Some(read_error), None) => Err(format!(
+            "Failed to mark room as read: read receipt: {read_error}"
+        )),
+        (None, Some(fully_read_error)) => Err(format!(
+            "Failed to mark room as read: fully-read marker: {fully_read_error}"
+        )),
+        (Some(read_error), Some(fully_read_error)) => Err(format!(
+            "Failed to mark room as read: read receipt: {read_error}; fully-read marker: {fully_read_error}"
+        )),
+    }
+}
+
+/// Drop the explicit `m.marked_unread` flag for an explicit read action.
+async fn clear_marked_unread(room: &Room) -> Result<(), String> {
+    use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
+
+    room.set_account_data(MarkedUnreadEventContent::new(false))
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("Failed to clear marked-unread flag: {error}"))
+}
+
+/// Avoid an account-data write on background reads unless the cached flag is set.
+async fn clear_marked_unread_if_set(room: &Room) -> Result<(), String> {
+    use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
+
+    let is_marked_unread = room
+        .account_data_static::<MarkedUnreadEventContent>()
+        .await
+        .map_err(|error| format!("Failed to load marked-unread flag: {error}"))?
+        .map(|raw| raw.deserialize())
+        .transpose()
+        .map_err(|error| format!("Failed to decode marked-unread flag: {error}"))?
+        .is_some_and(|event| event.content.unread);
+    if !is_marked_unread {
+        return Ok(());
+    }
+    clear_marked_unread(room).await
 }
 
 pub(super) async fn get_messages_before(

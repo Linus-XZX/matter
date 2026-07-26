@@ -321,6 +321,92 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('keeps cached messages hidden until the ignore list loads', (
+    tester,
+  ) async {
+    const roomId = '!ignored-loading:example.org';
+    final ignoredUsers = Completer<Set<String>>();
+    final ownMessage = _ownMessage(r'$own', content: 'mine', timestamp: '2');
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) => ignoredUsers.future),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$ignored'),
+      ownMessage,
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
+    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsNothing);
+
+    ignoredUsers.complete(const {'@alice:example.org'});
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
+    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('keeps messages hidden when the ignore list fails', (
+    tester,
+  ) async {
+    const roomId = '!ignored-error:example.org';
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        ignoredUserIdsProvider.overrideWith(
+          (ref) => Future<Set<String>>.error('offline'),
+        ),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$private'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey(r'text-bubble:$private')), findsNothing);
+    expect(find.text('无法加载忽略列表，消息已隐藏'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
   testWidgets('cached messages keep their first-frame vertical position', (
     tester,
   ) async {

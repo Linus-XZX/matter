@@ -22,6 +22,8 @@ import 'latest_message_control.dart';
 import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
 import 'message_input.dart';
+import 'pinned_messages_page.dart';
+import 'room_management_page.dart';
 import 'send_flight.dart';
 
 final chatRouteObserver = RouteObserver<ModalRoute<dynamic>>();
@@ -35,6 +37,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final bool embedded;
   final bool detailsPanelOpen;
   final VoidCallback? onToggleDetailsPanel;
+  final VoidCallback? onRoomLeft;
 
   const ChatDetailPage({
     super.key,
@@ -46,6 +49,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     this.embedded = false,
     this.detailsPanelOpen = false,
     this.onToggleDetailsPanel,
+    this.onRoomLeft,
   });
 
   @override
@@ -414,7 +418,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       return;
     }
 
-    final fromEventId = _displayedMessages.first.id;
+    final fromEventId = _olderMessages.isNotEmpty
+        ? _olderMessages.first.id
+        : _displayedMessages.first.id;
     setState(() => _isLoadingOlder = true);
     try {
       final older = await getMessagesBefore(
@@ -424,7 +430,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       );
       if (!mounted) return;
 
-      final knownIds = _displayedMessages.map((message) => message.id).toSet();
+      final knownIds = {
+        ..._displayedMessages.map((message) => message.id),
+        ..._olderMessages.map((message) => message.id),
+      };
       final newMessages = older
           .where((message) => !knownIds.contains(message.id))
           .toList();
@@ -470,10 +479,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     }
   }
 
-  List<ChatMessage> _mergeMessages(List<ChatMessage> latestMessages) {
+  List<ChatMessage> _mergeMessages(
+    List<ChatMessage> latestMessages,
+    Set<String> ignoredUserIds,
+  ) {
     final byId = <String, ChatMessage>{
-      for (final message in _olderMessages) message.id: message,
-      for (final message in latestMessages) message.id: message,
+      for (final message in _olderMessages)
+        if (message.isMe || !ignoredUserIds.contains(message.senderId))
+          message.id: message,
+      for (final message in latestMessages)
+        if (message.isMe || !ignoredUserIds.contains(message.senderId))
+          message.id: message,
     };
     final messages = byId.values.toList()
       ..sort(
@@ -594,12 +610,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     return groups;
   }
 
-  String _messagesFingerprint(List<ChatMessage> latestMessages) {
+  String _messagesFingerprint(
+    List<ChatMessage> latestMessages,
+    Set<String> ignoredUserIds,
+  ) {
+    final sortedIgnoredUserIds = ignoredUserIds.toList()..sort();
     final buffer = StringBuffer()
       ..write('older=')
       ..write(_olderMessages.length)
       ..write(';latest=')
-      ..write(latestMessages.length);
+      ..write(latestMessages.length)
+      ..write(';ignored=')
+      ..writeAll(sortedIgnoredUserIds, ',');
     for (final message in _olderMessages) {
       buffer
         ..write('|o:')
@@ -653,13 +675,16 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     return buffer.toString();
   }
 
-  void _rebuildDerivedMessages(List<ChatMessage> latestMessages) {
+  void _rebuildDerivedMessages(
+    List<ChatMessage> latestMessages,
+    Set<String> ignoredUserIds,
+  ) {
     if (identical(_lastDerivedMessagesInput, latestMessages) &&
         _lastDerivedOlderMessagesRevision == _olderMessagesRevision &&
         _lastDerivedSortOverrideRevision == _sortOverrideRevision) {
       return;
     }
-    final fingerprint = _messagesFingerprint(latestMessages);
+    final fingerprint = _messagesFingerprint(latestMessages, ignoredUserIds);
     if (_derivedMessagesFingerprint == fingerprint) {
       _lastDerivedMessagesInput = latestMessages;
       _lastDerivedOlderMessagesRevision = _olderMessagesRevision;
@@ -670,7 +695,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _lastDerivedMessagesInput = latestMessages;
     _lastDerivedOlderMessagesRevision = _olderMessagesRevision;
     _lastDerivedSortOverrideRevision = _sortOverrideRevision;
-    final displayedMessages = _mergeMessages(latestMessages);
+    final displayedMessages = _mergeMessages(latestMessages, ignoredUserIds);
     _displayedMessages = displayedMessages;
     _messageIndex
       ..clear()
@@ -829,6 +854,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       messageCacheOwnerProvider(widget.roomId),
     );
     final activeUserId = ref.watch(activeUserIdProvider) ?? 'anonymous';
+    final ignoredUserIdsAsync = ref.watch(ignoredUserIdsProvider);
     final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
     final cachedTotalMembers = cachedMessages.fold<int>(
       0,
@@ -972,6 +998,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               ),
               onPressed: null,
             ),
+            IconButton(
+              tooltip: '置顶消息',
+              icon: const Icon(
+                Icons.push_pin_outlined,
+                color: AppColors.onBackground,
+              ),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => PinnedMessagesPage(
+                    roomId: widget.roomId,
+                    roomName: widget.roomName,
+                  ),
+                ),
+              ),
+            ),
             if (widget.embedded && widget.onToggleDetailsPanel != null)
               IconButton(
                 tooltip: widget.detailsPanelOpen ? '隐藏详情' : '显示详情',
@@ -1006,6 +1047,38 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   final messages = messageCacheOwner == activeUserId
                       ? cachedMessages
                       : const <ChatMessage>[];
+                  if (!ignoredUserIdsAsync.hasValue) {
+                    if (ignoredUserIdsAsync.hasError) {
+                      return Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              '无法加载忽略列表，消息已隐藏',
+                              style: TextStyle(
+                                color: AppColors.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            IconButton(
+                              tooltip: '重试',
+                              icon: const Icon(Icons.refresh_rounded),
+                              color: AppColors.primary,
+                              onPressed: () =>
+                                  ref.invalidate(ignoredUserIdsProvider),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: AppColors.primary,
+                        strokeWidth: 2,
+                      ),
+                    );
+                  }
+                  final ignoredUserIds = ignoredUserIdsAsync.requireValue;
                   // Do not expose the timeline until its initial insets and
                   // member-dependent labels are stable enough for layout.
                   if ((!messageCachePrimed &&
@@ -1020,11 +1093,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                       ),
                     );
                   }
+                  final visibleMessages = ignoredUserIds.isEmpty
+                      ? messages
+                      : messages
+                            .where(
+                              (message) =>
+                                  message.isMe ||
+                                  !ignoredUserIds.contains(message.senderId),
+                            )
+                            .toList();
                   final timelineMessages = _timelineMessagesFor(
-                    messages,
+                    visibleMessages,
                     localOutgoingMessages,
                   );
-                  _rebuildDerivedMessages(timelineMessages);
+                  _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
                   final timelineEntries = _timelineEntries;
                   final messageIndex = _messageIndex;
                   final avatarMap = membersAsync.maybeWhen(
@@ -1259,7 +1341,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (context) => Container(
+      builder: (sheetContext) => Container(
         margin: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: AppColors.surface,
@@ -1308,6 +1390,23 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 ),
               ),
               const Divider(color: AppColors.surfaceVariant, height: 0.5),
+              _DetailMenuItem(
+                icon: Icons.settings_rounded,
+                label: '房间管理',
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => RoomManagementPage(
+                        roomId: widget.roomId,
+                        roomName: widget.roomName,
+                        avatarUrl: widget.avatarUrl,
+                        onRoomLeft: widget.onRoomLeft,
+                      ),
+                    ),
+                  );
+                },
+              ),
               // Room members preview
               Consumer(
                 builder: (context, ref, _) {

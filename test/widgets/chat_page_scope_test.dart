@@ -16,6 +16,7 @@ void main() {
     lastMessage: '',
     lastMessageTime: '0',
     unreadCount: 0,
+    isMarkedUnread: false,
     roomType: roomType,
     isEncrypted: false,
     roomState: 'joined',

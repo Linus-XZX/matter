@@ -53,6 +53,7 @@ rust.ChatRoom _room({
     lastMessage: '',
     lastMessageTime: '0',
     unreadCount: 0,
+    isMarkedUnread: false,
     roomType: roomType,
     isEncrypted: false,
     roomState: 'joined',
@@ -154,6 +155,36 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(840, 800));
     await tester.pump();
 
+    expect(find.byType(DesktopRoomDetailsPanel), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('clears the selected desktop room after it is left', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final room = _room(
+      id: '!room:example.org',
+      name: 'Project room',
+      roomType: 'dm',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => [room]),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    final detail = tester.widget<ChatDetailPage>(find.byType(ChatDetailPage));
+
+    detail.onRoomLeft!();
+    await tester.pump();
+
+    expect(find.byType(ChatDetailPage), findsNothing);
     expect(find.byType(DesktopRoomDetailsPanel), findsNothing);
     expect(tester.takeException(), isNull);
   });
