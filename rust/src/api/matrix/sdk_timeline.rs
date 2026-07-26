@@ -72,6 +72,17 @@ fn remote_event_count(items: &[Arc<TimelineItem>]) -> usize {
         .count()
 }
 
+fn has_any_expected_event<'a>(
+    loaded_ids: impl IntoIterator<Item = &'a str>,
+    expected_ids: &[&matrix_sdk::ruma::EventId],
+) -> bool {
+    loaded_ids.into_iter().any(|loaded_id| {
+        expected_ids
+            .iter()
+            .any(|expected_id| expected_id.as_str() == loaded_id)
+    })
+}
+
 async fn ensure_initial_window(timeline: &Timeline, target: usize) -> Result<(), String> {
     for _ in 0..4 {
         let items = snapshot(timeline).await;
@@ -160,29 +171,28 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
 
     let (mut items, mut updates) = timeline.subscribe().await;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let _ = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let has_all_pinned_events = expected_pinned_ids.iter().all(|expected_id| {
+            if has_any_expected_event(
                 items
                     .iter()
                     .filter_map(|item| item.as_event())
-                    .any(|event| event.event_id() == Some(*expected_id))
-            });
-            if has_all_pinned_events {
-                return Ok::<(), &'static str>(());
+                    .filter_map(|event| event.event_id())
+                    .map(|event_id| event_id.as_str()),
+                &expected_pinned_ids,
+            ) {
+                break;
             }
 
-            let diffs = updates
-                .next()
-                .await
-                .ok_or("Pinned message timeline closed before loading events.")?;
+            let Some(diffs) = updates.next().await else {
+                break;
+            };
             for diff in diffs {
                 diff.apply(&mut items);
             }
         }
     })
-    .await
-    .map_err(|_| "Timed out while loading pinned messages.".to_string())??;
+    .await;
 
     let items: Vec<_> = items.into_iter().collect();
     let messages = convert_snapshot(room, &items).await;
@@ -1092,7 +1102,7 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        messages_before, newest_receipt_position, reader_ids_for_position,
+        has_any_expected_event, messages_before, newest_receipt_position, reader_ids_for_position,
         record_latest_receipt_position, resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
@@ -1140,6 +1150,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["$a", "$b"]
         );
+    }
+
+    #[test]
+    fn one_loaded_pinned_event_is_enough_to_return_partial_results() {
+        use matrix_sdk::ruma::EventId;
+
+        let first = EventId::parse("$first:example.org").unwrap();
+        let missing = EventId::parse("$missing:example.org").unwrap();
+        let expected = [first.as_ref(), missing.as_ref()];
+
+        assert!(has_any_expected_event(
+            [first.as_str()].into_iter(),
+            &expected
+        ));
+        assert!(!has_any_expected_event([].into_iter(), &expected));
     }
 
     #[test]

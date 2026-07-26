@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import 'chat_timestamp.dart';
 
-class PinnedMessagesPage extends StatefulWidget {
+class PinnedMessagesPage extends ConsumerStatefulWidget {
   final String roomId;
   final String roomName;
 
@@ -15,10 +17,10 @@ class PinnedMessagesPage extends StatefulWidget {
   });
 
   @override
-  State<PinnedMessagesPage> createState() => _PinnedMessagesPageState();
+  ConsumerState<PinnedMessagesPage> createState() => _PinnedMessagesPageState();
 }
 
-class _PinnedMessagesPageState extends State<PinnedMessagesPage> {
+class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   late Future<List<rust.ChatMessage>> _messages;
 
   @override
@@ -33,6 +35,7 @@ class _PinnedMessagesPageState extends State<PinnedMessagesPage> {
 
   @override
   Widget build(BuildContext context) {
+    final ignoredUserIdsAsync = ref.watch(ignoredUserIdsProvider);
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -68,7 +71,30 @@ class _PinnedMessagesPageState extends State<PinnedMessagesPage> {
               ),
             );
           }
-          final messages = snapshot.data ?? const <rust.ChatMessage>[];
+          if (!ignoredUserIdsAsync.hasValue) {
+            if (ignoredUserIdsAsync.hasError) {
+              return Center(
+                child: TextButton.icon(
+                  onPressed: () => ref.invalidate(ignoredUserIdsProvider),
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('无法加载忽略列表'),
+                ),
+              );
+            }
+            return const Center(
+              child: CircularProgressIndicator(
+                color: AppColors.primary,
+                strokeWidth: 2,
+              ),
+            );
+          }
+          final ignoredUserIds = ignoredUserIdsAsync.requireValue;
+          final messages = (snapshot.data ?? const <rust.ChatMessage>[])
+              .where(
+                (message) =>
+                    message.isMe || !ignoredUserIds.contains(message.senderId),
+              )
+              .toList();
           if (messages.isEmpty) {
             return const Center(
               child: Text(

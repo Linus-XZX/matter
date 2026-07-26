@@ -35,6 +35,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   final _topicController = TextEditingController();
   final _imagePicker = ImagePicker();
   rust.RoomDetails? _details;
+  Uint8List? _avatarPreviewBytes;
   List<rust.Contact> _members = const [];
   List<rust.KnockRequest> _knockRequests = const [];
   List<String> _ignoredUsers = const [];
@@ -169,8 +170,11 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   void _closeCurrentRoom() {
+    final navigator = Navigator.of(context);
+    final handledByParent = widget.onRoomClosed != null;
     widget.onRoomClosed?.call();
-    Navigator.of(context).popUntil((route) => route.isFirst);
+    if (navigator.canPop()) navigator.pop();
+    if (!handledByParent && navigator.canPop()) navigator.pop();
   }
 
   Future<void> _saveDetails() async {
@@ -185,19 +189,29 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final updateName = details.hasExplicitName
         ? name != details.name
         : name.isNotEmpty;
+    final topic = _topicController.text.trim().isEmpty
+        ? null
+        : _topicController.text.trim();
     setState(() => _saving = true);
     try {
       await rust.updateRoomDetails(
         roomId: widget.roomId,
         name: name,
         updateName: updateName,
-        topic: _topicController.text.trim().isEmpty
-            ? null
-            : _topicController.text.trim(),
+        topic: topic,
       );
       _invalidateRoom();
-      await _load();
-      if (mounted) _showSnackBar('房间信息已更新');
+      if (!mounted) return;
+      setState(() {
+        _details = rust.RoomDetails(
+          id: details.id,
+          name: updateName ? name : details.name,
+          hasExplicitName: details.hasExplicitName || updateName,
+          avatarUrl: details.avatarUrl,
+          topic: topic,
+        );
+      });
+      _showSnackBar('房间信息已更新');
     } catch (error) {
       if (mounted) _showSnackBar('更新失败: $error');
     } finally {
@@ -231,8 +245,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         data: bytes,
       );
       _invalidateRoom();
-      await _load();
-      if (mounted) _showSnackBar('房间头像已更新');
+      if (!mounted) return;
+      setState(() => _avatarPreviewBytes = bytes);
+      _showSnackBar('房间头像已更新');
     } catch (error) {
       if (mounted) _showSnackBar('头像更新失败: $error');
     } finally {
@@ -309,8 +324,12 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       if (!mounted) return;
       ref.invalidate(ignoredUserIdsProvider);
       ref.invalidate(messagesProvider(widget.roomId));
-      await _load();
-      if (mounted) _showSnackBar(ignored ? '已忽略 $userId' : '已取消忽略 $userId');
+      setState(() {
+        _ignoredUsers = ignored
+            ? {..._ignoredUsers, userId}.toList()
+            : _ignoredUsers.where((id) => id != userId).toList();
+      });
+      _showSnackBar(ignored ? '已忽略 $userId' : '已取消忽略 $userId');
     } catch (error) {
       if (mounted) _showSnackBar('操作失败: $error');
     }
@@ -383,8 +402,13 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         );
       }
       _invalidateRoom();
-      await _load();
-      if (mounted) _showSnackBar(approve ? '已批准加入请求' : '已拒绝加入请求');
+      if (!mounted) return;
+      setState(() {
+        _knockRequests = _knockRequests
+            .where((item) => item.userId != request.userId)
+            .toList();
+      });
+      _showSnackBar(approve ? '已批准加入请求' : '已拒绝加入请求');
     } catch (error) {
       if (mounted) _showSnackBar('操作失败: $error');
     }
@@ -483,12 +507,25 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                       Center(
                         child: Stack(
                           children: [
-                            AppAvatar(
-                              fallback: details!.name,
-                              size: 76,
-                              radius: AppRadii.content,
-                              url: details.avatarUrl,
-                            ),
+                            if (_avatarPreviewBytes case final bytes?)
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                  AppRadii.content,
+                                ),
+                                child: Image.memory(
+                                  bytes,
+                                  width: 76,
+                                  height: 76,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            else
+                              AppAvatar(
+                                fallback: details!.name,
+                                size: 76,
+                                radius: AppRadii.content,
+                                url: details.avatarUrl,
+                              ),
                             Positioned(
                               right: -4,
                               bottom: -4,
@@ -641,7 +678,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           MaterialPageRoute(
                             builder: (_) => PinnedMessagesPage(
                               roomId: widget.roomId,
-                              roomName: details.name,
+                              roomName: details!.name,
                             ),
                           ),
                         ),

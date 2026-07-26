@@ -10,12 +10,18 @@ import 'package:matter/src/rust/frb_generated.dart';
 class _FakeRustApi implements RustLibApi {
   bool failSupplementalLoads = true;
   Completer<void>? pendingDetailsUpdate;
+  List<rust.KnockRequest> knockRequests = const [];
+  int detailsLoadCalls = 0;
+  int approveKnockCalls = 0;
   int markUnreadCalls = 0;
+  String? updatedName;
+  String? updatedTopic;
 
   @override
   Future<rust.RoomDetails> crateApiMatrixGetRoomDetails({
     required String roomId,
   }) async {
+    detailsLoadCalls++;
     return rust.RoomDetails(
       id: roomId,
       name: 'Project room',
@@ -45,7 +51,7 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     if (failSupplementalLoads) throw StateError('knocks unavailable');
-    return const [];
+    return knockRequests;
   }
 
   @override
@@ -61,7 +67,17 @@ class _FakeRustApi implements RustLibApi {
     required bool updateName,
     String? topic,
   }) {
+    updatedName = name;
+    updatedTopic = topic;
     return pendingDetailsUpdate?.future ?? Future.value();
+  }
+
+  @override
+  Future<void> crateApiMatrixApproveRoomKnock({
+    required String roomId,
+    required String userId,
+  }) async {
+    approveKnockCalls++;
   }
 
   @override
@@ -88,7 +104,12 @@ void main() {
   setUp(() {
     rustApi.failSupplementalLoads = true;
     rustApi.pendingDetailsUpdate = null;
+    rustApi.knockRequests = const [];
+    rustApi.detailsLoadCalls = 0;
+    rustApi.approveKnockCalls = 0;
     rustApi.markUnreadCalls = 0;
+    rustApi.updatedName = null;
+    rustApi.updatedTopic = null;
   });
 
   testWidgets('shows partial load failures instead of empty room data', (
@@ -177,6 +198,72 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('keeps saved room details instead of reloading stale cache', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), 'Renamed room');
+    await tester.enterText(fields.at(1), 'Updated topic');
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.detailsLoadCalls, 1);
+    expect(rustApi.updatedName, 'Renamed room');
+    expect(rustApi.updatedTopic, 'Updated topic');
+    expect(
+      tester.widget<TextField>(fields.at(0)).controller!.text,
+      'Renamed room',
+    );
+    expect(
+      tester.widget<TextField>(fields.at(1)).controller!.text,
+      'Updated topic',
+    );
+  });
+
+  testWidgets('removes an approved knock without reloading stale members', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.knockRequests = const [
+      rust.KnockRequest(userId: '@bob:example.org', displayName: 'Bob'),
+    ];
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bob'), findsOneWidget);
+    await tester.tap(find.byTooltip('批准'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.approveKnockCalls, 1);
+    expect(find.text('Bob'), findsNothing);
+  });
+
   testWidgets('marking the current room unread closes its chat view', (
     tester,
   ) async {
@@ -222,5 +309,71 @@ void main() {
     expect(roomClosed, isTrue);
     expect(find.byType(RoomManagementPage), findsNothing);
     expect(find.text('打开房间'), findsOneWidget);
+  });
+
+  testWidgets('closing a nested chat preserves its parent route', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Builder(
+            builder: (rootContext) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(rootContext).push(
+                  MaterialPageRoute<void>(
+                    builder: (spaceContext) => Scaffold(
+                      body: TextButton(
+                        onPressed: () => Navigator.of(spaceContext).push(
+                          MaterialPageRoute<void>(
+                            builder: (chatContext) => Scaffold(
+                              body: TextButton(
+                                onPressed: () => Navigator.of(chatContext).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const RoomManagementPage(
+                                      roomId: '!room:example.org',
+                                      roomName: 'Project room',
+                                    ),
+                                  ),
+                                ),
+                                child: const Text('打开管理'),
+                              ),
+                            ),
+                          ),
+                        ),
+                        child: const Text('打开聊天'),
+                      ),
+                    ),
+                  ),
+                ),
+                child: const Text('打开空间'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('打开空间'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开聊天'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开管理'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('标记为未读'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('标记为未读'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('打开聊天'), findsOneWidget);
+    expect(find.text('打开空间'), findsNothing);
+    expect(find.byType(RoomManagementPage), findsNothing);
   });
 }
