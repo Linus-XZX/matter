@@ -11,6 +11,31 @@ import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/connection_provider.dart';
 import 'package:matter/providers/message_cache_persistence.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
+import 'package:matter/src/rust/frb_generated.dart';
+
+class _FakeRustApi implements RustLibApi {
+  final syncEvents = StreamController<rust.SyncEvent>.broadcast();
+  int ignoredUsersCalls = 0;
+
+  @override
+  rust.ConnectionStatus crateApiMatrixGetConnectionStatus() {
+    return rust.ConnectionStatus.connected;
+  }
+
+  @override
+  Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
+    ignoredUsersCalls++;
+    return const [];
+  }
+
+  @override
+  Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
+  }
+}
 
 Future<WidgetRef> _captureRef(WidgetTester tester) async {
   WidgetRef? ref;
@@ -62,9 +87,21 @@ final _refreshMessagesRefProvider = FutureProvider.family<void, String>(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  late _FakeRustApi rustApi;
+
+  setUpAll(() {
+    rustApi = _FakeRustApi();
+    RustLib.initMock(api: rustApi);
+  });
+
+  tearDownAll(() async {
+    await rustApi.syncEvents.close();
+    RustLib.dispose();
+  });
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    rustApi.ignoredUsersCalls = 0;
   });
 
   group('clearActiveSessionState', () {
@@ -107,6 +144,41 @@ void main() {
       final ref = await _captureRef(tester);
       expect(() => invalidateSessionCollections(ref), returnsNormally);
     });
+  });
+
+  testWidgets('refreshes ignored users only for their sync event', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final syncSubscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    final ignoredSubscription = container.listen(
+      ignoredUserIdsProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    await container.read(ignoredUserIdsProvider.future);
+    expect(rustApi.ignoredUsersCalls, 1);
+
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(rustApi.ignoredUsersCalls, 1);
+
+    rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+    await tester.pump();
+    await container.read(ignoredUserIdsProvider.future);
+    expect(rustApi.ignoredUsersCalls, 2);
+
+    ignoredSubscription.close();
+    syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
   });
 
   group('bootstrapActiveSessionSync', () {

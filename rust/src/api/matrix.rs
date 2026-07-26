@@ -12,9 +12,11 @@ use matrix_sdk::{
         uiaa::{AuthData, Dummy, RegistrationToken, UiaaInfo},
     },
     ruma::events::{
+        ignored_user_list::IgnoredUserListEventContent,
         key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
         receipt::SyncReceiptEvent,
         room::message::OriginalSyncRoomMessageEvent,
+        GlobalAccountDataEvent,
     },
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
@@ -279,6 +281,8 @@ pub enum SyncEvent {
     SyncCompleted,
     /// A message was sent (room list should refresh).
     MessageSent { room_id: String },
+    /// The account's ignored-user list changed.
+    IgnoredUsersChanged,
 }
 
 static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> = Lazy::new(|| {
@@ -568,6 +572,12 @@ fn install_live_update_event_handlers(client: &Client) {
         );
         notify_sync_event(SyncEvent::MessageSent { room_id });
     });
+
+    client.add_event_handler(
+        |_event: GlobalAccountDataEvent<IgnoredUserListEventContent>| async move {
+            notify_sync_event(SyncEvent::IgnoredUsersChanged);
+        },
+    );
 }
 
 fn encryption_settings() -> EncryptionSettings {
@@ -5221,7 +5231,7 @@ pub async fn upload_room_avatar(
     room_id: String,
     content_type: String,
     data: Vec<u8>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let mime: mime::Mime = content_type
@@ -5230,11 +5240,20 @@ pub async fn upload_room_avatar(
     if mime.type_() != mime::IMAGE {
         return Err(format!("Expected an image MIME type, got {mime}"));
     }
-    room.upload_avatar(&mime, data, None)
+
+    let upload = client
+        .media()
+        .upload(&mime, data, None)
+        .await
+        .map_err(|error| format!("Failed to upload room avatar: {error}"))?;
+    let mut info = matrix_sdk::ruma::events::room::avatar::ImageInfo::new();
+    info.mimetype = Some(mime.to_string());
+    info.blurhash = upload.blurhash;
+    room.set_avatar_url(&upload.content_uri, Some(info))
         .await
         .map_err(|error| format!("Failed to update room avatar: {error}"))?;
     notify_sync_event(SyncEvent::SyncCompleted);
-    Ok(())
+    Ok(upload.content_uri.to_string())
 }
 
 /// Return whether a room has an explicit mute push rule.
@@ -5338,8 +5357,6 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
 /// List the Matrix user IDs in the current account's ignored-user list.
 #[frb]
 pub async fn get_ignored_users() -> Result<Vec<String>, String> {
-    use matrix_sdk::ruma::events::ignored_user_list::IgnoredUserListEventContent;
-
     let client = get_client().await.ok_or("No client created.")?;
     let content = client
         .account()
@@ -5360,7 +5377,7 @@ pub async fn get_ignored_users() -> Result<Vec<String>, String> {
 /// Add or remove one user from the account's ignored-user list.
 #[frb]
 pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<(), String> {
-    use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
+    use matrix_sdk::ruma::events::ignored_user_list::IgnoredUser;
 
     let client = get_client().await.ok_or("No client created.")?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())

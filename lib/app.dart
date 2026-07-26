@@ -159,8 +159,28 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       );
       return;
     }
-    if (_selectedRoom?.id == room.id) return;
+    if (_selectedRoom == room) return;
     setState(() => _selectedRoom = room);
+  }
+
+  void _updateSelectedRoomDetails(rust.RoomDetails details) {
+    final room = _selectedRoom;
+    if (room == null || room.id != details.id) return;
+    setState(() {
+      _selectedRoom = rust.ChatRoom(
+        id: room.id,
+        name: details.name,
+        avatarUrl: details.avatarUrl,
+        lastMessage: room.lastMessage,
+        lastMessageSender: room.lastMessageSender,
+        lastMessageTime: room.lastMessageTime,
+        unreadCount: room.unreadCount,
+        isMarkedUnread: room.isMarkedUnread,
+        roomType: room.roomType,
+        isEncrypted: room.isEncrypted,
+        roomState: room.roomState,
+      );
+    });
   }
 
   void _clearSelectedRoom() {
@@ -348,6 +368,8 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                       )
                                     : null,
                                 onRoomLeft: _clearSelectedRoom,
+                                onRoomDetailsChanged:
+                                    _updateSelectedRoomDetails,
                               ),
                       ),
                       if (showRoomDetails) ...[
@@ -359,6 +381,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                             roomName: selectedRoom.name,
                             avatarUrl: selectedRoom.avatarUrl,
                             onRoomLeft: _clearSelectedRoom,
+                            onRoomDetailsChanged: _updateSelectedRoomDetails,
                           ),
                         ),
                       ],

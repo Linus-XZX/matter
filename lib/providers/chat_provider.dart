@@ -898,7 +898,6 @@ final syncStreamProvider =
         switch (event) {
           case rust.SyncEvent_SyncCompleted():
             scheduleRoomRefresh();
-            ref.invalidate(ignoredUserIdsProvider);
             final currentRoomId = ref.read(currentRoomIdProvider);
             if (currentRoomId != null) {
               scheduleMessageRefresh(currentRoomId);
@@ -908,6 +907,8 @@ final syncStreamProvider =
               scheduleMessageRefresh(roomId);
             }
             scheduleRoomRefresh();
+          case rust.SyncEvent_IgnoredUsersChanged():
+            ref.invalidate(ignoredUserIdsProvider);
         }
       });
 

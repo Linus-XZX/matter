@@ -530,7 +530,7 @@ Future<void> updateRoomDetails({
 );
 
 /// Upload and apply a new avatar for a joined non-space room.
-Future<void> uploadRoomAvatar({
+Future<String> uploadRoomAvatar({
   required String roomId,
   required String contentType,
   required List<int> data,
@@ -1669,6 +1669,9 @@ sealed class SyncEvent with _$SyncEvent {
   /// A message was sent (room list should refresh).
   const factory SyncEvent.messageSent({required String roomId}) =
       SyncEvent_MessageSent;
+
+  /// The account's ignored-user list changed.
+  const factory SyncEvent.ignoredUsersChanged() = SyncEvent_IgnoredUsersChanged;
 }
 
 /// Ephemeral "who is typing right now" update for a room, pushed to Dart.

@@ -202,13 +202,15 @@ void main() {
     tester,
   ) async {
     rustApi.failSupplementalLoads = false;
+    rust.RoomDetails? changedDetails;
 
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
             roomName: 'Project room',
+            onRoomDetailsChanged: (details) => changedDetails = details,
           ),
         ),
       ),
@@ -232,6 +234,8 @@ void main() {
       tester.widget<TextField>(fields.at(1)).controller!.text,
       'Updated topic',
     );
+    expect(changedDetails?.name, 'Renamed room');
+    expect(changedDetails?.topic, 'Updated topic');
   });
 
   testWidgets('removes an approved knock without reloading stale members', (

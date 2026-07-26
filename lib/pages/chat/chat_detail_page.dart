@@ -38,6 +38,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final bool detailsPanelOpen;
   final VoidCallback? onToggleDetailsPanel;
   final VoidCallback? onRoomLeft;
+  final ValueChanged<RoomDetails>? onRoomDetailsChanged;
 
   const ChatDetailPage({
     super.key,
@@ -50,6 +51,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     this.detailsPanelOpen = false,
     this.onToggleDetailsPanel,
     this.onRoomLeft,
+    this.onRoomDetailsChanged,
   });
 
   @override
@@ -72,6 +74,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   List<DateBoundary> _floatingDateBoundariesCache = const [];
   List<GlobalKey> _floatingDateSeparatorKeysCache = const [];
   bool _hasTimelineGroups = false;
+  late String _roomName;
+  String? _avatarUrl;
   List<ChatMessage>? _lastMessageMergeInput;
   List<LocalOutgoingMessage>? _lastLocalMergeInput;
   List<ChatMessage> _lastTimelineMessages = const [];
@@ -153,12 +157,33 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   @override
   void initState() {
     super.initState();
+    _roomName = widget.roomName;
+    _avatarUrl = widget.avatarUrl;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(replyingToProvider(widget.roomId).notifier).value = null;
       _activateRoom();
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatDetailPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.roomName != widget.roomName) {
+      _roomName = widget.roomName;
+    }
+    if (oldWidget.avatarUrl != widget.avatarUrl) {
+      _avatarUrl = widget.avatarUrl;
+    }
+  }
+
+  void _handleRoomDetailsChanged(RoomDetails details) {
+    setState(() {
+      _roomName = details.name;
+      _avatarUrl = details.avatarUrl;
+    });
+    widget.onRoomDetailsChanged?.call(details);
   }
 
   @override
@@ -962,10 +987,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           title: Row(
             children: [
               AppAvatar(
-                fallback: widget.roomName,
+                fallback: _roomName,
                 size: 36,
                 radius: AppRadii.content,
-                url: widget.avatarUrl,
+                url: _avatarUrl,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -973,7 +998,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.roomName,
+                      _roomName,
                       style: const TextStyle(
                         color: AppColors.onBackground,
                         fontSize: 15.5,
@@ -1014,7 +1039,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 MaterialPageRoute(
                   builder: (_) => PinnedMessagesPage(
                     roomId: widget.roomId,
-                    roomName: widget.roomName,
+                    roomName: _roomName,
                   ),
                 ),
               ),
@@ -1361,18 +1386,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 padding: const EdgeInsets.all(16),
                 child: Row(
                   children: [
-                    AppAvatar(
-                      fallback: widget.roomName,
-                      size: 56,
-                      url: widget.avatarUrl,
-                    ),
+                    AppAvatar(fallback: _roomName, size: 56, url: _avatarUrl),
                     const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            widget.roomName,
+                            _roomName,
                             style: const TextStyle(
                               color: AppColors.onBackground,
                               fontSize: 18,
@@ -1405,9 +1426,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                     MaterialPageRoute(
                       builder: (_) => RoomManagementPage(
                         roomId: widget.roomId,
-                        roomName: widget.roomName,
-                        avatarUrl: widget.avatarUrl,
+                        roomName: _roomName,
+                        avatarUrl: _avatarUrl,
                         onRoomClosed: widget.onRoomLeft,
+                        onRoomDetailsChanged: _handleRoomDetailsChanged,
                       ),
                     ),
                   );

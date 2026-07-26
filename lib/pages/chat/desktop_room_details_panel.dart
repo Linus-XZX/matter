@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/chat_provider.dart';
+import '../../src/rust/api/matrix.dart' show RoomDetails;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import 'room_management_page.dart';
@@ -11,6 +12,7 @@ class DesktopRoomDetailsPanel extends ConsumerWidget {
   final String roomName;
   final String? avatarUrl;
   final VoidCallback? onRoomLeft;
+  final ValueChanged<RoomDetails>? onRoomDetailsChanged;
 
   const DesktopRoomDetailsPanel({
     super.key,
@@ -18,6 +20,7 @@ class DesktopRoomDetailsPanel extends ConsumerWidget {
     required this.roomName,
     this.avatarUrl,
     this.onRoomLeft,
+    this.onRoomDetailsChanged,
   });
 
   @override
@@ -65,6 +68,7 @@ class DesktopRoomDetailsPanel extends ConsumerWidget {
                         roomName: roomName,
                         avatarUrl: avatarUrl,
                         onRoomClosed: onRoomLeft,
+                        onRoomDetailsChanged: onRoomDetailsChanged,
                       ),
                     ),
                   ),

@@ -192,6 +192,51 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('updates the selected desktop room metadata', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final room = _room(
+      id: '!room:example.org',
+      name: 'Project room',
+      roomType: 'dm',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => [room]),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    await tester.tap(find.byTooltip('显示详情'));
+    await tester.pump();
+    final detail = tester.widget<ChatDetailPage>(find.byType(ChatDetailPage));
+
+    detail.onRoomDetailsChanged!(
+      const rust.RoomDetails(
+        id: '!room:example.org',
+        name: 'Renamed room',
+        hasExplicitName: true,
+        avatarUrl: 'mxc://example.org/avatar',
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Renamed room',
+    );
+    expect(
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .roomName,
+      'Renamed room',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('selects a room from the new account after switching accounts', (
     tester,
   ) async {

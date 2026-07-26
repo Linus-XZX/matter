@@ -17,6 +17,7 @@ class RoomManagementPage extends ConsumerStatefulWidget {
   final String roomName;
   final String? avatarUrl;
   final VoidCallback? onRoomClosed;
+  final ValueChanged<rust.RoomDetails>? onRoomDetailsChanged;
 
   const RoomManagementPage({
     super.key,
@@ -24,6 +25,7 @@ class RoomManagementPage extends ConsumerStatefulWidget {
     required this.roomName,
     this.avatarUrl,
     this.onRoomClosed,
+    this.onRoomDetailsChanged,
   });
 
   @override
@@ -202,15 +204,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       _invalidateRoom();
       if (!mounted) return;
-      setState(() {
-        _details = rust.RoomDetails(
-          id: details.id,
-          name: updateName ? name : details.name,
-          hasExplicitName: details.hasExplicitName || updateName,
-          avatarUrl: details.avatarUrl,
-          topic: topic,
-        );
-      });
+      final updatedDetails = rust.RoomDetails(
+        id: details.id,
+        name: updateName ? name : details.name,
+        hasExplicitName: details.hasExplicitName || updateName,
+        avatarUrl: details.avatarUrl,
+        topic: topic,
+      );
+      setState(() => _details = updatedDetails);
+      widget.onRoomDetailsChanged?.call(updatedDetails);
       _showSnackBar('房间信息已更新');
     } catch (error) {
       if (mounted) _showSnackBar('更新失败: $error');
@@ -239,14 +241,26 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       if (bytes == null || !mounted) return;
       setState(() => _saving = true);
-      await rust.uploadRoomAvatar(
+      final avatarUrl = await rust.uploadRoomAvatar(
         roomId: widget.roomId,
         contentType: 'image/jpeg',
         data: bytes,
       );
       _invalidateRoom();
       if (!mounted) return;
-      setState(() => _avatarPreviewBytes = bytes);
+      final details = _details!;
+      final updatedDetails = rust.RoomDetails(
+        id: details.id,
+        name: details.name,
+        hasExplicitName: details.hasExplicitName,
+        avatarUrl: avatarUrl,
+        topic: details.topic,
+      );
+      setState(() {
+        _details = updatedDetails;
+        _avatarPreviewBytes = bytes;
+      });
+      widget.onRoomDetailsChanged?.call(updatedDetails);
       _showSnackBar('房间头像已更新');
     } catch (error) {
       if (mounted) _showSnackBar('头像更新失败: $error');
