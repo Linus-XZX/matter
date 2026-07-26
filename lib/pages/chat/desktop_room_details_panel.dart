@@ -64,7 +64,7 @@ class DesktopRoomDetailsPanel extends ConsumerWidget {
                         roomId: roomId,
                         roomName: roomName,
                         avatarUrl: avatarUrl,
-                        onRoomLeft: onRoomLeft,
+                        onRoomClosed: onRoomLeft,
                       ),
                     ),
                   ),

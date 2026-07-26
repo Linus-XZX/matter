@@ -196,6 +196,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   Future<void> _primeAndRefreshMessages() async {
     await primeMessageCache(ref, widget.roomId);
     if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
+    try {
+      await markRoomAsRead(roomId: widget.roomId);
+    } catch (error) {
+      debugPrint('markRoomAsRead failed: $error');
+    }
+    if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
     await refreshMessagesFromNetwork(ref, widget.roomId);
   }
 
@@ -1401,7 +1407,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                         roomId: widget.roomId,
                         roomName: widget.roomName,
                         avatarUrl: widget.avatarUrl,
-                        onRoomLeft: widget.onRoomLeft,
+                        onRoomClosed: widget.onRoomLeft,
                       ),
                     ),
                   );

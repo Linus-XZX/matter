@@ -16,14 +16,14 @@ class RoomManagementPage extends ConsumerStatefulWidget {
   final String roomId;
   final String roomName;
   final String? avatarUrl;
-  final VoidCallback? onRoomLeft;
+  final VoidCallback? onRoomClosed;
 
   const RoomManagementPage({
     super.key,
     required this.roomId,
     required this.roomName,
     this.avatarUrl,
-    this.onRoomLeft,
+    this.onRoomClosed,
   });
 
   @override
@@ -69,6 +69,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   Future<void> _load() async {
+    if (!mounted) return;
     setState(() {
       _loading = true;
       _error = null;
@@ -159,9 +160,17 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   );
 
   void _invalidateRoom() {
+    if (!mounted) return;
     ref.invalidate(chatRoomsProvider);
     ref.invalidate(ungroupedRoomsProvider);
+    ref.invalidate(spaceChildrenProvider);
+    ref.invalidate(searchRoomsProvider);
     ref.invalidate(roomMembersProvider(widget.roomId));
+  }
+
+  void _closeCurrentRoom() {
+    widget.onRoomClosed?.call();
+    Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
   Future<void> _saveDetails() async {
@@ -277,8 +286,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                   roomId: widget.roomId,
                   userId: userId,
                 );
+                if (!mounted || !dialogContext.mounted) return;
                 _invalidateRoom();
-                if (!dialogContext.mounted) return;
                 Navigator.of(dialogContext).pop();
                 _showSnackBar('邀请已发送');
               } catch (error) {
@@ -297,6 +306,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   Future<void> _setUserIgnored(String userId, bool ignored) async {
     try {
       await rust.setUserIgnored(userId: userId, ignored: ignored);
+      if (!mounted) return;
       ref.invalidate(ignoredUserIdsProvider);
       ref.invalidate(messagesProvider(widget.roomId));
       await _load();
@@ -405,8 +415,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                 _invalidateRoom();
                 if (!dialogContext.mounted || !mounted) return;
                 Navigator.of(dialogContext).pop();
-                widget.onRoomLeft?.call();
-                Navigator.of(context).popUntil((route) => route.isFirst);
+                _closeCurrentRoom();
               } catch (error) {
                 if (dialogContext.mounted) _showSnackBar('退出失败: $error');
               }
@@ -657,7 +666,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           try {
                             await rust.markRoomUnread(roomId: widget.roomId);
                             _invalidateRoom();
-                            if (mounted) _showSnackBar('已标记为未读');
+                            if (!mounted) return;
+                            _showSnackBar('已标记为未读');
+                            _closeCurrentRoom();
                           } catch (error) {
                             if (mounted) _showSnackBar('操作失败: $error');
                           }

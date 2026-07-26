@@ -1,5 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use futures_util::StreamExt;
 use matrix_sdk::{
     ruma::{
         api::client::receipt::create_receipt::v3::ReceiptType,
@@ -97,13 +98,17 @@ pub(super) async fn get_messages(client: &Client, room: &Room) -> Result<Vec<Cha
     let timeline = get_or_create_timeline(client, room).await?;
     ensure_initial_window(&timeline, LIVE_WINDOW).await?;
 
-    if mark_as_read(&timeline, room).await.is_ok() {
-        if let Err(error) = clear_marked_unread_if_set(room).await {
+    match is_marked_unread(room).await {
+        Ok(false) => {
+            let _ = mark_as_read(&timeline, room).await;
+        }
+        Ok(true) => {}
+        Err(error) => {
             super::app_log(
                 "warn",
                 "receipts",
                 format!(
-                    "Failed to clear marked-unread flag for room {}: {error}",
+                    "Failed to load marked-unread flag for room {}: {error}",
                     room.room_id()
                 ),
             );
@@ -136,13 +141,51 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         return Ok(Vec::new());
     }
 
+    let max_events_to_load = room
+        .client()
+        .event_cache()
+        .config()
+        .max_pinned_events_to_load;
+    let expected_pinned_ids: Vec<_> = pinned_ids
+        .iter()
+        .rev()
+        .take(max_events_to_load)
+        .map(|event_id| event_id.as_ref())
+        .collect();
+
     let timeline = TimelineBuilder::new(room)
         .with_focus(TimelineFocus::PinnedEvents)
         .build()
         .await
         .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
 
-    let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
+    let (mut items, mut updates) = timeline.subscribe().await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let has_all_pinned_events = expected_pinned_ids.iter().all(|expected_id| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_event())
+                    .any(|event| event.event_id() == Some(*expected_id))
+            });
+            if has_all_pinned_events {
+                return Ok::<(), &'static str>(());
+            }
+
+            let diffs = updates
+                .next()
+                .await
+                .ok_or("Pinned message timeline closed before loading events.")?;
+            for diff in diffs {
+                diff.apply(&mut items);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "Timed out while loading pinned messages.".to_string())??;
+
+    let items: Vec<_> = items.into_iter().collect();
+    let messages = convert_snapshot(room, &items).await;
     let by_id: HashMap<String, ChatMessage> = messages
         .into_iter()
         .map(|message| (message.id.clone(), message))
@@ -218,22 +261,17 @@ async fn clear_marked_unread(room: &Room) -> Result<(), String> {
         .map_err(|error| format!("Failed to clear marked-unread flag: {error}"))
 }
 
-/// Avoid an account-data write on background reads unless the cached flag is set.
-async fn clear_marked_unread_if_set(room: &Room) -> Result<(), String> {
+async fn is_marked_unread(room: &Room) -> Result<bool, String> {
     use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
 
-    let is_marked_unread = room
+    Ok(room
         .account_data_static::<MarkedUnreadEventContent>()
         .await
         .map_err(|error| format!("Failed to load marked-unread flag: {error}"))?
         .map(|raw| raw.deserialize())
         .transpose()
         .map_err(|error| format!("Failed to decode marked-unread flag: {error}"))?
-        .is_some_and(|event| event.content.unread);
-    if !is_marked_unread {
-        return Ok(());
-    }
-    clear_marked_unread(room).await
+        .is_some_and(|event| event.content.unread))
 }
 
 pub(super) async fn get_messages_before(

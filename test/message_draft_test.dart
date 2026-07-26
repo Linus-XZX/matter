@@ -13,6 +13,9 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
+  @override
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+
   Completer<String>? pendingSend;
 
   @override

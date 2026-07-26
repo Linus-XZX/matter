@@ -12,6 +12,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
   @override
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+
+  @override
   Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async {
     return false;
   }
