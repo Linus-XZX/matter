@@ -223,6 +223,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
     try {
       await markRoomAsRead(roomId: widget.roomId);
+      if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
+      ref.read(roomUnreadOverrideProvider(widget.roomId).notifier).value =
+          false;
     } catch (error) {
       debugPrint('markRoomAsRead failed: $error');
     }
@@ -314,7 +317,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     if (_olderLoadArmed &&
         !_isLoadingOlder &&
         _hasMoreMessages &&
-        _displayedMessages.isNotEmpty &&
+        _paginationAnchorId() != null &&
         distanceFromOlderEdge <= triggerDistance) {
       _olderLoadArmed = false;
       unawaited(_loadOlderMessages());
@@ -445,13 +448,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   }
 
   Future<void> _loadOlderMessages() async {
-    if (_isLoadingOlder || !_hasMoreMessages || _displayedMessages.isEmpty) {
+    if (_isLoadingOlder || !_hasMoreMessages) {
       return;
     }
 
-    final fromEventId = _olderMessages.isNotEmpty
-        ? _olderMessages.first.id
-        : _displayedMessages.first.id;
+    final fromEventId = _paginationAnchorId();
+    if (fromEventId == null) return;
     setState(() => _isLoadingOlder = true);
     try {
       final older = await getMessagesBefore(
@@ -508,6 +510,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         context,
       ).showSnackBar(SnackBar(content: Text('加载更早消息失败: $error')));
     }
+  }
+
+  String? _paginationAnchorId() {
+    if (_olderMessages.isNotEmpty) return _olderMessages.first.id;
+    final cachedMessages = ref.read(messageCacheProvider(widget.roomId));
+    if (cachedMessages.isNotEmpty) return cachedMessages.first.id;
+    if (_displayedMessages.isNotEmpty) return _displayedMessages.first.id;
+    return null;
   }
 
   List<ChatMessage> _mergeMessages(
@@ -1138,6 +1148,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                     localOutgoingMessages,
                   );
                   _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
+                  if (_displayedMessages.isEmpty &&
+                      !_isLoadingOlder &&
+                      _hasMoreMessages &&
+                      _paginationAnchorId() != null) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) unawaited(_loadOlderMessages());
+                    });
+                  }
                   final timelineEntries = _timelineEntries;
                   final messageIndex = _messageIndex;
                   final avatarMap = membersAsync.maybeWhen(

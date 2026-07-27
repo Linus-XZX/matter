@@ -1815,7 +1815,7 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
             if (!isEvent)
               _IconTextAction(
                 icon: Icons.push_pin_outlined,
-                label: '置顶',
+                label: '置顶/取消置顶',
                 onTap: () => _select(widget.onPin),
               ),
             if (widget.isMe && isText)

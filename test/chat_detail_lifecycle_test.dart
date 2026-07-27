@@ -17,6 +17,9 @@ class _FakeRustApi implements RustLibApi {
   int unsubscribeTypingCalls = 0;
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
+  int getMessagesBeforeCalls = 0;
+  final messagesBeforeEventIds = <String>[];
+  List<rust.ChatMessage> messagesBefore = const [];
   Completer<String>? pendingSend;
 
   @override
@@ -65,6 +68,17 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+
+  @override
+  Future<List<rust.ChatMessage>> crateApiMatrixGetMessagesBefore({
+    required String roomId,
+    required String fromEventId,
+    required int limit,
+  }) async {
+    getMessagesBeforeCalls++;
+    messagesBeforeEventIds.add(fromEventId);
+    return messagesBefore;
+  }
 
   @override
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
@@ -143,6 +157,9 @@ void main() {
     rustApi.unsubscribeTypingCalls = 0;
     rustApi.subscribeRoomCalls = 0;
     rustApi.unsubscribeRoomCalls = 0;
+    rustApi.getMessagesBeforeCalls = 0;
+    rustApi.messagesBeforeEventIds.clear();
+    rustApi.messagesBefore = const [];
     rustApi.pendingSend = null;
     rustApi.activeTypingRoom = null;
     rustApi.typingUnsubscribeBarrier = null;
@@ -365,6 +382,55 @@ void main() {
 
     expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
     expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('loads older history when ignored messages empty the window', (
+    tester,
+  ) async {
+    const roomId = '!ignored-window:example.org';
+    final older = _ownMessage(
+      r'$older-visible',
+      content: 'older',
+      timestamp: '0',
+    );
+    rustApi.messagesBefore = [older];
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith(
+          (ref) async => const {'@alice:example.org'},
+        ),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$ignored-anchor'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.getMessagesBeforeCalls, greaterThanOrEqualTo(1));
+    expect(rustApi.messagesBeforeEventIds.first, r'$ignored-anchor');
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$older-visible')),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();

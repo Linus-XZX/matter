@@ -5322,7 +5322,7 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
     Ok(pinned)
 }
 
-/// Load pinned messages in display order, up to the SDK event-cache limit.
+/// Load every accessible pinned message in display order.
 #[frb]
 pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let client = get_client().await.ok_or("No client created.")?;

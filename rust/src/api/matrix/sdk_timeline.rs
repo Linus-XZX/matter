@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use futures_util::{stream, StreamExt};
 use matrix_sdk::{
     event_cache::EventsOrigin,
     ruma::{
@@ -14,8 +15,8 @@ use matrix_sdk::{
 };
 use matrix_sdk_ui::timeline::{
     EventTimelineItem, MembershipChange, MsgLikeKind, Profile, ReactionStatus, Timeline,
-    TimelineBuilder, TimelineDetails, TimelineFocus, TimelineItem, TimelineItemContent,
-    TimelineReadReceiptTracking,
+    TimelineBuilder, TimelineDetails, TimelineEventFocusThreadMode, TimelineFocus, TimelineItem,
+    TimelineItemContent, TimelineReadReceiptTracking,
 };
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
@@ -168,7 +169,7 @@ pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<()
     clear_marked_unread(room).await
 }
 
-/// Load pinned events through the SDK's event-focused cache, up to its limit.
+/// Load every accessible pinned event, supplementing the SDK's bounded cache.
 pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
     let pinned_ids = room
         .load_pinned_events()
@@ -190,9 +191,6 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         .take(max_events_to_load)
         .map(|event_id| event_id.as_ref())
         .collect();
-    if expected_pinned_ids.is_empty() {
-        return Ok(Vec::new());
-    }
 
     let (room_event_cache, _event_cache_drop_handles) = room
         .event_cache()
@@ -239,29 +237,120 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         events.iter().filter_map(|event| event.event_id()),
         &expected_pinned_ids,
     );
-    if loaded_count == 0 {
-        return Err(match wait_result {
+    let mut cache_error = if loaded_count == 0 {
+        Some(match wait_result {
             Ok(Err(error)) => format!("Failed to load pinned messages: {error}"),
             Err(_) => "Timed out while loading pinned messages.".to_owned(),
             Ok(Ok(())) => "Failed to load any pinned messages.".to_owned(),
-        });
+        })
+    } else {
+        None
+    };
+
+    let mut by_id = HashMap::new();
+    if loaded_count > 0 {
+        match TimelineBuilder::new(room)
+            .with_focus(TimelineFocus::PinnedEvents)
+            .build()
+            .await
+        {
+            Ok(timeline) => {
+                let items = snapshot(&timeline).await;
+                by_id.extend(
+                    convert_snapshot(room, &items)
+                        .await
+                        .into_iter()
+                        .map(|message| (message.id.clone(), message)),
+                );
+            }
+            Err(error) => {
+                let error = format!("Failed to load pinned messages: {error}");
+                super::app_log("warn", "pinned", error.clone());
+                cache_error = Some(error);
+            }
+        }
     }
 
+    let missing_ids = missing_pinned_event_ids(&pinned_ids, &by_id);
+    let fetched = stream::iter(missing_ids)
+        .map(|event_id| {
+            let room = room.clone();
+            async move {
+                let result = load_focused_message(&room, event_id.clone()).await;
+                (event_id, result)
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    let mut focused_error = None;
+    for (event_id, result) in fetched {
+        match result {
+            Ok(Some(message)) => {
+                by_id.insert(event_id.to_string(), message);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                focused_error.get_or_insert_with(|| error.clone());
+                super::app_log(
+                    "warn",
+                    "pinned",
+                    format!("Failed to load pinned event {event_id}: {error}"),
+                );
+            }
+        }
+    }
+
+    if by_id.is_empty() {
+        return Err(focused_error
+            .map(|error| format!("Failed to load pinned messages: {error}"))
+            .or(cache_error)
+            .unwrap_or_else(|| "Failed to load any pinned messages.".to_owned()));
+    }
+
+    Ok(ordered_pinned_messages(&pinned_ids, &by_id))
+}
+
+async fn load_focused_message(
+    room: &Room,
+    event_id: matrix_sdk::ruma::OwnedEventId,
+) -> Result<Option<ChatMessage>, String> {
     let timeline = TimelineBuilder::new(room)
-        .with_focus(TimelineFocus::PinnedEvents)
+        .with_focus(TimelineFocus::Event {
+            target: event_id.clone(),
+            num_context_events: 0,
+            thread_mode: TimelineEventFocusThreadMode::Automatic {
+                hide_threaded_events: false,
+            },
+        })
         .build()
         .await
-        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
-    let items = snapshot(&timeline).await;
-    let messages = convert_snapshot(room, &items).await;
-    let by_id: HashMap<String, ChatMessage> = messages
+        .map_err(|error| format!("Failed to load event: {error}"))?;
+    Ok(convert_snapshot(room, &snapshot(&timeline).await)
+        .await
         .into_iter()
-        .map(|message| (message.id.clone(), message))
-        .collect();
-    Ok(pinned_ids
+        .find(|message| message.id == event_id.as_str()))
+}
+
+fn ordered_pinned_messages(
+    pinned_ids: &[matrix_sdk::ruma::OwnedEventId],
+    by_id: &HashMap<String, ChatMessage>,
+) -> Vec<ChatMessage> {
+    pinned_ids
         .iter()
         .filter_map(|event_id| by_id.get(event_id.as_str()).cloned())
-        .collect())
+        .collect()
+}
+
+fn missing_pinned_event_ids(
+    pinned_ids: &[matrix_sdk::ruma::OwnedEventId],
+    by_id: &HashMap<String, ChatMessage>,
+) -> Vec<matrix_sdk::ruma::OwnedEventId> {
+    pinned_ids
+        .iter()
+        .filter(|event_id| !by_id.contains_key(event_id.as_str()))
+        .cloned()
+        .collect()
 }
 
 async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
@@ -1161,8 +1250,9 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 mod tests {
     use super::{
         loaded_expected_event_count, loaded_expected_event_ids, messages_before,
-        newest_receipt_position, pinned_events_ready, reader_ids_for_position,
-        record_latest_receipt_position, resolve_receipt_position,
+        missing_pinned_event_ids, newest_receipt_position, ordered_pinned_messages,
+        pinned_events_ready, reader_ids_for_position, record_latest_receipt_position,
+        resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
@@ -1262,6 +1352,37 @@ mod tests {
     #[test]
     fn empty_network_result_is_not_ready() {
         assert!(!pinned_events_ready(0, 2, true));
+    }
+
+    #[test]
+    fn supplements_a_bounded_pinned_cache_and_preserves_state_order() {
+        use matrix_sdk::ruma::EventId;
+
+        let pinned_ids = (0..130)
+            .map(|index| EventId::parse(format!("$pin-{index}:example.org")).unwrap())
+            .collect::<Vec<_>>();
+        let bounded_cache = pinned_ids
+            .iter()
+            .skip(2)
+            .map(|event_id| (event_id.to_string(), message(event_id.as_str())))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            missing_pinned_event_ids(&pinned_ids, &bounded_cache)
+                .iter()
+                .map(|event_id| event_id.as_str())
+                .collect::<Vec<_>>(),
+            ["$pin-0:example.org", "$pin-1:example.org"]
+        );
+
+        let all_messages = pinned_ids
+            .iter()
+            .map(|event_id| (event_id.to_string(), message(event_id.as_str())))
+            .collect::<HashMap<_, _>>();
+        let ordered = ordered_pinned_messages(&pinned_ids, &all_messages);
+        assert_eq!(ordered.len(), 130);
+        assert_eq!(ordered.first().unwrap().id, "$pin-0:example.org");
+        assert_eq!(ordered.last().unwrap().id, "$pin-129:example.org");
     }
 
     #[test]

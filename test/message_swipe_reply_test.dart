@@ -52,6 +52,23 @@ Widget _buildSubject({
 }
 
 void main() {
+  testWidgets('message menu describes pinning as a toggle', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-toggle', isMe: false);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-toggle')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('置顶/取消置顶'), findsOneWidget);
+  });
+
   testWidgets('left swipe past threshold starts a reply to another user', (
     tester,
   ) async {

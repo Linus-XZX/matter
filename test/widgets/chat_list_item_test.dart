@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/chat_list_item.dart';
 import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
 
 void main() {
@@ -149,6 +150,56 @@ void main() {
       await tester.pump();
 
       expect(find.text('99+'), findsOneWidget);
+    });
+
+    testWidgets('optimistic read state overrides stale unread counts', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-read:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(roomUnreadOverrideProvider(roomId).notifier).value = false;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, unreadCount: 5)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('optimistic unread state overrides stale read state', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-unread:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(roomUnreadOverrideProvider(roomId).notifier).value = true;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('shows a person icon for dm rooms', (tester) async {

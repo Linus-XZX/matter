@@ -560,7 +560,7 @@ Future<bool> togglePinnedMessage({
   eventId: eventId,
 );
 
-/// Load pinned messages in display order, up to the SDK event-cache limit.
+/// Load every accessible pinned message in display order.
 Future<List<ChatMessage>> getPinnedMessages({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetPinnedMessages(roomId: roomId);
 

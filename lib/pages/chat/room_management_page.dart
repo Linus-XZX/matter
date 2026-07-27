@@ -703,8 +703,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         onTap: () async {
                           try {
                             await rust.markRoomAsRead(roomId: widget.roomId);
+                            if (!mounted) return;
+                            final unreadOverride = ref.read(
+                              roomUnreadOverrideProvider(
+                                widget.roomId,
+                              ).notifier,
+                            );
+                            unreadOverride.value = false;
                             _invalidateRoom();
-                            if (mounted) _showSnackBar('已标记为已读');
+                            _showSnackBar('已标记为已读');
                           } catch (error) {
                             if (mounted) _showSnackBar('操作失败: $error');
                           }
@@ -716,8 +723,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         onTap: () async {
                           try {
                             await rust.markRoomUnread(roomId: widget.roomId);
-                            _invalidateRoom();
                             if (!mounted) return;
+                            final unreadOverride = ref.read(
+                              roomUnreadOverrideProvider(
+                                widget.roomId,
+                              ).notifier,
+                            );
+                            unreadOverride.value = true;
+                            _invalidateRoom();
                             _showSnackBar('已标记为未读');
                             _closeCurrentRoom();
                           } catch (error) {

@@ -64,12 +64,19 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
   return (await rust.getIgnoredUsers()).toSet();
 });
 
+/// Optimistic unread state while read receipts or account data catch up via sync.
+final roomUnreadOverrideProvider =
+    NotifierProvider.family<MutableState<bool?>, bool?, String>(
+      (_) => MutableState(null),
+    );
+
 void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(chatRoomsProvider);
   ref.invalidate(spacesProvider);
   ref.invalidate(ungroupedRoomsProvider);
   ref.invalidate(contactsProvider);
   ref.invalidate(ignoredUserIdsProvider);
+  ref.invalidate(roomUnreadOverrideProvider);
 }
 
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {

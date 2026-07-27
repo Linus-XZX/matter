@@ -62,7 +62,17 @@ class ChatListItem extends ConsumerWidget {
     final preview = hasDraft
         ? draft.trim().replaceAll(RegExp(r'\s+'), ' ')
         : chatListPreview(room);
-    final hasUnread = room.unreadCount > 0 || room.isMarkedUnread;
+    final unreadOverride = ref.watch(roomUnreadOverrideProvider(room.id));
+    final syncedHasUnread = room.unreadCount > 0 || room.isMarkedUnread;
+    final hasUnread = unreadOverride ?? syncedHasUnread;
+    if (unreadOverride != null && unreadOverride == syncedHasUnread) {
+      Future.microtask(() {
+        if (!context.mounted) return;
+        if (ref.read(roomUnreadOverrideProvider(room.id)) == unreadOverride) {
+          ref.read(roomUnreadOverrideProvider(room.id).notifier).value = null;
+        }
+      });
+    }
 
     return InkWell(
       borderRadius: BorderRadius.circular(AppRadii.button),
@@ -185,6 +195,7 @@ class ChatListItem extends ConsumerWidget {
                       if (hasUnread) ...[
                         const SizedBox(width: 8),
                         Container(
+                          key: ValueKey('room-unread-badge:${room.id}'),
                           padding: const EdgeInsets.symmetric(
                             horizontal: 7,
                             vertical: 2,
@@ -275,6 +286,7 @@ class ChatListItem extends ConsumerWidget {
                   ref,
                   room.id,
                   markRoomAsRead,
+                  false,
                   '已标记为已读',
                 ),
               ),
@@ -293,6 +305,7 @@ class ChatListItem extends ConsumerWidget {
                   ref,
                   room.id,
                   markRoomUnread,
+                  true,
                   '已标记为未读',
                 ),
               ),
@@ -309,15 +322,19 @@ class ChatListItem extends ConsumerWidget {
     WidgetRef ref,
     String roomId,
     Future<void> Function({required String roomId}) action,
+    bool markedUnread,
     String successMessage,
   ) async {
     try {
       await action(roomId: roomId);
+      if (!context.mounted) return;
+      ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
+          markedUnread;
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
       ref.invalidate(spaceChildrenProvider);
       ref.invalidate(searchRoomsProvider);
-      if (!sheetContext.mounted || !context.mounted) return;
+      if (!sheetContext.mounted) return;
       Navigator.of(sheetContext).pop();
       ScaffoldMessenger.of(
         context,
