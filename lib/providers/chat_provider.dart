@@ -59,10 +59,161 @@ final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
 
 /// Server-backed ignore list. Chat timelines filter these senders immediately,
 /// while the Matrix SDK applies the same policy to future sync events.
+///
+/// The last successfully fetched list is persisted per account so that a
+/// loading or failed refresh never degrades into "nobody is ignored" and
+/// re-exposes cached messages from ignored senders. When no snapshot exists
+/// yet, the state is *unknown* — wait for the authoritative fetch (which
+/// itself falls back to the SDK's local account-data store when offline)
+/// instead of rendering unfiltered.
 final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return const <String>{};
-  return (await rust.getIgnoredUsers()).toSet();
+  final namespace = ref.watch(activeUserIdProvider) ?? '';
+  final persisted = await _loadPersistedIgnoredUserIds(namespace);
+  if (persisted != null) {
+    unawaited(_refreshIgnoredUserIds(ref, namespace, persisted));
+    return persisted;
+  }
+  final version = _ignoredListVersion(namespace);
+  final fresh = (await rust.getIgnoredUsers()).toSet();
+  if (_ignoredListVersion(namespace) == version) {
+    await _enqueueIgnoredListWrite(namespace, version, () async {
+      await _persistIgnoredUserIds(namespace, fresh);
+    });
+    // Re-check after the persist: a confirmed change may have landed while
+    // the write was queued or on disk; this response is stale then.
+    if (_ignoredListVersion(namespace) == version) return fresh;
+  }
+  // A confirmed change landed while this fetch (or its persist) was in
+  // flight: the response is stale and must not become the provider state.
+  // Serve the newer write-through snapshot instead; the read is queued
+  // behind the change's own write so it observes the post-change snapshot.
+  Set<String>? latest;
+  await _enqueueIgnoredListWrite(namespace, null, () async {
+    latest = await _loadPersistedIgnoredUserIds(namespace);
+  });
+  return latest ?? fresh;
 });
+
+const _kIgnoredUsersCachePrefix = 'ignored_users_v1';
+
+/// Returns the persisted ignore list, or null when no snapshot exists yet
+/// (distinct from a persisted *empty* list).
+Future<Set<String>?> _loadPersistedIgnoredUserIds(String namespace) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getStringList(
+      '${_kIgnoredUsersCachePrefix}_$namespace',
+    );
+    return stored?.toSet();
+  } catch (error) {
+    debugPrint('loadPersistedIgnoredUserIds failed: $error');
+    return null;
+  }
+}
+
+Future<void> _persistIgnoredUserIds(String namespace, Set<String> ids) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      '${_kIgnoredUsersCachePrefix}_$namespace',
+      ids.toList()..sort(),
+    );
+  } catch (error) {
+    debugPrint('persistIgnoredUserIds failed: $error');
+  }
+}
+
+/// Write the authoritative ignore list returned by a successful
+/// `setUserIgnored` call through to the persisted snapshot for [namespace],
+/// so timelines filter the affected sender immediately after the caller
+/// revalidates [ignoredUserIdsProvider]. Without this, the provider would
+/// keep serving the pre-change snapshot until a background server refresh
+/// happens to succeed (and would restore it forever if that refresh keeps
+/// failing). Persisting the full post-write list — rather than merging a
+/// delta into a possibly unknown local baseline — also keeps other
+/// already-ignored users when no snapshot exists yet.
+Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
+  // Bump synchronously so any refresh whose fetch started earlier is
+  // recognized as stale when it completes. The queued write itself must
+  // always run: queued writes execute in order, so rapid consecutive
+  // changes apply in order instead of losing updates.
+  _ignoredListWriteVersions[namespace] = _ignoredListVersion(namespace) + 1;
+  await _enqueueIgnoredListWrite(namespace, null, () async {
+    await _persistIgnoredUserIds(namespace, ids);
+  });
+}
+
+Future<void> _refreshIgnoredUserIds(
+  Ref ref,
+  String namespace,
+  Set<String> persisted,
+) async {
+  // Captured before the fetch: if a confirmed change bumps the version while
+  // this refresh is in flight, its (stale) result must not overwrite the
+  // write-through, nor revalidate the provider over newer state.
+  final version = _ignoredListVersion(namespace);
+  try {
+    final fresh = (await rust.getIgnoredUsers()).toSet();
+    await _enqueueIgnoredListWrite(namespace, version, () async {
+      await _persistIgnoredUserIds(namespace, fresh);
+    });
+    if (_ignoredListVersion(namespace) == version &&
+        (fresh.length != persisted.length || !fresh.containsAll(persisted))) {
+      ref.invalidateSelf();
+    }
+  } catch (error) {
+    // Keep the persisted snapshot: an unknown server state must not be
+    // treated as an empty ignore list.
+    debugPrint('refreshIgnoredUserIds failed: $error');
+  }
+}
+
+final _ignoredListWriteVersions = <String, int>{};
+final _ignoredListWriteQueues = <String, List<Future<void> Function()>>{};
+
+int _ignoredListVersion(String namespace) =>
+    _ignoredListWriteVersions[namespace] ?? 0;
+
+/// Serializes persisted ignore-list writes per account. When
+/// [expectedVersion] is given, the write runs only if the list's version
+/// still equals it — a confirmed change ([persistIgnoredUserList]) bumps
+/// the version synchronously, so a refresh whose fetch started before that
+/// change is dropped instead of overwriting the newer snapshot. Confirmed
+/// changes pass null: their queued writes always run, in order.
+///
+/// The returned future is created in the caller's zone and the drain starts
+/// in the caller's zone, so this stays safe when callers live in different
+/// zones (e.g. separate `testWidgets` bodies with their own FakeAsync).
+Future<void> _enqueueIgnoredListWrite(
+  String namespace,
+  int? expectedVersion,
+  Future<void> Function() write,
+) {
+  final completer = Completer<void>();
+  final queue = _ignoredListWriteQueues.putIfAbsent(namespace, () => []);
+  queue.add(() async {
+    try {
+      if (expectedVersion == null ||
+          _ignoredListVersion(namespace) == expectedVersion) {
+        await write();
+      }
+      completer.complete();
+    } catch (error) {
+      completer.completeError(error);
+    }
+  });
+  if (queue.length == 1) unawaited(_drainIgnoredListWrites(namespace));
+  return completer.future;
+}
+
+Future<void> _drainIgnoredListWrites(String namespace) async {
+  final queue = _ignoredListWriteQueues[namespace]!;
+  while (queue.isNotEmpty) {
+    await queue.first();
+    queue.removeAt(0);
+  }
+}
 
 class RoomUnreadOverride {
   final bool unread;

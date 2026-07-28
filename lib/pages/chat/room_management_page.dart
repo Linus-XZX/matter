@@ -50,6 +50,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   Object? _membersLoadError;
   Object? _ignoredUsersLoadError;
   bool _muted = false;
+  bool _muteSaving = false;
   bool _loading = true;
   bool _saving = false;
   String? _error;
@@ -271,7 +272,11 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   Future<void> _setMuted(bool muted) async {
-    setState(() => _muted = muted);
+    if (_muteSaving) return;
+    setState(() {
+      _muteSaving = true;
+      _muted = muted;
+    });
     try {
       await rust.setRoomMuted(roomId: widget.roomId, muted: muted);
       if (!mounted) return;
@@ -282,6 +287,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         setState(() => _muted = !muted);
         _showSnackBar('通知设置更新失败: $error');
       }
+    } finally {
+      if (mounted) setState(() => _muteSaving = false);
     }
   }
 
@@ -336,8 +343,22 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   Future<void> _setUserIgnored(String userId, bool ignored) async {
+    // Captured before the await: the write-through must run even if this
+    // page is popped while the server request is in flight.
+    final namespace = ref.read(activeUserIdProvider) ?? '';
     try {
-      await rust.setUserIgnored(userId: userId, ignored: ignored);
+      final updated = await rust.setUserIgnored(
+        userId: userId,
+        ignored: ignored,
+      );
+      // The server write succeeded: write the returned full list through to
+      // the local snapshot so open timelines hide/show the sender's messages
+      // now, without waiting for a background refresh that may fail offline.
+      // Persisting the complete list (not a delta) also keeps other ignored
+      // users when no local snapshot exists yet. This only touches
+      // SharedPreferences, so it is safe after unmount — skipping it here
+      // would keep the sender visible indefinitely.
+      await persistIgnoredUserList(namespace, updated.toSet());
       if (!mounted) return;
       ref.invalidate(ignoredUserIdsProvider);
       setState(() {
@@ -707,7 +728,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           ),
                         ),
                         value: _muted,
-                        onChanged: _mutedLoadError == null ? _setMuted : null,
+                        onChanged: _mutedLoadError == null && !_muteSaving
+                            ? _setMuted
+                            : null,
                         secondary: _mutedLoadError == null
                             ? null
                             : IconButton(

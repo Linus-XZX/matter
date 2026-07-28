@@ -315,6 +315,44 @@ struct MarkedUnreadOverride {
 static MARKED_UNREAD_OVERRIDES: Lazy<RwLock<HashMap<String, MarkedUnreadOverride>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+/// Per-account notification-settings handles. Reusing one instance matters:
+/// it applies its own writes to its internal ruleset, while a fresh instance
+/// initializes from the local store copy of push rules, which lags the sync
+/// echo and can turn a rapid mute/unmute/re-mute sequence into a no-op.
+static NOTIFICATION_SETTINGS: Lazy<
+    RwLock<HashMap<String, matrix_sdk::notification_settings::NotificationSettings>>,
+> = Lazy::new(|| RwLock::new(HashMap::new()));
+
+async fn notification_settings_for(
+    client: &Client,
+    user_id: &str,
+) -> matrix_sdk::notification_settings::NotificationSettings {
+    if let Some(settings) = NOTIFICATION_SETTINGS.read().await.get(user_id) {
+        return settings.clone();
+    }
+    let settings = client.notification_settings().await;
+    NOTIFICATION_SETTINGS
+        .write()
+        .await
+        .entry(user_id.to_string())
+        .or_insert(settings)
+        .clone()
+}
+
+/// Drop per-account runtime state whenever a client is removed or replaced
+/// (logout, account removal, or login replacing an existing client), so a
+/// later session never reuses state bound to the old client or sync position.
+async fn clear_account_runtime_state(user_id: &str) {
+    {
+        let mut settings = NOTIFICATION_SETTINGS.write().await;
+        settings.remove(user_id);
+    }
+    {
+        let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
+        overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
+    }
+}
+
 #[frb]
 #[derive(Clone, Debug)]
 pub struct SessionTokenUpdate {
@@ -330,9 +368,10 @@ fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
 }
 
-async fn enqueue_mutation<F>(key: String, operation: F) -> Result<(), String>
+async fn enqueue_mutation<F, T>(key: String, operation: F) -> Result<T, String>
 where
-    F: Future<Output = Result<(), String>> + Send + 'static,
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
 {
     let id = NEXT_MUTATION_ID.fetch_add(1, Ordering::Relaxed);
     let future = {
@@ -352,7 +391,13 @@ where
             key.clone(),
             MutationTail {
                 id,
-                future: future.clone(),
+                // Chain on a unit-typed projection so operations with
+                // different payload types can share one queue per key.
+                future: future
+                    .clone()
+                    .map(|result| result.map(|_| ()))
+                    .boxed()
+                    .shared(),
             },
         );
         future
@@ -897,6 +942,7 @@ async fn finalize_pending() -> Result<String, String> {
         let mut clients = CLIENTS.write().await;
         clients.remove(&user_id);
     }
+    clear_account_runtime_state(&user_id).await;
 
     // Release every reference before moving SQLite files (required on Windows
     // and avoids moving a database while WAL writes are still in flight).
@@ -1184,7 +1230,15 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         .await
         .map(|state| state.is_encrypted())
         .unwrap_or(true);
-    let notification_settings = room.client().notification_settings().await;
+    let notification_settings = notification_settings_for(
+        &room.client(),
+        &room
+            .client()
+            .user_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+    )
+    .await;
     let is_muted = notification_settings
         .get_user_defined_room_notification_mode(room.room_id())
         .await
@@ -2324,6 +2378,7 @@ pub async fn logout() -> Result<(), String> {
         let mut clients = CLIENTS.write().await;
         clients.remove(&user_id);
     }
+    clear_account_runtime_state(&user_id).await;
 
     // Delete the per-user SDK data directory after the client has been removed.
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
@@ -2394,6 +2449,7 @@ pub async fn remove_account(user_id: String) -> Result<(), String> {
         let mut clients = CLIENTS.write().await;
         clients.remove(&user_id);
     }
+    clear_account_runtime_state(&user_id).await;
 
     // Delete the per-user SDK data directory
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
@@ -2519,7 +2575,9 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
     install_live_update_event_handlers(&client);
     install_room_key_event_handler(&client);
 
-    // Add to multi-account store
+    // Add to multi-account store, dropping any runtime state bound to a
+    // previous client for this account (e.g. after an engine rebuild).
+    clear_account_runtime_state(&session.user_id).await;
     {
         let mut clients = CLIENTS.write().await;
         clients.insert(
@@ -5441,7 +5499,11 @@ pub async fn upload_room_avatar(
 pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let settings = client.notification_settings().await;
+    let user_id = client
+        .user_id()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let settings = notification_settings_for(&client, &user_id).await;
     Ok(settings
         .get_user_defined_room_notification_mode(room.room_id())
         .await
@@ -5453,31 +5515,41 @@ pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
 pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let settings = client.notification_settings().await;
-    if muted {
-        settings
-            .set_room_notification_mode(
-                room.room_id(),
-                matrix_sdk::notification_settings::RoomNotificationMode::Mute,
-            )
-            .await
-            .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
-    } else {
-        let is_encrypted = room
-            .latest_encryption_state()
-            .await
-            .map(|state| state.is_encrypted())
-            .unwrap_or(false);
-        let is_one_to_one = room.is_direct().await.unwrap_or(false);
-        settings
-            .unmute_room(
-                room.room_id(),
-                matrix_sdk::notification_settings::IsEncrypted::from(is_encrypted),
-                matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
-            )
-            .await
-            .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
-    }
+    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    enqueue_mutation(format!("muted:{user_id}:{room_id}"), async move {
+        // Push-rule updates are read-modify-write server calls; serialize per
+        // room so rapid toggles apply in click order instead of racing. The
+        // shared per-account instance applies its own writes to its internal
+        // ruleset, so a re-toggle right after the previous write cannot
+        // misread the pre-write state from the store and no-op.
+        let settings = notification_settings_for(&client, &user_id).await;
+        if muted {
+            settings
+                .set_room_notification_mode(
+                    room.room_id(),
+                    matrix_sdk::notification_settings::RoomNotificationMode::Mute,
+                )
+                .await
+                .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
+        } else {
+            let is_encrypted = room
+                .latest_encryption_state()
+                .await
+                .map(|state| state.is_encrypted())
+                .unwrap_or(false);
+            let is_one_to_one = room.is_direct().await.unwrap_or(false);
+            settings
+                .unmute_room(
+                    room.room_id(),
+                    matrix_sdk::notification_settings::IsEncrypted::from(is_encrypted),
+                    matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
+                )
+                .await
+                .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
+        }
+        Ok(())
+    })
+    .await?;
     notify_sync_event(SyncEvent::RoomListChanged);
     Ok(())
 }
@@ -5493,15 +5565,30 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
     let pinned_result = Arc::new(AtomicBool::new(false));
     let queued_result = pinned_result.clone();
     enqueue_mutation(format!("pinned:{user_id}:{room_id}"), async move {
-        let pinned = room
-            .pin_event(&event_id)
+        // RMW against the authoritative server state: the SDK's in-memory
+        // room state lags our own writes until the sync echo, so rapid
+        // pin/unpin sequences would otherwise overwrite each other.
+        // load_pinned_events is a server read that maps a missing
+        // m.room.pinned_events state (first-ever pin) to an empty list.
+        let mut pinned_ids = room
+            .load_pinned_events()
             .await
-            .map_err(|error| format!("Failed to pin message: {error}"))?;
-        if !pinned {
-            room.unpin_event(&event_id)
-                .await
-                .map_err(|error| format!("Failed to unpin message: {error}"))?;
-        }
+            .map_err(|error| format!("Failed to load pinned state: {error}"))?
+            .unwrap_or_default();
+        let pinned = if let Some(index) = pinned_ids.iter().position(|id| id == &event_id) {
+            pinned_ids.remove(index);
+            false
+        } else {
+            pinned_ids.push(event_id.to_owned());
+            true
+        };
+        room.send_state_event(
+            matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent::new(
+                pinned_ids,
+            ),
+        )
+        .await
+        .map_err(|error| format!("Failed to update pinned messages: {error}"))?;
         queued_result.store(pinned, Ordering::Relaxed);
         Ok(())
     })
@@ -5566,11 +5653,24 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
 #[frb]
 pub async fn get_ignored_users() -> Result<Vec<String>, String> {
     let client = get_client().await.ok_or("No client created.")?;
-    let content = client
-        .account()
+    let account = client.account();
+    // Prefer the server copy, but fall back to the local state store so an
+    // offline client still filters ignored senders after its first sync.
+    let raw = match account
         .fetch_account_data_static::<IgnoredUserListEventContent>()
         .await
-        .map_err(|error| format!("Failed to load ignored users: {error}"))?
+    {
+        Ok(raw) => raw,
+        Err(network_error) => account
+            .account_data::<IgnoredUserListEventContent>()
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to load ignored users: {network_error}; store fallback failed: {error}"
+                )
+            })?,
+    };
+    let content = raw
         .map(|raw| raw.deserialize())
         .transpose()
         .map_err(|error| format!("Failed to decode ignored users: {error}"))?
@@ -5583,8 +5683,12 @@ pub async fn get_ignored_users() -> Result<Vec<String>, String> {
 }
 
 /// Add or remove one user from the account's ignored-user list.
+///
+/// Returns the complete post-write list so callers can persist the
+/// authoritative snapshot instead of merging a delta into a possibly
+/// unknown local baseline.
 #[frb]
-pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<(), String> {
+pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<String>, String> {
     use matrix_sdk::ruma::events::ignored_user_list::IgnoredUser;
 
     let client = get_client().await.ok_or("No client created.")?;
@@ -5607,12 +5711,17 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<(), Stri
         } else {
             content.ignored_users.remove(&user_id);
         }
+        let updated = content
+            .ignored_users
+            .keys()
+            .map(|user_id| user_id.to_string())
+            .collect();
         account
             .set_account_data(content)
             .await
             .map_err(|error| format!("Failed to update ignored users: {error}"))?;
         notify_sync_event(SyncEvent::IgnoredUsersChanged);
-        Ok(())
+        Ok(updated)
     })
     .await
 }

@@ -16,6 +16,9 @@ import 'package:matter/src/rust/frb_generated.dart';
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
   int ignoredUsersCalls = 0;
+  List<String> ignoredUsers = const [];
+  Object? ignoredUsersError;
+  Completer<List<String>>? pendingIgnoredUsers;
   int getMessagesCalls = 0;
   int markRoomAsReadCalls = 0;
   int chatRoomsCalls = 0;
@@ -34,7 +37,10 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
     ignoredUsersCalls++;
-    return const [];
+    if (ignoredUsersError case final error?) throw error;
+    final pending = pendingIgnoredUsers;
+    if (pending != null) return pending.future;
+    return ignoredUsers;
   }
 
   @override
@@ -173,6 +179,9 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     rustApi.ignoredUsersCalls = 0;
+    rustApi.ignoredUsers = const [];
+    rustApi.ignoredUsersError = null;
+    rustApi.pendingIgnoredUsers = null;
     rustApi.getMessagesCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
     rustApi.chatRoomsCalls = 0;
@@ -255,6 +264,9 @@ void main() {
     );
 
     await container.read(ignoredUserIdsProvider.future);
+    // The provider resolves with the persisted snapshot first; the network
+    // refresh happens in the background.
+    await tester.pump();
     expect(rustApi.ignoredUsersCalls, 1);
 
     rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
@@ -264,10 +276,232 @@ void main() {
     rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
     await tester.pump();
     await container.read(ignoredUserIdsProvider.future);
+    await tester.pump();
     expect(rustApi.ignoredUsersCalls, 2);
 
     ignoredSubscription.close();
     syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets(
+    'ignored users stay unknown without a snapshot when the fetch fails',
+    (tester) async {
+      rustApi.ignoredUsersError = StateError('offline');
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      // No persisted snapshot and a failing fetch: the provider must surface
+      // an error (unknown) rather than silently resolving to an empty list.
+      await expectLater(
+        container.read(ignoredUserIdsProvider.future),
+        throwsStateError,
+      );
+      expect(rustApi.ignoredUsersCalls, 1);
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('a confirmed ignore change survives a failing refresh', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+    });
+    rustApi.ignoredUsers = const ['@a:example.org'];
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+    });
+    await tester.pump();
+
+    // The server-side ignore succeeded; the returned full list is written
+    // through to the local snapshot so timelines filter the sender
+    // immediately. The server now holds the change as well.
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    rustApi.ignoredUsers = const ['@a:example.org', '@b:example.org'];
+    container.invalidate(ignoredUserIdsProvider);
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+
+    // A failing refresh afterwards must not restore the pre-change list.
+    rustApi.ignoredUsersError = StateError('offline');
+    container.invalidate(ignoredUserIdsProvider);
+    await tester.pump();
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets(
+    'an in-flight refresh cannot overwrite a newer confirmed change',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+      });
+      // The background refresh hangs until the test releases it.
+      final refresh = Completer<List<String>>();
+      rustApi.pendingIgnoredUsers = refresh;
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      // Resolves with the persisted snapshot; the refresh fetch is now in
+      // flight and pending.
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@a:example.org',
+      });
+
+      // The server-side ignore succeeds and its full post-write list is
+      // written through while the earlier refresh is still pending.
+      await persistIgnoredUserList('@alice:example.org', const {
+        '@a:example.org',
+        '@b:example.org',
+      });
+
+      // The stale refresh now completes with the pre-change list; it must
+      // not overwrite the newer write-through.
+      rustApi.pendingIgnoredUsers = null;
+      rustApi.ignoredUsers = const ['@a:example.org', '@b:example.org'];
+      refresh.complete(const ['@a:example.org']);
+      await tester.pump();
+
+      container.invalidate(ignoredUserIdsProvider);
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@a:example.org',
+        '@b:example.org',
+      });
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('a first load superseded by a change serves the newer snapshot', (
+    tester,
+  ) async {
+    // No persisted snapshot: the provider waits on the authoritative
+    // fetch, which hangs until the test releases it.
+    final firstFetch = Completer<List<String>>();
+    rustApi.pendingIgnoredUsers = firstFetch;
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    final future = container.read(ignoredUserIdsProvider.future);
+    // Let the provider reach the pending fetch (version captured) before
+    // the change lands.
+    await tester.pump();
+
+    // A confirmed ignore change (persisting the full post-write list)
+    // lands while the first fetch is still in flight.
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@a:example.org',
+      '@b:example.org',
+    });
+
+    // The stale first response must not become the provider state.
+    rustApi.pendingIgnoredUsers = null;
+    firstFetch.complete(const ['@a:example.org']);
+    expect(await future, {'@a:example.org', '@b:example.org'});
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets(
+    'a first load publishes the newer snapshot when a change lands mid-persist',
+    (tester) async {
+      // No persisted snapshot: the provider waits on the authoritative
+      // fetch, which hangs until the test releases it.
+      final firstFetch = Completer<List<String>>();
+      rustApi.pendingIgnoredUsers = firstFetch;
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      final future = container.read(ignoredUserIdsProvider.future);
+      // Let the provider reach the pending fetch (version captured).
+      await tester.pump();
+
+      // Releasing the fetch lets the provider pass its first version check
+      // and start persisting. The confirmed change is scheduled one
+      // microtask later, landing while that persist is in flight — the
+      // provider must still not publish the stale response.
+      firstFetch.complete(const ['@a:example.org']);
+      late Future<void> writeThrough;
+      scheduleMicrotask(() {
+        writeThrough = persistIgnoredUserList('@alice:example.org', const {
+          '@a:example.org',
+          '@b:example.org',
+        });
+      });
+      expect(await future, {'@a:example.org', '@b:example.org'});
+      await writeThrough;
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('ignored users fall back to the persisted list on failure', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@blocked:example.org'],
+    });
+    rustApi.ignoredUsersError = StateError('offline');
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    final ids = await container.read(ignoredUserIdsProvider.future);
+    await tester.pump();
+    // A failed refresh must not degrade into "nobody is ignored".
+    expect(ids, {'@blocked:example.org'});
+    expect(rustApi.ignoredUsersCalls, 1);
+
+    // Once the server is reachable again the fresh list wins and persists.
+    rustApi.ignoredUsersError = null;
+    rustApi.ignoredUsers = const ['@blocked:example.org', '@spam:example.org'];
+    container.invalidate(ignoredUserIdsProvider);
+    await container.read(ignoredUserIdsProvider.future);
+    await tester.pump();
+    await tester.pump();
+    final refreshed = await container.read(ignoredUserIdsProvider.future);
+    expect(refreshed, {'@blocked:example.org', '@spam:example.org'});
+
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });

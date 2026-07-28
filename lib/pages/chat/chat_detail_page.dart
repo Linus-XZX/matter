@@ -59,7 +59,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
 }
 
 class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
-    with RouteAware {
+    with RouteAware, WidgetsBindingObserver {
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
   late final MutableState<String?> _currentRoomIdNotifier;
@@ -163,6 +163,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _roomName = widget.roomName;
     _avatarUrl = widget.avatarUrl;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
@@ -226,7 +227,60 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     });
   }
 
+  @override
+  void didPushNext() {
+    // Another route (room management, pinned messages, …) covers this chat:
+    // it is no longer the visible room, so incoming messages must not be
+    // auto-marked as read until didPopNext reactivates it.
+    _deactivateRoom();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        // Reactivate only if the room is currently inactive; the page may be
+        // covered by another route or no longer current.
+        if (mounted && _currentRoomIdNotifier.value != widget.roomId) {
+          _activateRoom();
+        }
+      case AppLifecycleState.inactive ||
+          AppLifecycleState.paused ||
+          AppLifecycleState.hidden ||
+          AppLifecycleState.detached:
+        // While the app is not visible the room must not be treated as
+        // "being viewed": background sync would otherwise mark incoming
+        // messages as read.
+        _deactivateRoom();
+    }
+  }
+
+  void _deactivateRoom() {
+    if (_currentRoomIdNotifier.value == widget.roomId) {
+      _currentRoomIdNotifier.value = null;
+    }
+    unawaited(
+      unsubscribeTyping(roomId: widget.roomId).catchError((e) {
+        debugPrint('unsubscribeTyping failed: $e');
+      }),
+    );
+    unawaited(
+      unsubscribeRoomForReceipts(roomId: widget.roomId).catchError((e) {
+        debugPrint('unsubscribeRoomForReceipts failed: $e');
+      }),
+    );
+  }
+
   void _activateRoom() {
+    // Never activate unless the app itself is in the foreground: a route
+    // callback (e.g. a cover popped while inactive/paused) must not make the
+    // room "being viewed" again in the background. A null lifecycle state
+    // means no event has been delivered yet (app start, tests); the first
+    // real transition will re-evaluate activation either way.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) {
+      return;
+    }
     if (!(_route?.isCurrent ?? ModalRoute.of(context)?.isCurrent ?? false)) {
       return;
     }
@@ -274,6 +328,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     chatRouteObserver.unsubscribe(this);
     final currentRoomIdNotifier = _currentRoomIdNotifier;
     final roomId = widget.roomId;
@@ -1147,8 +1202,34 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   final messages = messageCacheOwner == activeUserId
                       ? cachedMessages
                       : const <ChatMessage>[];
-                  final ignoredUserIds =
-                      ignoredUserIdsAsync.value ?? const <String>{};
+                  final ignoredUserIds = ignoredUserIdsAsync.value;
+                  // An unknown ignore list (first load, or a failed load
+                  // without any snapshot) must not degrade into "nobody is
+                  // ignored" and re-expose messages from ignored senders.
+                  if (ignoredUserIds == null) {
+                    if (ignoredUserIdsAsync.hasError) {
+                      return Center(
+                        child: TextButton.icon(
+                          onPressed: () =>
+                              ref.invalidate(ignoredUserIdsProvider),
+                          icon: const Icon(
+                            Icons.refresh_rounded,
+                            color: AppColors.primary,
+                          ),
+                          label: const Text(
+                            '无法加载忽略列表，消息已隐藏',
+                            style: TextStyle(color: AppColors.onSurface),
+                          ),
+                        ),
+                      );
+                    }
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: AppColors.primary,
+                        strokeWidth: 2,
+                      ),
+                    );
+                  }
                   // Do not expose the timeline until its initial insets and
                   // member-dependent labels are stable enough for layout.
                   if ((!messageCachePrimed &&

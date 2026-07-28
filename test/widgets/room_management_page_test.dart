@@ -9,6 +9,7 @@ import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/mutable_state.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// The knock-requests provider is gated on an active session; tests pump the
 /// management page without one, so force the session ready.
@@ -25,6 +26,10 @@ class _FakeRustApi implements RustLibApi {
   int approveKnockCalls = 0;
   int rejectKnockCalls = 0;
   int markUnreadCalls = 0;
+  int setMutedCalls = 0;
+  int setIgnoredCalls = 0;
+  Completer<void>? pendingMutedUpdate;
+  Completer<List<String>>? pendingSetIgnored;
   String? updatedName;
   String? updatedTopic;
 
@@ -45,6 +50,15 @@ class _FakeRustApi implements RustLibApi {
   Future<bool> crateApiMatrixIsRoomMuted({required String roomId}) async {
     if (failSupplementalLoads) throw StateError('muted unavailable');
     return true;
+  }
+
+  @override
+  Future<void> crateApiMatrixSetRoomMuted({
+    required String roomId,
+    required bool muted,
+  }) {
+    setMutedCalls++;
+    return pendingMutedUpdate?.future ?? Future.value();
   }
 
   @override
@@ -70,6 +84,15 @@ class _FakeRustApi implements RustLibApi {
   Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
     if (failSupplementalLoads) throw StateError('ignored unavailable');
     return const ['@blocked:example.org'];
+  }
+
+  @override
+  Future<List<String>> crateApiMatrixSetUserIgnored({
+    required String userId,
+    required bool ignored,
+  }) {
+    setIgnoredCalls++;
+    return pendingSetIgnored?.future ?? Future.value(const []);
   }
 
   @override
@@ -130,6 +153,10 @@ void main() {
     rustApi.approveKnockCalls = 0;
     rustApi.rejectKnockCalls = 0;
     rustApi.markUnreadCalls = 0;
+    rustApi.setMutedCalls = 0;
+    rustApi.setIgnoredCalls = 0;
+    rustApi.pendingMutedUpdate = null;
+    rustApi.pendingSetIgnored = null;
     rustApi.updatedName = null;
     rustApi.updatedTopic = null;
   });
@@ -222,6 +249,58 @@ void main() {
 
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'ignoring a user writes through even if the page closes mid-request',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final ignore = Completer<List<String>>();
+      rustApi.failSupplementalLoads = false;
+      rustApi.pendingSetIgnored = ignore;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            _sessionReadyOverride,
+            activeUserIdProvider.overrideWith(
+              () => MutableState<String?>('@carol:example.org'),
+            ),
+          ],
+          child: MaterialApp(
+            home: RoomManagementPage(
+              roomId: '!room:example.org',
+              roomName: 'Project room',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('忽略用户'));
+      await tester.pump();
+      expect(rustApi.setIgnoredCalls, 1);
+
+      // The page is popped while the server request is still in flight; the
+      // write-through must still land in the persisted snapshot, otherwise
+      // the sender's cached messages stay visible. The response carries the
+      // complete post-write list (the server already held @blocked), so the
+      // first-ever write-through must not drop other ignored users.
+      await tester.pumpWidget(const SizedBox.shrink());
+      ignore.complete(const ['@blocked:example.org', '@alice:example.org']);
+      await tester.pump();
+      await tester.pump();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getStringList('ignored_users_v1_@carol:example.org'),
+        containsAll(['@blocked:example.org', '@alice:example.org']),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('keeps saved room details instead of reloading stale cache', (
     tester,
@@ -326,7 +405,6 @@ void main() {
     expect(rustApi.rejectKnockCalls, 1);
     // Optimistically hidden until the server echo removes the membership.
     expect(find.text('Bob'), findsNothing);
-
     final container = ProviderScope.containerOf(
       tester.element(find.byType(RoomManagementPage)),
     );
@@ -344,6 +422,48 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Bob'), findsOneWidget);
+  });
+
+  testWidgets('disables the mute switch while a mute update is in flight', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    final pending = Completer<void>();
+    rustApi.pendingMutedUpdate = pending;
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final muteSwitch = find.byType(SwitchListTile);
+    expect(muteSwitch, findsOneWidget);
+
+    await tester.tap(muteSwitch);
+    await tester.pump();
+    expect(rustApi.setMutedCalls, 1);
+
+    // While the request is in flight the switch is disabled: rapid toggles
+    // must not fire competing push-rule updates.
+    await tester.tap(muteSwitch);
+    await tester.pump();
+    expect(rustApi.setMutedCalls, 1);
+
+    pending.complete();
+    await tester.pumpAndSettle();
+    await tester.tap(muteSwitch);
+    await tester.pump();
+    expect(rustApi.setMutedCalls, 2);
   });
 
   testWidgets('marking the current room unread closes its chat view', (

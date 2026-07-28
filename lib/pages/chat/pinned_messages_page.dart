@@ -74,7 +74,25 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
               ),
             );
           }
-          final ignoredUserIds = ignoredUserIdsAsync.value ?? const <String>{};
+          final ignoredUserIds = ignoredUserIdsAsync.value;
+          // An unknown ignore list must not degrade into "nobody is ignored".
+          if (ignoredUserIds == null) {
+            if (ignoredUserIdsAsync.hasError) {
+              return Center(
+                child: TextButton.icon(
+                  onPressed: () => ref.invalidate(ignoredUserIdsProvider),
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('无法加载忽略列表，消息已隐藏'),
+                ),
+              );
+            }
+            return const Center(
+              child: CircularProgressIndicator(
+                color: AppColors.primary,
+                strokeWidth: 2,
+              ),
+            );
+          }
           final messages = (snapshot.data ?? const <rust.ChatMessage>[])
               .where(
                 (message) =>

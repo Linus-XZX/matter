@@ -317,6 +317,185 @@ void main() {
     expect(rustApi.activeTypingRoom, '!a:example.org');
   });
 
+  testWidgets('a covered chat stops being the active room until uncovered', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('cover')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // While covered, the chat must not be treated as the visible room:
+    // incoming messages would otherwise be silently marked as read.
+    expect(container.read(currentRoomIdProvider), isNull);
+    final readCallsWhileCovered = rustApi.markRoomAsReadCalls;
+
+    navigator.pop();
+    await tester.pumpAndSettle();
+
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+    expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsWhileCovered));
+  });
+
+  testWidgets('backgrounding deactivates the room until the app resumes', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+    final readCallsBeforeBackground = rustApi.markRoomAsReadCalls;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    // In the background the room is no longer "being viewed", so background
+    // sync must not auto-mark incoming messages as read.
+    expect(container.read(currentRoomIdProvider), isNull);
+    expect(rustApi.unsubscribeTypingCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+    expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsBeforeBackground));
+  });
+
+  testWidgets('popping a cover while paused does not reactivate the room', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('cover')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), isNull);
+
+    // Pause the app, then pop the cover while still paused: the route
+    // callback must not reactivate the room in the background.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), isNull);
+
+    // Returning to the foreground reactivates it.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+  });
+
+  testWidgets('popping a cover while inactive does not reactivate the room', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('cover')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), isNull);
+
+    // Pop the cover during a transient inactive window (e.g. notification
+    // shade): the route callback must not reactivate the room.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), isNull);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+  });
+
   testWidgets('does not reactivate a chat route that is also being popped', (
     tester,
   ) async {
@@ -402,7 +581,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('shows cached messages while the ignore list loads', (
+  testWidgets('hides cached messages while the ignore list is unknown', (
     tester,
   ) async {
     const roomId = '!ignored-loading:example.org';
@@ -434,8 +613,9 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsOneWidget);
-    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsOneWidget);
+    // While the ignore list is unknown, no messages are exposed unfiltered.
+    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
+    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsNothing);
 
     ignoredUsers.complete(const {'@alice:example.org'});
     await tester.pump();
@@ -443,6 +623,45 @@ void main() {
 
     expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
     expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('keeps messages hidden when the ignore list fails to load', (
+    tester,
+  ) async {
+    const roomId = '!ignored-failure:example.org';
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith(
+          (ref) => Future<Set<String>>.error(StateError('offline')),
+        ),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$ignored'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
+    expect(find.text('无法加载忽略列表，消息已隐藏'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -541,45 +760,6 @@ void main() {
       find.byKey(const ValueKey(r'text-bubble:$live-ignored')),
       findsNothing,
     );
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('keeps cached messages available when the ignore list fails', (
-    tester,
-  ) async {
-    const roomId = '!ignored-error:example.org';
-    final container = ProviderContainer(
-      retry: (_, _) => null,
-      overrides: [
-        ignoredUserIdsProvider.overrideWith(
-          (ref) => Future<Set<String>>.error('offline'),
-        ),
-        roomMembersProvider(roomId).overrideWith((ref) async => const []),
-      ],
-    );
-    addTearDown(container.dispose);
-    await container.read(roomMembersProvider(roomId).future);
-    container.read(messageCacheProvider(roomId).notifier).value = [
-      _message(r'$private'),
-    ];
-    container.read(messageCacheOwnerProvider(roomId).notifier).value =
-        'anonymous';
-    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
-
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: const MaterialApp(
-          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.byKey(const ValueKey(r'text-bubble:$private')), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
