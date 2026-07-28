@@ -8,13 +8,8 @@ import 'chat_timestamp.dart';
 
 class PinnedMessagesPage extends ConsumerStatefulWidget {
   final String roomId;
-  final String roomName;
 
-  const PinnedMessagesPage({
-    super.key,
-    required this.roomId,
-    required this.roomName,
-  });
+  const PinnedMessagesPage({super.key, required this.roomId});
 
   @override
   ConsumerState<PinnedMessagesPage> createState() => _PinnedMessagesPageState();
@@ -79,24 +74,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
               ),
             );
           }
-          if (!ignoredUserIdsAsync.hasValue) {
-            if (ignoredUserIdsAsync.hasError) {
-              return Center(
-                child: TextButton.icon(
-                  onPressed: () => ref.invalidate(ignoredUserIdsProvider),
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('无法加载忽略列表'),
-                ),
-              );
-            }
-            return const Center(
-              child: CircularProgressIndicator(
-                color: AppColors.primary,
-                strokeWidth: 2,
-              ),
-            );
-          }
-          final ignoredUserIds = ignoredUserIdsAsync.requireValue;
+          final ignoredUserIds = ignoredUserIdsAsync.value ?? const <String>{};
           final messages = (snapshot.data ?? const <rust.ChatMessage>[])
               .where(
                 (message) =>

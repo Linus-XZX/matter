@@ -39,11 +39,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   rust.RoomDetails? _details;
   Uint8List? _avatarPreviewBytes;
   List<rust.Contact> _members = const [];
-  List<rust.KnockRequest> _knockRequests = const [];
   List<String> _ignoredUsers = const [];
+
+  /// Knockers approved/rejected just now, hidden until the server echo
+  /// removes them (or a short grace elapses) so entries don't flicker back.
+  /// The grace bounds the hide: a genuine re-knock must become visible again.
+  final Map<String, DateTime> _handledKnockUserIds = {};
+  static const Duration _handledKnockGrace = Duration(seconds: 10);
   Object? _mutedLoadError;
   Object? _membersLoadError;
-  Object? _knocksLoadError;
   Object? _ignoredUsersLoadError;
   bool _muted = false;
   bool _loading = true;
@@ -78,7 +82,6 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       _error = null;
       _mutedLoadError = null;
       _membersLoadError = null;
-      _knocksLoadError = null;
       _ignoredUsersLoadError = null;
     });
     try {
@@ -87,24 +90,18 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       final membersFuture = _attempt(
         rust.getRoomMembers(roomId: widget.roomId),
       );
-      final knocksFuture = _attempt(
-        rust.getRoomKnockRequests(roomId: widget.roomId),
-      );
       final ignoredFuture = _attempt(rust.getIgnoredUsers());
       final muted = await mutedFuture;
       final members = await membersFuture;
-      final knockRequests = await knocksFuture;
       final ignoredUsers = await ignoredFuture;
       if (!mounted) return;
       setState(() {
         _details = details;
         _mutedLoadError = muted.error;
         _membersLoadError = members.error;
-        _knocksLoadError = knockRequests.error;
         _ignoredUsersLoadError = ignoredUsers.error;
         if (muted.value case final value?) _muted = value;
         if (members.value case final value?) _members = value;
-        if (knockRequests.value case final value?) _knockRequests = value;
         if (ignoredUsers.value case final value?) _ignoredUsers = value;
         _nameController.text = details.hasExplicitName ? details.name : '';
         _topicController.text = details.topic ?? '';
@@ -150,11 +147,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     updateError: (error) => _membersLoadError = error,
   );
 
-  Future<void> _retryKnocks() => _retryPartialLoad(
-    load: () => rust.getRoomKnockRequests(roomId: widget.roomId),
-    updateValue: (value) => _knockRequests = value,
-    updateError: (error) => _knocksLoadError = error,
-  );
+  Future<void> _retryKnocks() async {
+    ref.invalidate(roomKnockRequestsProvider(widget.roomId));
+    try {
+      await ref.read(roomKnockRequestsProvider(widget.roomId).future);
+    } catch (_) {
+      // The provider exposes the retry error in the section.
+    }
+  }
 
   Future<void> _retryIgnoredUsers() => _retryPartialLoad(
     load: rust.getIgnoredUsers,
@@ -169,6 +169,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     ref.invalidate(spaceChildrenProvider);
     ref.invalidate(searchRoomsProvider);
     ref.invalidate(roomMembersProvider(widget.roomId));
+    ref.invalidate(roomKnockRequestsProvider(widget.roomId));
   }
 
   void _closeCurrentRoom() {
@@ -273,7 +274,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     setState(() => _muted = muted);
     try {
       await rust.setRoomMuted(roomId: widget.roomId, muted: muted);
-      if (mounted) _showSnackBar(muted ? '已开启免打扰' : '已关闭免打扰');
+      if (!mounted) return;
+      _invalidateRoom();
+      _showSnackBar(muted ? '已开启免打扰' : '已关闭免打扰');
     } catch (error) {
       if (mounted) {
         setState(() => _muted = !muted);
@@ -337,7 +340,6 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       await rust.setUserIgnored(userId: userId, ignored: ignored);
       if (!mounted) return;
       ref.invalidate(ignoredUserIdsProvider);
-      ref.invalidate(messagesProvider(widget.roomId));
       setState(() {
         _ignoredUsers = ignored
             ? {..._ignoredUsers, userId}.toList()
@@ -415,13 +417,13 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
           userId: request.userId,
         );
       }
-      _invalidateRoom();
       if (!mounted) return;
-      setState(() {
-        _knockRequests = _knockRequests
-            .where((item) => item.userId != request.userId)
-            .toList();
-      });
+      setState(() => _handledKnockUserIds[request.userId] = DateTime.now());
+      _invalidateRoom();
+      if (approve) {
+        await _retryMembers();
+        if (!mounted) return;
+      }
       _showSnackBar(approve ? '已批准加入请求' : '已拒绝加入请求');
     } catch (error) {
       if (mounted) _showSnackBar('操作失败: $error');
@@ -465,9 +467,38 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     );
   }
 
+  bool _isKnockHidden(String userId) {
+    final handledAt = _handledKnockUserIds[userId];
+    return handledAt != null &&
+        DateTime.now().difference(handledAt) < _handledKnockGrace;
+  }
+
   @override
   Widget build(BuildContext context) {
     final details = _details;
+    final knockRequestsAsync = ref.watch(
+      roomKnockRequestsProvider(widget.roomId),
+    );
+    ref.listen(roomKnockRequestsProvider(widget.roomId), (_, next) {
+      next.whenData((requests) {
+        final activeUserIds = requests.map((request) => request.userId).toSet();
+        final previousCount = _handledKnockUserIds.length;
+        _handledKnockUserIds.removeWhere(
+          (userId, _) =>
+              !activeUserIds.contains(userId) || !_isKnockHidden(userId),
+        );
+        if (mounted && previousCount != _handledKnockUserIds.length) {
+          setState(() {});
+        }
+      });
+    });
+    final knockRequests =
+        (knockRequestsAsync.asData?.value ?? const <rust.KnockRequest>[])
+            .where((request) => !_isKnockHidden(request.userId))
+            .toList();
+    final knocksLoadError = knockRequestsAsync.hasError
+        ? knockRequestsAsync.error
+        : null;
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -590,20 +621,20 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           ],
                         ),
                 ),
-                if (_knocksLoadError != null || _knockRequests.isNotEmpty) ...[
+                if (knocksLoadError != null || knockRequests.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   _section(
-                    title: _knocksLoadError == null
-                        ? '加入请求 ${_knockRequests.length}'
+                    title: knocksLoadError == null
+                        ? '加入请求 ${knockRequests.length}'
                         : '加入请求',
-                    child: _knocksLoadError != null
+                    child: knocksLoadError != null
                         ? _partialLoadErrorTile(
                             label: '无法加载加入请求',
                             onRetry: _retryKnocks,
                           )
                         : Column(
                             children: [
-                              for (final request in _knockRequests)
+                              for (final request in knockRequests)
                                 ListTile(
                                   contentPadding: EdgeInsets.zero,
                                   leading: AppAvatar(
@@ -690,10 +721,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         label: '置顶消息',
                         onTap: () => Navigator.of(context).push(
                           MaterialPageRoute(
-                            builder: (_) => PinnedMessagesPage(
-                              roomId: widget.roomId,
-                              roomName: details!.name,
-                            ),
+                            builder: (_) =>
+                                PinnedMessagesPage(roomId: widget.roomId),
                           ),
                         ),
                       ),
@@ -701,19 +730,26 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         icon: Icons.done_all_rounded,
                         label: '标记为已读',
                         onTap: () async {
+                          final suppression = roomAutoReadSuppressedProvider(
+                            widget.roomId,
+                          );
+                          final previousSuppression = ref.read(suppression);
+                          ref.read(suppression.notifier).value = false;
                           try {
                             await rust.markRoomAsRead(roomId: widget.roomId);
                             if (!mounted) return;
-                            final unreadOverride = ref.read(
-                              roomUnreadOverrideProvider(
-                                widget.roomId,
-                              ).notifier,
+                            setRoomUnreadOverrideById(
+                              ref,
+                              widget.roomId,
+                              unread: false,
                             );
-                            unreadOverride.value = false;
                             _invalidateRoom();
                             _showSnackBar('已标记为已读');
                           } catch (error) {
-                            if (mounted) _showSnackBar('操作失败: $error');
+                            if (!mounted) return;
+                            ref.read(suppression.notifier).value =
+                                previousSuppression;
+                            _showSnackBar('操作失败: $error');
                           }
                         },
                       ),
@@ -721,20 +757,27 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         icon: Icons.mark_unread_chat_alt_rounded,
                         label: '标记为未读',
                         onTap: () async {
+                          final suppression = roomAutoReadSuppressedProvider(
+                            widget.roomId,
+                          );
+                          final previousSuppression = ref.read(suppression);
+                          ref.read(suppression.notifier).value = true;
                           try {
                             await rust.markRoomUnread(roomId: widget.roomId);
                             if (!mounted) return;
-                            final unreadOverride = ref.read(
-                              roomUnreadOverrideProvider(
-                                widget.roomId,
-                              ).notifier,
+                            setRoomUnreadOverrideById(
+                              ref,
+                              widget.roomId,
+                              unread: true,
                             );
-                            unreadOverride.value = true;
                             _invalidateRoom();
                             _showSnackBar('已标记为未读');
                             _closeCurrentRoom();
                           } catch (error) {
-                            if (mounted) _showSnackBar('操作失败: $error');
+                            if (!mounted) return;
+                            ref.read(suppression.notifier).value =
+                                previousSuppression;
+                            _showSnackBar('操作失败: $error');
                           }
                         },
                       ),

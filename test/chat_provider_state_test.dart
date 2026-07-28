@@ -16,6 +16,15 @@ import 'package:matter/src/rust/frb_generated.dart';
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
   int ignoredUsersCalls = 0;
+  int getMessagesCalls = 0;
+  int markRoomAsReadCalls = 0;
+  int chatRoomsCalls = 0;
+  int ungroupedRoomsCalls = 0;
+  int spaceChildrenCalls = 0;
+  int searchRoomsCalls = 0;
+  int knockRequestsCalls = 0;
+  int membersCalls = 0;
+  Completer<List<rust.ChatMessage>>? pendingMessages;
 
   @override
   rust.ConnectionStatus crateApiMatrixGetConnectionStatus() {
@@ -25,6 +34,67 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
     ignoredUsersCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.ChatMessage>> crateApiMatrixGetMessages({
+    required String roomId,
+  }) {
+    getMessagesCalls++;
+    return pendingMessages?.future ?? Future.value(const []);
+  }
+
+  @override
+  Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async =>
+      false;
+
+  @override
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+    markRoomAsReadCalls++;
+  }
+
+  @override
+  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms() async {
+    chatRoomsCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.ChatRoom>> crateApiMatrixGetUngroupedRooms() async {
+    ungroupedRoomsCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.ChatRoom>> crateApiMatrixGetSpaceChildren({
+    required String spaceId,
+  }) async {
+    spaceChildrenCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.ChatRoom>> crateApiMatrixSearchRooms({
+    required String query,
+  }) async {
+    searchRoomsCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.KnockRequest>> crateApiMatrixGetRoomKnockRequests({
+    required String roomId,
+  }) async {
+    knockRequestsCalls++;
+    return const [];
+  }
+
+  @override
+  Future<List<rust.Contact>> crateApiMatrixGetRoomMembers({
+    required String roomId,
+  }) async {
+    membersCalls++;
     return const [];
   }
 
@@ -78,6 +148,7 @@ rust.ChatRoom _room(String id, {bool isEncrypted = false}) => rust.ChatRoom(
   isMarkedUnread: false,
   roomType: 'group',
   isEncrypted: isEncrypted,
+  isMuted: false,
   roomState: 'joined',
 );
 
@@ -102,6 +173,14 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     rustApi.ignoredUsersCalls = 0;
+    rustApi.getMessagesCalls = 0;
+    rustApi.markRoomAsReadCalls = 0;
+    rustApi.chatRoomsCalls = 0;
+    rustApi.ungroupedRoomsCalls = 0;
+    rustApi.spaceChildrenCalls = 0;
+    rustApi.searchRoomsCalls = 0;
+    rustApi.knockRequestsCalls = 0;
+    rustApi.pendingMessages = null;
   });
 
   group('clearActiveSessionState', () {
@@ -138,11 +217,23 @@ void main() {
   });
 
   group('invalidateSessionCollections', () {
-    testWidgets('invalidates collection providers without throwing', (
-      tester,
-    ) async {
+    testWidgets('resets room-local optimistic state', (tester) async {
       final ref = await _captureRef(tester);
-      expect(() => invalidateSessionCollections(ref), returnsNormally);
+      const roomId = '!room:example.org';
+      ref
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: true,
+        baselineUnreadCount: 0,
+        baselineMarkedUnread: false,
+      );
+      ref.read(roomAutoReadSuppressedProvider(roomId).notifier).value = true;
+
+      invalidateSessionCollections(ref);
+      await tester.pump();
+
+      expect(ref.read(roomUnreadOverrideProvider(roomId)), isNull);
+      expect(ref.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
     });
   });
 
@@ -177,6 +268,151 @@ void main() {
 
     ignoredSubscription.close();
     syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('room-list events refresh every room collection', (tester) async {
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final subscriptions = <ProviderSubscription<dynamic>>[
+      container.listen(chatRoomsProvider, (_, _) {}, fireImmediately: true),
+      container.listen(
+        ungroupedRoomsProvider,
+        (_, _) {},
+        fireImmediately: true,
+      ),
+      container.listen(
+        spaceChildrenProvider('!space:example.org'),
+        (_, _) {},
+        fireImmediately: true,
+      ),
+      container.listen(
+        searchRoomsProvider('project'),
+        (_, _) {},
+        fireImmediately: true,
+      ),
+      container.listen(
+        roomKnockRequestsProvider('!room:example.org'),
+        (_, _) {},
+        fireImmediately: true,
+      ),
+      container.listen(
+        roomMembersProvider('!room:example.org'),
+        (_, _) {},
+        fireImmediately: true,
+      ),
+      container.listen(syncStreamProvider, (_, _) {}, fireImmediately: true),
+    ];
+    await tester.pump();
+    expect(rustApi.chatRoomsCalls, 1);
+    expect(rustApi.ungroupedRoomsCalls, 1);
+    expect(rustApi.spaceChildrenCalls, 1);
+    expect(rustApi.searchRoomsCalls, 1);
+    expect(rustApi.knockRequestsCalls, 1);
+    expect(rustApi.membersCalls, 1);
+
+    rustApi.syncEvents.add(const rust.SyncEvent.roomListChanged());
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+
+    expect(rustApi.chatRoomsCalls, 2);
+    expect(rustApi.ungroupedRoomsCalls, 2);
+    expect(rustApi.spaceChildrenCalls, 2);
+    expect(rustApi.searchRoomsCalls, 2);
+    expect(rustApi.knockRequestsCalls, 2);
+    expect(rustApi.membersCalls, 2);
+
+    for (final subscription in subscriptions) {
+      subscription.close();
+    }
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('marks a newly refreshed current-room message as read', (
+    tester,
+  ) async {
+    const roomId = '!current:example.org';
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    container.read(currentRoomIdProvider.notifier).value = roomId;
+    final subscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump();
+
+    expect(rustApi.getMessagesCalls, 1);
+    expect(rustApi.markRoomAsReadCalls, 1);
+
+    subscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('keeps an explicitly unread current room unread on refresh', (
+    tester,
+  ) async {
+    const roomId = '!unread:example.org';
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    container.read(currentRoomIdProvider.notifier).value = roomId;
+    container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+        true;
+    final subscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump();
+
+    expect(rustApi.getMessagesCalls, 1);
+    expect(rustApi.markRoomAsReadCalls, 0);
+
+    subscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('does not mark read after the refreshed room was closed', (
+    tester,
+  ) async {
+    const roomId = '!closed:example.org';
+    final messages = Completer<List<rust.ChatMessage>>();
+    rustApi.pendingMessages = messages;
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    container.read(currentRoomIdProvider.notifier).value = roomId;
+    final subscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(rustApi.getMessagesCalls, 1);
+
+    container.read(currentRoomIdProvider.notifier).value = null;
+    messages.complete(const []);
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.markRoomAsReadCalls, 0);
+
+    subscription.close();
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });

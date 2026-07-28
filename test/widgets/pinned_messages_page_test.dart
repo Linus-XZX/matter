@@ -80,10 +80,7 @@ void main() {
           ),
         ],
         child: const MaterialApp(
-          home: PinnedMessagesPage(
-            roomId: '!room:example.org',
-            roomName: 'Project room',
-          ),
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
         ),
       ),
     );
@@ -103,10 +100,7 @@ void main() {
           ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
         ],
         child: const MaterialApp(
-          home: PinnedMessagesPage(
-            roomId: '!room:example.org',
-            roomName: 'Project room',
-          ),
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
         ),
       ),
     );
@@ -144,10 +138,7 @@ void main() {
           ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
         ],
         child: const MaterialApp(
-          home: PinnedMessagesPage(
-            roomId: '!room:example.org',
-            roomName: 'Project room',
-          ),
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
         ),
       ),
     );

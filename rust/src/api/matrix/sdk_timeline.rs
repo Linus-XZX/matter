@@ -137,23 +137,6 @@ pub(super) async fn get_messages(client: &Client, room: &Room) -> Result<Vec<Cha
     let timeline = get_or_create_timeline(client, room).await?;
     ensure_initial_window(&timeline, LIVE_WINDOW).await?;
 
-    match is_marked_unread(room).await {
-        Ok(false) => {
-            let _ = mark_as_read(&timeline, room).await;
-        }
-        Ok(true) => {}
-        Err(error) => {
-            super::app_log(
-                "warn",
-                "receipts",
-                format!(
-                    "Failed to load marked-unread flag for room {}: {error}",
-                    room.room_id()
-                ),
-            );
-        }
-    }
-
     let mut messages = convert_snapshot(room, &snapshot(&timeline).await).await;
     if messages.len() > LIVE_WINDOW {
         messages.drain(..messages.len() - LIVE_WINDOW);
@@ -216,18 +199,25 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
                 break;
             }
 
-            let update = updates.recv().await.map_err(|error| error.to_string())?;
+            let update = if saw_network_update {
+                match tokio::time::timeout(Duration::from_millis(750), updates.recv()).await {
+                    Ok(result) => result.map_err(|error| error.to_string())?,
+                    Err(_) => break,
+                }
+            } else {
+                // The cache listener stays silent when every /event fetch
+                // fails, so an unbounded wait here would stall for the full
+                // outer timeout. Fall through to the focused timeline instead.
+                match tokio::time::timeout(Duration::from_secs(5), updates.recv()).await {
+                    Ok(result) => result.map_err(|error| error.to_string())?,
+                    Err(_) => break,
+                }
+            };
             let came_from_sync = matches!(update.origin, EventsOrigin::Sync);
             for diff in update.diffs {
                 diff.apply(&mut events);
             }
-            if came_from_sync {
-                let updated_ids = loaded_expected_event_ids(
-                    events.iter().filter_map(|event| event.event_id()),
-                    &expected_pinned_ids,
-                );
-                saw_network_update |= updated_ids != loaded_ids;
-            }
+            saw_network_update |= came_from_sync;
         }
         Ok::<(), String>(())
     })
@@ -416,19 +406,6 @@ async fn clear_marked_unread(room: &Room) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|error| format!("Failed to clear marked-unread flag: {error}"))
-}
-
-async fn is_marked_unread(room: &Room) -> Result<bool, String> {
-    use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
-
-    Ok(room
-        .account_data_static::<MarkedUnreadEventContent>()
-        .await
-        .map_err(|error| format!("Failed to load marked-unread flag: {error}"))?
-        .map(|raw| raw.deserialize())
-        .transpose()
-        .map_err(|error| format!("Failed to decode marked-unread flag: {error}"))?
-        .is_some_and(|event| event.content.unread))
 }
 
 pub(super) async fn get_messages_before(
@@ -1249,10 +1226,9 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        loaded_expected_event_count, loaded_expected_event_ids, messages_before,
-        missing_pinned_event_ids, newest_receipt_position, ordered_pinned_messages,
-        pinned_events_ready, reader_ids_for_position, record_latest_receipt_position,
-        resolve_receipt_position,
+        loaded_expected_event_count, messages_before, missing_pinned_event_ids,
+        newest_receipt_position, ordered_pinned_messages, pinned_events_ready,
+        reader_ids_for_position, record_latest_receipt_position, resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
@@ -1331,22 +1307,8 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_sync_update_does_not_release_partial_cache() {
-        use matrix_sdk::ruma::EventId;
-
-        let first = EventId::parse("$first:example.org").unwrap();
-        let missing = EventId::parse("$missing:example.org").unwrap();
-        let expected = [first.as_ref(), missing.as_ref()];
-        let cached = loaded_expected_event_ids([first.as_str()], &expected);
-        let after_relation =
-            loaded_expected_event_ids([first.as_str(), "$reaction:example.org"], &expected);
-
-        assert_eq!(cached, after_relation);
-        assert!(!pinned_events_ready(
-            after_relation.len(),
-            expected.len(),
-            after_relation != cached,
-        ));
+    fn partial_cache_is_not_ready_before_network_completion() {
+        assert!(!pinned_events_ready(1, 2, false));
     }
 
     #[test]

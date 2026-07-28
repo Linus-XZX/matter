@@ -19,6 +19,7 @@ void main() {
     isMarkedUnread: false,
     roomType: roomType,
     isEncrypted: false,
+    isMuted: false,
     roomState: 'joined',
   );
 

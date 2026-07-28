@@ -64,11 +64,71 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
   return (await rust.getIgnoredUsers()).toSet();
 });
 
-/// Optimistic unread state while read receipts or account data catch up via sync.
+class RoomUnreadOverride {
+  final bool unread;
+  final int baselineUnreadCount;
+  final bool baselineMarkedUnread;
+
+  const RoomUnreadOverride({
+    required this.unread,
+    required this.baselineUnreadCount,
+    required this.baselineMarkedUnread,
+  });
+
+  bool appliesTo(rust.ChatRoom room) =>
+      room.unreadCount == baselineUnreadCount &&
+      room.isMarkedUnread == baselineMarkedUnread;
+}
+
+/// Optimistic unread state tied to the exact server snapshot it supersedes.
+///
+/// Any newer snapshot, including one containing a newly arrived message,
+/// invalidates the override instead of letting an old "read" action hide it.
 final roomUnreadOverrideProvider =
-    NotifierProvider.family<MutableState<bool?>, bool?, String>(
-      (_) => MutableState(null),
+    NotifierProvider.family<
+      MutableState<RoomUnreadOverride?>,
+      RoomUnreadOverride?,
+      String
+    >((_) => MutableState(null));
+
+/// Prevents background timeline refreshes from undoing an explicit unread
+/// action. Opening the room again clears the suppression.
+final roomAutoReadSuppressedProvider =
+    NotifierProvider.family<MutableState<bool>, bool, String>(
+      (_) => MutableState(false),
     );
+
+void setRoomUnreadOverride(
+  WidgetRef ref,
+  rust.ChatRoom room, {
+  required bool unread,
+}) {
+  final syncedUnread = room.unreadCount > 0 || room.isMarkedUnread;
+  ref
+      .read(roomUnreadOverrideProvider(room.id).notifier)
+      .value = syncedUnread == unread
+      ? null
+      : RoomUnreadOverride(
+          unread: unread,
+          baselineUnreadCount: room.unreadCount,
+          baselineMarkedUnread: room.isMarkedUnread,
+        );
+}
+
+void setRoomUnreadOverrideById(
+  WidgetRef ref,
+  String roomId, {
+  required bool unread,
+}) {
+  final rooms = ref.read(chatRoomsProvider).asData?.value;
+  if (rooms == null) return;
+  for (final room in rooms) {
+    if (room.id == roomId) {
+      setRoomUnreadOverride(ref, room, unread: unread);
+      return;
+    }
+  }
+}
 
 void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(chatRoomsProvider);
@@ -76,7 +136,9 @@ void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(ungroupedRoomsProvider);
   ref.invalidate(contactsProvider);
   ref.invalidate(ignoredUserIdsProvider);
+  ref.invalidate(roomKnockRequestsProvider);
   ref.invalidate(roomUnreadOverrideProvider);
+  ref.invalidate(roomAutoReadSuppressedProvider);
 }
 
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
@@ -776,6 +838,12 @@ final roomMembersProvider = FutureProvider.family<List<rust.Contact>, String>((
   return members;
 });
 
+final roomKnockRequestsProvider =
+    FutureProvider.family<List<rust.KnockRequest>, String>((ref, roomId) async {
+      if (!ref.watch(sessionReadyProvider)) return [];
+      return rust.getRoomKnockRequests(roomId: roomId);
+    });
+
 /// Search rooms provider
 final searchRoomsProvider = FutureProvider.family<List<rust.ChatRoom>, String>((
   ref,
@@ -835,14 +903,21 @@ final syncStreamProvider =
       Timer? messageRefreshTimer;
       Timer? roomRefreshTimer;
       final pendingMessageRefreshes = <String>{};
+      final pendingReadAfterRefreshes = <String>{};
       var messageRefreshInFlight = false;
       var messageRefreshTrailing = false;
       var disposed = false;
+      late void Function(String roomId, {bool markReadAfterRefresh})
+      scheduleMessageRefresh;
 
       void refreshRooms() {
         ref.invalidate(chatRoomsProvider);
         ref.invalidate(spacesProvider);
         ref.invalidate(ungroupedRoomsProvider);
+        ref.invalidate(spaceChildrenProvider);
+        ref.invalidate(searchRoomsProvider);
+        ref.invalidate(roomKnockRequestsProvider);
+        ref.invalidate(roomMembersProvider);
       }
 
       void scheduleRoomRefresh() {
@@ -853,8 +928,6 @@ final syncStreamProvider =
         });
       }
 
-      late void Function(String roomId) scheduleMessageRefresh;
-
       Future<void> flushMessageRefreshes() async {
         if (disposed) return;
         if (messageRefreshInFlight) {
@@ -863,12 +936,28 @@ final syncStreamProvider =
         }
         final roomIds = pendingMessageRefreshes.toList();
         pendingMessageRefreshes.clear();
+        final readAfterRefreshes = roomIds
+            .where(pendingReadAfterRefreshes.remove)
+            .toSet();
         if (roomIds.isEmpty) return;
 
         messageRefreshInFlight = true;
         try {
           await Future.wait(
-            roomIds.map((roomId) => refreshMessagesRef(ref, roomId)),
+            roomIds.map((roomId) async {
+              await refreshMessagesRef(ref, roomId);
+              if (!readAfterRefreshes.contains(roomId) ||
+                  ref.read(currentRoomIdProvider) != roomId ||
+                  ref.read(roomAutoReadSuppressedProvider(roomId))) {
+                return;
+              }
+              try {
+                await rust.markRoomAsRead(roomId: roomId);
+                scheduleRoomRefresh();
+              } catch (error) {
+                debugPrint('markRoomAsRead after refresh failed: $error');
+              }
+            }),
           );
         } finally {
           messageRefreshInFlight = false;
@@ -882,18 +971,22 @@ final syncStreamProvider =
         }
       }
 
-      scheduleMessageRefresh = (String roomId) {
-        pendingMessageRefreshes.add(roomId);
-        if (messageRefreshInFlight) {
-          messageRefreshTrailing = true;
-          return;
-        }
-        if (messageRefreshTimer != null) return;
-        messageRefreshTimer = Timer(const Duration(milliseconds: 100), () {
-          messageRefreshTimer = null;
-          unawaited(flushMessageRefreshes());
-        });
-      };
+      scheduleMessageRefresh =
+          (String roomId, {bool markReadAfterRefresh = false}) {
+            pendingMessageRefreshes.add(roomId);
+            if (markReadAfterRefresh) {
+              pendingReadAfterRefreshes.add(roomId);
+            }
+            if (messageRefreshInFlight) {
+              messageRefreshTrailing = true;
+              return;
+            }
+            if (messageRefreshTimer != null) return;
+            messageRefreshTimer = Timer(const Duration(milliseconds: 100), () {
+              messageRefreshTimer = null;
+              unawaited(flushMessageRefreshes());
+            });
+          };
 
       final statusTimer = Timer.periodic(
         const Duration(seconds: 1),
@@ -909,9 +1002,11 @@ final syncStreamProvider =
             if (currentRoomId != null) {
               scheduleMessageRefresh(currentRoomId);
             }
+          case rust.SyncEvent_RoomListChanged():
+            scheduleRoomRefresh();
           case rust.SyncEvent_MessageSent(:final roomId):
             if (ref.read(currentRoomIdProvider) == roomId) {
-              scheduleMessageRefresh(roomId);
+              scheduleMessageRefresh(roomId, markReadAfterRefresh: true);
             }
             scheduleRoomRefresh();
           case rust.SyncEvent_IgnoredUsersChanged():
@@ -924,6 +1019,7 @@ final syncStreamProvider =
         statusTimer.cancel();
         messageRefreshTimer?.cancel();
         roomRefreshTimer?.cancel();
+        pendingReadAfterRefreshes.clear();
         subscription.cancel();
       });
 

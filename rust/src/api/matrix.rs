@@ -1,4 +1,5 @@
 use flutter_rust_bridge::frb;
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use log::{info, warn};
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
@@ -23,8 +24,10 @@ use matrix_sdk::{
 };
 use once_cell::sync::Lazy;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::future::Future;
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock};
@@ -279,6 +282,8 @@ fn set_connection_status(status: ConnectionStatus) {
 pub enum SyncEvent {
     /// A sync cycle completed (rooms may have new messages).
     SyncCompleted,
+    /// Room-list metadata changed without requiring a timeline refresh.
+    RoomListChanged,
     /// A message was sent (room list should refresh).
     MessageSent { room_id: String },
     /// The account's ignored-user list changed.
@@ -289,6 +294,26 @@ static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> = Lazy::ne
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     tx
 });
+
+type MutationFuture = Shared<BoxFuture<'static, Result<(), String>>>;
+
+struct MutationTail {
+    id: u64,
+    future: MutationFuture,
+}
+
+static MUTATION_TAILS: Lazy<std::sync::Mutex<HashMap<String, MutationTail>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+static NEXT_MUTATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+struct MarkedUnreadOverride {
+    baseline: bool,
+    desired: bool,
+}
+
+static MARKED_UNREAD_OVERRIDES: Lazy<RwLock<HashMap<String, MarkedUnreadOverride>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 #[frb]
 #[derive(Clone, Debug)]
@@ -303,6 +328,150 @@ static SESSION_TOKEN_TX: Lazy<tokio::sync::broadcast::Sender<SessionTokenUpdate>
 
 fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
+}
+
+async fn enqueue_mutation<F>(key: String, operation: F) -> Result<(), String>
+where
+    F: Future<Output = Result<(), String>> + Send + 'static,
+{
+    let id = NEXT_MUTATION_ID.fetch_add(1, Ordering::Relaxed);
+    let future = {
+        let mut tails = MUTATION_TAILS
+            .lock()
+            .map_err(|_| "Mutation queue is unavailable.".to_string())?;
+        let previous = tails.get(&key).map(|tail| tail.future.clone());
+        let future = async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            operation.await
+        }
+        .boxed()
+        .shared();
+        tails.insert(
+            key.clone(),
+            MutationTail {
+                id,
+                future: future.clone(),
+            },
+        );
+        future
+    };
+
+    let result = future.await;
+    if let Ok(mut tails) = MUTATION_TAILS.lock() {
+        if tails.get(&key).is_some_and(|tail| tail.id == id) {
+            tails.remove(&key);
+        }
+    }
+    result
+}
+
+async fn synced_marked_unread(room: &Room) -> bool {
+    room.account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.deserialize().ok())
+        .is_some_and(|event| event.content.unread)
+}
+
+fn marked_unread_override_key(client: &Client, room: &Room) -> Option<String> {
+    client
+        .user_id()
+        .map(|user_id| format!("{user_id}:{}", room.room_id()))
+}
+
+fn resolve_marked_unread(synced: bool, local: Option<MarkedUnreadOverride>) -> (bool, bool) {
+    match local {
+        Some(local) if synced == local.baseline => (local.desired, false),
+        Some(_) => (synced, true),
+        None => (synced, false),
+    }
+}
+
+async fn effective_marked_unread(client: &Client, room: &Room) -> bool {
+    let synced = synced_marked_unread(room).await;
+    let Some(key) = marked_unread_override_key(client, room) else {
+        return synced;
+    };
+    let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
+    let (effective, stale) = resolve_marked_unread(synced, overrides.get(&key).copied());
+    if stale {
+        overrides.remove(&key);
+    }
+    effective
+}
+
+async fn set_marked_unread_override(key: String, baseline: bool, desired: bool) {
+    let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
+    if baseline == desired {
+        overrides.remove(&key);
+    } else {
+        overrides.insert(key, MarkedUnreadOverride { baseline, desired });
+    }
+}
+
+#[cfg(test)]
+mod mutation_queue_tests {
+    use super::{enqueue_mutation, resolve_marked_unread, MarkedUnreadOverride};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn serializes_mutations_with_the_same_key() {
+        let key = format!("test:{}", std::process::id());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first_order = order.clone();
+        let (release_first, wait_for_release) = oneshot::channel();
+        let (first_started, wait_for_first) = oneshot::channel();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            enqueue_mutation(first_key, async move {
+                first_order.lock().unwrap().push(1);
+                let _ = first_started.send(());
+                let _ = wait_for_release.await;
+                Ok(())
+            })
+            .await
+        });
+
+        wait_for_first.await.unwrap();
+
+        let second_order = order.clone();
+        let second = tokio::spawn(async move {
+            enqueue_mutation(key, async move {
+                second_order.lock().unwrap().push(2);
+                Ok(())
+            })
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(*order.lock().unwrap(), [1]);
+
+        let _ = release_first.send(());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), [1, 2]);
+    }
+
+    #[test]
+    fn marked_unread_override_expires_when_sync_advances() {
+        let local = MarkedUnreadOverride {
+            baseline: false,
+            desired: true,
+        };
+        assert_eq!(resolve_marked_unread(false, Some(local)), (true, false));
+        assert_eq!(resolve_marked_unread(true, Some(local)), (true, true));
+
+        let local = MarkedUnreadOverride {
+            baseline: true,
+            desired: false,
+        };
+        assert_eq!(resolve_marked_unread(true, Some(local)), (false, false));
+        assert_eq!(resolve_marked_unread(false, Some(local)), (false, true));
+    }
 }
 
 fn install_session_token_callback(client: &Client) -> Result<(), String> {
@@ -873,6 +1042,8 @@ pub struct ChatRoom {
     /// "dm", "group", or "space"
     pub room_type: String,
     pub is_encrypted: bool,
+    /// Whether an explicit mute push rule exists for this room.
+    pub is_muted: bool,
     /// "joined", "invited", "knocked", "left", or "banned"
     pub room_state: String,
 }
@@ -964,14 +1135,17 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
-    let is_marked_unread = room
-        .account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
-        .await
-        .ok()
-        .flatten()
-        .and_then(|raw| raw.deserialize().ok())
-        .is_some_and(|event| event.content.unread);
-    let (last_message, last_message_sender_id, last_message_time) = get_last_message_info(room);
+    let is_marked_unread = effective_marked_unread(&room.client(), room).await;
+    let (mut last_message, mut last_message_sender_id, last_message_time) =
+        get_last_message_info(room);
+    if let Some(sender_id) = last_message_sender_id.as_deref() {
+        if let Ok(user_id) = matrix_sdk::ruma::UserId::parse(sender_id) {
+            if room.client().is_user_ignored(&user_id).await {
+                last_message = "(消息已隐藏)".to_string();
+                last_message_sender_id = None;
+            }
+        }
+    }
     let last_message_sender = if let Some(sender_id) = last_message_sender_id {
         let is_me = room
             .client()
@@ -1010,6 +1184,11 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         .await
         .map(|state| state.is_encrypted())
         .unwrap_or(true);
+    let notification_settings = room.client().notification_settings().await;
+    let is_muted = notification_settings
+        .get_user_defined_room_notification_mode(room.room_id())
+        .await
+        == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute);
 
     ChatRoom {
         id: room_id,
@@ -1022,6 +1201,7 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         is_marked_unread,
         room_type,
         is_encrypted,
+        is_muted,
         room_state: room_state_label(room.state()).to_string(),
     }
 }
@@ -5298,7 +5478,7 @@ pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> 
             .await
             .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
     }
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event(SyncEvent::RoomListChanged);
     Ok(())
 }
 
@@ -5309,15 +5489,24 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
     let room = joined_non_space_room(&client, &room_id)?;
     let event_id = matrix_sdk::ruma::EventId::parse(event_id)
         .map_err(|error| format!("Invalid event ID: {error}"))?;
-    let pinned = room
-        .pin_event(&event_id)
-        .await
-        .map_err(|error| format!("Failed to pin message: {error}"))?;
-    if !pinned {
-        room.unpin_event(&event_id)
+    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let pinned_result = Arc::new(AtomicBool::new(false));
+    let queued_result = pinned_result.clone();
+    enqueue_mutation(format!("pinned:{user_id}:{room_id}"), async move {
+        let pinned = room
+            .pin_event(&event_id)
             .await
-            .map_err(|error| format!("Failed to unpin message: {error}"))?;
-    }
+            .map_err(|error| format!("Failed to pin message: {error}"))?;
+        if !pinned {
+            room.unpin_event(&event_id)
+                .await
+                .map_err(|error| format!("Failed to unpin message: {error}"))?;
+        }
+        queued_result.store(pinned, Ordering::Relaxed);
+        Ok(())
+    })
+    .await?;
+    let pinned = pinned_result.load(Ordering::Relaxed);
     notify_sync_event(SyncEvent::SyncCompleted);
     Ok(pinned)
 }
@@ -5335,8 +5524,17 @@ pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, St
 pub async fn mark_room_as_read(room_id: String) -> Result<(), String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    sdk_timeline::mark_room_as_read(&client, &room).await?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let mutation_key = format!("read:{user_id}:{room_id}");
+    let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    enqueue_mutation(mutation_key, async move {
+        let baseline = synced_marked_unread(&room).await;
+        sdk_timeline::mark_room_as_read(&client, &room).await?;
+        set_marked_unread_override(override_key, baseline, false).await;
+        Ok(())
+    })
+    .await?;
+    notify_sync_event(SyncEvent::RoomListChanged);
     Ok(())
 }
 
@@ -5347,10 +5545,20 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
 
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    room.set_account_data(MarkedUnreadEventContent::new(true))
-        .await
-        .map_err(|error| format!("Failed to mark room unread: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let mutation_key = format!("read:{user_id}:{room_id}");
+    let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    enqueue_mutation(mutation_key, async move {
+        let baseline = synced_marked_unread(&room).await;
+        room.set_account_data(MarkedUnreadEventContent::new(true))
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("Failed to mark room unread: {error}"))?;
+        set_marked_unread_override(override_key, baseline, true).await;
+        Ok(())
+    })
+    .await?;
+    notify_sync_event(SyncEvent::RoomListChanged);
     Ok(())
 }
 
@@ -5383,26 +5591,30 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<(), Stri
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
         .map_err(|error| format!("Invalid user ID: {error}"))?
         .to_owned();
-    let account = client.account();
-    let mut content = account
-        .fetch_account_data_static::<IgnoredUserListEventContent>()
-        .await
-        .map_err(|error| format!("Failed to load ignored users: {error}"))?
-        .map(|raw| raw.deserialize())
-        .transpose()
-        .map_err(|error| format!("Failed to decode ignored users: {error}"))?
-        .unwrap_or_default();
-    if ignored {
-        content.ignored_users.insert(user_id, IgnoredUser::new());
-    } else {
-        content.ignored_users.remove(&user_id);
-    }
-    account
-        .set_account_data(content)
-        .await
-        .map_err(|error| format!("Failed to update ignored users: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
-    Ok(())
+    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    enqueue_mutation(format!("ignored:{active_user_id}"), async move {
+        let account = client.account();
+        let mut content = account
+            .fetch_account_data_static::<IgnoredUserListEventContent>()
+            .await
+            .map_err(|error| format!("Failed to load ignored users: {error}"))?
+            .map(|raw| raw.deserialize())
+            .transpose()
+            .map_err(|error| format!("Failed to decode ignored users: {error}"))?
+            .unwrap_or_default();
+        if ignored {
+            content.ignored_users.insert(user_id, IgnoredUser::new());
+        } else {
+            content.ignored_users.remove(&user_id);
+        }
+        account
+            .set_account_data(content)
+            .await
+            .map_err(|error| format!("Failed to update ignored users: {error}"))?;
+        notify_sync_event(SyncEvent::IgnoredUsersChanged);
+        Ok(())
+    })
+    .await
 }
 
 /// List current requests to join a knock-enabled room.

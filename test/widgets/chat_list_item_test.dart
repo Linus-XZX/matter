@@ -15,6 +15,8 @@ void main() {
       String lastMessage = 'Hello',
       String lastMessageTime = '0',
       int unreadCount = 0,
+      bool isMarkedUnread = false,
+      bool isMuted = false,
       String roomType = 'group',
       String roomState = 'joined',
     }) => ChatRoom(
@@ -23,9 +25,10 @@ void main() {
       lastMessage: lastMessage,
       lastMessageTime: lastMessageTime,
       unreadCount: unreadCount,
-      isMarkedUnread: false,
+      isMarkedUnread: isMarkedUnread,
       roomType: roomType,
       isEncrypted: false,
+      isMuted: isMuted,
       roomState: roomState,
     );
 
@@ -152,13 +155,59 @@ void main() {
       expect(find.text('99+'), findsOneWidget);
     });
 
+    testWidgets('shows a dot for an explicit unread marker', (tester) async {
+      const roomId = '!marked-unread:example.org';
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, isMarkedUnread: true)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-dot:$roomId')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('shows mute state in the room list', (tester) async {
+      const roomId = '!muted:example.org';
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, isMuted: true)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-muted-icon:$roomId')),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('optimistic read state overrides stale unread counts', (
       tester,
     ) async {
       const roomId = '!optimistic-read:example.org';
       final container = ProviderContainer();
       addTearDown(container.dispose);
-      container.read(roomUnreadOverrideProvider(roomId).notifier).value = false;
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: false,
+        baselineUnreadCount: 5,
+        baselineMarkedUnread: false,
+      );
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
@@ -183,7 +232,13 @@ void main() {
       const roomId = '!optimistic-unread:example.org';
       final container = ProviderContainer();
       addTearDown(container.dispose);
-      container.read(roomUnreadOverrideProvider(roomId).notifier).value = true;
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: true,
+        baselineUnreadCount: 0,
+        baselineMarkedUnread: false,
+      );
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
@@ -197,9 +252,39 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        find.byKey(const ValueKey('room-unread-dot:$roomId')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('new room snapshot invalidates an optimistic read state', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-new-message:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: false,
+        baselineUnreadCount: 5,
+        baselineMarkedUnread: false,
+      );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, unreadCount: 6)),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('6'), findsOneWidget);
+      expect(container.read(roomUnreadOverrideProvider(roomId)), isNull);
     });
 
     testWidgets('shows a person icon for dm rooms', (tester) async {

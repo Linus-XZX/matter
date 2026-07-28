@@ -64,11 +64,20 @@ class ChatListItem extends ConsumerWidget {
         : chatListPreview(room);
     final unreadOverride = ref.watch(roomUnreadOverrideProvider(room.id));
     final syncedHasUnread = room.unreadCount > 0 || room.isMarkedUnread;
-    final hasUnread = unreadOverride ?? syncedHasUnread;
-    if (unreadOverride != null && unreadOverride == syncedHasUnread) {
+    final overrideApplies = unreadOverride?.appliesTo(room) ?? false;
+    final hasUnread = overrideApplies
+        ? unreadOverride!.unread
+        : syncedHasUnread;
+    final unreadAccent = room.isMuted
+        ? AppColors.onSurfaceVariant
+        : AppColors.primary;
+    if (unreadOverride != null && !overrideApplies) {
       Future.microtask(() {
         if (!context.mounted) return;
-        if (ref.read(roomUnreadOverrideProvider(room.id)) == unreadOverride) {
+        if (identical(
+          ref.read(roomUnreadOverrideProvider(room.id)),
+          unreadOverride,
+        )) {
           ref.read(roomUnreadOverrideProvider(room.id).notifier).value = null;
         }
       });
@@ -150,12 +159,21 @@ class ChatListItem extends ConsumerWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      if (room.isMuted) ...[
+                        const SizedBox(width: 6),
+                        Icon(
+                          Icons.volume_off_rounded,
+                          key: ValueKey('room-muted-icon:${room.id}'),
+                          size: 15,
+                          color: AppColors.onSurfaceVariant,
+                        ),
+                      ],
                       const SizedBox(width: 8),
                       Text(
                         formatChatListTime(room.lastMessageTime),
                         style: TextStyle(
                           color: hasUnread
-                              ? AppColors.primary
+                              ? unreadAccent
                               : AppColors.onSurfaceVariant,
                           fontSize: 12,
                           fontWeight: hasUnread
@@ -194,29 +212,38 @@ class ChatListItem extends ConsumerWidget {
                       ),
                       if (hasUnread) ...[
                         const SizedBox(width: 8),
-                        Container(
-                          key: ValueKey('room-unread-badge:${room.id}'),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 7,
-                            vertical: 2,
+                        if (room.unreadCount > 0)
+                          Container(
+                            key: ValueKey('room-unread-badge:${room.id}'),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: unreadAccent,
+                              borderRadius: BorderRadius.circular(AppRadii.tag),
+                            ),
+                            child: Text(
+                              room.unreadCount > 99
+                                  ? '99+'
+                                  : '${room.unreadCount}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          )
+                        else
+                          Container(
+                            key: ValueKey('room-unread-dot:${room.id}'),
+                            width: 9,
+                            height: 9,
+                            decoration: BoxDecoration(
+                              color: unreadAccent,
+                              shape: BoxShape.circle,
+                            ),
                           ),
-                          decoration: BoxDecoration(
-                            color: AppColors.primary,
-                            borderRadius: BorderRadius.circular(AppRadii.tag),
-                          ),
-                          child: room.unreadCount > 0
-                              ? Text(
-                                  room.unreadCount > 99
-                                      ? '99+'
-                                      : '${room.unreadCount}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 11.5,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                )
-                              : const SizedBox(width: 7, height: 14),
-                        ),
                       ],
                     ],
                   ),
@@ -284,7 +311,7 @@ class ChatListItem extends ConsumerWidget {
                   context,
                   sheetContext,
                   ref,
-                  room.id,
+                  room,
                   markRoomAsRead,
                   false,
                   '已标记为已读',
@@ -303,7 +330,7 @@ class ChatListItem extends ConsumerWidget {
                   context,
                   sheetContext,
                   ref,
-                  room.id,
+                  room,
                   markRoomUnread,
                   true,
                   '已标记为未读',
@@ -320,16 +347,18 @@ class ChatListItem extends ConsumerWidget {
     BuildContext context,
     BuildContext sheetContext,
     WidgetRef ref,
-    String roomId,
+    ChatRoom room,
     Future<void> Function({required String roomId}) action,
     bool markedUnread,
     String successMessage,
   ) async {
+    final suppression = roomAutoReadSuppressedProvider(room.id);
+    final previousSuppression = ref.read(suppression);
+    ref.read(suppression.notifier).value = markedUnread;
     try {
-      await action(roomId: roomId);
+      await action(roomId: room.id);
       if (!context.mounted) return;
-      ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
-          markedUnread;
+      setRoomUnreadOverride(ref, room, unread: markedUnread);
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
       ref.invalidate(spaceChildrenProvider);
@@ -340,11 +369,11 @@ class ChatListItem extends ConsumerWidget {
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
     } catch (error) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('操作失败: $error')));
-      }
+      if (!context.mounted) return;
+      ref.read(suppression.notifier).value = previousSuppression;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('操作失败: $error')));
     }
   }
 }

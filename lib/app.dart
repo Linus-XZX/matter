@@ -39,6 +39,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   _DesktopRoomSource _desktopRoomSource = _DesktopRoomSource.directMessages;
   bool _showRoomDetails = false;
   String? _lastActiveUserId;
+  ({String name, String? avatarUrl})? _selectedRoomDetailsBaseline;
 
   static const double _desktopBreakpoint = 840;
   static const double _desktopDetailsPaneBreakpoint = 1024;
@@ -159,33 +160,82 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       );
       return;
     }
-    if (_selectedRoom == room) return;
+    if (_selectedRoom?.id == room.id) {
+      final selectedRoom = _selectedRoom!;
+      final localBaseline = _selectedRoomDetailsBaseline;
+      final refreshedRoom =
+          localBaseline != null &&
+              room.name == localBaseline.name &&
+              room.avatarUrl == localBaseline.avatarUrl
+          ? _roomWithDetails(
+              room,
+              name: selectedRoom.name,
+              avatarUrl: selectedRoom.avatarUrl,
+            )
+          : room;
+      if (selectedRoom != refreshedRoom) {
+        setState(() => _selectedRoom = refreshedRoom);
+      }
+      ref.read(roomAutoReadSuppressedProvider(room.id).notifier).value = false;
+      unawaited(_markSelectedRoomAsRead(refreshedRoom));
+      return;
+    }
+    _selectedRoomDetailsBaseline = null;
     setState(() => _selectedRoom = room);
+  }
+
+  Future<void> _markSelectedRoomAsRead(rust.ChatRoom room) async {
+    try {
+      await rust.markRoomAsRead(roomId: room.id);
+      if (!mounted || _selectedRoom?.id != room.id) return;
+      setRoomUnreadOverride(ref, room, unread: false);
+      ref.invalidate(chatRoomsProvider);
+      ref.invalidate(ungroupedRoomsProvider);
+      ref.invalidate(spaceChildrenProvider);
+      ref.invalidate(searchRoomsProvider);
+    } catch (error) {
+      debugPrint('markRoomAsRead after room reselection failed: $error');
+    }
   }
 
   void _updateSelectedRoomDetails(rust.RoomDetails details) {
     final room = _selectedRoom;
     if (room == null || room.id != details.id) return;
+    _selectedRoomDetailsBaseline = (name: room.name, avatarUrl: room.avatarUrl);
     setState(() {
-      _selectedRoom = rust.ChatRoom(
-        id: room.id,
+      _selectedRoom = _roomWithDetails(
+        room,
         name: details.name,
         avatarUrl: details.avatarUrl,
-        lastMessage: room.lastMessage,
-        lastMessageSender: room.lastMessageSender,
-        lastMessageTime: room.lastMessageTime,
-        unreadCount: room.unreadCount,
-        isMarkedUnread: room.isMarkedUnread,
-        roomType: room.roomType,
-        isEncrypted: room.isEncrypted,
-        roomState: room.roomState,
       );
     });
+  }
+
+  rust.ChatRoom _roomWithDetails(
+    rust.ChatRoom room, {
+    required String name,
+    required String? avatarUrl,
+  }) {
+    return rust.ChatRoom(
+      id: room.id,
+      name: name,
+      avatarUrl: avatarUrl,
+      lastMessage: room.lastMessage,
+      lastMessageSender: room.lastMessageSender,
+      lastMessageTime: room.lastMessageTime,
+      unreadCount: room.unreadCount,
+      isMarkedUnread: room.isMarkedUnread,
+      roomType: room.roomType,
+      isEncrypted: room.isEncrypted,
+      isMuted: room.isMuted,
+      roomState: room.roomState,
+    );
   }
 
   void _clearSelectedRoom() {
     setState(() {
       _selectedRoom = null;
+      _selectedRoomDetailsBaseline = null;
       _showRoomDetails = false;
     });
   }
@@ -196,6 +246,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.directMessages;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
+      _selectedRoomDetailsBaseline = null;
     });
   }
 
@@ -205,6 +256,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.ungroupedRooms;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
+      _selectedRoomDetailsBaseline = null;
     });
   }
 
@@ -214,6 +266,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.space;
       _selectedDesktopSpace = space;
       _selectedRoom = null;
+      _selectedRoomDetailsBaseline = null;
     });
   }
 
@@ -229,6 +282,10 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         final isDesktop = constraints.maxWidth >= _desktopBreakpoint;
         _syncMobilePageAfterLayoutChange(isDesktop);
         if (isDesktop) {
+          // Only the desktop layout keeps a selected room whose metadata must
+          // follow chatRoomsProvider; watching it on mobile would rebuild the
+          // whole app on every room list refresh for nothing.
+          _syncSelectedRoomFromRooms(ref.watch(chatRoomsProvider));
           return _buildDesktopLayout(context, constraints);
         }
         return _buildMobileLayout();
@@ -242,9 +299,38 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     if (previousUserId == null || previousUserId == activeUserId) return;
 
     _selectedRoom = null;
+    _selectedRoomDetailsBaseline = null;
     _selectedDesktopSpace = null;
     _desktopRoomSource = _DesktopRoomSource.directMessages;
     _showRoomDetails = false;
+  }
+
+  void _syncSelectedRoomFromRooms(AsyncValue<List<rust.ChatRoom>> roomsAsync) {
+    final selectedRoom = _selectedRoom;
+    final rooms = roomsAsync.asData?.value;
+    if (selectedRoom == null || rooms == null) return;
+
+    rust.ChatRoom? refreshedRoom;
+    for (final room in rooms) {
+      if (room.id == selectedRoom.id) {
+        refreshedRoom = room;
+        break;
+      }
+    }
+    if (refreshedRoom == null) return;
+    final localBaseline = _selectedRoomDetailsBaseline;
+    if (localBaseline != null &&
+        refreshedRoom.name == localBaseline.name &&
+        refreshedRoom.avatarUrl == localBaseline.avatarUrl) {
+      _selectedRoom = _roomWithDetails(
+        refreshedRoom,
+        name: selectedRoom.name,
+        avatarUrl: selectedRoom.avatarUrl,
+      );
+      return;
+    }
+    _selectedRoomDetailsBaseline = null;
+    _selectedRoom = refreshedRoom;
   }
 
   void _syncMobilePageAfterLayoutChange(bool isDesktop) {

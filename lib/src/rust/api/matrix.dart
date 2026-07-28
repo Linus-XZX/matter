@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `encryption_settings`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -1020,6 +1020,9 @@ class ChatRoom {
   final String roomType;
   final bool isEncrypted;
 
+  /// Whether an explicit mute push rule exists for this room.
+  final bool isMuted;
+
   /// "joined", "invited", "knocked", "left", or "banned"
   final String roomState;
 
@@ -1034,6 +1037,7 @@ class ChatRoom {
     required this.isMarkedUnread,
     required this.roomType,
     required this.isEncrypted,
+    required this.isMuted,
     required this.roomState,
   });
 
@@ -1049,6 +1053,7 @@ class ChatRoom {
       isMarkedUnread.hashCode ^
       roomType.hashCode ^
       isEncrypted.hashCode ^
+      isMuted.hashCode ^
       roomState.hashCode;
 
   @override
@@ -1066,6 +1071,7 @@ class ChatRoom {
           isMarkedUnread == other.isMarkedUnread &&
           roomType == other.roomType &&
           isEncrypted == other.isEncrypted &&
+          isMuted == other.isMuted &&
           roomState == other.roomState;
 }
 
@@ -1665,6 +1671,9 @@ sealed class SyncEvent with _$SyncEvent {
 
   /// A sync cycle completed (rooms may have new messages).
   const factory SyncEvent.syncCompleted() = SyncEvent_SyncCompleted;
+
+  /// Room-list metadata changed without requiring a timeline refresh.
+  const factory SyncEvent.roomListChanged() = SyncEvent_RoomListChanged;
 
   /// A message was sent (room list should refresh).
   const factory SyncEvent.messageSent({required String roomId}) =

@@ -76,6 +76,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   bool _hasTimelineGroups = false;
   late String _roomName;
   String? _avatarUrl;
+
+  /// Snapshot of the name/avatar a local edit replaced. While the room list
+  /// still shows these old values, a lagging sync snapshot must not revert
+  /// the title; cleared once the list catches up.
+  ({String name, String? avatarUrl})? _editedRoomMetaBaseline;
   List<ChatMessage>? _lastMessageMergeInput;
   List<LocalOutgoingMessage>? _lastLocalMergeInput;
   List<ChatMessage> _lastTimelineMessages = const [];
@@ -87,6 +92,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   bool _isLoadingOlder = false;
   bool _hasMoreMessages = true;
   bool _olderLoadArmed = true;
+  bool _automaticOlderLoadBlocked = false;
   String _derivedMessagesFingerprint = '';
   InputPanelMode _inputPanelMode = InputPanelMode.none;
   double? _inputChromeHeight;
@@ -180,10 +186,25 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   void _handleRoomDetailsChanged(RoomDetails details) {
     setState(() {
+      _editedRoomMetaBaseline = (name: _roomName, avatarUrl: _avatarUrl);
       _roomName = details.name;
       _avatarUrl = details.avatarUrl;
     });
     widget.onRoomDetailsChanged?.call(details);
+  }
+
+  void _applySyncedRoomMeta(({String name, String? avatarUrl})? meta) {
+    if (meta == null) return;
+    final baseline = _editedRoomMetaBaseline;
+    if (baseline != null &&
+        meta.name == baseline.name &&
+        meta.avatarUrl == baseline.avatarUrl) {
+      // The list snapshot predates the local edit; keep the edited values.
+      return;
+    }
+    _editedRoomMetaBaseline = null;
+    _roomName = meta.name;
+    _avatarUrl = meta.avatarUrl;
   }
 
   @override
@@ -199,12 +220,19 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   @override
   void didPopNext() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _activateRoom();
+      if (mounted && (_route?.isCurrent ?? false)) {
+        _activateRoom();
+      }
     });
   }
 
   void _activateRoom() {
+    if (!(_route?.isCurrent ?? ModalRoute.of(context)?.isCurrent ?? false)) {
+      return;
+    }
     _currentRoomIdNotifier.value = widget.roomId;
+    ref.read(roomAutoReadSuppressedProvider(widget.roomId).notifier).value =
+        false;
     unawaited(
       subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
         debugPrint('subscribeTypingForRoom failed: $e');
@@ -224,8 +252,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     try {
       await markRoomAsRead(roomId: widget.roomId);
       if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
-      ref.read(roomUnreadOverrideProvider(widget.roomId).notifier).value =
-          false;
+      setRoomUnreadOverrideById(ref, widget.roomId, unread: false);
+      ref.invalidate(chatRoomsProvider);
+      ref.invalidate(ungroupedRoomsProvider);
+      ref.invalidate(spaceChildrenProvider);
+      ref.invalidate(searchRoomsProvider);
     } catch (error) {
       debugPrint('markRoomAsRead failed: $error');
     }
@@ -247,7 +278,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final currentRoomIdNotifier = _currentRoomIdNotifier;
     final roomId = widget.roomId;
     Future.microtask(() {
-      if (currentRoomIdNotifier.value == roomId) {
+      if (currentRoomIdNotifier.mounted &&
+          currentRoomIdNotifier.value == roomId) {
         currentRoomIdNotifier.value = null;
       }
     });
@@ -312,9 +344,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final triggerDistance = _olderLoadTriggerDistance(metrics);
     if (distanceFromOlderEdge > triggerDistance + _olderLoadRearmDistance) {
       _olderLoadArmed = true;
+      _automaticOlderLoadBlocked = false;
     }
 
     if (_olderLoadArmed &&
+        !_automaticOlderLoadBlocked &&
         !_isLoadingOlder &&
         _hasMoreMessages &&
         _paginationAnchorId() != null &&
@@ -494,6 +528,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           _olderMessagesRevision++;
           _olderLoadArmed = true;
         }
+        _automaticOlderLoadBlocked = false;
         _hasMoreMessages = older.isNotEmpty;
         _isLoadingOlder = false;
       });
@@ -505,11 +540,23 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       }
     } catch (error) {
       if (!mounted) return;
-      setState(() => _isLoadingOlder = false);
+      setState(() {
+        _isLoadingOlder = false;
+        _olderLoadArmed = false;
+        _automaticOlderLoadBlocked = true;
+      });
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('加载更早消息失败: $error')));
     }
+  }
+
+  void _retryOlderMessages() {
+    setState(() {
+      _automaticOlderLoadBlocked = false;
+      _olderLoadArmed = true;
+    });
+    unawaited(_loadOlderMessages());
   }
 
   String? _paginationAnchorId() {
@@ -897,6 +944,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final activeUserId = ref.watch(activeUserIdProvider) ?? 'anonymous';
     final ignoredUserIdsAsync = ref.watch(ignoredUserIdsProvider);
     final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
+    // Follow server-side renames/avatar changes for this room. select() keeps
+    // unrelated room list churn from rebuilding the timeline.
+    final syncedRoomMeta = ref.watch(
+      chatRoomsProvider.select((roomsAsync) {
+        final rooms = roomsAsync.value;
+        if (rooms == null) return null;
+        for (final room in rooms) {
+          if (room.id == widget.roomId) {
+            return (name: room.name, avatarUrl: room.avatarUrl);
+          }
+        }
+        return null;
+      }),
+    );
+    _applySyncedRoomMeta(syncedRoomMeta);
     final cachedTotalMembers = cachedMessages.fold<int>(
       0,
       (count, message) => math.max(count, message.totalMembers),
@@ -1047,10 +1109,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               ),
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => PinnedMessagesPage(
-                    roomId: widget.roomId,
-                    roomName: _roomName,
-                  ),
+                  builder: (_) => PinnedMessagesPage(roomId: widget.roomId),
                 ),
               ),
             ),
@@ -1088,38 +1147,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   final messages = messageCacheOwner == activeUserId
                       ? cachedMessages
                       : const <ChatMessage>[];
-                  if (!ignoredUserIdsAsync.hasValue) {
-                    if (ignoredUserIdsAsync.hasError) {
-                      return Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Text(
-                              '无法加载忽略列表，消息已隐藏',
-                              style: TextStyle(
-                                color: AppColors.onSurfaceVariant,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            IconButton(
-                              tooltip: '重试',
-                              icon: const Icon(Icons.refresh_rounded),
-                              color: AppColors.primary,
-                              onPressed: () =>
-                                  ref.invalidate(ignoredUserIdsProvider),
-                            ),
-                          ],
-                        ),
-                      );
-                    }
-                    return const Center(
-                      child: CircularProgressIndicator(
-                        color: AppColors.primary,
-                        strokeWidth: 2,
-                      ),
-                    );
-                  }
-                  final ignoredUserIds = ignoredUserIdsAsync.requireValue;
+                  final ignoredUserIds =
+                      ignoredUserIdsAsync.value ?? const <String>{};
                   // Do not expose the timeline until its initial insets and
                   // member-dependent labels are stable enough for layout.
                   if ((!messageCachePrimed &&
@@ -1149,6 +1178,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   );
                   _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
                   if (_displayedMessages.isEmpty &&
+                      !_automaticOlderLoadBlocked &&
                       !_isLoadingOlder &&
                       _hasMoreMessages &&
                       _paginationAnchorId() != null) {
@@ -1202,6 +1232,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                                       _findTimelineEntryIndex,
                                 ),
                               ),
+                              if (_automaticOlderLoadBlocked &&
+                                  timelineEntries.isEmpty)
+                                SliverFillRemaining(
+                                  hasScrollBody: false,
+                                  child: Center(
+                                    child: TextButton.icon(
+                                      onPressed: _retryOlderMessages,
+                                      icon: const Icon(Icons.refresh_rounded),
+                                      label: const Text('重试加载更早消息'),
+                                    ),
+                                  ),
+                                ),
                               const SliverPadding(
                                 padding: EdgeInsets.only(top: 8),
                               ),

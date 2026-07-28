@@ -11,4 +11,6 @@ class MutableState<T> extends Notifier<T> {
   T get value => state;
 
   set value(T value) => state = value;
+
+  bool get mounted => ref.mounted;
 }

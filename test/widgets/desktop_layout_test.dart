@@ -11,8 +11,12 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
+  int markRoomAsReadCalls = 0;
+
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+    markRoomAsReadCalls++;
+  }
 
   @override
   Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async {
@@ -59,6 +63,7 @@ rust.ChatRoom _room({
     isMarkedUnread: false,
     roomType: roomType,
     isEncrypted: false,
+    isMuted: false,
     roomState: 'joined',
   );
 }
@@ -76,14 +81,18 @@ Future<void> _pumpApp(WidgetTester tester, ProviderContainer container) async {
 }
 
 void main() {
+  late _FakeRustApi rustApi;
+
   setUpAll(() {
-    RustLib.initMock(api: _FakeRustApi());
+    rustApi = _FakeRustApi();
+    RustLib.initMock(api: rustApi);
   });
 
   tearDownAll(RustLib.dispose);
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    rustApi.markRoomAsReadCalls = 0;
   });
 
   testWidgets('opens a nested space instead of its chat detail', (
@@ -234,7 +243,83 @@ void main() {
           .roomName,
       'Renamed room',
     );
+    await tester.tap(find.text('Project room').first);
+    await tester.pump();
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Renamed room',
+    );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('syncs remote room metadata into the selected desktop room', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var rooms = [
+      _room(id: '!room:example.org', name: 'Project room', roomType: 'dm'),
+    ];
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => rooms),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    await tester.tap(find.byTooltip('显示详情'));
+    await tester.pump();
+
+    rooms = [
+      _room(id: '!room:example.org', name: 'Remote name', roomType: 'dm'),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Remote name',
+    );
+    expect(
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .roomName,
+      'Remote name',
+    );
+  });
+
+  testWidgets('reselecting the current desktop room resumes read receipts', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final room = _room(
+      id: '!room:example.org',
+      name: 'Project room',
+      roomType: 'dm',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => [room]),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    final initialReadCalls = rustApi.markRoomAsReadCalls;
+    container.read(roomAutoReadSuppressedProvider(room.id).notifier).value =
+        true;
+
+    await tester.tap(find.text('Project room').first);
+    await tester.pump();
+
+    expect(container.read(roomAutoReadSuppressedProvider(room.id)), isFalse);
+    expect(rustApi.markRoomAsReadCalls, initialReadCalls + 1);
   });
 
   testWidgets('selects a room from the new account after switching accounts', (

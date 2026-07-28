@@ -20,6 +20,7 @@ rust.ChatRoom _room(
   isMarkedUnread: false,
   roomType: type,
   isEncrypted: false,
+  isMuted: false,
   roomState: state,
 );
 

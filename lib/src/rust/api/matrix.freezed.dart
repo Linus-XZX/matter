@@ -55,11 +55,12 @@ extension SyncEventPatterns on SyncEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( SyncEvent_SyncCompleted value)?  syncCompleted,TResult Function( SyncEvent_MessageSent value)?  messageSent,TResult Function( SyncEvent_IgnoredUsersChanged value)?  ignoredUsersChanged,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( SyncEvent_SyncCompleted value)?  syncCompleted,TResult Function( SyncEvent_RoomListChanged value)?  roomListChanged,TResult Function( SyncEvent_MessageSent value)?  messageSent,TResult Function( SyncEvent_IgnoredUsersChanged value)?  ignoredUsersChanged,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted() when syncCompleted != null:
-return syncCompleted(_that);case SyncEvent_MessageSent() when messageSent != null:
+return syncCompleted(_that);case SyncEvent_RoomListChanged() when roomListChanged != null:
+return roomListChanged(_that);case SyncEvent_MessageSent() when messageSent != null:
 return messageSent(_that);case SyncEvent_IgnoredUsersChanged() when ignoredUsersChanged != null:
 return ignoredUsersChanged(_that);case _:
   return orElse();
@@ -79,11 +80,12 @@ return ignoredUsersChanged(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( SyncEvent_SyncCompleted value)  syncCompleted,required TResult Function( SyncEvent_MessageSent value)  messageSent,required TResult Function( SyncEvent_IgnoredUsersChanged value)  ignoredUsersChanged,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( SyncEvent_SyncCompleted value)  syncCompleted,required TResult Function( SyncEvent_RoomListChanged value)  roomListChanged,required TResult Function( SyncEvent_MessageSent value)  messageSent,required TResult Function( SyncEvent_IgnoredUsersChanged value)  ignoredUsersChanged,}){
 final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted():
-return syncCompleted(_that);case SyncEvent_MessageSent():
+return syncCompleted(_that);case SyncEvent_RoomListChanged():
+return roomListChanged(_that);case SyncEvent_MessageSent():
 return messageSent(_that);case SyncEvent_IgnoredUsersChanged():
 return ignoredUsersChanged(_that);}
 }
@@ -99,11 +101,12 @@ return ignoredUsersChanged(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( SyncEvent_SyncCompleted value)?  syncCompleted,TResult? Function( SyncEvent_MessageSent value)?  messageSent,TResult? Function( SyncEvent_IgnoredUsersChanged value)?  ignoredUsersChanged,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( SyncEvent_SyncCompleted value)?  syncCompleted,TResult? Function( SyncEvent_RoomListChanged value)?  roomListChanged,TResult? Function( SyncEvent_MessageSent value)?  messageSent,TResult? Function( SyncEvent_IgnoredUsersChanged value)?  ignoredUsersChanged,}){
 final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted() when syncCompleted != null:
-return syncCompleted(_that);case SyncEvent_MessageSent() when messageSent != null:
+return syncCompleted(_that);case SyncEvent_RoomListChanged() when roomListChanged != null:
+return roomListChanged(_that);case SyncEvent_MessageSent() when messageSent != null:
 return messageSent(_that);case SyncEvent_IgnoredUsersChanged() when ignoredUsersChanged != null:
 return ignoredUsersChanged(_that);case _:
   return null;
@@ -122,10 +125,11 @@ return ignoredUsersChanged(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  syncCompleted,TResult Function( String roomId)?  messageSent,TResult Function()?  ignoredUsersChanged,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  syncCompleted,TResult Function()?  roomListChanged,TResult Function( String roomId)?  messageSent,TResult Function()?  ignoredUsersChanged,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted() when syncCompleted != null:
-return syncCompleted();case SyncEvent_MessageSent() when messageSent != null:
+return syncCompleted();case SyncEvent_RoomListChanged() when roomListChanged != null:
+return roomListChanged();case SyncEvent_MessageSent() when messageSent != null:
 return messageSent(_that.roomId);case SyncEvent_IgnoredUsersChanged() when ignoredUsersChanged != null:
 return ignoredUsersChanged();case _:
   return orElse();
@@ -145,10 +149,11 @@ return ignoredUsersChanged();case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  syncCompleted,required TResult Function( String roomId)  messageSent,required TResult Function()  ignoredUsersChanged,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  syncCompleted,required TResult Function()  roomListChanged,required TResult Function( String roomId)  messageSent,required TResult Function()  ignoredUsersChanged,}) {final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted():
-return syncCompleted();case SyncEvent_MessageSent():
+return syncCompleted();case SyncEvent_RoomListChanged():
+return roomListChanged();case SyncEvent_MessageSent():
 return messageSent(_that.roomId);case SyncEvent_IgnoredUsersChanged():
 return ignoredUsersChanged();}
 }
@@ -164,10 +169,11 @@ return ignoredUsersChanged();}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  syncCompleted,TResult? Function( String roomId)?  messageSent,TResult? Function()?  ignoredUsersChanged,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  syncCompleted,TResult? Function()?  roomListChanged,TResult? Function( String roomId)?  messageSent,TResult? Function()?  ignoredUsersChanged,}) {final _that = this;
 switch (_that) {
 case SyncEvent_SyncCompleted() when syncCompleted != null:
-return syncCompleted();case SyncEvent_MessageSent() when messageSent != null:
+return syncCompleted();case SyncEvent_RoomListChanged() when roomListChanged != null:
+return roomListChanged();case SyncEvent_MessageSent() when messageSent != null:
 return messageSent(_that.roomId);case SyncEvent_IgnoredUsersChanged() when ignoredUsersChanged != null:
 return ignoredUsersChanged();case _:
   return null;
@@ -201,6 +207,38 @@ int get hashCode => runtimeType.hashCode;
 @override
 String toString() {
   return 'SyncEvent.syncCompleted()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
+
+
+class SyncEvent_RoomListChanged extends SyncEvent {
+  const SyncEvent_RoomListChanged(): super._();
+
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_RoomListChanged);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'SyncEvent.roomListChanged()';
 }
 
 

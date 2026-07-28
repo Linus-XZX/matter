@@ -7,6 +7,7 @@ import 'package:matter/pages/chat/chat_detail_page.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
 import 'package:matter/pages/chat/message_insert_animation.dart';
 import 'package:matter/pages/chat/send_flight.dart';
+import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
@@ -17,10 +18,18 @@ class _FakeRustApi implements RustLibApi {
   int unsubscribeTypingCalls = 0;
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
+  int markRoomAsReadCalls = 0;
   int getMessagesBeforeCalls = 0;
   final messagesBeforeEventIds = <String>[];
   List<rust.ChatMessage> messagesBefore = const [];
+  Object? messagesBeforeError;
   Completer<String>? pendingSend;
+  List<rust.ChatRoom> chatRooms = const [];
+
+  @override
+  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms() async {
+    return chatRooms;
+  }
 
   @override
   Future<String> crateApiMatrixSendMessage({
@@ -67,7 +76,9 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+    markRoomAsReadCalls++;
+  }
 
   @override
   Future<List<rust.ChatMessage>> crateApiMatrixGetMessagesBefore({
@@ -77,6 +88,7 @@ class _FakeRustApi implements RustLibApi {
   }) async {
     getMessagesBeforeCalls++;
     messagesBeforeEventIds.add(fromEventId);
+    if (messagesBeforeError case final error?) throw error;
     return messagesBefore;
   }
 
@@ -157,10 +169,13 @@ void main() {
     rustApi.unsubscribeTypingCalls = 0;
     rustApi.subscribeRoomCalls = 0;
     rustApi.unsubscribeRoomCalls = 0;
+    rustApi.markRoomAsReadCalls = 0;
     rustApi.getMessagesBeforeCalls = 0;
     rustApi.messagesBeforeEventIds.clear();
     rustApi.messagesBefore = const [];
+    rustApi.messagesBeforeError = null;
     rustApi.pendingSend = null;
+    rustApi.chatRooms = const [];
     rustApi.activeTypingRoom = null;
     rustApi.typingUnsubscribeBarrier = null;
     SharedPreferences.setMockInitialValues({});
@@ -302,6 +317,52 @@ void main() {
     expect(rustApi.activeTypingRoom, '!a:example.org');
   });
 
+  testWidgets('does not reactivate a chat route that is also being popped', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const Scaffold(body: SizedBox(key: ValueKey('root-route'))),
+        ),
+      ),
+    );
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const ChatDetailPage(
+            roomId: '!leaving:example.org',
+            roomName: 'Leaving',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final initialReadCalls = rustApi.markRoomAsReadCalls;
+
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: SizedBox.shrink()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    navigator.pop();
+    navigator.pop();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ChatDetailPage), findsNothing);
+    expect(find.byKey(const ValueKey('root-route')), findsOneWidget);
+    expect(rustApi.markRoomAsReadCalls, initialReadCalls);
+  });
+
   testWidgets('waits for initial members before rendering cached messages', (
     tester,
   ) async {
@@ -341,7 +402,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('keeps cached messages hidden until the ignore list loads', (
+  testWidgets('shows cached messages while the ignore list loads', (
     tester,
   ) async {
     const roomId = '!ignored-loading:example.org';
@@ -373,8 +434,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsNothing);
-    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsNothing);
+    expect(find.byKey(const ValueKey(r'text-bubble:$ignored')), findsOneWidget);
+    expect(find.byKey(const ValueKey(r'text-bubble:$own')), findsOneWidget);
 
     ignoredUsers.complete(const {'@alice:example.org'});
     await tester.pump();
@@ -436,7 +497,56 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('keeps messages hidden when the ignore list fails', (
+  testWidgets('removes newly ignored user messages from an open timeline', (
+    tester,
+  ) async {
+    const roomId = '!ignored-live:example.org';
+    var ignoredUsers = <String>{};
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => ignoredUsers),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$live-ignored'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$live-ignored')),
+      findsOneWidget,
+    );
+
+    ignoredUsers = {'@alice:example.org'};
+    container.invalidate(ignoredUserIdsProvider);
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$live-ignored')),
+      findsNothing,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('keeps cached messages available when the ignore list fails', (
     tester,
   ) async {
     const roomId = '!ignored-error:example.org';
@@ -469,8 +579,63 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.byKey(const ValueKey(r'text-bubble:$private')), findsNothing);
-    expect(find.text('无法加载忽略列表，消息已隐藏'), findsOneWidget);
+    expect(find.byKey(const ValueKey(r'text-bubble:$private')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('stops automatic older-message retries after a failure', (
+    tester,
+  ) async {
+    const roomId = '!older-failure:example.org';
+    rustApi.messagesBeforeError = StateError('offline');
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith(
+          (ref) async => const {'@alice:example.org'},
+        ),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$ignored-anchor'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    expect(rustApi.getMessagesBeforeCalls, 1);
+    expect(find.textContaining('加载更早消息失败'), findsOneWidget);
+    expect(find.text('重试加载更早消息'), findsOneWidget);
+
+    rustApi.messagesBeforeError = null;
+    rustApi.messagesBefore = [
+      _ownMessage(r'$manual-retry', content: 'recovered', timestamp: '0'),
+    ];
+    await tester.tap(find.text('重试加载更早消息'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.getMessagesBeforeCalls, greaterThanOrEqualTo(2));
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$manual-retry')),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -660,5 +825,49 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+
+  testWidgets('an open chat follows server-side room renames', (tester) async {
+    rust.ChatRoom room(String name) => rust.ChatRoom(
+      id: '!room:example.org',
+      name: name,
+      lastMessage: '',
+      lastMessageTime: '',
+      unreadCount: 0,
+      isMarkedUnread: false,
+      roomType: 'group',
+      isEncrypted: false,
+      isMuted: false,
+      roomState: 'joined',
+    );
+    rustApi.chatRooms = [room('Old name')];
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Old name',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Old name'), findsWidgets);
+
+    // Another client renamed the room; the next room-list snapshot carries it.
+    rustApi.chatRooms = [room('New name')];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Old name'), findsNothing);
+    expect(find.text('New name'), findsWidgets);
   });
 }

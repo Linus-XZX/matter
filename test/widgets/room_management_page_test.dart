@@ -4,15 +4,26 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/room_management_page.dart';
+import 'package:matter/providers/auth_provider.dart';
+import 'package:matter/providers/chat_provider.dart';
+import 'package:matter/providers/mutable_state.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
+
+/// The knock-requests provider is gated on an active session; tests pump the
+/// management page without one, so force the session ready.
+final _sessionReadyOverride = sessionReadyProvider.overrideWith(
+  () => MutableState(true),
+);
 
 class _FakeRustApi implements RustLibApi {
   bool failSupplementalLoads = true;
   Completer<void>? pendingDetailsUpdate;
   List<rust.KnockRequest> knockRequests = const [];
   int detailsLoadCalls = 0;
+  int membersLoadCalls = 0;
   int approveKnockCalls = 0;
+  int rejectKnockCalls = 0;
   int markUnreadCalls = 0;
   String? updatedName;
   String? updatedTopic;
@@ -40,6 +51,7 @@ class _FakeRustApi implements RustLibApi {
   Future<List<rust.Contact>> crateApiMatrixGetRoomMembers({
     required String roomId,
   }) async {
+    membersLoadCalls++;
     if (failSupplementalLoads) throw StateError('members unavailable');
     return const [
       rust.Contact(id: '@alice:example.org', name: 'Alice', status: 'online'),
@@ -81,6 +93,14 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
+  Future<void> crateApiMatrixRejectRoomKnock({
+    required String roomId,
+    required String userId,
+  }) async {
+    rejectKnockCalls++;
+  }
+
+  @override
   Future<void> crateApiMatrixMarkRoomUnread({required String roomId}) async {
     markUnreadCalls++;
   }
@@ -106,7 +126,9 @@ void main() {
     rustApi.pendingDetailsUpdate = null;
     rustApi.knockRequests = const [];
     rustApi.detailsLoadCalls = 0;
+    rustApi.membersLoadCalls = 0;
     rustApi.approveKnockCalls = 0;
+    rustApi.rejectKnockCalls = 0;
     rustApi.markUnreadCalls = 0;
     rustApi.updatedName = null;
     rustApi.updatedTopic = null;
@@ -119,7 +141,8 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
@@ -145,7 +168,8 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
@@ -178,7 +202,8 @@ void main() {
     rustApi.pendingDetailsUpdate = update;
 
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
@@ -206,6 +231,7 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
@@ -238,7 +264,7 @@ void main() {
     expect(changedDetails?.topic, 'Updated topic');
   });
 
-  testWidgets('removes an approved knock without reloading stale members', (
+  testWidgets('removes an approved knock and refreshes room members', (
     tester,
   ) async {
     rustApi.failSupplementalLoads = false;
@@ -249,7 +275,8 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(900, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: RoomManagementPage(
             roomId: '!room:example.org',
@@ -265,7 +292,58 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(rustApi.approveKnockCalls, 1);
+    expect(rustApi.membersLoadCalls, 2);
     expect(find.text('Bob'), findsNothing);
+  });
+
+  testWidgets('a re-knock becomes visible again after the server echo', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.knockRequests = const [
+      rust.KnockRequest(userId: '@bob:example.org', displayName: 'Bob'),
+    ];
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bob'), findsOneWidget);
+    await tester.tap(find.byTooltip('拒绝'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.rejectKnockCalls, 1);
+    // Optimistically hidden until the server echo removes the membership.
+    expect(find.text('Bob'), findsNothing);
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(RoomManagementPage)),
+    );
+
+    // Server echo: the rejected knock is gone from the membership list.
+    rustApi.knockRequests = const [];
+    container.invalidate(roomKnockRequestsProvider('!room:example.org'));
+    await tester.pumpAndSettle();
+
+    // The same user knocks again; the new request must become visible.
+    rustApi.knockRequests = const [
+      rust.KnockRequest(userId: '@bob:example.org', displayName: 'Bob'),
+    ];
+    container.invalidate(roomKnockRequestsProvider('!room:example.org'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bob'), findsOneWidget);
   });
 
   testWidgets('marking the current room unread closes its chat view', (
@@ -278,6 +356,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
       ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: Builder(
             builder: (context) => Scaffold(
@@ -324,6 +403,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
       ProviderScope(
+        overrides: [_sessionReadyOverride],
         child: MaterialApp(
           home: Builder(
             builder: (rootContext) => Scaffold(
