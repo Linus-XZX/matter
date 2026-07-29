@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_marked_unread`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -309,8 +309,13 @@ Future<String?> getRefreshToken() =>
 Future<bool> isRoomEncrypted({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixIsRoomEncrypted(roomId: roomId);
 
-Future<List<ChatRoom>> getChatRooms() =>
-    RustLib.instance.api.crateApiMatrixGetChatRooms();
+Future<List<ChatRoom>> getChatRooms({
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetChatRooms(
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 /// Get messages for a room (must sync first).
 Future<List<ChatMessage>> getMessages({required String roomId}) =>
@@ -617,8 +622,15 @@ Future<List<Space>> getSpaces() =>
 Future<SpaceDetails> getSpaceDetails({required String spaceId}) =>
     RustLib.instance.api.crateApiMatrixGetSpaceDetails(spaceId: spaceId);
 
-Future<List<ChatRoom>> getSpaceChildren({required String spaceId}) =>
-    RustLib.instance.api.crateApiMatrixGetSpaceChildren(spaceId: spaceId);
+Future<List<ChatRoom>> getSpaceChildren({
+  required String spaceId,
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetSpaceChildren(
+  spaceId: spaceId,
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 Future<void> updateSpaceDetails({
   required String spaceId,
@@ -650,8 +662,13 @@ Future<void> removeRoomFromSpace({
 Future<void> leaveSpace({required String spaceId}) =>
     RustLib.instance.api.crateApiMatrixLeaveSpace(spaceId: spaceId);
 
-Future<List<ChatRoom>> getUngroupedRooms() =>
-    RustLib.instance.api.crateApiMatrixGetUngroupedRooms();
+Future<List<ChatRoom>> getUngroupedRooms({
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetUngroupedRooms(
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 Future<List<Contact>> getContacts() =>
     RustLib.instance.api.crateApiMatrixGetContacts();
@@ -730,8 +747,15 @@ Future<String?> getRoomAvatarUrl({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetRoomAvatarUrl(roomId: roomId);
 
 /// Search rooms by name.
-Future<List<ChatRoom>> searchRooms({required String query}) =>
-    RustLib.instance.api.crateApiMatrixSearchRooms(query: query);
+Future<List<ChatRoom>> searchRooms({
+  required String query,
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixSearchRooms(
+  query: query,
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 /// Load more messages (paginated) from before a given event.
 Future<List<ChatMessage>> getMessagesBefore({
@@ -1017,6 +1041,10 @@ class ChatRoom {
   final String lastMessage;
   final String? lastMessageSender;
   final String lastMessageTime;
+
+  /// Event ID of the latest timeline event (empty when none): the room's
+  /// revision token for optimistic-state baselines.
+  final String lastEventId;
   final int unreadCount;
 
   /// Whether the user explicitly marked this room as unread.
@@ -1039,6 +1067,7 @@ class ChatRoom {
     required this.lastMessage,
     this.lastMessageSender,
     required this.lastMessageTime,
+    required this.lastEventId,
     required this.unreadCount,
     required this.isMarkedUnread,
     required this.roomType,
@@ -1055,6 +1084,7 @@ class ChatRoom {
       lastMessage.hashCode ^
       lastMessageSender.hashCode ^
       lastMessageTime.hashCode ^
+      lastEventId.hashCode ^
       unreadCount.hashCode ^
       isMarkedUnread.hashCode ^
       roomType.hashCode ^
@@ -1073,6 +1103,7 @@ class ChatRoom {
           lastMessage == other.lastMessage &&
           lastMessageSender == other.lastMessageSender &&
           lastMessageTime == other.lastMessageTime &&
+          lastEventId == other.lastEventId &&
           unreadCount == other.unreadCount &&
           isMarkedUnread == other.isMarkedUnread &&
           roomType == other.roomType &&

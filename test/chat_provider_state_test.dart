@@ -22,6 +22,8 @@ class _FakeRustApi implements RustLibApi {
   int getMessagesCalls = 0;
   int markRoomAsReadCalls = 0;
   int chatRoomsCalls = 0;
+  List<String>? chatRoomsIgnoredFilter;
+  bool? chatRoomsAuthoritative;
   int ungroupedRoomsCalls = 0;
   int spaceChildrenCalls = 0;
   int searchRoomsCalls = 0;
@@ -61,13 +63,21 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms() async {
+  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms({
+    List<String>? ignoredUserIds,
+    required bool authoritative,
+  }) async {
     chatRoomsCalls++;
+    chatRoomsIgnoredFilter = ignoredUserIds;
+    chatRoomsAuthoritative = authoritative;
     return const [];
   }
 
   @override
-  Future<List<rust.ChatRoom>> crateApiMatrixGetUngroupedRooms() async {
+  Future<List<rust.ChatRoom>> crateApiMatrixGetUngroupedRooms({
+    List<String>? ignoredUserIds,
+    required bool authoritative,
+  }) async {
     ungroupedRoomsCalls++;
     return const [];
   }
@@ -75,6 +85,8 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<List<rust.ChatRoom>> crateApiMatrixGetSpaceChildren({
     required String spaceId,
+    List<String>? ignoredUserIds,
+    required bool authoritative,
   }) async {
     spaceChildrenCalls++;
     return const [];
@@ -83,6 +95,8 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<List<rust.ChatRoom>> crateApiMatrixSearchRooms({
     required String query,
+    List<String>? ignoredUserIds,
+    required bool authoritative,
   }) async {
     searchRoomsCalls++;
     return const [];
@@ -150,6 +164,7 @@ rust.ChatRoom _room(String id, {bool isEncrypted = false}) => rust.ChatRoom(
   name: 'Room',
   lastMessage: '',
   lastMessageTime: '0',
+  lastEventId: '',
   unreadCount: 0,
   isMarkedUnread: false,
   roomType: 'group',
@@ -185,6 +200,8 @@ void main() {
     rustApi.getMessagesCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
     rustApi.chatRoomsCalls = 0;
+    rustApi.chatRoomsIgnoredFilter = null;
+    rustApi.chatRoomsAuthoritative = null;
     rustApi.ungroupedRoomsCalls = 0;
     rustApi.spaceChildrenCalls = 0;
     rustApi.searchRoomsCalls = 0;
@@ -235,6 +252,7 @@ void main() {
         unread: true,
         baselineUnreadCount: 0,
         baselineMarkedUnread: false,
+        baselineLastEventId: '0',
       );
       ref.read(roomAutoReadSuppressedProvider(roomId).notifier).value = true;
 
@@ -472,6 +490,146 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
     },
   );
+
+  testWidgets('room previews refilter against the write-through ignore list', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsCalls, 1);
+    expect(rustApi.chatRoomsIgnoredFilter, isEmpty);
+    // The first fetch completed against the server: the list is fresh and
+    // may override the lagging store.
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    // A confirmed ignore change is written through; revalidating the ignore
+    // provider (as the management page does) must cascade into the room
+    // list so previews are re-filtered without waiting for the sync echo.
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@b:example.org',
+    });
+    // The server now holds the change as well.
+    rustApi.ignoredUsers = const ['@b:example.org'];
+    container.invalidate(ignoredUserIdsProvider);
+    await container.read(chatRoomsProvider.future);
+    await tester.pump();
+
+    expect(rustApi.chatRoomsCalls, greaterThan(1));
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('room previews pass no filter when the ignore list is unknown', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    // No persisted snapshot and the fetch fails: the ignore state is
+    // unknown. It must not degrade into "nobody is ignored" — a null filter
+    // lets Rust fall back to its store-side filter instead.
+    rustApi.ignoredUsersError = StateError('offline');
+
+    await container.read(chatRoomsProvider.future);
+
+    expect(rustApi.chatRoomsCalls, 1);
+    expect(rustApi.chatRoomsIgnoredFilter, isNull);
+    expect(rustApi.chatRoomsAuthoritative, isFalse);
+  });
+
+  testWidgets(
+    'a confirmed un-ignore makes the empty list authoritative again',
+    (tester) async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      rustApi.ignoredUsers = const ['@b:example.org'];
+
+      await container.read(chatRoomsProvider.future);
+      expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+      expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+      // The un-ignore is confirmed and written through; the revalidated room
+      // list must pass the (empty) list itself with the authoritative flag,
+      // never null or a stale snapshot, so Rust lets it override the store
+      // whose sync echo still lags — and cannot resurrect a stuck ignore
+      // override for the preview.
+      await persistIgnoredUserList('@alice:example.org', const {});
+      rustApi.ignoredUsers = const [];
+      container.invalidate(ignoredUserIdsProvider);
+      await container.read(chatRoomsProvider.future);
+      await tester.pump();
+
+      expect(rustApi.chatRoomsIgnoredFilter, isNotNull);
+      expect(rustApi.chatRoomsIgnoredFilter, isEmpty);
+      expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('a persisted cache only merges until revalidated as fresh', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@cached:example.org'],
+    });
+    // Hold the background refresh: the provider serves the persisted
+    // snapshot while its freshness is unconfirmed.
+    rustApi.pendingIgnoredUsers = Completer<List<String>>();
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final syncSubscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    await container.read(chatRoomsProvider.future);
+    // A merely persisted cache must be merged with the store, not treated
+    // as authoritative.
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@cached:example.org'));
+    expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+    // Once the refresh completes, the same list becomes authoritative.
+    rustApi.pendingIgnoredUsers!.complete(const ['@cached:example.org']);
+    await tester.pump();
+    container.invalidate(chatRoomsProvider);
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    // A cross-device change demotes the confirmed list: until the
+    // revalidation completes, previews merge with the store again.
+    rustApi.pendingIgnoredUsers = Completer<List<String>>();
+    rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+    await tester.pump();
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+    rustApi.pendingIgnoredUsers!.complete(const ['@cached:example.org']);
+    await tester.pump();
+    container.invalidate(chatRoomsProvider);
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
 
   testWidgets('ignored users fall back to the persisted list on failure', (
     tester,

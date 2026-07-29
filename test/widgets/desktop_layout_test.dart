@@ -59,6 +59,7 @@ rust.ChatRoom _room({
     name: name,
     lastMessage: '',
     lastMessageTime: '0',
+    lastEventId: '',
     unreadCount: 0,
     isMarkedUnread: false,
     roomType: roomType,

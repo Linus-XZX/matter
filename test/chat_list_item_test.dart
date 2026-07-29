@@ -12,6 +12,7 @@ ChatRoom room({
   lastMessage: '你好',
   lastMessageSender: sender,
   lastMessageTime: '0',
+  lastEventId: '',
   unreadCount: 0,
   isMarkedUnread: false,
   roomType: type,

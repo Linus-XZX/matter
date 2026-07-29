@@ -188,7 +188,7 @@ return ignoredUsersChanged();case _:
 
 class SyncEvent_SyncCompleted extends SyncEvent {
   const SyncEvent_SyncCompleted(): super._();
-  
+
 
 
 
@@ -252,7 +252,7 @@ String toString() {
 
 class SyncEvent_MessageSent extends SyncEvent {
   const SyncEvent_MessageSent({required this.roomId}): super._();
-  
+
 
  final  String roomId;
 

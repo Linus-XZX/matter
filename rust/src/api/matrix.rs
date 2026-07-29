@@ -315,6 +315,20 @@ struct MarkedUnreadOverride {
 static MARKED_UNREAD_OVERRIDES: Lazy<RwLock<HashMap<String, MarkedUnreadOverride>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+#[derive(Clone, Copy)]
+struct IgnoredUserOverride {
+    baseline: bool,
+    desired: bool,
+}
+
+/// Per-account ignored-user overrides for locally confirmed writes whose
+/// account-data echo has not synced yet: `set_account_data` does not update
+/// the SDK state store, so `Client::is_user_ignored` would keep serving the
+/// pre-write value and room previews would stay visible until the echo (or
+/// indefinitely, if connectivity drops first).
+static IGNORED_USER_OVERRIDES: Lazy<RwLock<HashMap<String, IgnoredUserOverride>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
 /// Per-account notification-settings handles. Reusing one instance matters:
 /// it applies its own writes to its internal ruleset, while a fresh instance
 /// initializes from the local store copy of push rules, which lags the sync
@@ -349,6 +363,10 @@ async fn clear_account_runtime_state(user_id: &str) {
     }
     {
         let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
+        overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
+    }
+    {
+        let mut overrides = IGNORED_USER_OVERRIDES.write().await;
         overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
     }
 }
@@ -457,9 +475,88 @@ async fn set_marked_unread_override(key: String, baseline: bool, desired: bool) 
     }
 }
 
+fn ignored_user_override_key(client: &Client, target: &matrix_sdk::ruma::UserId) -> Option<String> {
+    client
+        .user_id()
+        .map(|user_id| format!("{user_id}:{target}"))
+}
+
+fn resolve_ignored_user(synced: bool, local: Option<IgnoredUserOverride>) -> (bool, bool) {
+    match local {
+        Some(local) if synced == local.baseline => (local.desired, false),
+        Some(_) => (synced, true),
+        None => (synced, false),
+    }
+}
+
+/// Effective ignored state for previews: while the state store still shows
+/// the baseline of a confirmed write, report the confirmed value; once the
+/// echo (or any newer server state) advances the store, the store wins and
+/// the stale override is dropped.
+async fn effective_is_user_ignored(client: &Client, target: &matrix_sdk::ruma::UserId) -> bool {
+    let synced = client.is_user_ignored(target).await;
+    let Some(key) = ignored_user_override_key(client, target) else {
+        return synced;
+    };
+    let mut overrides = IGNORED_USER_OVERRIDES.write().await;
+    let (effective, stale) = resolve_ignored_user(synced, overrides.get(&key).copied());
+    if stale {
+        overrides.remove(&key);
+    }
+    effective
+}
+
+async fn set_ignored_user_override(key: String, baseline: bool, desired: bool) {
+    let mut overrides = IGNORED_USER_OVERRIDES.write().await;
+    if baseline == desired {
+        overrides.remove(&key);
+    } else {
+        overrides.insert(key, IgnoredUserOverride { baseline, desired });
+    }
+}
+
+/// An override stays active while the authoritative ignored-user list still
+/// matches the baseline captured when the local write was confirmed; once the
+/// account-data content advances past that baseline (the echo, or a change
+/// from another device), the override is stale.
+fn ignored_user_override_active(
+    key: &str,
+    account_prefix: &str,
+    baseline: bool,
+    content: &IgnoredUserListEventContent,
+) -> bool {
+    let Some(target) = key.strip_prefix(account_prefix) else {
+        // Belongs to another account; leave it untouched.
+        return true;
+    };
+    let synced = matrix_sdk::ruma::UserId::parse(target)
+        .map(|user_id| content.ignored_users.contains_key(&user_id))
+        .unwrap_or(false);
+    synced == baseline
+}
+
+/// Drop stale ignored-user overrides as soon as the account-data echo
+/// arrives. Preview rendering only consults overrides for the current
+/// last-message sender, so without this reconciliation an override whose
+/// target is no room's latest sender would never be read, never expire, and
+/// would keep hiding previews after another device un-ignores the user.
+async fn reconcile_ignored_user_overrides(client: &Client, content: &IgnoredUserListEventContent) {
+    let Some(account_prefix) = client.user_id().map(|user_id| format!("{user_id}:")) else {
+        return;
+    };
+    let mut overrides = IGNORED_USER_OVERRIDES.write().await;
+    overrides.retain(|key, local| {
+        ignored_user_override_active(key, &account_prefix, local.baseline, content)
+    });
+}
+
 #[cfg(test)]
 mod mutation_queue_tests {
-    use super::{enqueue_mutation, resolve_marked_unread, MarkedUnreadOverride};
+    use super::{
+        enqueue_mutation, ignored_user_override_active, resolve_ignored_user,
+        resolve_marked_unread, IgnoredUserOverride, MarkedUnreadOverride,
+    };
+    use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
 
@@ -516,6 +613,77 @@ mod mutation_queue_tests {
         };
         assert_eq!(resolve_marked_unread(true, Some(local)), (false, false));
         assert_eq!(resolve_marked_unread(false, Some(local)), (false, true));
+    }
+
+    #[test]
+    fn ignored_user_override_expires_when_sync_advances() {
+        let local = IgnoredUserOverride {
+            baseline: false,
+            desired: true,
+        };
+        assert_eq!(resolve_ignored_user(false, Some(local)), (true, false));
+        assert_eq!(resolve_ignored_user(true, Some(local)), (true, true));
+
+        let local = IgnoredUserOverride {
+            baseline: true,
+            desired: false,
+        };
+        assert_eq!(resolve_ignored_user(true, Some(local)), (false, false));
+        assert_eq!(resolve_ignored_user(false, Some(local)), (false, true));
+
+        assert_eq!(resolve_ignored_user(true, None), (true, false));
+    }
+
+    #[test]
+    fn ignored_user_override_heals_before_another_device_unignores() {
+        // 1. Local ignore: the store has not caught up; the override hides.
+        let local = IgnoredUserOverride {
+            baseline: false,
+            desired: true,
+        };
+        assert_eq!(resolve_ignored_user(false, Some(local)), (true, false));
+        // 2. Echo lands: the override is stale and must be dropped. This
+        //    consult has to happen even while the write-through list still
+        //    hides the sender (see room_to_chat_room), or step 3 goes wrong.
+        assert_eq!(resolve_ignored_user(true, Some(local)), (true, true));
+        // 3. Another device un-ignores: no override remains; the store wins.
+        assert_eq!(resolve_ignored_user(false, None), (false, false));
+    }
+
+    #[test]
+    fn account_data_echo_reconciles_ignored_user_overrides() {
+        let prefix = "@me:example.org:";
+        let key = "@me:example.org:@target:example.org";
+        let mut echoed = IgnoredUserListEventContent::default();
+        echoed.ignored_users.insert(
+            matrix_sdk::ruma::OwnedUserId::try_from("@target:example.org").unwrap(),
+            IgnoredUser::default(),
+        );
+        let unignored = IgnoredUserListEventContent::default();
+
+        // Echo landed: the target is in the authoritative list while the
+        // override's baseline was "not ignored" → stale, drop it.
+        assert!(!ignored_user_override_active(key, prefix, false, &echoed));
+        // Ignore override for a user whose echo has not landed yet: the
+        // list still matches the baseline → keep it.
+        assert!(ignored_user_override_active(
+            "@me:example.org:@other:example.org",
+            prefix,
+            false,
+            &echoed
+        ));
+        // Another device un-ignored the target: an override whose baseline
+        // was "ignored" is now stale.
+        assert!(!ignored_user_override_active(key, prefix, true, &unignored));
+        // An un-ignore override still waiting for its echo stays active.
+        assert!(ignored_user_override_active(key, prefix, true, &echoed));
+        // Overrides of other accounts are never touched.
+        assert!(ignored_user_override_active(
+            "@someoneelse:example.org:@target:example.org",
+            prefix,
+            false,
+            &echoed
+        ));
     }
 }
 
@@ -787,9 +955,14 @@ fn install_live_update_event_handlers(client: &Client) {
         notify_sync_event(SyncEvent::MessageSent { room_id });
     });
 
+    let ignored_overrides_client = client.clone();
     client.add_event_handler(
-        |_event: GlobalAccountDataEvent<IgnoredUserListEventContent>| async move {
-            notify_sync_event(SyncEvent::IgnoredUsersChanged);
+        move |event: GlobalAccountDataEvent<IgnoredUserListEventContent>| {
+            let client = ignored_overrides_client.clone();
+            async move {
+                reconcile_ignored_user_overrides(&client, &event.content).await;
+                notify_sync_event(SyncEvent::IgnoredUsersChanged);
+            }
         },
     );
 }
@@ -1082,6 +1255,9 @@ pub struct ChatRoom {
     pub last_message: String,
     pub last_message_sender: Option<String>,
     pub last_message_time: String,
+    /// Event ID of the latest timeline event (empty when none): the room's
+    /// revision token for optimistic-state baselines.
+    pub last_event_id: String,
     pub unread_count: i32,
     /// Whether the user explicitly marked this room as unread.
     pub is_marked_unread: bool,
@@ -1165,7 +1341,11 @@ pub struct KnockRequest {
     pub reason: Option<String>,
 }
 
-async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
+async fn room_to_chat_room(
+    room: &matrix_sdk::Room,
+    ignored_user_ids: Option<&std::collections::HashSet<String>>,
+    authoritative: bool,
+) -> ChatRoom {
     let room_id = room.room_id().to_string();
     let mut name = room.name().filter(|n| !n.is_empty()).unwrap_or_default();
     if name.is_empty() {
@@ -1182,14 +1362,43 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let unread_count = room.unread_notification_counts().notification_count as i32;
     let is_marked_unread = effective_marked_unread(&room.client(), room).await;
-    let (mut last_message, mut last_message_sender_id, last_message_time) =
+    let (mut last_message, mut last_message_sender_id, last_message_time, last_event_id) =
         get_last_message_info(room);
     if let Some(sender_id) = last_message_sender_id.as_deref() {
-        if let Ok(user_id) = matrix_sdk::ruma::UserId::parse(sender_id) {
-            if room.client().is_user_ignored(&user_id).await {
-                last_message = "(消息已隐藏)".to_string();
-                last_message_sender_id = None;
+        // The Dart ignore list comes in three freshness levels:
+        // - authoritative (a confirmed write-through or a just-completed
+        //   fetch): the list wins outright. The SDK store's sync echo can
+        //   lag in either direction — after a confirmed un-ignore it may
+        //   still report the sender as ignored, and merging would keep
+        //   previews hidden indefinitely while offline.
+        // - a merely persisted cache: union with the store, so the stale
+        //   snapshot can neither re-expose a sender the store already hides
+        //   (cross-device change, echo ahead of write-through) nor be
+        //   overridden by it forever.
+        // - no list at all (unknown): the store plus pending-write
+        //   overrides are the only source.
+        // Overrides are deliberately consulted ONLY in the unknown case:
+        // they bridge the store lag for local writes (already covered by
+        // the list otherwise), and a coalesced sync (false → true → false
+        // reports only the final false) can leave an override stuck at its
+        // baseline forever (ABA).
+        let hidden = match ignored_user_ids {
+            Some(list) if authoritative => list.contains(sender_id),
+            Some(list) => {
+                let store_ignored = match matrix_sdk::ruma::UserId::parse(sender_id) {
+                    Ok(user_id) => room.client().is_user_ignored(&user_id).await,
+                    Err(_) => false,
+                };
+                list.contains(sender_id) || store_ignored
             }
+            None => match matrix_sdk::ruma::UserId::parse(sender_id) {
+                Ok(user_id) => effective_is_user_ignored(&room.client(), &user_id).await,
+                Err(_) => false,
+            },
+        };
+        if hidden {
+            last_message = "(消息已隐藏)".to_string();
+            last_message_sender_id = None;
         }
     }
     let last_message_sender = if let Some(sender_id) = last_message_sender_id {
@@ -1251,6 +1460,7 @@ async fn room_to_chat_room(room: &matrix_sdk::Room) -> ChatRoom {
         last_message,
         last_message_sender,
         last_message_time,
+        last_event_id,
         unread_count,
         is_marked_unread,
         room_type,
@@ -3775,7 +3985,10 @@ pub async fn is_room_encrypted(room_id: String) -> Result<bool, String> {
 }
 
 #[frb]
-pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
+pub async fn get_chat_rooms(
+    ignored_user_ids: Option<Vec<String>>,
+    authoritative: bool,
+) -> Result<Vec<ChatRoom>, String> {
     let client = get_client().await.ok_or_else(|| {
         app_log(
             "error",
@@ -3784,6 +3997,8 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
         );
         "No client created.".to_string()
     })?;
+    let ignored_user_ids =
+        ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
     let rooms = client.rooms();
     app_log(
@@ -3805,7 +4020,8 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
         }
         visible += 1;
 
-        let mut chat_room = room_to_chat_room(&room).await;
+        let mut chat_room =
+            room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
         if room.state() == matrix_sdk::RoomState::Joined && !room.is_space() {
             chat_room.room_type = match room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -3831,9 +4047,10 @@ pub async fn get_chat_rooms() -> Result<Vec<ChatRoom>, String> {
     Ok(result)
 }
 
-fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String) {
+fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String, String) {
     let mut last_msg = "(暂无消息)".to_string();
     let mut last_time = String::new();
+    let mut last_event_id = String::new();
 
     let latest_value = room.latest_event();
     if let matrix_sdk::latest_events::LatestEventValue::Remote(latest) = latest_value {
@@ -3841,14 +4058,18 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
         if let Ok(any_ev) = raw.deserialize() {
             // Always record the latest event's timestamp for sorting, so that
             // rooms whose newest event isn't a text message (e.g. a reaction or
-            // a state change) don't sink to the bottom of the list.
+            // a state change) don't sink to the bottom of the list. The event
+            // ID is the room's revision token: timestamps are millisecond
+            // resolution and can collide between events.
             last_time = u64::from(any_ev.origin_server_ts().0).to_string();
+            last_event_id = any_ev.event_id().to_string();
 
             if latest.kind.is_utd() {
                 return (
                     "无法解密此消息".to_string(),
                     Some(any_ev.sender().to_string()),
                     last_time,
+                    last_event_id,
                 );
             }
 
@@ -3896,12 +4117,12 @@ fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, St
                     text.push_str("...");
                 }
                 last_msg = text;
-                return (last_msg, Some(sender_id), last_time);
+                return (last_msg, Some(sender_id), last_time, last_event_id);
             }
         }
     }
 
-    (last_msg, None, last_time)
+    (last_msg, None, last_time, last_event_id)
 }
 
 fn room_message_preview(
@@ -5707,7 +5928,9 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<Stri
             .map_err(|error| format!("Failed to decode ignored users: {error}"))?
             .unwrap_or_default();
         if ignored {
-            content.ignored_users.insert(user_id, IgnoredUser::new());
+            content
+                .ignored_users
+                .insert(user_id.clone(), IgnoredUser::new());
         } else {
             content.ignored_users.remove(&user_id);
         }
@@ -5716,10 +5939,17 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<Stri
             .keys()
             .map(|user_id| user_id.to_string())
             .collect();
+        // Baseline of the local store before the write: the store only
+        // advances on the sync echo, and previews consult it until then.
+        let synced_baseline = client.is_user_ignored(&user_id).await;
+        let override_key = ignored_user_override_key(&client, &user_id);
         account
             .set_account_data(content)
             .await
             .map_err(|error| format!("Failed to update ignored users: {error}"))?;
+        if let Some(key) = override_key {
+            set_ignored_user_override(key, synced_baseline, ignored).await;
+        }
         notify_sync_event(SyncEvent::IgnoredUsersChanged);
         Ok(updated)
     })
@@ -5789,7 +6019,7 @@ pub async fn get_spaces() -> Result<Vec<Space>, String> {
         if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
             continue;
         }
-        let chat_room = room_to_chat_room(&room).await;
+        let chat_room = room_to_chat_room(&room, None, false).await;
         spaces.push(Space {
             id: chat_room.id,
             name: chat_room.name,
@@ -5815,7 +6045,7 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
         return Err(format!("Room is not a joined space: {space_id}"));
     }
 
-    let chat_room = room_to_chat_room(&room).await;
+    let chat_room = room_to_chat_room(&room, None, false).await;
     let topic = room
         .topic()
         .map(|topic| topic.trim().to_string())
@@ -5830,8 +6060,14 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
 }
 
 #[frb]
-pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, String> {
+pub async fn get_space_children(
+    space_id: String,
+    ignored_user_ids: Option<Vec<String>>,
+    authoritative: bool,
+) -> Result<Vec<ChatRoom>, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    let ignored_user_ids =
+        ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
     let space_room = client
         .get_room(
@@ -5867,7 +6103,8 @@ pub async fn get_space_children(space_id: String) -> Result<Vec<ChatRoom>, Strin
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&child_room).await;
+        let mut chat_room =
+            room_to_chat_room(&child_room, ignored_user_ids.as_ref(), authoritative).await;
         if !child_room.is_space() {
             chat_room.room_type = match child_room.is_direct().await {
                 Ok(true) => "dm".to_string(),
@@ -6075,8 +6312,13 @@ pub async fn leave_space(space_id: String) -> Result<(), String> {
 }
 
 #[frb]
-pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
+pub async fn get_ungrouped_rooms(
+    ignored_user_ids: Option<Vec<String>>,
+    authoritative: bool,
+) -> Result<Vec<ChatRoom>, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    let ignored_user_ids =
+        ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
     let mut grouped_room_ids = std::collections::HashSet::new();
     for room in client.rooms() {
@@ -6120,7 +6362,8 @@ pub async fn get_ungrouped_rooms() -> Result<Vec<ChatRoom>, String> {
             continue;
         }
 
-        let mut chat_room = room_to_chat_room(&room).await;
+        let mut chat_room =
+            room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
         chat_room.room_type = "group".to_string();
         rooms.push(chat_room);
     }
@@ -6414,8 +6657,12 @@ pub async fn get_room_avatar_url(room_id: String) -> Option<String> {
 
 /// Search rooms by name.
 #[frb]
-pub async fn search_rooms(query: String) -> Result<Vec<ChatRoom>, String> {
-    let all = get_chat_rooms().await?;
+pub async fn search_rooms(
+    query: String,
+    ignored_user_ids: Option<Vec<String>>,
+    authoritative: bool,
+) -> Result<Vec<ChatRoom>, String> {
+    let all = get_chat_rooms(ignored_user_ids, authoritative).await?;
     let q = query.to_lowercase();
     let filtered: Vec<ChatRoom> = all
         .into_iter()

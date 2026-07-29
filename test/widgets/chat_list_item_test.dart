@@ -14,6 +14,7 @@ void main() {
       String name = 'Room',
       String lastMessage = 'Hello',
       String lastMessageTime = '0',
+      String lastEventId = '0',
       int unreadCount = 0,
       bool isMarkedUnread = false,
       bool isMuted = false,
@@ -24,6 +25,7 @@ void main() {
       name: name,
       lastMessage: lastMessage,
       lastMessageTime: lastMessageTime,
+      lastEventId: lastEventId,
       unreadCount: unreadCount,
       isMarkedUnread: isMarkedUnread,
       roomType: roomType,
@@ -207,6 +209,7 @@ void main() {
         unread: false,
         baselineUnreadCount: 5,
         baselineMarkedUnread: false,
+        baselineLastEventId: '0',
       );
 
       await tester.pumpWidget(
@@ -238,6 +241,7 @@ void main() {
         unread: true,
         baselineUnreadCount: 0,
         baselineMarkedUnread: false,
+        baselineLastEventId: '0',
       );
 
       await tester.pumpWidget(
@@ -269,6 +273,7 @@ void main() {
         unread: false,
         baselineUnreadCount: 5,
         baselineMarkedUnread: false,
+        baselineLastEventId: '0',
       );
 
       await tester.pumpWidget(
@@ -286,6 +291,49 @@ void main() {
       expect(find.text('6'), findsOneWidget);
       expect(container.read(roomUnreadOverrideProvider(roomId)), isNull);
     });
+
+    testWidgets(
+      'a room that advanced with the same counters invalidates an optimistic read state',
+      (tester) async {
+        const roomId = '!optimistic-advanced:example.org';
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        // The room was marked read at unreadCount 1; a new message arrived
+        // before the refresh, so the refreshed room still has unreadCount 1
+        // — and even the same millisecond timestamp. The changed latest-event
+        // ID must drop the stale override.
+        container
+            .read(roomUnreadOverrideProvider(roomId).notifier)
+            .value = const RoomUnreadOverride(
+          unread: false,
+          baselineUnreadCount: 1,
+          baselineMarkedUnread: false,
+          baselineLastEventId: r'$old-event',
+        );
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              home: Scaffold(
+                body: ChatListItem(
+                  room: room(
+                    id: roomId,
+                    unreadCount: 1,
+                    lastMessageTime: '100',
+                    lastEventId: r'$new-event',
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('1'), findsOneWidget);
+        expect(container.read(roomUnreadOverrideProvider(roomId)), isNull);
+      },
+    );
 
     testWidgets('shows a person icon for dm rooms', (tester) async {
       await tester.pumpWidget(

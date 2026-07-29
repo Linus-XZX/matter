@@ -223,6 +223,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       lastMessage: room.lastMessage,
       lastMessageSender: room.lastMessageSender,
       lastMessageTime: room.lastMessageTime,
+      lastEventId: room.lastEventId,
       unreadCount: room.unreadCount,
       isMarkedUnread: room.isMarkedUnread,
       roomType: room.roomType,

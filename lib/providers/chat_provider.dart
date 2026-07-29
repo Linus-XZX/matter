@@ -13,7 +13,11 @@ import 'mutable_state.dart';
 
 final chatRoomsProvider = FutureProvider<List<rust.ChatRoom>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return [];
-  final rooms = await rust.getChatRooms();
+  final filter = await _previewIgnoreFilter(ref);
+  final rooms = await rust.getChatRooms(
+    ignoredUserIds: filter.ids?.toList(),
+    authoritative: filter.authoritative,
+  );
   return rooms;
 });
 
@@ -42,13 +46,22 @@ final inboxRoomsProvider = Provider<AsyncValue<List<rust.ChatRoom>>>((ref) {
 
 final ungroupedRoomsProvider = FutureProvider<List<rust.ChatRoom>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return [];
-  return rust.getUngroupedRooms();
+  final filter = await _previewIgnoreFilter(ref);
+  return rust.getUngroupedRooms(
+    ignoredUserIds: filter.ids?.toList(),
+    authoritative: filter.authoritative,
+  );
 });
 
 final spaceChildrenProvider =
     FutureProvider.family<List<rust.ChatRoom>, String>((ref, spaceId) async {
       if (!ref.watch(sessionReadyProvider)) return [];
-      return rust.getSpaceChildren(spaceId: spaceId);
+      final filter = await _previewIgnoreFilter(ref);
+      return rust.getSpaceChildren(
+        spaceId: spaceId,
+        ignoredUserIds: filter.ids?.toList(),
+        authoritative: filter.authoritative,
+      );
     });
 
 final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
@@ -82,7 +95,10 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
     });
     // Re-check after the persist: a confirmed change may have landed while
     // the write was queued or on disk; this response is stale then.
-    if (_ignoredListVersion(namespace) == version) return fresh;
+    if (_ignoredListVersion(namespace) == version) {
+      _confirmedIgnoredLists[namespace] = fresh;
+      return fresh;
+    }
   }
   // A confirmed change landed while this fetch (or its persist) was in
   // flight: the response is stale and must not become the provider state.
@@ -96,6 +112,33 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
 });
 
 const _kIgnoredUsersCachePrefix = 'ignored_users_v1';
+
+/// The ignore list used to filter room-list previews, with its freshness.
+/// Room collections watch it, so a write-through change re-filters previews
+/// immediately (and an offline restart still filters via the persisted
+/// snapshot). `ids` is null when the ignore state is unknown (no snapshot
+/// and the fetch failed): Rust then falls back to its store-side filter
+/// instead of treating the account as "nobody is ignored".
+/// `authoritative` is true only when the served list matches the last
+/// server-confirmed state (a successful write-through or completed fetch,
+/// not superseded by a later `IgnoredUsersChanged`): Rust may then let the
+/// list override its store, whose sync echo can lag in either direction. A
+/// merely persisted cache is merged with the store instead.
+Future<({Set<String>? ids, bool authoritative})> _previewIgnoreFilter(
+  Ref ref,
+) async {
+  final namespace = ref.watch(activeUserIdProvider) ?? '';
+  try {
+    final ids = await ref.watch(ignoredUserIdsProvider.future);
+    final confirmed = _confirmedIgnoredLists[namespace];
+    return (
+      ids: ids,
+      authoritative: confirmed != null && setEquals(ids, confirmed),
+    );
+  } catch (_) {
+    return (ids: null, authoritative: false);
+  }
+}
 
 /// Returns the persisted ignore list, or null when no snapshot exists yet
 /// (distinct from a persisted *empty* list).
@@ -134,6 +177,10 @@ Future<void> _persistIgnoredUserIds(String namespace, Set<String> ids) async {
 /// delta into a possibly unknown local baseline — also keeps other
 /// already-ignored users when no snapshot exists yet.
 Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
+  // Record the confirmed value synchronously: previews may treat the list as
+  // authoritative from this point (the server has accepted the change), and
+  // a later IgnoredUsersChanged demotes it again until revalidated.
+  _confirmedIgnoredLists[namespace] = Set.unmodifiable(ids);
   // Bump synchronously so any refresh whose fetch started earlier is
   // recognized as stale when it completes. The queued write itself must
   // always run: queued writes execute in order, so rapid consecutive
@@ -158,9 +205,14 @@ Future<void> _refreshIgnoredUserIds(
     await _enqueueIgnoredListWrite(namespace, version, () async {
       await _persistIgnoredUserIds(namespace, fresh);
     });
-    if (_ignoredListVersion(namespace) == version &&
-        (fresh.length != persisted.length || !fresh.containsAll(persisted))) {
-      ref.invalidateSelf();
+    if (_ignoredListVersion(namespace) == version) {
+      // The fetch completed against the current version: the persisted
+      // snapshot now reflects a server-confirmed state, so previews may
+      // treat it as authoritative again.
+      _confirmedIgnoredLists[namespace] = fresh;
+      if (fresh.length != persisted.length || !fresh.containsAll(persisted)) {
+        ref.invalidateSelf();
+      }
     }
   } catch (error) {
     // Keep the persisted snapshot: an unknown server state must not be
@@ -171,6 +223,13 @@ Future<void> _refreshIgnoredUserIds(
 
 final _ignoredListWriteVersions = <String, int>{};
 final _ignoredListWriteQueues = <String, List<Future<void> Function()>>{};
+
+/// The last server-confirmed ignore list per account — set by a successful
+/// write-through ([persistIgnoredUserList]) or a completed fetch, removed
+/// when an `IgnoredUsersChanged` sync event makes it suspect. A served list
+/// equal to this value may override the lagging SDK store in Rust; anything
+/// else is only merged with the store.
+final _confirmedIgnoredLists = <String, Set<String>>{};
 
 int _ignoredListVersion(String namespace) =>
     _ignoredListWriteVersions[namespace] ?? 0;
@@ -220,15 +279,24 @@ class RoomUnreadOverride {
   final int baselineUnreadCount;
   final bool baselineMarkedUnread;
 
+  /// Latest-event ID of the snapshot the override supersedes. A room can
+  /// advance without changing the unread counters (one unread is marked
+  /// read, then another message arrives before the refresh: count is 1
+  /// again), and millisecond timestamps can collide between events, so only
+  /// the event ID reliably recognizes a newer snapshot.
+  final String baselineLastEventId;
+
   const RoomUnreadOverride({
     required this.unread,
     required this.baselineUnreadCount,
     required this.baselineMarkedUnread,
+    required this.baselineLastEventId,
   });
 
   bool appliesTo(rust.ChatRoom room) =>
       room.unreadCount == baselineUnreadCount &&
-      room.isMarkedUnread == baselineMarkedUnread;
+      room.isMarkedUnread == baselineMarkedUnread &&
+      room.lastEventId == baselineLastEventId;
 }
 
 /// Optimistic unread state tied to the exact server snapshot it supersedes.
@@ -263,6 +331,7 @@ void setRoomUnreadOverride(
           unread: unread,
           baselineUnreadCount: room.unreadCount,
           baselineMarkedUnread: room.isMarkedUnread,
+          baselineLastEventId: room.lastEventId,
         );
 }
 
@@ -1002,7 +1071,12 @@ final searchRoomsProvider = FutureProvider.family<List<rust.ChatRoom>, String>((
 ) async {
   if (!ref.watch(sessionReadyProvider)) return [];
   if (query.trim().isEmpty) return [];
-  return rust.searchRooms(query: query);
+  final filter = await _previewIgnoreFilter(ref);
+  return rust.searchRooms(
+    query: query,
+    ignoredUserIds: filter.ids?.toList(),
+    authoritative: filter.authoritative,
+  );
 });
 
 /// Send a reply to a message
@@ -1161,6 +1235,10 @@ final syncStreamProvider =
             }
             scheduleRoomRefresh();
           case rust.SyncEvent_IgnoredUsersChanged():
+            // The account data changed outside a confirmed local write (or
+            // its echo landed): the last confirmed list is now suspect, so
+            // previews must merge with the store until revalidated.
+            _confirmedIgnoredLists.remove(ref.read(activeUserIdProvider) ?? '');
             ref.invalidate(ignoredUserIdsProvider);
         }
       });

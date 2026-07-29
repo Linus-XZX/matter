@@ -27,7 +27,10 @@ class _FakeRustApi implements RustLibApi {
   List<rust.ChatRoom> chatRooms = const [];
 
   @override
-  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms() async {
+  Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms({
+    List<String>? ignoredUserIds,
+    required bool authoritative,
+  }) async {
     return chatRooms;
   }
 
@@ -1013,6 +1016,7 @@ void main() {
       name: name,
       lastMessage: '',
       lastMessageTime: '',
+      lastEventId: '',
       unreadCount: 0,
       isMarkedUnread: false,
       roomType: 'group',
