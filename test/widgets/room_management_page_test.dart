@@ -81,9 +81,12 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
+  Future<rust.IgnoredUsers> crateApiMatrixGetIgnoredUsers() async {
     if (failSupplementalLoads) throw StateError('ignored unavailable');
-    return const ['@blocked:example.org'];
+    return rust.IgnoredUsers(
+      userIds: const ['@blocked:example.org'],
+      fromServer: true,
+    );
   }
 
   @override

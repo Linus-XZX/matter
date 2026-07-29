@@ -91,7 +91,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       final membersFuture = _attempt(
         rust.getRoomMembers(roomId: widget.roomId),
       );
-      final ignoredFuture = _attempt(rust.getIgnoredUsers());
+      final ignoredFuture = _attempt(
+        rust.getIgnoredUsers().then((result) => result.userIds),
+      );
       final muted = await mutedFuture;
       final members = await membersFuture;
       final ignoredUsers = await ignoredFuture;
@@ -158,7 +160,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   Future<void> _retryIgnoredUsers() => _retryPartialLoad(
-    load: rust.getIgnoredUsers,
+    load: () => rust.getIgnoredUsers().then((result) => result.userIds),
     updateValue: (value) => _ignoredUsers = value,
     updateError: (error) => _ignoredUsersLoadError = error,
   );
@@ -355,12 +357,11 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       // the local snapshot so open timelines hide/show the sender's messages
       // now, without waiting for a background refresh that may fail offline.
       // Persisting the complete list (not a delta) also keeps other ignored
-      // users when no local snapshot exists yet. This only touches
-      // SharedPreferences, so it is safe after unmount — skipping it here
-      // would keep the sender visible indefinitely.
+      // users when no local snapshot exists yet. The write-through itself
+      // revalidates ignoredUserIdsProvider app-wide, so this stays correct
+      // even when the page is popped before the request completes.
       await persistIgnoredUserList(namespace, updated.toSet());
       if (!mounted) return;
-      ref.invalidate(ignoredUserIdsProvider);
       setState(() {
         _ignoredUsers = ignored
             ? {..._ignoredUsers, userId}.toList()

@@ -81,6 +81,9 @@ dev_dependencies:
   # fixed upstream.
   freezed: ^3.2.5
   build_runner: ^2.15.1
+  # Test-only: inject SharedPreferences store failures (see
+  # test/chat_provider_state_test.dart).
+  shared_preferences_platform_interface: ^2.4.2
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

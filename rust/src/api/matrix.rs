@@ -5870,37 +5870,54 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The account's ignored-user list, tagged with its source freshness.
+#[frb]
+pub struct IgnoredUsers {
+    pub user_ids: Vec<String>,
+    /// True when fetched from the server; false when served from the local
+    /// state store (offline fallback), which can lag the latest confirmed
+    /// state in either direction and must never be persisted or treated as
+    /// authoritative by callers.
+    pub from_server: bool,
+}
+
 /// List the Matrix user IDs in the current account's ignored-user list.
 #[frb]
-pub async fn get_ignored_users() -> Result<Vec<String>, String> {
+pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let account = client.account();
     // Prefer the server copy, but fall back to the local state store so an
     // offline client still filters ignored senders after its first sync.
-    let raw = match account
+    let (raw, from_server) = match account
         .fetch_account_data_static::<IgnoredUserListEventContent>()
         .await
     {
-        Ok(raw) => raw,
-        Err(network_error) => account
-            .account_data::<IgnoredUserListEventContent>()
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to load ignored users: {network_error}; store fallback failed: {error}"
-                )
-            })?,
+        Ok(raw) => (raw, true),
+        Err(network_error) => (
+            account
+                .account_data::<IgnoredUserListEventContent>()
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to load ignored users: {network_error}; store fallback failed: {error}"
+                    )
+                })?,
+            false,
+        ),
     };
     let content = raw
         .map(|raw| raw.deserialize())
         .transpose()
         .map_err(|error| format!("Failed to decode ignored users: {error}"))?
         .unwrap_or_default();
-    Ok(content
-        .ignored_users
-        .into_keys()
-        .map(|user_id| user_id.to_string())
-        .collect())
+    Ok(IgnoredUsers {
+        user_ids: content
+            .ignored_users
+            .into_keys()
+            .map(|user_id| user_id.to_string())
+            .collect(),
+        from_server,
+    })
 }
 
 /// Add or remove one user from the account's ignored-user list.
@@ -5950,7 +5967,13 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<Stri
         if let Some(key) = override_key {
             set_ignored_user_override(key, synced_baseline, ignored).await;
         }
-        notify_sync_event(SyncEvent::IgnoredUsersChanged);
+        // No IgnoredUsersChanged here: the Dart caller write-throughs the
+        // returned list and revalidates itself, and the genuine account-data
+        // echo arrives via the sync event handler. Notifying a local write
+        // through the same event would race the FFI future on a different
+        // channel — if it landed after the write-through, it would demote
+        // the just-confirmed list and bump the generation as if a
+        // cross-device change had happened.
         Ok(updated)
     })
     .await

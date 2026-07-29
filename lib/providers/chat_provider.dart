@@ -76,19 +76,116 @@ final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
 /// The last successfully fetched list is persisted per account so that a
 /// loading or failed refresh never degrades into "nobody is ignored" and
 /// re-exposes cached messages from ignored senders. When no snapshot exists
-/// yet, the state is *unknown* — wait for the authoritative fetch (which
-/// itself falls back to the SDK's local account-data store when offline)
-/// instead of rendering unfiltered.
+/// yet, the state is *unknown* — wait for the fetch (which itself falls back
+/// to the SDK's local account-data store when offline, flagged `fromServer:
+/// false` so it is served but never persisted or marked confirmed) instead
+/// of rendering unfiltered.
+/// Per-namespace count of live in-flight [ignoredUserIdsProvider] builds, and
+/// namespaces whose revalidation was requested mid-build. Invalidating the
+/// provider while a build is in flight permanently strands futures held on
+/// that build, so write-through events arriving mid-build are deferred until
+/// the build has fully completed.
+final _ignoredListBuildsInFlight = <String, int>{};
+final _ignoredListRevalidationPending = <String>{};
+
+/// Records a revalidation request when a live build of
+/// [ignoredUserIdsProvider] is in flight and returns true in that case.
+/// Every revalidation source (sync events, confirmed write-throughs, refresh
+/// completion, session changes) must defer this way instead of invalidating
+/// directly:
+/// invalidating mid-build permanently strands futures held on that build.
+/// Deferred requests are drained by the provider's build-end hook.
+bool _deferIgnoredListRevalidation(String namespace) {
+  if ((_ignoredListBuildsInFlight[namespace] ?? 0) > 0) {
+    _ignoredListRevalidationPending.add(namespace);
+    return true;
+  }
+  return false;
+}
+
+/// Revalidate [ignoredUserIdsProvider] for [namespace], deferring while a
+/// build is in flight (see [_deferIgnoredListRevalidation]). [invalidate]
+/// does the actual invalidation when no build is in flight — callers pass
+/// `ref.invalidateSelf` from the provider's own ref or
+/// `() => ref.invalidate(ignoredUserIdsProvider)` from an external ref,
+/// since a provider's own ref cannot invalidate itself by reference.
+void _revalidateIgnoredUserIds(String namespace, void Function() invalidate) {
+  if (!_deferIgnoredListRevalidation(namespace)) invalidate();
+}
+
 final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return const <String>{};
   final namespace = ref.watch(activeUserIdProvider) ?? '';
-  final persisted = await _loadPersistedIgnoredUserIds(namespace);
+  // Revalidate on confirmed write-throughs for this account. The publication
+  // lives here — not in whichever widget triggered the write — so a
+  // management page popped while its server request is still in flight
+  // cannot leave the cached provider (and every open timeline) stale.
+  var disposed = false;
+  var buildReleased = false;
+  void releaseBuild({required bool drainPending}) {
+    if (buildReleased) return;
+    buildReleased = true;
+    final remaining = (_ignoredListBuildsInFlight[namespace] ?? 1) - 1;
+    if (remaining == 0) {
+      _ignoredListBuildsInFlight.remove(namespace);
+    } else {
+      _ignoredListBuildsInFlight[namespace] = remaining;
+    }
+    if (drainPending &&
+        !disposed &&
+        _ignoredListRevalidationPending.remove(namespace)) {
+      ref.invalidateSelf();
+    }
+  }
+
+  _ignoredListBuildsInFlight[namespace] =
+      (_ignoredListBuildsInFlight[namespace] ?? 0) + 1;
+  ref.onDispose(() {
+    disposed = true;
+    // A cancelled first load may never reach its finally block. Release its
+    // namespace slot now, but leave pending work for a live build to drain.
+    releaseBuild(drainPending: false);
+  });
+  final writeThroughs = _ignoredListWriteThroughs.stream.listen((changed) {
+    if (changed != namespace || disposed) return;
+    // Mid-build, the in-flight build already reconciles via its version
+    // checks and post-change snapshot reads; revalidate once it finishes.
+    _revalidateIgnoredUserIds(namespace, ref.invalidateSelf);
+  });
+  ref.onDispose(writeThroughs.cancel);
+  try {
+    return await _loadIgnoredUserIds(ref, namespace);
+  } finally {
+    // Revalidate only after this live build's future has completed:
+    // invalidateSelf during a build strands held futures.
+    scheduleMicrotask(() {
+      releaseBuild(drainPending: true);
+    });
+  }
+});
+
+Future<Set<String>> _loadIgnoredUserIds(Ref ref, String namespace) async {
+  // The in-memory confirmed list (set only from server-authoritative
+  // sources: a completed write-through or a server fetch) outranks the
+  // persisted snapshot, which stays best-effort — a SharedPreferences write
+  // can fail after a confirmed write-through, leaving the snapshot stale.
+  final persisted =
+      _confirmedIgnoredLists[namespace] ??
+      await _loadPersistedIgnoredUserIds(namespace);
   if (persisted != null) {
     unawaited(_refreshIgnoredUserIds(ref, namespace, persisted));
     return persisted;
   }
   final version = _ignoredListVersion(namespace);
-  final fresh = (await rust.getIgnoredUsers()).toSet();
+  final result = await rust.getIgnoredUsers();
+  final fresh = result.userIds.toSet();
+  if (!result.fromServer) {
+    // Offline store fallback: serve it (better than unknown on a first
+    // run), but never persist or confirm it — the store can lag the latest
+    // confirmed state in either direction and must not overwrite a
+    // write-through snapshot later.
+    return fresh;
+  }
   if (_ignoredListVersion(namespace) == version) {
     await _enqueueIgnoredListWrite(namespace, version, () async {
       await _persistIgnoredUserIds(namespace, fresh);
@@ -104,12 +201,14 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
   // flight: the response is stale and must not become the provider state.
   // Serve the newer write-through snapshot instead; the read is queued
   // behind the change's own write so it observes the post-change snapshot.
-  Set<String>? latest;
-  await _enqueueIgnoredListWrite(namespace, null, () async {
-    latest = await _loadPersistedIgnoredUserIds(namespace);
-  });
+  Set<String>? latest = _confirmedIgnoredLists[namespace];
+  if (latest == null) {
+    await _enqueueIgnoredListWrite(namespace, null, () async {
+      latest = await _loadPersistedIgnoredUserIds(namespace);
+    });
+  }
   return latest ?? fresh;
-});
+}
 
 const _kIgnoredUsersCachePrefix = 'ignored_users_v1';
 
@@ -158,10 +257,18 @@ Future<Set<String>?> _loadPersistedIgnoredUserIds(String namespace) async {
 Future<void> _persistIgnoredUserIds(String namespace, Set<String> ids) async {
   try {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
+    final written = await prefs.setStringList(
       '${_kIgnoredUsersCachePrefix}_$namespace',
       ids.toList()..sort(),
     );
+    if (!written) {
+      // Best-effort persistence: the in-memory confirmed list still
+      // protects this session, but warn that a restart would lose it.
+      debugPrint(
+        'persistIgnoredUserIds: setStringList returned false for '
+        '$namespace; the snapshot was not updated.',
+      );
+    }
   } catch (error) {
     debugPrint('persistIgnoredUserIds failed: $error');
   }
@@ -176,6 +283,12 @@ Future<void> _persistIgnoredUserIds(String namespace, Set<String> ids) async {
 /// failing). Persisting the full post-write list — rather than merging a
 /// delta into a possibly unknown local baseline — also keeps other
 /// already-ignored users when no snapshot exists yet.
+/// Broadcasts the account namespace of every confirmed ignore-list
+/// write-through. `ignoredUserIdsProvider` revalidates itself on these, so
+/// the revalidation does not depend on the lifecycle of the widget that
+/// triggered the write.
+final _ignoredListWriteThroughs = StreamController<String>.broadcast();
+
 Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
   // Record the confirmed value synchronously: previews may treat the list as
   // authoritative from this point (the server has accepted the change), and
@@ -189,6 +302,7 @@ Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
   await _enqueueIgnoredListWrite(namespace, null, () async {
     await _persistIgnoredUserIds(namespace, ids);
   });
+  _ignoredListWriteThroughs.add(namespace);
 }
 
 Future<void> _refreshIgnoredUserIds(
@@ -201,7 +315,35 @@ Future<void> _refreshIgnoredUserIds(
   // write-through, nor revalidate the provider over newer state.
   final version = _ignoredListVersion(namespace);
   try {
-    final fresh = (await rust.getIgnoredUsers()).toSet();
+    final result = await rust.getIgnoredUsers();
+    if (!result.fromServer) {
+      // Offline store fallback: it can lag a confirmed write-through in
+      // either direction, so it must never REMOVE ids from the snapshot.
+      final confirmed = _confirmedIgnoredLists[namespace];
+      if (confirmed != null && setEquals(confirmed, persisted)) {
+        // This snapshot IS a confirmed local write whose sync echo has not
+        // arrived: the store is known to lag it, so the confirmed state
+        // wins outright — unioning would resurrect e.g. a just-un-ignored
+        // sender. Only an unconfirmed list (or one demoted by a genuine
+        // IgnoredUsersChanged) may absorb store additions.
+        return;
+      }
+      // The store may already hold cross-device additions the persisted
+      // snapshot missed — union conservatively so Dart timelines (which
+      // filter on this list alone) hide those senders too. Only a
+      // server-authoritative result may shrink the list or be confirmed.
+      final merged = {...persisted, ...result.userIds};
+      if (merged.length != persisted.length) {
+        await _enqueueIgnoredListWrite(namespace, version, () async {
+          await _persistIgnoredUserIds(namespace, merged);
+        });
+        if (_ignoredListVersion(namespace) == version) {
+          _revalidateIgnoredUserIds(namespace, ref.invalidateSelf);
+        }
+      }
+      return;
+    }
+    final fresh = result.userIds.toSet();
     await _enqueueIgnoredListWrite(namespace, version, () async {
       await _persistIgnoredUserIds(namespace, fresh);
     });
@@ -209,9 +351,18 @@ Future<void> _refreshIgnoredUserIds(
       // The fetch completed against the current version: the persisted
       // snapshot now reflects a server-confirmed state, so previews may
       // treat it as authoritative again.
+      final confirmed = _confirmedIgnoredLists[namespace];
+      final wasConfirmed = confirmed != null && setEquals(confirmed, fresh);
       _confirmedIgnoredLists[namespace] = fresh;
-      if (fresh.length != persisted.length || !fresh.containsAll(persisted)) {
-        ref.invalidateSelf();
+      // Revalidate dependents when the content changed OR the freshness
+      // just upgraded (cached → confirmed): the list value alone does not
+      // carry freshness, and a stale store may still hide a sender the
+      // confirmed list has un-ignored. When both are unchanged, skip the
+      // invalidation — it would re-trigger this refresh in a loop.
+      if (!wasConfirmed ||
+          fresh.length != persisted.length ||
+          !fresh.containsAll(persisted)) {
+        _revalidateIgnoredUserIds(namespace, ref.invalidateSelf);
       }
     }
   } catch (error) {
@@ -355,13 +506,32 @@ void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(spacesProvider);
   ref.invalidate(ungroupedRoomsProvider);
   ref.invalidate(contactsProvider);
-  ref.invalidate(ignoredUserIdsProvider);
+  final ignoredNamespace = ref.read(activeUserIdProvider) ?? '';
+  if (!_deferIgnoredListRevalidation(ignoredNamespace)) {
+    ref.invalidate(ignoredUserIdsProvider);
+  }
   ref.invalidate(roomKnockRequestsProvider);
   ref.invalidate(roomUnreadOverrideProvider);
   ref.invalidate(roomAutoReadSuppressedProvider);
 }
 
+/// Drop the per-account ignore-list freshness and invalidate any refresh
+/// still in flight for [namespace]. Session teardown and (re-)establishment
+/// must reset this: while a session is down the sync subscription is
+/// stopped, so the IgnoredUsersChanged that would normally demote a stale
+/// confirmed list can be missed, and a previous session's confirmed list
+/// must never mark the persisted snapshot authoritative for a new session.
+void resetIgnoredListAccountState(String namespace) {
+  _confirmedIgnoredLists.remove(namespace);
+  _ignoredListWriteVersions[namespace] = _ignoredListVersion(namespace) + 1;
+}
+
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
+  // Drop the ignore-list freshness of the outgoing account and invalidate
+  // any refresh still in flight for it: while the session is down the sync
+  // subscription is stopped, so the IgnoredUsersChanged that would normally
+  // demote a stale confirmed list can be missed across a re-login.
+  resetIgnoredListAccountState(ref.read(activeUserIdProvider) ?? '');
   ref.read(isLoggedInProvider.notifier).value = false;
   ref.read(currentUserProvider.notifier).value = null;
   ref.read(currentAccessTokenProvider.notifier).value = null;
@@ -381,6 +551,13 @@ Future<void> applyActiveSessionState(
   bool refreshStoredSessions = false,
   bool markLoggedIn = true,
 }) async {
+  // Every session (re-)establishment — login, account switch and its
+  // rollback, startup restore — funnels through here. A confirmed ignore
+  // list left over from a previous session of this account must not mark
+  // the persisted snapshot authoritative: cross-device changes that landed
+  // while the session was down were never demoted (the sync subscription is
+  // off then), and a store-fallback refresh would cement the stale state.
+  resetIgnoredListAccountState(userId);
   if (persistActiveUser) {
     await saveActiveUserId(userId);
   }
@@ -1237,9 +1414,18 @@ final syncStreamProvider =
           case rust.SyncEvent_IgnoredUsersChanged():
             // The account data changed outside a confirmed local write (or
             // its echo landed): the last confirmed list is now suspect, so
-            // previews must merge with the store until revalidated.
-            _confirmedIgnoredLists.remove(ref.read(activeUserIdProvider) ?? '');
-            ref.invalidate(ignoredUserIdsProvider);
+            // previews must merge with the store until revalidated. Bump
+            // the version as well, so a refresh whose fetch started before
+            // this event is dropped instead of writing back (and confirming)
+            // a list that predates the change.
+            final namespace = ref.read(activeUserIdProvider) ?? '';
+            _confirmedIgnoredLists.remove(namespace);
+            _ignoredListWriteVersions[namespace] =
+                _ignoredListVersion(namespace) + 1;
+            _revalidateIgnoredUserIds(
+              namespace,
+              () => ref.invalidate(ignoredUserIdsProvider),
+            );
         }
       });
 

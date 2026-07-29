@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -13,10 +14,33 @@ import 'package:matter/providers/message_cache_persistence.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 
+/// A [SharedPreferencesStorePlatform] that serves reads from the wrapped
+/// store but fails every write, simulating a snapshot update that never
+/// reaches disk.
+class _FailingWritePreferencesStore extends SharedPreferencesStorePlatform {
+  _FailingWritePreferencesStore(this._inner);
+
+  final SharedPreferencesStorePlatform _inner;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async =>
+      false;
+
+  @override
+  Future<bool> remove(String key) => _inner.remove(key);
+
+  @override
+  Future<bool> clear() => _inner.clear();
+
+  @override
+  Future<Map<String, Object>> getAll() => _inner.getAll();
+}
+
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
   int ignoredUsersCalls = 0;
   List<String> ignoredUsers = const [];
+  bool ignoredUsersFromServer = true;
   Object? ignoredUsersError;
   Completer<List<String>>? pendingIgnoredUsers;
   int getMessagesCalls = 0;
@@ -37,12 +61,20 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<List<String>> crateApiMatrixGetIgnoredUsers() async {
+  Future<rust.IgnoredUsers> crateApiMatrixGetIgnoredUsers() async {
     ignoredUsersCalls++;
     if (ignoredUsersError case final error?) throw error;
     final pending = pendingIgnoredUsers;
-    if (pending != null) return pending.future;
-    return ignoredUsers;
+    if (pending != null) {
+      return rust.IgnoredUsers(
+        userIds: await pending.future,
+        fromServer: ignoredUsersFromServer,
+      );
+    }
+    return rust.IgnoredUsers(
+      userIds: ignoredUsers,
+      fromServer: ignoredUsersFromServer,
+    );
   }
 
   @override
@@ -122,6 +154,9 @@ class _FakeRustApi implements RustLibApi {
   Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
   @override
+  Future<String?> crateApiMatrixGetAccessToken() async => null;
+
+  @override
   dynamic noSuchMethod(Invocation invocation) {
     throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
   }
@@ -193,8 +228,13 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    // The ignore-list globals are process-wide; drop leftovers from earlier
+    // tests so a stale confirmed list cannot leak into the next account
+    // snapshot read.
+    resetIgnoredListAccountState('@alice:example.org');
     rustApi.ignoredUsersCalls = 0;
     rustApi.ignoredUsers = const [];
+    rustApi.ignoredUsersFromServer = true;
     rustApi.ignoredUsersError = null;
     rustApi.pendingIgnoredUsers = null;
     rustApi.getMessagesCalls = 0;
@@ -240,6 +280,68 @@ void main() {
 
       expect(ref.read(sessionReadyProvider), isTrue);
     });
+
+    testWidgets('drops ignore-list freshness of the outgoing account', (
+      tester,
+    ) async {
+      final ref = await _captureRef(tester);
+      ref.read(sessionReadyProvider.notifier).value = true;
+      ref.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+      // A completed server fetch marks the list confirmed.
+      await ref.read(chatRoomsProvider.future);
+      expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+      // Tearing the session down (logout, account switch) must drop that
+      // freshness: the sync subscription is stopped while the session is
+      // down, so the demoting event can be missed across a re-login.
+      clearActiveSessionState(ref);
+
+      ref.read(sessionReadyProvider.notifier).value = true;
+      ref.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+      await ref.read(chatRoomsProvider.future);
+      await tester.pump();
+
+      expect(rustApi.chatRoomsAuthoritative, isFalse);
+    });
+
+    testWidgets(
+      're-establishing a session drops leftover ignore-list freshness',
+      (tester) async {
+        final ref = await _captureRef(tester);
+        ref.read(sessionReadyProvider.notifier).value = true;
+        ref.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+        // A completed server fetch marks the list confirmed.
+        await ref.read(chatRoomsProvider.future);
+        expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+        // Account switch (and its rollback) funnels through
+        // applyActiveSessionState. The confirmed list from the previous
+        // session must not survive: cross-device changes that landed while
+        // the session was down were never demoted. Hold the revalidation so
+        // the post-switch state is observed deterministically.
+        rustApi.pendingIgnoredUsers = Completer<List<String>>();
+        ref.read(sessionReadyProvider.notifier).value = false;
+        await applyActiveSessionState(
+          ref,
+          userId: '@alice:example.org',
+          displayName: 'Alice',
+          homeserver: 'https://example.org',
+        );
+        ref.read(sessionReadyProvider.notifier).value = true;
+        await ref.read(chatRoomsProvider.future);
+        await tester.pump();
+        expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+        // Revalidation confirms the list again.
+        rustApi.pendingIgnoredUsers!.complete(const []);
+        await tester.pump();
+        await ref.read(chatRoomsProvider.future);
+        await tester.pump();
+        expect(rustApi.chatRoomsAuthoritative, isTrue);
+      },
+    );
   });
 
   group('invalidateSessionCollections', () {
@@ -372,6 +474,63 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  testWidgets('a confirmed change survives a failed snapshot write', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+    });
+    // Every snapshot write fails: the disk keeps the pre-change value, so
+    // only the in-memory confirmed list can protect this session.
+    SharedPreferencesStorePlatform.instance = _FailingWritePreferencesStore(
+      SharedPreferencesStorePlatform.instance,
+    );
+    rustApi.ignoredUsers = const ['@a:example.org'];
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+    });
+    await tester.pump();
+
+    // The server-side ignore succeeds, but writing its full post-write
+    // list through to the snapshot fails on disk: the store still holds
+    // the pre-change value.
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    final stored = await SharedPreferencesStorePlatform.instance.getAll();
+    expect(stored['flutter.ignored_users_v1_@alice:example.org'], [
+      '@a:example.org',
+    ]);
+
+    // Simulate the in-process preference cache being lost over the stale
+    // disk (the legacy SharedPreferences singleton caches writes even when
+    // the store write failed). A rebuild must still serve the confirmed
+    // in-memory list rather than the stale snapshot.
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+    });
+    rustApi.ignoredUsersError = StateError('offline');
+    container.invalidate(ignoredUserIdsProvider);
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+
+    // Room previews filter on the same confirmed list.
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets(
     'an in-flight refresh cannot overwrite a newer confirmed change',
     (tester) async {
@@ -453,6 +612,58 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  testWidgets('a disposed hanging first load cannot block a rebuilt account', (
+    tester,
+  ) async {
+    // The first session has no snapshot and its initial fetch never
+    // completes, even after that provider is disposed.
+    final firstFetch = Completer<List<String>>();
+    rustApi.pendingIgnoredUsers = firstFetch;
+
+    final firstContainer = ProviderContainer();
+    firstContainer.read(sessionReadyProvider.notifier).value = true;
+    firstContainer.read(activeUserIdProvider.notifier).value =
+        '@alice:example.org';
+    firstContainer.read(ignoredUserIdsProvider.future);
+    await tester.pump();
+    expect(rustApi.ignoredUsersCalls, 1);
+
+    firstContainer.dispose();
+    await tester.pump();
+
+    // Re-entering the same account starts and completes a fresh build
+    // while the disposed session's fetch remains unresolved.
+    rustApi.pendingIgnoredUsers = null;
+    final secondContainer = ProviderContainer();
+    addTearDown(secondContainer.dispose);
+    secondContainer.read(sessionReadyProvider.notifier).value = true;
+    secondContainer.read(activeUserIdProvider.notifier).value =
+        '@alice:example.org';
+
+    expect(await secondContainer.read(ignoredUserIdsProvider.future), isEmpty);
+    await secondContainer.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsIgnoredFilter, isEmpty);
+    await tester.pump();
+
+    // A confirmed write-through must revalidate both the list and room
+    // previews without waiting for the abandoned first fetch.
+    rustApi.ignoredUsers = const ['@b:example.org'];
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@b:example.org',
+    });
+    await tester.pump();
+
+    expect(await secondContainer.read(ignoredUserIdsProvider.future), {
+      '@b:example.org',
+    });
+    await secondContainer.read(chatRoomsProvider.future);
+    await tester.pump();
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+
+    secondContainer.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets(
     'a first load publishes the newer snapshot when a change lands mid-persist',
     (tester) async {
@@ -526,6 +737,36 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  testWidgets('a write-through revalidates live providers without any page', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await container.read(chatRoomsProvider.future);
+    expect(rustApi.chatRoomsIgnoredFilter, isEmpty);
+
+    // The originating page is already gone: only the write-through runs and
+    // nobody invalidates the provider. Live providers must still recompute —
+    // otherwise an offline gap before the echo would leave the sender
+    // visible (or hidden) indefinitely.
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@b:example.org',
+    });
+    rustApi.ignoredUsers = const ['@b:example.org'];
+    await tester.pump();
+    await container.read(chatRoomsProvider.future);
+    await tester.pump();
+
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets('room previews pass no filter when the ignore list is unknown', (
     tester,
   ) async {
@@ -579,6 +820,43 @@ void main() {
     },
   );
 
+  testWidgets('a confirmed un-ignore wins over a lagging store fallback', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    rustApi.ignoredUsers = const ['@b:example.org'];
+
+    await container.read(chatRoomsProvider.future);
+
+    // The un-ignore is confirmed and written through: the snapshot is now
+    // empty and confirmed.
+    await persistIgnoredUserList('@alice:example.org', const {});
+    await tester.pump();
+
+    // The sync echo never arrives and the network drops: the offline
+    // refresh serves the store fallback, which still holds the old id.
+    rustApi.ignoredUsersFromServer = false;
+    rustApi.ignoredUsers = const ['@b:example.org'];
+    container.invalidate(ignoredUserIdsProvider);
+    await container.read(chatRoomsProvider.future);
+    await tester.pump();
+    await tester.pump();
+
+    // The confirmed state must win over the lagging store: the old id must
+    // not be unioned back into the snapshot.
+    expect(await container.read(ignoredUserIdsProvider.future), isEmpty);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList('ignored_users_v1_@alice:example.org'), isEmpty);
+    expect(rustApi.chatRoomsIgnoredFilter, isNot(contains('@b:example.org')));
+    expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets('a persisted cache only merges until revalidated as fresh', (
     tester,
   ) async {
@@ -605,11 +883,13 @@ void main() {
     expect(rustApi.chatRoomsIgnoredFilter, contains('@cached:example.org'));
     expect(rustApi.chatRoomsAuthoritative, isFalse);
 
-    // Once the refresh completes, the same list becomes authoritative.
+    // Once the refresh completes, the freshness upgrade must cascade into
+    // the room list on its own (the list content is unchanged, so only a
+    // freshness-aware revalidation rebuilds dependents).
     rustApi.pendingIgnoredUsers!.complete(const ['@cached:example.org']);
     await tester.pump();
-    container.invalidate(chatRoomsProvider);
     await container.read(chatRoomsProvider.future);
+    await tester.pump();
     expect(rustApi.chatRoomsAuthoritative, isTrue);
 
     // A cross-device change demotes the confirmed list: until the
@@ -622,14 +902,206 @@ void main() {
 
     rustApi.pendingIgnoredUsers!.complete(const ['@cached:example.org']);
     await tester.pump();
-    container.invalidate(chatRoomsProvider);
     await container.read(chatRoomsProvider.future);
+    await tester.pump();
     expect(rustApi.chatRoomsAuthoritative, isTrue);
 
     syncSubscription.close();
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });
+
+  testWidgets(
+    'an offline store fallback never overwrites the persisted snapshot',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'ignored_users_v1_@alice:example.org': const ['@ignored:example.org'],
+      });
+      // The network is down and the SDK store lags the confirmed state.
+      rustApi.ignoredUsersFromServer = false;
+      rustApi.ignoredUsers = const [];
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await container.read(chatRoomsProvider.future);
+      // Let the background refresh (store fallback) complete.
+      await tester.pump();
+
+      // The lagging store result must neither overwrite the persisted
+      // snapshot nor become authoritative.
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@ignored:example.org',
+      });
+      expect(rustApi.chatRoomsIgnoredFilter, contains('@ignored:example.org'));
+      expect(rustApi.chatRoomsAuthoritative, isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList('ignored_users_v1_@alice:example.org'), [
+        '@ignored:example.org',
+      ]);
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('an offline store fallback unions cross-device additions', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+    });
+    // The network is down, but the SDK store already holds a cross-device
+    // addition from the last sync: the persisted snapshot is a subset.
+    rustApi.ignoredUsersFromServer = false;
+    rustApi.ignoredUsers = const ['@a:example.org', '@b:example.org'];
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await container.read(chatRoomsProvider.future);
+    // Let the background refresh (store fallback) complete.
+    await tester.pump();
+    await tester.pump();
+
+    // The superset must be unioned in — Dart timelines filter on this list
+    // alone and would otherwise keep showing @b's messages. It is still not
+    // authoritative: only a server result may shrink the list.
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList('ignored_users_v1_@alice:example.org'), [
+      '@a:example.org',
+      '@b:example.org',
+    ]);
+    await container.read(chatRoomsProvider.future);
+    await tester.pump();
+    expect(rustApi.chatRoomsIgnoredFilter, contains('@b:example.org'));
+    expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets(
+    'a sync event during the first build does not strand the future',
+    (tester) async {
+      // No persisted snapshot: the room list build waits on the ignore-list
+      // fetch through the provider chain.
+      final firstFetch = Completer<List<String>>();
+      rustApi.pendingIgnoredUsers = firstFetch;
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      final syncSubscription = container.listen(
+        syncStreamProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      final future = container.read(chatRoomsProvider.future);
+      // Let the build reach the pending fetch (mid-build).
+      await tester.pump();
+
+      // The event requests a revalidation while the build is in flight; it
+      // must be deferred, or the room-list future waiting on it never
+      // completes.
+      rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+      await tester.pump();
+
+      rustApi.pendingIgnoredUsers = null;
+      rustApi.ignoredUsers = const ['@a:example.org'];
+      firstFetch.complete(const ['@a:example.org']);
+
+      await future;
+      await tester.pump();
+      await tester.pump();
+      // The deferred revalidation did not strand the build; the next read
+      // re-fetches and serves the revalidated list.
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@a:example.org',
+      });
+      expect(rustApi.ignoredUsersCalls, greaterThanOrEqualTo(2));
+
+      syncSubscription.close();
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'a sync event drops an in-flight refresh instead of confirming it',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'ignored_users_v1_@alice:example.org': const <String>[],
+      });
+      // The first fetch hangs: it started before the cross-device change.
+      rustApi.pendingIgnoredUsers = Completer<List<String>>();
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      final syncSubscription = container.listen(
+        syncStreamProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      await container.read(chatRoomsProvider.future);
+      expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+      // The cross-device change lands while the first fetch is in flight; a
+      // revalidation starts behind it.
+      rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+      await tester.pump();
+      final staleFetch = rustApi.pendingIgnoredUsers!;
+      rustApi.pendingIgnoredUsers = Completer<List<String>>();
+      await container.read(ignoredUserIdsProvider.future);
+
+      // The late result of the pre-change fetch must be dropped: not
+      // persisted, not confirmed, never authoritative.
+      staleFetch.complete(const ['@stale:example.org']);
+      await tester.pump();
+      await tester.pump();
+      expect(await container.read(ignoredUserIdsProvider.future), isEmpty);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getStringList('ignored_users_v1_@alice:example.org'),
+        isEmpty,
+      );
+      await container.read(chatRoomsProvider.future);
+      await tester.pump();
+      expect(
+        rustApi.chatRoomsIgnoredFilter,
+        isNot(contains('@stale:example.org')),
+      );
+      expect(rustApi.chatRoomsAuthoritative, isFalse);
+
+      // The revalidation behind the event still lands and becomes fresh.
+      rustApi.pendingIgnoredUsers!.complete(const ['@cross:example.org']);
+      await tester.pump();
+      await container.read(chatRoomsProvider.future);
+      await tester.pump();
+      expect(rustApi.chatRoomsIgnoredFilter, contains('@cross:example.org'));
+      expect(rustApi.chatRoomsAuthoritative, isTrue);
+
+      syncSubscription.close();
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
 
   testWidgets('ignored users fall back to the persisted list on failure', (
     tester,

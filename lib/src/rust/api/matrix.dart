@@ -578,7 +578,7 @@ Future<void> markRoomUnread({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixMarkRoomUnread(roomId: roomId);
 
 /// List the Matrix user IDs in the current account's ignored-user list.
-Future<List<String>> getIgnoredUsers() =>
+Future<IgnoredUsers> getIgnoredUsers() =>
     RustLib.instance.api.crateApiMatrixGetIgnoredUsers();
 
 /// Add or remove one user from the account's ignored-user list.
@@ -1235,6 +1235,30 @@ class FormattedMessageInput {
           formattedBody == other.formattedBody &&
           mentionedUserIds == other.mentionedUserIds &&
           mentionsRoom == other.mentionsRoom;
+}
+
+/// The account's ignored-user list, tagged with its source freshness.
+class IgnoredUsers {
+  final List<String> userIds;
+
+  /// True when fetched from the server; false when served from the local
+  /// state store (offline fallback), which can lag the latest confirmed
+  /// state in either direction and must never be persisted or treated as
+  /// authoritative by callers.
+  final bool fromServer;
+
+  const IgnoredUsers({required this.userIds, required this.fromServer});
+
+  @override
+  int get hashCode => userIds.hashCode ^ fromServer.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is IgnoredUsers &&
+          runtimeType == other.runtimeType &&
+          userIds == other.userIds &&
+          fromServer == other.fromServer;
 }
 
 /// A pending request to join a knock-enabled room.
