@@ -200,13 +200,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final topic = _topicController.text.trim().isEmpty
         ? null
         : _topicController.text.trim();
+    final updateTopic = topic != details.topic;
     setState(() => _saving = true);
     try {
       final result = await rust.updateRoomDetails(
         roomId: widget.roomId,
         name: name,
         updateName: updateName,
-        topic: topic,
+        updateTopic: updateTopic,
+        topic: updateTopic ? topic : null,
       );
       _invalidateRoom();
       if (!mounted) return;
@@ -218,7 +220,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         avatarUrl: details.avatarUrl,
         nameEventId: nameUpdated ? result.nameEventId : details.nameEventId,
         avatarEventId: details.avatarEventId,
-        topic: result.topicError == null ? topic : details.topic,
+        topic: updateTopic && result.topicError == null ? topic : details.topic,
       );
       final detailsChanged = updatedDetails != details;
       if (detailsChanged) {

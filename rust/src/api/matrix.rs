@@ -16,11 +16,8 @@ use matrix_sdk::{
         ignored_user_list::IgnoredUserListEventContent,
         key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
         receipt::SyncReceiptEvent,
-        room::{
-            avatar::RoomAvatarEventContent, message::OriginalSyncRoomMessageEvent,
-            name::RoomNameEventContent,
-        },
-        GlobalAccountDataEvent,
+        room::{avatar::RoomAvatarEventContent, name::RoomNameEventContent},
+        AnySyncMessageLikeEvent, GlobalAccountDataEvent,
     },
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
@@ -929,13 +926,11 @@ fn install_verification_event_handler(client: &Client) {
 }
 
 fn install_live_update_event_handlers(client: &Client) {
-    client.add_event_handler(
-        |_event: OriginalSyncRoomMessageEvent, room: Room| async move {
-            notify_sync_event(SyncEvent::MessageSent {
-                room_id: room.room_id().to_string(),
-            });
-        },
-    );
+    client.add_event_handler(|_event: AnySyncMessageLikeEvent, room: Room| async move {
+        notify_sync_event(SyncEvent::MessageSent {
+            room_id: room.room_id().to_string(),
+        });
+    });
 
     client.add_event_handler(|event: SyncReceiptEvent, room: Room| async move {
         let room_id = room.room_id().to_string();
@@ -5710,6 +5705,7 @@ pub async fn update_room_details(
     room_id: String,
     name: String,
     update_name: bool,
+    update_topic: bool,
     topic: Option<String>,
 ) -> Result<RoomDetailsUpdate, String> {
     let client = get_client().await.ok_or("No client created.")?;
@@ -5727,12 +5723,16 @@ pub async fn update_room_details(
     } else {
         (None, None)
     };
-    let new_topic = topic.unwrap_or_default().trim().to_owned();
-    let current_topic = room.topic().unwrap_or_default().trim().to_owned();
-    let (topic_updated, topic_error) = if new_topic != current_topic {
-        match room.set_room_topic(&new_topic).await {
-            Ok(_) => (true, None),
-            Err(error) => (false, Some(format!("Failed to update room topic: {error}"))),
+    let (topic_updated, topic_error) = if update_topic {
+        let new_topic = topic.unwrap_or_default().trim().to_owned();
+        let current_topic = room.topic().unwrap_or_default().trim().to_owned();
+        if new_topic != current_topic {
+            match room.set_room_topic(&new_topic).await {
+                Ok(_) => (true, None),
+                Err(error) => (false, Some(format!("Failed to update room topic: {error}"))),
+            }
+        } else {
+            (false, None)
         }
     } else {
         (false, None)

@@ -54,6 +54,8 @@ class _FakeRustApi implements RustLibApi {
   int knockRequestsCalls = 0;
   int membersCalls = 0;
   Completer<List<rust.ChatMessage>>? pendingMessages;
+  Completer<List<rust.ChatRoom>>? pendingChatRooms;
+  List<rust.ChatRoom> chatRooms = const [];
 
   @override
   rust.ConnectionStatus crateApiMatrixGetConnectionStatus() {
@@ -98,11 +100,11 @@ class _FakeRustApi implements RustLibApi {
   Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms({
     List<String>? ignoredUserIds,
     required bool authoritative,
-  }) async {
+  }) {
     chatRoomsCalls++;
     chatRoomsIgnoredFilter = ignoredUserIds;
     chatRoomsAuthoritative = authoritative;
-    return const [];
+    return pendingChatRooms?.future ?? Future.value(chatRooms);
   }
 
   @override
@@ -239,6 +241,8 @@ void main() {
     rustApi.pendingIgnoredUsers = null;
     rustApi.getMessagesCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
+    rustApi.chatRooms = const [];
+    rustApi.pendingChatRooms = null;
     rustApi.chatRoomsCalls = 0;
     rustApi.chatRoomsIgnoredFilter = null;
     rustApi.chatRoomsAuthoritative = null;
@@ -1199,22 +1203,59 @@ void main() {
     tester,
   ) async {
     const roomId = '!current:example.org';
+    rustApi.chatRooms = const [
+      rust.ChatRoom(
+        id: roomId,
+        name: 'Current room',
+        lastMessage: 'Old message',
+        lastMessageTime: '0',
+        lastEventId: r'$event-0',
+        unreadCount: 0,
+        isMarkedUnread: false,
+        roomType: 'group',
+        isEncrypted: false,
+        isMuted: false,
+        roomState: 'joined',
+      ),
+    ];
     final container = ProviderContainer();
     container.read(sessionReadyProvider.notifier).value = true;
     container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
     container.read(currentRoomIdProvider.notifier).value = roomId;
+    await container.read(chatRoomsProvider.future);
     final subscription = container.listen(
       syncStreamProvider,
       (_, _) {},
       fireImmediately: true,
     );
 
+    rustApi.chatRooms = const [
+      rust.ChatRoom(
+        id: roomId,
+        name: 'Current room',
+        lastMessage: 'New message',
+        lastMessageTime: '1',
+        lastEventId: r'$event-1',
+        unreadCount: 2,
+        isMarkedUnread: false,
+        roomType: 'group',
+        isEncrypted: false,
+        isMuted: false,
+        roomState: 'joined',
+      ),
+    ];
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
     rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
     await tester.pump(const Duration(milliseconds: 150));
     await tester.pump();
 
     expect(rustApi.getMessagesCalls, 1);
     expect(rustApi.markRoomAsReadCalls, 1);
+    expect(rustApi.chatRoomsCalls, 2);
+    final unreadOverride = container.read(roomUnreadOverrideProvider(roomId));
+    expect(unreadOverride?.unread, isFalse);
+    expect(unreadOverride?.baselineUnreadCount, 2);
+    expect(unreadOverride?.baselineLastEventId, r'$event-1');
 
     subscription.close();
     container.dispose();
@@ -1280,6 +1321,39 @@ void main() {
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });
+
+  testWidgets(
+    'drops a pending room refresh when the sync provider is disposed',
+    (tester) async {
+      const roomId = '!disposed:example.org';
+      final pendingRooms = Completer<List<rust.ChatRoom>>();
+      rustApi.pendingChatRooms = pendingRooms;
+      final container = ProviderContainer();
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(currentRoomIdProvider.notifier).value = roomId;
+      final subscription = container.listen(
+        syncStreamProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(rustApi.chatRoomsCalls, greaterThanOrEqualTo(1));
+      expect(rustApi.markRoomAsReadCalls, 0);
+
+      subscription.close();
+      container.dispose();
+      pendingRooms.complete(const []);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(rustApi.markRoomAsReadCalls, 0);
+    },
+  );
 
   group('bootstrapActiveSessionSync', () {
     testWidgets('retries until the third sync attempt succeeds', (

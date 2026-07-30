@@ -526,11 +526,13 @@ Future<RoomDetailsUpdate> updateRoomDetails({
   required String roomId,
   required String name,
   required bool updateName,
+  required bool updateTopic,
   String? topic,
 }) => RustLib.instance.api.crateApiMatrixUpdateRoomDetails(
   roomId: roomId,
   name: name,
   updateName: updateName,
+  updateTopic: updateTopic,
   topic: topic,
 );
 

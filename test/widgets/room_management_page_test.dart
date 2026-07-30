@@ -36,6 +36,7 @@ class _FakeRustApi implements RustLibApi {
   String? topicUpdateError;
   String? updatedName;
   String? updatedTopic;
+  bool? updatedTopicFlag;
 
   @override
   Future<rust.RoomDetails> crateApiMatrixGetRoomDetails({
@@ -108,10 +109,12 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
     required String name,
     required bool updateName,
+    required bool updateTopic,
     String? topic,
   }) async {
     updatedName = name;
-    updatedTopic = topic;
+    updatedTopicFlag = updateTopic;
+    updatedTopic = updateTopic ? topic : null;
     await pendingDetailsUpdate?.future;
     return rust.RoomDetailsUpdate(
       nameEventId: updateName && nameUpdateError == null ? r'$name-1' : null,
@@ -176,6 +179,7 @@ void main() {
     rustApi.topicUpdateError = null;
     rustApi.updatedName = null;
     rustApi.updatedTopic = null;
+    rustApi.updatedTopicFlag = null;
   });
 
   testWidgets('shows partial load failures instead of empty room data', (
@@ -350,6 +354,7 @@ void main() {
     expect(rustApi.detailsLoadCalls, 1);
     expect(rustApi.updatedName, 'Renamed room');
     expect(rustApi.updatedTopic, 'Updated topic');
+    expect(rustApi.updatedTopicFlag, isTrue);
     expect(
       tester.widget<TextField>(fields.at(0)).controller!.text,
       'Renamed room',
@@ -359,6 +364,31 @@ void main() {
       'Updated topic',
     );
     expect(changedName?.name, 'Renamed room');
+  });
+
+  testWidgets('renaming does not submit an untouched topic', (tester) async {
+    rustApi.failSupplementalLoads = false;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, 'Renamed room');
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.updatedName, 'Renamed room');
+    expect(rustApi.updatedTopic, isNull);
+    expect(rustApi.updatedTopicFlag, isFalse);
   });
 
   testWidgets('keeps a successful rename when the topic update fails', (

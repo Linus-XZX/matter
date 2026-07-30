@@ -468,15 +468,12 @@ final roomAutoReadSuppressedProvider =
       (_) => MutableState(false),
     );
 
-void setRoomUnreadOverride(
-  WidgetRef ref,
+RoomUnreadOverride? _roomUnreadOverrideFor(
   rust.ChatRoom room, {
   required bool unread,
 }) {
   final syncedUnread = room.unreadCount > 0 || room.isMarkedUnread;
-  ref
-      .read(roomUnreadOverrideProvider(room.id).notifier)
-      .value = syncedUnread == unread
+  return syncedUnread == unread
       ? null
       : RoomUnreadOverride(
           unread: unread,
@@ -484,6 +481,15 @@ void setRoomUnreadOverride(
           baselineMarkedUnread: room.isMarkedUnread,
           baselineLastEventId: room.lastEventId,
         );
+}
+
+void setRoomUnreadOverride(
+  WidgetRef ref,
+  rust.ChatRoom room, {
+  required bool unread,
+}) {
+  ref.read(roomUnreadOverrideProvider(room.id).notifier).value =
+      _roomUnreadOverrideFor(room, unread: unread);
 }
 
 void setRoomUnreadOverrideById(
@@ -994,8 +1000,10 @@ Future<void> refreshMessagesRef(Ref ref, String roomId) async {
   // loading state. This is the path used by syncStreamProvider.
   try {
     final latest = await ref.read(messagesProvider(roomId).future);
+    if (!ref.mounted) return;
     if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
     final allowDiskCache = await _canPersistMessagesForRoom(ref.read, roomId);
+    if (!ref.mounted) return;
     if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
     ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
     final current = ref.read(messageCacheProvider(roomId));
@@ -1313,6 +1321,7 @@ final syncStreamProvider =
       scheduleMessageRefresh;
 
       void refreshRooms() {
+        if (disposed || !ref.mounted) return;
         ref.invalidate(chatRoomsProvider);
         ref.invalidate(spacesProvider);
         ref.invalidate(ungroupedRoomsProvider);
@@ -1323,6 +1332,7 @@ final syncStreamProvider =
       }
 
       void scheduleRoomRefresh() {
+        if (disposed || !ref.mounted) return;
         roomRefreshTimer?.cancel();
         roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
           roomRefreshTimer = null;
@@ -1348,17 +1358,45 @@ final syncStreamProvider =
           await Future.wait(
             roomIds.map((roomId) async {
               await refreshMessagesRef(ref, roomId);
+              if (disposed || !ref.mounted) return;
               if (!readAfterRefreshes.contains(roomId) ||
                   ref.read(currentRoomIdProvider) != roomId ||
                   ref.read(roomAutoReadSuppressedProvider(roomId))) {
                 return;
               }
+              rust.ChatRoom? unreadRoom;
+              roomRefreshTimer?.cancel();
+              roomRefreshTimer = null;
+              try {
+                final rooms = await ref.refresh(chatRoomsProvider.future);
+                for (final room in rooms) {
+                  if (room.id == roomId) {
+                    unreadRoom = room;
+                    break;
+                  }
+                }
+              } catch (error) {
+                debugPrint(
+                  'refresh chat rooms before markRoomAsRead failed: $error',
+                );
+              }
+              if (disposed || !ref.mounted) return;
+              if (ref.read(currentRoomIdProvider) != roomId ||
+                  ref.read(roomAutoReadSuppressedProvider(roomId))) {
+                scheduleRoomRefresh();
+                return;
+              }
               try {
                 await rust.markRoomAsRead(roomId: roomId);
-                scheduleRoomRefresh();
+                if (disposed || !ref.mounted) return;
+                if (unreadRoom != null) {
+                  ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
+                      _roomUnreadOverrideFor(unreadRoom, unread: false);
+                }
               } catch (error) {
                 debugPrint('markRoomAsRead after refresh failed: $error');
               }
+              scheduleRoomRefresh();
             }),
           );
         } finally {
@@ -1375,6 +1413,7 @@ final syncStreamProvider =
 
       scheduleMessageRefresh =
           (String roomId, {bool markReadAfterRefresh = false}) {
+            if (disposed || !ref.mounted) return;
             pendingMessageRefreshes.add(roomId);
             if (markReadAfterRefresh) {
               pendingReadAfterRefreshes.add(roomId);
@@ -1396,6 +1435,7 @@ final syncStreamProvider =
       );
       Future.microtask(() => pollConnectionStatus(ref));
       final subscription = stream.listen((event) {
+        if (disposed || !ref.mounted) return;
         pollConnectionStatus(ref);
         switch (event) {
           case rust.SyncEvent_SyncCompleted():
