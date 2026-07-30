@@ -1812,7 +1812,7 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
                 label: '转发',
                 onTap: () => _select(widget.onForward),
               ),
-            if (!isEvent)
+            if (!isEvent && !isLocalOutgoingMessage(msg.id))
               _IconTextAction(
                 icon: Icons.push_pin_outlined,
                 label: '置顶/取消置顶',

@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `knock_member_events_request`, `lagged_sync_event`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -201,8 +201,8 @@ Future<void> startSync() => RustLib.instance.api.crateApiMatrixStartSync();
 
 /// Stream real-time sync events from Rust → Dart.
 /// Call this once on app start and listen for updates.
-/// When a `SyncCompleted` event arrives, refresh the room list.
-/// When a `MessageSent` event arrives, refresh that room's messages.
+/// `FullRefreshRequired` means specific events were dropped and all
+/// interested views must refresh.
 Stream<SyncEvent> watchSyncEvents() =>
     RustLib.instance.api.crateApiMatrixWatchSyncEvents();
 
@@ -222,8 +222,8 @@ Future<void> unsubscribeTyping({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixUnsubscribeTyping(roomId: roomId);
 
 /// Subscribe to the given room in the Sliding Sync instance so that it is
-/// included in every sync roundtrip, ensuring read-receipt deltas for it are
-/// always delivered. Call when entering a room screen.
+/// included in every sync roundtrip, ensuring read-receipt deltas and pinned
+/// state are always delivered. Call when entering a room screen.
 ///
 /// If Sliding Sync is not yet ready (startup race / account switch), the
 /// desire is recorded and applied automatically once the sync loop publishes
@@ -596,7 +596,6 @@ Future<List<String>> setUserIgnored({
   ignored: ignored,
 );
 
-/// List current requests to join a knock-enabled room.
 Future<List<KnockRequest>> getRoomKnockRequests({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetRoomKnockRequests(roomId: roomId);
 
@@ -1793,12 +1792,19 @@ sealed class SyncEvent with _$SyncEvent {
   /// A sync cycle completed (rooms may have new messages).
   const factory SyncEvent.syncCompleted() = SyncEvent_SyncCompleted;
 
+  /// Specific sync events were dropped; all interested views must refresh.
+  const factory SyncEvent.fullRefreshRequired() = SyncEvent_FullRefreshRequired;
+
   /// Room-list metadata changed without requiring a timeline refresh.
   const factory SyncEvent.roomListChanged() = SyncEvent_RoomListChanged;
 
   /// A message was sent (room list should refresh).
   const factory SyncEvent.messageSent({required String roomId}) =
       SyncEvent_MessageSent;
+
+  /// A room's pinned-event state changed.
+  const factory SyncEvent.pinnedMessagesChanged({required String roomId}) =
+      SyncEvent_PinnedMessagesChanged;
 
   /// The account's ignored-user list changed.
   const factory SyncEvent.ignoredUsersChanged() = SyncEvent_IgnoredUsersChanged;

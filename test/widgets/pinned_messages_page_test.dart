@@ -10,6 +10,9 @@ import 'package:matter/src/rust/frb_generated.dart';
 
 class _FakeRustApi implements RustLibApi {
   final List<Future<List<rust.ChatMessage>> Function()> _responses = [];
+  final syncEvents = StreamController<rust.SyncEvent>.broadcast();
+  Future<void> Function(String roomId)? subscribeHandler;
+  Future<void> Function(String roomId)? unsubscribeHandler;
   int callCount = 0;
 
   void reset(List<Future<List<rust.ChatMessage>> Function()> responses) {
@@ -29,6 +32,19 @@ class _FakeRustApi implements RustLibApi {
     }
     return _responses.removeAt(0)();
   }
+
+  @override
+  Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
+
+  @override
+  Future<void> crateApiMatrixSubscribeRoomForReceipts({
+    required String roomId,
+  }) => subscribeHandler?.call(roomId) ?? Future.value();
+
+  @override
+  Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
+    required String roomId,
+  }) => unsubscribeHandler?.call(roomId) ?? Future.value();
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -63,7 +79,10 @@ void main() {
     RustLib.initMock(api: api);
   });
 
-  tearDownAll(RustLib.dispose);
+  tearDownAll(() async {
+    await api.syncEvents.close();
+    RustLib.dispose();
+  });
 
   testWidgets('hides pinned messages from ignored users', (tester) async {
     api.reset([
@@ -114,7 +133,8 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
 
     expect(api.callCount, 2);
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('暂无置顶消息'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
 
     refresh.complete([
       _message(r'$refreshed', '@alice:example.org', 'Refreshed message'),
@@ -150,5 +170,134 @@ void main() {
 
     expect(api.callCount, 2);
     expect(find.text('Loaded after retry'), findsOneWidget);
+  });
+
+  testWidgets(
+    'room pin changes refresh serially and retain the current messages',
+    (tester) async {
+      final refresh = Completer<List<rust.ChatMessage>>();
+      api.reset([
+        () async => [_message(r'$old', '@alice:example.org', 'Old pinned')],
+        () => refresh.future,
+        () async => [_message(r'$new', '@alice:example.org', 'New pinned')],
+      ]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+          ],
+          child: const MaterialApp(
+            home: PinnedMessagesPage(roomId: '!room:example.org'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Old pinned'), findsOneWidget);
+
+      api.syncEvents.add(
+        const rust.SyncEvent.pinnedMessagesChanged(
+          roomId: '!other:example.org',
+        ),
+      );
+      api.syncEvents.add(const rust.SyncEvent.syncCompleted());
+      await tester.pump();
+      expect(api.callCount, 1);
+
+      api.syncEvents.add(
+        const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+      );
+      await tester.pump();
+      expect(api.callCount, 2);
+      expect(find.text('Old pinned'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      api.syncEvents.add(
+        const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+      );
+      api.syncEvents.add(
+        const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+      );
+      await tester.pump();
+      expect(api.callCount, 2);
+
+      refresh.complete([
+        _message(r'$middle', '@alice:example.org', 'Intermediate pinned'),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(api.callCount, 3);
+      expect(find.text('Old pinned'), findsNothing);
+      expect(find.text('New pinned'), findsOneWidget);
+    },
+  );
+
+  testWidgets('full refresh compensates for dropped pin events', (
+    tester,
+  ) async {
+    api.reset([
+      () async => [_message(r'$old', '@alice:example.org', 'Old pinned')],
+      () async => [_message(r'$new', '@alice:example.org', 'New pinned')],
+    ]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    api.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(api.callCount, 1);
+
+    api.syncEvents.add(const rust.SyncEvent.fullRefreshRequired());
+    await tester.pumpAndSettle();
+
+    expect(api.callCount, 2);
+    expect(find.text('New pinned'), findsOneWidget);
+  });
+
+  testWidgets('dispose waits for room subscription before unsubscribing', (
+    tester,
+  ) async {
+    final subscription = Completer<void>();
+    final calls = <String>[];
+    api.subscribeHandler = (roomId) {
+      calls.add('subscribe');
+      return subscription.future;
+    };
+    api.unsubscribeHandler = (roomId) async {
+      calls.add('unsubscribe');
+    };
+    api.reset([() async => []]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+
+    expect(calls, ['subscribe']);
+
+    subscription.complete();
+    await tester.pump();
+
+    expect(calls, ['subscribe', 'unsubscribe']);
+    api.subscribeHandler = null;
+    api.unsubscribeHandler = null;
   });
 }

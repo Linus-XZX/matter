@@ -1340,6 +1340,28 @@ final syncStreamProvider =
         });
       }
 
+      void revalidateIgnoredUsers() {
+        // A remote change or a dropped specific event makes the last
+        // confirmed list suspect. Bump the version so an older in-flight
+        // fetch cannot confirm stale data.
+        final namespace = ref.read(activeUserIdProvider) ?? '';
+        _confirmedIgnoredLists.remove(namespace);
+        _ignoredListWriteVersions[namespace] =
+            _ignoredListVersion(namespace) + 1;
+        _revalidateIgnoredUserIds(
+          namespace,
+          () => ref.invalidate(ignoredUserIdsProvider),
+        );
+      }
+
+      void scheduleSyncRefresh() {
+        scheduleRoomRefresh();
+        final currentRoomId = ref.read(currentRoomIdProvider);
+        if (currentRoomId != null) {
+          scheduleMessageRefresh(currentRoomId);
+        }
+      }
+
       Future<void> flushMessageRefreshes() async {
         if (disposed) return;
         if (messageRefreshInFlight) {
@@ -1439,11 +1461,10 @@ final syncStreamProvider =
         pollConnectionStatus(ref);
         switch (event) {
           case rust.SyncEvent_SyncCompleted():
-            scheduleRoomRefresh();
-            final currentRoomId = ref.read(currentRoomIdProvider);
-            if (currentRoomId != null) {
-              scheduleMessageRefresh(currentRoomId);
-            }
+            scheduleSyncRefresh();
+          case rust.SyncEvent_FullRefreshRequired():
+            scheduleSyncRefresh();
+            revalidateIgnoredUsers();
           case rust.SyncEvent_RoomListChanged():
             scheduleRoomRefresh();
           case rust.SyncEvent_MessageSent(:final roomId):
@@ -1451,21 +1472,10 @@ final syncStreamProvider =
               scheduleMessageRefresh(roomId, markReadAfterRefresh: true);
             }
             scheduleRoomRefresh();
+          case rust.SyncEvent_PinnedMessagesChanged():
+            break;
           case rust.SyncEvent_IgnoredUsersChanged():
-            // The account data changed outside a confirmed local write (or
-            // its echo landed): the last confirmed list is now suspect, so
-            // previews must merge with the store until revalidated. Bump
-            // the version as well, so a refresh whose fetch started before
-            // this event is dropped instead of writing back (and confirming)
-            // a list that predates the change.
-            final namespace = ref.read(activeUserIdProvider) ?? '';
-            _confirmedIgnoredLists.remove(namespace);
-            _ignoredListWriteVersions[namespace] =
-                _ignoredListVersion(namespace) + 1;
-            _revalidateIgnoredUserIds(
-              namespace,
-              () => ref.invalidate(ignoredUserIdsProvider),
-            );
+            revalidateIgnoredUsers();
         }
       });
 

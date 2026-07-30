@@ -16,8 +16,11 @@ use matrix_sdk::{
         ignored_user_list::IgnoredUserListEventContent,
         key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
         receipt::SyncReceiptEvent,
-        room::{avatar::RoomAvatarEventContent, name::RoomNameEventContent},
-        AnySyncMessageLikeEvent, GlobalAccountDataEvent,
+        room::{
+            avatar::RoomAvatarEventContent, name::RoomNameEventContent,
+            pinned_events::RoomPinnedEventsEventContent,
+        },
+        AnySyncMessageLikeEvent, GlobalAccountDataEvent, SyncStateEvent,
     },
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
@@ -282,10 +285,14 @@ fn set_connection_status(status: ConnectionStatus) {
 pub enum SyncEvent {
     /// A sync cycle completed (rooms may have new messages).
     SyncCompleted,
+    /// Specific sync events were dropped; all interested views must refresh.
+    FullRefreshRequired,
     /// Room-list metadata changed without requiring a timeline refresh.
     RoomListChanged,
     /// A message was sent (room list should refresh).
     MessageSent { room_id: String },
+    /// A room's pinned-event state changed.
+    PinnedMessagesChanged { room_id: String },
     /// The account's ignored-user list changed.
     IgnoredUsersChanged,
 }
@@ -952,6 +959,14 @@ fn install_live_update_event_handlers(client: &Client) {
         );
         notify_sync_event(SyncEvent::MessageSent { room_id });
     });
+
+    client.add_event_handler(
+        |_event: SyncStateEvent<RoomPinnedEventsEventContent>, room: Room| async move {
+            notify_sync_event(SyncEvent::PinnedMessagesChanged {
+                room_id: room.room_id().to_string(),
+            });
+        },
+    );
 
     let ignored_overrides_client = client.clone();
     client.add_event_handler(
@@ -3404,7 +3419,10 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
                         (RoomStateType::RoomName, "".to_owned()),
                         (RoomStateType::RoomAvatar, "".to_owned()),
                         (RoomStateType::RoomCanonicalAlias, "".to_owned()),
-                        (RoomStateType::RoomMember, "".to_owned()),
+                        // Keep normal member state lazy; knock approvals query
+                        // the authoritative /members endpoint on demand.
+                        (RoomStateType::RoomMember, "$LAZY".to_owned()),
+                        (RoomStateType::RoomMember, "$ME".to_owned()),
                         (RoomStateType::RoomTopic, "".to_owned()),
                         // Space membership: without these, get_space_children and
                         // get_ungrouped_rooms see no parent/child relationships and
@@ -3447,11 +3465,11 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
             sub_state.active = Some(sliding_sync.clone());
             for room_id in sub_state.desired.keys() {
                 if let Ok(parsed) = matrix_sdk::ruma::RoomId::parse(room_id.as_str()) {
-                    use matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription;
-                    use matrix_sdk::ruma::UInt;
-                    let mut sub = RoomSubscription::default();
-                    sub.timeline_limit = UInt::from(50u32);
-                    sliding_sync.subscribe_to_rooms(&[&parsed], Some(sub), false);
+                    sliding_sync.subscribe_to_rooms(
+                        &[&parsed],
+                        Some(live_room_subscription()),
+                        false,
+                    );
                 }
             }
             drop(sub_state);
@@ -3497,10 +3515,27 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
     Ok(handle)
 }
 
+fn lagged_sync_event() -> SyncEvent {
+    SyncEvent::FullRefreshRequired
+}
+
+#[cfg(test)]
+mod sync_event_tests {
+    use super::{lagged_sync_event, SyncEvent};
+
+    #[test]
+    fn lagged_receivers_request_a_full_refresh() {
+        assert!(matches!(
+            lagged_sync_event(),
+            SyncEvent::FullRefreshRequired
+        ));
+    }
+}
+
 /// Stream real-time sync events from Rust → Dart.
 /// Call this once on app start and listen for updates.
-/// When a `SyncCompleted` event arrives, refresh the room list.
-/// When a `MessageSent` event arrives, refresh that room's messages.
+/// `FullRefreshRequired` means specific events were dropped and all
+/// interested views must refresh.
 #[frb]
 pub fn watch_sync_events(sink: crate::frb_generated::StreamSink<SyncEvent>) {
     let mut rx = SYNC_EVENT_TX.subscribe();
@@ -3516,7 +3551,7 @@ pub fn watch_sync_events(sink: crate::frb_generated::StreamSink<SyncEvent>) {
                     // Dart can be paused while the app is backgrounded. A
                     // synthetic full refresh catches it up without killing
                     // the only Rust -> Dart update bridge.
-                    if sink.add(SyncEvent::SyncCompleted).is_err() {
+                    if sink.add(lagged_sync_event()).is_err() {
                         break;
                     }
                 }
@@ -3644,9 +3679,36 @@ mod typing_subscription_tests {
     }
 }
 
+fn live_room_subscription(
+) -> matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription {
+    use matrix_sdk::ruma::{events::StateEventType, UInt};
+
+    let mut subscription =
+        matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription::default();
+    subscription.timeline_limit = UInt::from(50u32);
+    subscription.required_state = vec![(StateEventType::RoomPinnedEvents, String::new())];
+    subscription
+}
+
+#[cfg(test)]
+mod live_room_subscription_tests {
+    use super::live_room_subscription;
+    use matrix_sdk::ruma::events::StateEventType;
+
+    #[test]
+    fn requests_pinned_event_state() {
+        let subscription = live_room_subscription();
+
+        assert_eq!(
+            subscription.required_state,
+            vec![(StateEventType::RoomPinnedEvents, String::new())]
+        );
+    }
+}
+
 /// Subscribe to the given room in the Sliding Sync instance so that it is
-/// included in every sync roundtrip, ensuring read-receipt deltas for it are
-/// always delivered. Call when entering a room screen.
+/// included in every sync roundtrip, ensuring read-receipt deltas and pinned
+/// state are always delivered. Call when entering a room screen.
 ///
 /// If Sliding Sync is not yet ready (startup race / account switch), the
 /// desire is recorded and applied automatically once the sync loop publishes
@@ -3663,11 +3725,7 @@ pub async fn subscribe_room_for_receipts(room_id: String) -> Result<(), String> 
     let first_subscriber = state.add_desired(&room_id);
     if first_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
-            use matrix_sdk::ruma::api::client::sync::sync_events::v5::request::RoomSubscription;
-            use matrix_sdk::ruma::UInt;
-            let mut sub = RoomSubscription::default();
-            sub.timeline_limit = UInt::from(50u32);
-            sliding_sync.subscribe_to_rooms(&[&parsed], Some(sub), true);
+            sliding_sync.subscribe_to_rooms(&[&parsed], Some(live_room_subscription()), true);
         }
     }
     Ok(())
@@ -5882,7 +5940,7 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
     })
     .await?;
     let pinned = pinned_result.load(Ordering::Relaxed);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event(SyncEvent::PinnedMessagesChanged { room_id });
     Ok(pinned)
 }
 
@@ -6047,29 +6105,60 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<Stri
 }
 
 /// List current requests to join a knock-enabled room.
+fn knock_member_events_request(
+    room_id: matrix_sdk::ruma::OwnedRoomId,
+) -> matrix_sdk::ruma::api::client::membership::get_member_events::v3::Request {
+    use matrix_sdk::ruma::events::room::member::MembershipState;
+
+    let mut request =
+        matrix_sdk::ruma::api::client::membership::get_member_events::v3::Request::new(room_id);
+    request.membership = Some(MembershipState::Knock);
+    request
+}
+
 #[frb]
 pub async fn get_room_knock_requests(room_id: String) -> Result<Vec<KnockRequest>, String> {
+    use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEvent};
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let members = room
-        .members(matrix_sdk::RoomMemberships::KNOCK)
+    let response = client
+        .send(knock_member_events_request(room.room_id().to_owned()))
         .await
         .map_err(|error| format!("Failed to load knock requests: {error}"))?;
-    Ok(members
-        .into_iter()
-        .map(|member| {
-            let user_id = member.user_id().to_string();
-            KnockRequest {
-                display_name: member
-                    .display_name()
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| user_id.clone()),
-                avatar_url: member.avatar_url().map(ToString::to_string),
-                reason: member.event().reason().map(ToOwned::to_owned),
-                user_id,
-            }
-        })
-        .collect())
+    let mut requests = Vec::with_capacity(response.chunk.len());
+    for raw in response.chunk {
+        let event: RoomMemberEvent = raw
+            .deserialize()
+            .map_err(|error| format!("Failed to decode knock request: {error}"))?;
+        let RoomMemberEvent::Original(event) = event else {
+            continue;
+        };
+        if event.content.membership != MembershipState::Knock {
+            continue;
+        }
+        let user_id = event.state_key.to_string();
+        requests.push(KnockRequest {
+            display_name: event.content.displayname.unwrap_or_else(|| user_id.clone()),
+            avatar_url: event.content.avatar_url.map(|url| url.to_string()),
+            reason: event.content.reason,
+            user_id,
+        });
+    }
+    Ok(requests)
+}
+
+#[cfg(test)]
+mod knock_request_tests {
+    use super::knock_member_events_request;
+    use matrix_sdk::ruma::{events::room::member::MembershipState, room_id};
+
+    #[test]
+    fn knock_member_query_is_filtered_authoritatively() {
+        let request = knock_member_events_request(room_id!("!room:example.org").to_owned());
+
+        assert_eq!(request.membership, Some(MembershipState::Knock));
+    }
 }
 
 /// Accept a knock request by inviting the requester to the room.

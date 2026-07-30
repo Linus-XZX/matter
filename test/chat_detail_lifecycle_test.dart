@@ -51,7 +51,11 @@ class _FakeRustApi implements RustLibApi {
     required bool typing,
   }) async {}
   String? activeTypingRoom;
+  final activeReceiptRooms = <String>{};
+  Completer<void>? typingSubscribeBarrier;
   Completer<void>? typingUnsubscribeBarrier;
+  Completer<void>? roomSubscribeBarrier;
+  Completer<void>? roomUnsubscribeBarrier;
 
   @override
   Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) =>
@@ -62,6 +66,8 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     subscribeTypingCalls++;
+    final barrier = typingSubscribeBarrier;
+    if (barrier != null) await barrier.future;
     activeTypingRoom = roomId;
   }
 
@@ -78,6 +84,9 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     subscribeRoomCalls++;
+    final barrier = roomSubscribeBarrier;
+    if (barrier != null) await barrier.future;
+    activeReceiptRooms.add(roomId);
   }
 
   @override
@@ -102,6 +111,9 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     unsubscribeRoomCalls++;
+    final barrier = roomUnsubscribeBarrier;
+    if (barrier != null) await barrier.future;
+    activeReceiptRooms.remove(roomId);
   }
 
   @override
@@ -183,7 +195,11 @@ void main() {
     rustApi.pendingRoomEncryption = null;
     rustApi.chatRooms = const [];
     rustApi.activeTypingRoom = null;
+    rustApi.activeReceiptRooms.clear();
+    rustApi.typingSubscribeBarrier = null;
     rustApi.typingUnsubscribeBarrier = null;
+    rustApi.roomSubscribeBarrier = null;
+    rustApi.roomUnsubscribeBarrier = null;
     SharedPreferences.setMockInitialValues({});
   });
 
@@ -218,6 +234,47 @@ void main() {
     expect(rustApi.unsubscribeTypingCalls, 1);
     expect(rustApi.subscribeRoomCalls, 1);
     expect(rustApi.unsubscribeRoomCalls, 1);
+  });
+
+  testWidgets('dispose waits for pending room subscriptions', (tester) async {
+    final subscribeBarrier = Completer<void>();
+    rustApi.typingSubscribeBarrier = subscribeBarrier;
+    rustApi.roomSubscribeBarrier = subscribeBarrier;
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(rustApi.subscribeTypingCalls, 1);
+    expect(rustApi.subscribeRoomCalls, 1);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const SizedBox.shrink(),
+      ),
+    );
+    await tester.pump();
+
+    expect(rustApi.unsubscribeTypingCalls, 0);
+    expect(rustApi.unsubscribeRoomCalls, 0);
+
+    subscribeBarrier.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.unsubscribeTypingCalls, 1);
+    expect(rustApi.unsubscribeRoomCalls, 1);
+    expect(rustApi.activeTypingRoom, isNull);
+    expect(rustApi.activeReceiptRooms, isEmpty);
   });
 
   testWidgets('disposing an old chat does not clear its replacement room', (
@@ -432,6 +489,49 @@ void main() {
     await tester.pumpAndSettle();
     expect(container.read(currentRoomIdProvider), '!room:example.org');
     expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsBeforeBackground));
+  });
+
+  testWidgets('resume waits for pending room unsubscriptions', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final unsubscribeBarrier = Completer<void>();
+    rustApi.typingUnsubscribeBarrier = unsubscribeBarrier;
+    rustApi.roomUnsubscribeBarrier = unsubscribeBarrier;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+
+    expect(rustApi.unsubscribeTypingCalls, 1);
+    expect(rustApi.unsubscribeRoomCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    expect(rustApi.subscribeTypingCalls, 1);
+    expect(rustApi.subscribeRoomCalls, 1);
+
+    unsubscribeBarrier.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.subscribeTypingCalls, 2);
+    expect(rustApi.subscribeRoomCalls, 2);
+    expect(rustApi.activeTypingRoom, '!room:example.org');
+    expect(rustApi.activeReceiptRooms, contains('!room:example.org'));
   });
 
   testWidgets('popping a cover while paused does not reactivate the room', (

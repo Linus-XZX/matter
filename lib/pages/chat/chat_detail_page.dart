@@ -69,6 +69,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
   late final MutableState<String?> _currentRoomIdNotifier;
+  Future<void> _subscriptionLifecycle = Future.value();
+  bool _subscriptionsDesired = false;
   ModalRoute<dynamic>? _route;
   final List<ChatMessage> _olderMessages = [];
   final List<MessageGroup> _groupedMessages = [];
@@ -297,16 +299,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     if (_currentRoomIdNotifier.value == widget.roomId) {
       _currentRoomIdNotifier.value = null;
     }
-    unawaited(
-      unsubscribeTyping(roomId: widget.roomId).catchError((e) {
-        debugPrint('unsubscribeTyping failed: $e');
-      }),
-    );
-    unawaited(
-      unsubscribeRoomForReceipts(roomId: widget.roomId).catchError((e) {
-        debugPrint('unsubscribeRoomForReceipts failed: $e');
-      }),
-    );
+    _setSubscriptionsDesired(false);
   }
 
   void _activateRoom() {
@@ -325,17 +318,56 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _currentRoomIdNotifier.value = widget.roomId;
     ref.read(roomAutoReadSuppressedProvider(widget.roomId).notifier).value =
         false;
-    unawaited(
-      subscribeTypingForRoom(roomId: widget.roomId).catchError((e) {
-        debugPrint('subscribeTypingForRoom failed: $e');
-      }),
-    );
-    unawaited(
-      subscribeRoomForReceipts(roomId: widget.roomId).catchError((e) {
-        debugPrint('subscribeRoomForReceipts failed: $e');
-      }),
-    );
+    _setSubscriptionsDesired(true);
     unawaited(_primeAndRefreshMessages());
+  }
+
+  void _setSubscriptionsDesired(bool desired) {
+    if (_subscriptionsDesired == desired) return;
+    _subscriptionsDesired = desired;
+    final roomId = widget.roomId;
+    _subscriptionLifecycle = _subscriptionLifecycle.then((_) async {
+      await Future.wait([
+        _updateTypingSubscription(roomId, subscribe: desired),
+        _updateRoomSubscription(roomId, subscribe: desired),
+      ]);
+    });
+    unawaited(_subscriptionLifecycle);
+  }
+
+  Future<void> _updateTypingSubscription(
+    String roomId, {
+    required bool subscribe,
+  }) async {
+    try {
+      if (subscribe) {
+        await subscribeTypingForRoom(roomId: roomId);
+      } else {
+        await unsubscribeTyping(roomId: roomId);
+      }
+    } catch (error) {
+      debugPrint(
+        '${subscribe ? 'subscribe' : 'unsubscribe'}Typing failed: $error',
+      );
+    }
+  }
+
+  Future<void> _updateRoomSubscription(
+    String roomId, {
+    required bool subscribe,
+  }) async {
+    try {
+      if (subscribe) {
+        await subscribeRoomForReceipts(roomId: roomId);
+      } else {
+        await unsubscribeRoomForReceipts(roomId: roomId);
+      }
+    } catch (error) {
+      debugPrint(
+        '${subscribe ? 'subscribe' : 'unsubscribe'}RoomForReceipts failed: '
+        '$error',
+      );
+    }
   }
 
   Future<void> _primeAndRefreshMessages() async {
@@ -378,16 +410,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         currentRoomIdNotifier.value = null;
       }
     });
-    unawaited(
-      unsubscribeTyping(roomId: roomId).catchError((e) {
-        debugPrint('unsubscribeTyping failed: $e');
-      }),
-    );
-    unawaited(
-      unsubscribeRoomForReceipts(roomId: roomId).catchError((e) {
-        debugPrint('unsubscribeRoomForReceipts failed: $e');
-      }),
-    );
+    _setSubscriptionsDesired(false);
     _pickerResizeTimer?.cancel();
     _sentNoticeTimer?.cancel();
     _forwardNoticeTimer?.cancel();
