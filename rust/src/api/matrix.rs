@@ -16,7 +16,10 @@ use matrix_sdk::{
         ignored_user_list::IgnoredUserListEventContent,
         key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
         receipt::SyncReceiptEvent,
-        room::message::OriginalSyncRoomMessageEvent,
+        room::{
+            avatar::RoomAvatarEventContent, message::OriginalSyncRoomMessageEvent,
+            name::RoomNameEventContent,
+        },
         GlobalAccountDataEvent,
     },
     store::RoomLoadSettings,
@@ -1252,6 +1255,10 @@ pub struct ChatRoom {
     pub id: String,
     pub name: String,
     pub avatar_url: Option<String>,
+    /// Event IDs of the current name/avatar state. Unlike display values,
+    /// these distinguish repeated values in optimistic-update reconciliation.
+    pub name_event_id: Option<String>,
+    pub avatar_event_id: Option<String>,
     pub last_message: String,
     pub last_message_sender: Option<String>,
     pub last_message_time: String,
@@ -1319,7 +1326,24 @@ pub struct RoomDetails {
     pub name: String,
     pub has_explicit_name: bool,
     pub avatar_url: Option<String>,
+    pub name_event_id: Option<String>,
+    pub avatar_event_id: Option<String>,
     pub topic: Option<String>,
+}
+
+#[frb]
+#[derive(Clone, Debug)]
+pub struct RoomDetailsUpdate {
+    pub name_event_id: Option<String>,
+    pub name_error: Option<String>,
+    pub topic_error: Option<String>,
+}
+
+#[frb]
+#[derive(Clone, Debug)]
+pub struct RoomAvatarUpdate {
+    pub avatar_url: String,
+    pub event_id: String,
 }
 
 #[frb]
@@ -1341,6 +1365,24 @@ pub struct KnockRequest {
     pub reason: Option<String>,
 }
 
+async fn room_name_event_id(room: &Room) -> Option<String> {
+    let raw = room
+        .get_state_event_static::<RoomNameEventContent>()
+        .await
+        .ok()
+        .flatten()?;
+    raw.deserialize().ok()?.event_id().map(ToString::to_string)
+}
+
+async fn room_avatar_event_id(room: &Room) -> Option<String> {
+    let raw = room
+        .get_state_event_static::<RoomAvatarEventContent>()
+        .await
+        .ok()
+        .flatten()?;
+    raw.deserialize().ok()?.event_id().map(ToString::to_string)
+}
+
 async fn room_to_chat_room(
     room: &matrix_sdk::Room,
     ignored_user_ids: Option<&std::collections::HashSet<String>>,
@@ -1360,6 +1402,8 @@ async fn room_to_chat_room(
     }
 
     let avatar_url = room.avatar_url().map(|u| u.to_string());
+    let (name_event_id, avatar_event_id) =
+        tokio::join!(room_name_event_id(room), room_avatar_event_id(room));
     let unread_count = room.unread_notification_counts().notification_count as i32;
     let is_marked_unread = effective_marked_unread(&room.client(), room).await;
     let (mut last_message, mut last_message_sender_id, last_message_time, last_event_id) =
@@ -1457,6 +1501,8 @@ async fn room_to_chat_room(
         id: room_id,
         name,
         avatar_url,
+        name_event_id,
+        avatar_event_id,
         last_message,
         last_message_sender,
         last_message_time,
@@ -5628,11 +5674,15 @@ pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let has_explicit_name = room.name().is_some_and(|name| !name.trim().is_empty());
+    let (name_event_id, avatar_event_id) =
+        tokio::join!(room_name_event_id(&room), room_avatar_event_id(&room));
     Ok(RoomDetails {
         id: room_id,
         name: room_display_name(&room),
         has_explicit_name,
         avatar_url: room.avatar_url().map(|url| url.to_string()),
+        name_event_id,
+        avatar_event_id,
         topic: room
             .topic()
             .map(|topic| topic.trim().to_string())
@@ -5661,27 +5711,40 @@ pub async fn update_room_details(
     name: String,
     update_name: bool,
     topic: Option<String>,
-) -> Result<(), String> {
+) -> Result<RoomDetailsUpdate, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let name = name.trim();
-    if update_name {
+    let (name_event_id, name_error) = if update_name {
         if name.is_empty() {
-            return Err("Room name cannot be empty.".to_string());
+            (None, Some("Room name cannot be empty.".to_string()))
+        } else {
+            match room.set_name(name.to_owned()).await {
+                Ok(response) => (Some(response.event_id.to_string()), None),
+                Err(error) => (None, Some(format!("Failed to update room name: {error}"))),
+            }
         }
-        room.set_name(name.to_owned())
-            .await
-            .map_err(|error| format!("Failed to update room name: {error}"))?;
-    }
+    } else {
+        (None, None)
+    };
     let new_topic = topic.unwrap_or_default().trim().to_owned();
     let current_topic = room.topic().unwrap_or_default().trim().to_owned();
-    if new_topic != current_topic {
-        room.set_room_topic(&new_topic)
-            .await
-            .map_err(|error| format!("Failed to update room topic: {error}"))?;
+    let (topic_updated, topic_error) = if new_topic != current_topic {
+        match room.set_room_topic(&new_topic).await {
+            Ok(_) => (true, None),
+            Err(error) => (false, Some(format!("Failed to update room topic: {error}"))),
+        }
+    } else {
+        (false, None)
+    };
+    if name_event_id.is_some() || topic_updated {
+        notify_sync_event(SyncEvent::SyncCompleted);
     }
-    notify_sync_event(SyncEvent::SyncCompleted);
-    Ok(())
+    Ok(RoomDetailsUpdate {
+        name_event_id,
+        name_error,
+        topic_error,
+    })
 }
 
 /// Upload and apply a new avatar for a joined non-space room.
@@ -5690,7 +5753,7 @@ pub async fn upload_room_avatar(
     room_id: String,
     content_type: String,
     data: Vec<u8>,
-) -> Result<String, String> {
+) -> Result<RoomAvatarUpdate, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let mime: mime::Mime = content_type
@@ -5708,11 +5771,15 @@ pub async fn upload_room_avatar(
     let mut info = matrix_sdk::ruma::events::room::avatar::ImageInfo::new();
     info.mimetype = Some(mime.to_string());
     info.blurhash = upload.blurhash;
-    room.set_avatar_url(&upload.content_uri, Some(info))
+    let response = room
+        .set_avatar_url(&upload.content_uri, Some(info))
         .await
         .map_err(|error| format!("Failed to update room avatar: {error}"))?;
     notify_sync_event(SyncEvent::SyncCompleted);
-    Ok(upload.content_uri.to_string())
+    Ok(RoomAvatarUpdate {
+        avatar_url: upload.content_uri.to_string(),
+        event_id: response.event_id.to_string(),
+    })
 }
 
 /// Return whether a room has an explicit mute push rule.

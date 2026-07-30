@@ -609,6 +609,8 @@ class _SpaceChildTile extends StatelessWidget {
                       roomId: room.id,
                       roomName: room.name,
                       avatarUrl: room.avatarUrl,
+                      nameEventId: room.nameEventId,
+                      avatarEventId: room.avatarEventId,
                       isDm: room.roomType == 'dm',
                       subtitle: room.unreadCount > 0
                           ? '${room.unreadCount} 条未读消息'

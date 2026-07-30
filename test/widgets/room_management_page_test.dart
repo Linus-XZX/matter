@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:matter/pages/chat/room_metadata_patch.dart';
 import 'package:matter/pages/chat/room_management_page.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -29,7 +30,10 @@ class _FakeRustApi implements RustLibApi {
   int setMutedCalls = 0;
   int setIgnoredCalls = 0;
   Completer<void>? pendingMutedUpdate;
+  Completer<void>? pendingApproveKnock;
   Completer<List<String>>? pendingSetIgnored;
+  String? nameUpdateError;
+  String? topicUpdateError;
   String? updatedName;
   String? updatedTopic;
 
@@ -43,6 +47,7 @@ class _FakeRustApi implements RustLibApi {
       name: 'Project room',
       hasExplicitName: true,
       topic: 'Topic',
+      nameEventId: r'$name-0',
     );
   }
 
@@ -99,15 +104,20 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiMatrixUpdateRoomDetails({
+  Future<rust.RoomDetailsUpdate> crateApiMatrixUpdateRoomDetails({
     required String roomId,
     required String name,
     required bool updateName,
     String? topic,
-  }) {
+  }) async {
     updatedName = name;
     updatedTopic = topic;
-    return pendingDetailsUpdate?.future ?? Future.value();
+    await pendingDetailsUpdate?.future;
+    return rust.RoomDetailsUpdate(
+      nameEventId: updateName && nameUpdateError == null ? r'$name-1' : null,
+      nameError: nameUpdateError,
+      topicError: topicUpdateError,
+    );
   }
 
   @override
@@ -116,6 +126,7 @@ class _FakeRustApi implements RustLibApi {
     required String userId,
   }) async {
     approveKnockCalls++;
+    await pendingApproveKnock?.future;
   }
 
   @override
@@ -159,7 +170,10 @@ void main() {
     rustApi.setMutedCalls = 0;
     rustApi.setIgnoredCalls = 0;
     rustApi.pendingMutedUpdate = null;
+    rustApi.pendingApproveKnock = null;
     rustApi.pendingSetIgnored = null;
+    rustApi.nameUpdateError = null;
+    rustApi.topicUpdateError = null;
     rustApi.updatedName = null;
     rustApi.updatedTopic = null;
   });
@@ -309,7 +323,7 @@ void main() {
     tester,
   ) async {
     rustApi.failSupplementalLoads = false;
-    rust.RoomDetails? changedDetails;
+    RoomNamePatch? changedName;
 
     await tester.pumpWidget(
       ProviderScope(
@@ -318,7 +332,9 @@ void main() {
           home: RoomManagementPage(
             roomId: '!room:example.org',
             roomName: 'Project room',
-            onRoomDetailsChanged: (details) => changedDetails = details,
+            onRoomDetailsChanged: (patch) {
+              if (patch is RoomNamePatch) changedName = patch;
+            },
           ),
         ),
       ),
@@ -342,8 +358,83 @@ void main() {
       tester.widget<TextField>(fields.at(1)).controller!.text,
       'Updated topic',
     );
-    expect(changedDetails?.name, 'Renamed room');
-    expect(changedDetails?.topic, 'Updated topic');
+    expect(changedName?.name, 'Renamed room');
+  });
+
+  testWidgets('keeps a successful rename when the topic update fails', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.topicUpdateError = 'topic unavailable';
+    RoomNamePatch? changedName;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+            onRoomDetailsChanged: (patch) {
+              if (patch is RoomNamePatch) changedName = patch;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), 'Renamed room');
+    await tester.enterText(fields.at(1), 'Updated topic');
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pumpAndSettle();
+
+    expect(changedName?.name, 'Renamed room');
+    expect(changedName?.nameEventId, r'$name-1');
+    expect(find.textContaining('主题更新失败'), findsOneWidget);
+  });
+
+  testWidgets('saving only the topic preserves remote room metadata', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    RoomMetadataPatch? changedPatch;
+    var outerName = 'Remote name';
+    String? outerAvatarUrl = 'mxc://example.org/remote-avatar';
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+            onRoomDetailsChanged: (patch) {
+              changedPatch = patch;
+              switch (patch) {
+                case RoomNamePatch():
+                  outerName = patch.name;
+                  break;
+                case RoomAvatarPatch():
+                  outerAvatarUrl = patch.avatarUrl;
+                  break;
+              }
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(1), 'Updated topic');
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pumpAndSettle();
+
+    expect(changedPatch, isNull);
+    expect(outerName, 'Remote name');
+    expect(outerAvatarUrl, 'mxc://example.org/remote-avatar');
   });
 
   testWidgets('removes an approved knock and refreshes room members', (
@@ -376,6 +467,50 @@ void main() {
     expect(rustApi.approveKnockCalls, 1);
     expect(rustApi.membersLoadCalls, 2);
     expect(find.text('Bob'), findsNothing);
+  });
+
+  testWidgets('disables both knock actions while one is in flight', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.knockRequests = const [
+      rust.KnockRequest(userId: '@bob:example.org', displayName: 'Bob'),
+    ];
+    final pendingApprove = Completer<void>();
+    rustApi.pendingApproveKnock = pendingApprove;
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('批准'));
+    await tester.pump();
+
+    IconButton actionButton(String tooltip) => tester.widget<IconButton>(
+      find.ancestor(
+        of: find.byTooltip(tooltip),
+        matching: find.byType(IconButton),
+      ),
+    );
+    expect(actionButton('批准').onPressed, isNull);
+    expect(actionButton('拒绝').onPressed, isNull);
+    await tester.tap(find.byTooltip('拒绝'));
+    expect(rustApi.approveKnockCalls, 1);
+    expect(rustApi.rejectKnockCalls, 0);
+
+    pendingApprove.complete();
+    await tester.pumpAndSettle();
   });
 
   testWidgets('a re-knock becomes visible again after the server echo', (

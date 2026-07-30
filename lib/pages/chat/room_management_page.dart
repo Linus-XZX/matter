@@ -11,13 +11,14 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import '../settings/avatar_crop_editor_page.dart';
 import 'pinned_messages_page.dart';
+import 'room_metadata_patch.dart';
 
 class RoomManagementPage extends ConsumerStatefulWidget {
   final String roomId;
   final String roomName;
   final String? avatarUrl;
   final VoidCallback? onRoomClosed;
-  final ValueChanged<rust.RoomDetails>? onRoomDetailsChanged;
+  final ValueChanged<RoomMetadataPatch>? onRoomDetailsChanged;
 
   const RoomManagementPage({
     super.key,
@@ -45,6 +46,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   /// removes them (or a short grace elapses) so entries don't flicker back.
   /// The grace bounds the hide: a genuine re-knock must become visible again.
   final Map<String, DateTime> _handledKnockUserIds = {};
+  final Set<String> _pendingKnockUserIds = {};
   static const Duration _handledKnockGrace = Duration(seconds: 10);
   Object? _mutedLoadError;
   Object? _membersLoadError;
@@ -200,7 +202,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         : _topicController.text.trim();
     setState(() => _saving = true);
     try {
-      await rust.updateRoomDetails(
+      final result = await rust.updateRoomDetails(
         roomId: widget.roomId,
         name: name,
         updateName: updateName,
@@ -208,16 +210,39 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       _invalidateRoom();
       if (!mounted) return;
+      final nameUpdated = updateName && result.nameError == null;
       final updatedDetails = rust.RoomDetails(
         id: details.id,
-        name: updateName ? name : details.name,
-        hasExplicitName: details.hasExplicitName || updateName,
+        name: nameUpdated ? name : details.name,
+        hasExplicitName: details.hasExplicitName || nameUpdated,
         avatarUrl: details.avatarUrl,
-        topic: topic,
+        nameEventId: nameUpdated ? result.nameEventId : details.nameEventId,
+        avatarEventId: details.avatarEventId,
+        topic: result.topicError == null ? topic : details.topic,
       );
-      setState(() => _details = updatedDetails);
-      widget.onRoomDetailsChanged?.call(updatedDetails);
-      _showSnackBar('房间信息已更新');
+      final detailsChanged = updatedDetails != details;
+      if (detailsChanged) {
+        setState(() => _details = updatedDetails);
+      }
+      if (nameUpdated) {
+        widget.onRoomDetailsChanged?.call(
+          RoomNamePatch(
+            roomId: details.id,
+            name: name,
+            nameEventId: result.nameEventId,
+          ),
+        );
+      }
+      final failures = [
+        if (result.nameError case final error?) '房间名称更新失败: $error',
+        if (result.topicError case final error?) '主题更新失败: $error',
+      ];
+      if (failures.isEmpty) {
+        _showSnackBar('房间信息已更新');
+      } else {
+        final prefix = detailsChanged ? '部分更新成功：' : '';
+        _showSnackBar('$prefix${failures.join('；')}');
+      }
     } catch (error) {
       if (mounted) _showSnackBar('更新失败: $error');
     } finally {
@@ -245,7 +270,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       if (bytes == null || !mounted) return;
       setState(() => _saving = true);
-      final avatarUrl = await rust.uploadRoomAvatar(
+      final avatarUpdate = await rust.uploadRoomAvatar(
         roomId: widget.roomId,
         contentType: 'image/jpeg',
         data: bytes,
@@ -257,14 +282,22 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         id: details.id,
         name: details.name,
         hasExplicitName: details.hasExplicitName,
-        avatarUrl: avatarUrl,
+        avatarUrl: avatarUpdate.avatarUrl,
+        nameEventId: details.nameEventId,
+        avatarEventId: avatarUpdate.eventId,
         topic: details.topic,
       );
       setState(() {
         _details = updatedDetails;
         _avatarPreviewBytes = bytes;
       });
-      widget.onRoomDetailsChanged?.call(updatedDetails);
+      widget.onRoomDetailsChanged?.call(
+        RoomAvatarPatch(
+          roomId: details.id,
+          avatarUrl: avatarUpdate.avatarUrl,
+          avatarEventId: avatarUpdate.eventId,
+        ),
+      );
       _showSnackBar('房间头像已更新');
     } catch (error) {
       if (mounted) _showSnackBar('头像更新失败: $error');
@@ -427,6 +460,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   Future<void> _runKnockAction(rust.KnockRequest request, bool approve) async {
+    if (_pendingKnockUserIds.contains(request.userId)) return;
+    setState(() => _pendingKnockUserIds.add(request.userId));
     try {
       if (approve) {
         await rust.approveRoomKnock(
@@ -449,6 +484,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       _showSnackBar(approve ? '已批准加入请求' : '已拒绝加入请求');
     } catch (error) {
       if (mounted) _showSnackBar('操作失败: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _pendingKnockUserIds.remove(request.userId));
+      }
     }
   }
 
@@ -692,8 +731,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                           Icons.check_rounded,
                                           color: AppColors.primary,
                                         ),
-                                        onPressed: () =>
-                                            _runKnockAction(request, true),
+                                        onPressed:
+                                            _pendingKnockUserIds.contains(
+                                              request.userId,
+                                            )
+                                            ? null
+                                            : () => _runKnockAction(
+                                                request,
+                                                true,
+                                              ),
                                       ),
                                       IconButton(
                                         tooltip: '拒绝',
@@ -701,8 +747,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                           Icons.close_rounded,
                                           color: AppColors.error,
                                         ),
-                                        onPressed: () =>
-                                            _runKnockAction(request, false),
+                                        onPressed:
+                                            _pendingKnockUserIds.contains(
+                                              request.userId,
+                                            )
+                                            ? null
+                                            : () => _runKnockAction(
+                                                request,
+                                                false,
+                                              ),
                                       ),
                                     ],
                                   ),

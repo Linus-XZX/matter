@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'pages/chat/chat_detail_page.dart';
 import 'pages/chat/chat_page.dart';
 import 'pages/chat/desktop_room_details_panel.dart';
+import 'pages/chat/room_metadata_patch.dart';
+import 'pages/chat/room_state_edit_tracker.dart';
 import 'pages/chat/space_page.dart';
 import 'pages/contacts/contacts_page.dart';
 import 'pages/settings/encryption_page.dart';
@@ -39,7 +41,8 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   _DesktopRoomSource _desktopRoomSource = _DesktopRoomSource.directMessages;
   bool _showRoomDetails = false;
   String? _lastActiveUserId;
-  ({String name, String? avatarUrl})? _selectedRoomDetailsBaseline;
+  final _selectedRoomNameEdit = RoomStateEditTracker();
+  final _selectedRoomAvatarEdit = RoomStateEditTracker();
 
   static const double _desktopBreakpoint = 840;
   static const double _desktopDetailsPaneBreakpoint = 1024;
@@ -153,6 +156,37 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     }
   }
 
+  void _clearSelectedRoomDetailsEdits() {
+    _selectedRoomNameEdit.clear();
+    _selectedRoomAvatarEdit.clear();
+  }
+
+  rust.ChatRoom _reconcileSelectedRoomDetails(
+    rust.ChatRoom selectedRoom,
+    rust.ChatRoom refreshedRoom,
+  ) {
+    final acceptName = _selectedRoomNameEdit.shouldAccept(
+      refreshedRoom.nameEventId,
+    );
+    final acceptAvatar = _selectedRoomAvatarEdit.shouldAccept(
+      refreshedRoom.avatarEventId,
+    );
+    if (acceptName && acceptAvatar) return refreshedRoom;
+    return _roomWithDetails(
+      refreshedRoom,
+      name: acceptName ? refreshedRoom.name : selectedRoom.name,
+      avatarUrl: acceptAvatar
+          ? refreshedRoom.avatarUrl
+          : selectedRoom.avatarUrl,
+      nameEventId: acceptName
+          ? refreshedRoom.nameEventId
+          : selectedRoom.nameEventId,
+      avatarEventId: acceptAvatar
+          ? refreshedRoom.avatarEventId
+          : selectedRoom.avatarEventId,
+    );
+  }
+
   void _selectRoom(rust.ChatRoom room) {
     if (room.roomType == 'space') {
       _showSpace(
@@ -162,17 +196,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     }
     if (_selectedRoom?.id == room.id) {
       final selectedRoom = _selectedRoom!;
-      final localBaseline = _selectedRoomDetailsBaseline;
-      final refreshedRoom =
-          localBaseline != null &&
-              room.name == localBaseline.name &&
-              room.avatarUrl == localBaseline.avatarUrl
-          ? _roomWithDetails(
-              room,
-              name: selectedRoom.name,
-              avatarUrl: selectedRoom.avatarUrl,
-            )
-          : room;
+      final refreshedRoom = _reconcileSelectedRoomDetails(selectedRoom, room);
       if (selectedRoom != refreshedRoom) {
         setState(() => _selectedRoom = refreshedRoom);
       }
@@ -180,7 +204,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       unawaited(_markSelectedRoomAsRead(refreshedRoom));
       return;
     }
-    _selectedRoomDetailsBaseline = null;
+    _clearSelectedRoomDetailsEdits();
     setState(() => _selectedRoom = room);
   }
 
@@ -198,15 +222,38 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     }
   }
 
-  void _updateSelectedRoomDetails(rust.RoomDetails details) {
+  void _updateSelectedRoomDetails(RoomMetadataPatch patch) {
     final room = _selectedRoom;
-    if (room == null || room.id != details.id) return;
-    _selectedRoomDetailsBaseline = (name: room.name, avatarUrl: room.avatarUrl);
+    if (room == null || room.id != patch.roomId) return;
+    var name = room.name;
+    var avatarUrl = room.avatarUrl;
+    var nameEventId = room.nameEventId;
+    var avatarEventId = room.avatarEventId;
+    switch (patch) {
+      case RoomNamePatch():
+        _selectedRoomNameEdit.record(
+          currentEventId: nameEventId,
+          nextEventId: patch.nameEventId,
+        );
+        name = patch.name;
+        nameEventId = patch.nameEventId;
+        break;
+      case RoomAvatarPatch():
+        _selectedRoomAvatarEdit.record(
+          currentEventId: avatarEventId,
+          nextEventId: patch.avatarEventId,
+        );
+        avatarUrl = patch.avatarUrl;
+        avatarEventId = patch.avatarEventId;
+        break;
+    }
     setState(() {
       _selectedRoom = _roomWithDetails(
         room,
-        name: details.name,
-        avatarUrl: details.avatarUrl,
+        name: name,
+        avatarUrl: avatarUrl,
+        nameEventId: nameEventId,
+        avatarEventId: avatarEventId,
       );
     });
   }
@@ -215,11 +262,15 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     rust.ChatRoom room, {
     required String name,
     required String? avatarUrl,
+    required String? nameEventId,
+    required String? avatarEventId,
   }) {
     return rust.ChatRoom(
       id: room.id,
       name: name,
       avatarUrl: avatarUrl,
+      nameEventId: nameEventId,
+      avatarEventId: avatarEventId,
       lastMessage: room.lastMessage,
       lastMessageSender: room.lastMessageSender,
       lastMessageTime: room.lastMessageTime,
@@ -236,7 +287,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   void _clearSelectedRoom() {
     setState(() {
       _selectedRoom = null;
-      _selectedRoomDetailsBaseline = null;
+      _clearSelectedRoomDetailsEdits();
       _showRoomDetails = false;
     });
   }
@@ -247,7 +298,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.directMessages;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
-      _selectedRoomDetailsBaseline = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -257,7 +308,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.ungroupedRooms;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
-      _selectedRoomDetailsBaseline = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -267,7 +318,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.space;
       _selectedDesktopSpace = space;
       _selectedRoom = null;
-      _selectedRoomDetailsBaseline = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -300,7 +351,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     if (previousUserId == null || previousUserId == activeUserId) return;
 
     _selectedRoom = null;
-    _selectedRoomDetailsBaseline = null;
+    _clearSelectedRoomDetailsEdits();
     _selectedDesktopSpace = null;
     _desktopRoomSource = _DesktopRoomSource.directMessages;
     _showRoomDetails = false;
@@ -319,19 +370,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       }
     }
     if (refreshedRoom == null) return;
-    final localBaseline = _selectedRoomDetailsBaseline;
-    if (localBaseline != null &&
-        refreshedRoom.name == localBaseline.name &&
-        refreshedRoom.avatarUrl == localBaseline.avatarUrl) {
-      _selectedRoom = _roomWithDetails(
-        refreshedRoom,
-        name: selectedRoom.name,
-        avatarUrl: selectedRoom.avatarUrl,
-      );
-      return;
-    }
-    _selectedRoomDetailsBaseline = null;
-    _selectedRoom = refreshedRoom;
+    _selectedRoom = _reconcileSelectedRoomDetails(selectedRoom, refreshedRoom);
   }
 
   void _syncMobilePageAfterLayoutChange(bool isDesktop) {
@@ -442,6 +481,8 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                 roomId: selectedRoom.id,
                                 roomName: selectedRoom.name,
                                 avatarUrl: selectedRoom.avatarUrl,
+                                nameEventId: selectedRoom.nameEventId,
+                                avatarEventId: selectedRoom.avatarEventId,
                                 isDm: selectedRoom.roomType == 'dm',
                                 subtitle: selectedRoom.unreadCount > 0
                                     ? '${selectedRoom.unreadCount} 条未读消息'

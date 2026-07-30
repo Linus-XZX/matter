@@ -6,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/chat_detail_page.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
 import 'package:matter/pages/chat/message_insert_animation.dart';
+import 'package:matter/pages/chat/room_metadata_patch.dart';
+import 'package:matter/pages/chat/room_management_page.dart';
 import 'package:matter/pages/chat/send_flight.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -24,6 +26,7 @@ class _FakeRustApi implements RustLibApi {
   List<rust.ChatMessage> messagesBefore = const [];
   Object? messagesBeforeError;
   Completer<String>? pendingSend;
+  Completer<bool>? pendingRoomEncryption;
   List<rust.ChatRoom> chatRooms = const [];
 
   @override
@@ -51,9 +54,8 @@ class _FakeRustApi implements RustLibApi {
   Completer<void>? typingUnsubscribeBarrier;
 
   @override
-  Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) async {
-    return false;
-  }
+  Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) =>
+      pendingRoomEncryption?.future ?? Future.value(false);
 
   @override
   Future<void> crateApiMatrixSubscribeTypingForRoom({
@@ -178,6 +180,7 @@ void main() {
     rustApi.messagesBefore = const [];
     rustApi.messagesBeforeError = null;
     rustApi.pendingSend = null;
+    rustApi.pendingRoomEncryption = null;
     rustApi.chatRooms = const [];
     rustApi.activeTypingRoom = null;
     rustApi.typingUnsubscribeBarrier = null;
@@ -361,6 +364,38 @@ void main() {
 
     expect(container.read(currentRoomIdProvider), '!room:example.org');
     expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsWhileCovered));
+  });
+
+  testWidgets('manual unread suppresses auto-read delayed by cache priming', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final encryptionCheck = Completer<bool>();
+    rustApi.pendingRoomEncryption = encryptionCheck;
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(rustApi.markRoomAsReadCalls, 0);
+
+    // The room-list action sets suppression before its unread request starts.
+    // Finish cache priming only after that explicit action has won the race.
+    container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+        true;
+    encryptionCheck.complete(false);
+    await tester.pump();
+    await tester.pump();
+
+    expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+    expect(rustApi.markRoomAsReadCalls, 0);
   });
 
   testWidgets('backgrounding deactivates the room until the app resumes', (
@@ -1053,5 +1088,97 @@ void main() {
 
     expect(find.text('Old name'), findsNothing);
     expect(find.text('New name'), findsWidgets);
+  });
+
+  testWidgets('repeated local room names wait for the matching event echo', (
+    tester,
+  ) async {
+    rust.ChatRoom room(String name, String nameEventId) => rust.ChatRoom(
+      id: '!room:example.org',
+      name: name,
+      nameEventId: nameEventId,
+      lastMessage: '',
+      lastMessageTime: '',
+      lastEventId: '',
+      unreadCount: 0,
+      isMarkedUnread: false,
+      roomType: 'group',
+      isEncrypted: false,
+      isMuted: false,
+      roomState: 'joined',
+    );
+    rustApi.chatRooms = [room('Name A', r'$name-a0')];
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Name A',
+            nameEventId: r'$name-a0',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.more_vert_rounded));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('房间管理'));
+    await tester.pumpAndSettle();
+
+    final management = tester.widget<RoomManagementPage>(
+      find.byType(RoomManagementPage),
+    );
+    management.onRoomDetailsChanged!(
+      const RoomNamePatch(
+        roomId: '!room:example.org',
+        name: 'Name B',
+        nameEventId: r'$name-b',
+      ),
+    );
+    management.onRoomDetailsChanged!(
+      const RoomNamePatch(
+        roomId: '!room:example.org',
+        name: 'Name A',
+        nameEventId: r'$name-a2',
+      ),
+    );
+    await tester.pump();
+    Navigator.of(tester.element(find.byType(RoomManagementPage))).pop();
+    await tester.pumpAndSettle();
+
+    // Re-deliver the cached original A event. Its equal display value must not
+    // confirm the final A edit.
+    rustApi.chatRooms = [room('Name A', r'$name-a0')];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Name A'), findsWidgets);
+
+    // B is the real echo of the superseded first edit. Keep the final A.
+    rustApi.chatRooms = [room('Name B', r'$name-b')];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Name B'), findsNothing);
+    expect(find.text('Name A'), findsWidgets);
+
+    // Only the distinct event ID of the final A confirms the latest edit.
+    rustApi.chatRooms = [room('Name A', r'$name-a2')];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Name A'), findsWidgets);
+
+    // A real remote edit may reuse B's value, but has its own event ID.
+    rustApi.chatRooms = [room('Name B', r'$name-b-remote')];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Name B'), findsWidgets);
   });
 }

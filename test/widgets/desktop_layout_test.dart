@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/app.dart';
 import 'package:matter/pages/chat/chat_detail_page.dart';
 import 'package:matter/pages/chat/desktop_room_details_panel.dart';
+import 'package:matter/pages/chat/room_metadata_patch.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
@@ -53,10 +54,16 @@ rust.ChatRoom _room({
   required String id,
   required String name,
   required String roomType,
+  String? avatarUrl,
+  String? nameEventId,
+  String? avatarEventId,
 }) {
   return rust.ChatRoom(
     id: id,
     name: name,
+    avatarUrl: avatarUrl,
+    nameEventId: nameEventId,
+    avatarEventId: avatarEventId,
     lastMessage: '',
     lastMessageTime: '0',
     lastEventId: '',
@@ -151,6 +158,7 @@ void main() {
       id: '!room:example.org',
       name: 'Project room',
       roomType: 'dm',
+      nameEventId: r'$name-0',
     );
     final container = ProviderContainer(
       overrides: [
@@ -225,11 +233,17 @@ void main() {
     final detail = tester.widget<ChatDetailPage>(find.byType(ChatDetailPage));
 
     detail.onRoomDetailsChanged!(
-      const rust.RoomDetails(
-        id: '!room:example.org',
+      const RoomNamePatch(
+        roomId: '!room:example.org',
         name: 'Renamed room',
-        hasExplicitName: true,
+        nameEventId: r'$name-1',
+      ),
+    );
+    detail.onRoomDetailsChanged!(
+      const RoomAvatarPatch(
+        roomId: '!room:example.org',
         avatarUrl: 'mxc://example.org/avatar',
+        avatarEventId: r'$avatar-1',
       ),
     );
     await tester.pump();
@@ -251,6 +265,202 @@ void main() {
       'Renamed room',
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('uploading an avatar preserves a remotely synced room name', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name A',
+        roomType: 'dm',
+        avatarUrl: 'mxc://example.org/avatar-x',
+        nameEventId: r'$name-a',
+        avatarEventId: r'$avatar-x',
+      ),
+    ];
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => rooms),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    await tester.tap(find.byTooltip('显示详情'));
+    await tester.pump();
+
+    rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name B',
+        roomType: 'dm',
+        avatarUrl: 'mxc://example.org/avatar-y',
+        nameEventId: r'$name-b',
+        avatarEventId: r'$avatar-y',
+      ),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+
+    tester
+        .widget<ChatDetailPage>(find.byType(ChatDetailPage))
+        .onRoomDetailsChanged!(
+      const RoomAvatarPatch(
+        roomId: '!room:example.org',
+        avatarUrl: 'mxc://example.org/avatar-z',
+        avatarEventId: r'$avatar-z',
+      ),
+    );
+    await tester.pump();
+
+    final detail = tester.widget<ChatDetailPage>(find.byType(ChatDetailPage));
+    expect(detail.roomName, 'Name B');
+    expect(detail.avatarUrl, 'mxc://example.org/avatar-z');
+    final panel = tester.widget<DesktopRoomDetailsPanel>(
+      find.byType(DesktopRoomDetailsPanel),
+    );
+    expect(panel.roomName, 'Name B');
+    expect(panel.avatarUrl, 'mxc://example.org/avatar-z');
+  });
+
+  testWidgets('repeated local room names wait for the matching event echo', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name A',
+        roomType: 'dm',
+        nameEventId: r'$name-a0',
+      ),
+    ];
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => rooms),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await _pumpApp(tester, container);
+    await tester.tap(find.byTooltip('显示详情'));
+    await tester.pump();
+
+    tester
+        .widget<ChatDetailPage>(find.byType(ChatDetailPage))
+        .onRoomDetailsChanged!(
+      const RoomNamePatch(
+        roomId: '!room:example.org',
+        name: 'Name B',
+        nameEventId: r'$name-b',
+      ),
+    );
+    await tester.pump();
+    tester
+        .widget<ChatDetailPage>(find.byType(ChatDetailPage))
+        .onRoomDetailsChanged!(
+      const RoomNamePatch(
+        roomId: '!room:example.org',
+        name: 'Name A',
+        nameEventId: r'$name-a2',
+      ),
+    );
+    await tester.pump();
+
+    // Re-deliver the cached original A event.
+    rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name A',
+        roomType: 'dm',
+        nameEventId: r'$name-a0',
+      ),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Name A',
+    );
+    expect(
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .roomName,
+      'Name A',
+    );
+
+    // B is only the echo of the superseded first edit.
+    rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name B',
+        roomType: 'dm',
+        nameEventId: r'$name-b',
+      ),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Name A',
+    );
+    expect(
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .roomName,
+      'Name A',
+    );
+
+    rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name A',
+        roomType: 'dm',
+        nameEventId: r'$name-a2',
+      ),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Name A',
+    );
+
+    // A real remote edit can reuse B's value without reusing its event ID.
+    rooms = [
+      _room(
+        id: '!room:example.org',
+        name: 'Name B',
+        roomType: 'dm',
+        nameEventId: r'$name-b-remote',
+      ),
+    ];
+    container.invalidate(chatRoomsProvider);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<ChatDetailPage>(find.byType(ChatDetailPage)).roomName,
+      'Name B',
+    );
+    expect(
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .roomName,
+      'Name B',
+    );
   });
 
   testWidgets('syncs remote room metadata into the selected desktop room', (

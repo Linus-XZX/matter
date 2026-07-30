@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -522,7 +522,7 @@ Future<void> inviteUserToRoom({
 );
 
 /// Update a joined non-space room's name and topic.
-Future<void> updateRoomDetails({
+Future<RoomDetailsUpdate> updateRoomDetails({
   required String roomId,
   required String name,
   required bool updateName,
@@ -535,7 +535,7 @@ Future<void> updateRoomDetails({
 );
 
 /// Upload and apply a new avatar for a joined non-space room.
-Future<String> uploadRoomAvatar({
+Future<RoomAvatarUpdate> uploadRoomAvatar({
   required String roomId,
   required String contentType,
   required List<int> data,
@@ -1038,6 +1038,11 @@ class ChatRoom {
   final String id;
   final String name;
   final String? avatarUrl;
+
+  /// Event IDs of the current name/avatar state. Unlike display values,
+  /// these distinguish repeated values in optimistic-update reconciliation.
+  final String? nameEventId;
+  final String? avatarEventId;
   final String lastMessage;
   final String? lastMessageSender;
   final String lastMessageTime;
@@ -1064,6 +1069,8 @@ class ChatRoom {
     required this.id,
     required this.name,
     this.avatarUrl,
+    this.nameEventId,
+    this.avatarEventId,
     required this.lastMessage,
     this.lastMessageSender,
     required this.lastMessageTime,
@@ -1081,6 +1088,8 @@ class ChatRoom {
       id.hashCode ^
       name.hashCode ^
       avatarUrl.hashCode ^
+      nameEventId.hashCode ^
+      avatarEventId.hashCode ^
       lastMessage.hashCode ^
       lastMessageSender.hashCode ^
       lastMessageTime.hashCode ^
@@ -1100,6 +1109,8 @@ class ChatRoom {
           id == other.id &&
           name == other.name &&
           avatarUrl == other.avatarUrl &&
+          nameEventId == other.nameEventId &&
+          avatarEventId == other.avatarEventId &&
           lastMessage == other.lastMessage &&
           lastMessageSender == other.lastMessageSender &&
           lastMessageTime == other.lastMessageTime &&
@@ -1497,12 +1508,32 @@ class Reaction {
           myEventId == other.myEventId;
 }
 
+class RoomAvatarUpdate {
+  final String avatarUrl;
+  final String eventId;
+
+  const RoomAvatarUpdate({required this.avatarUrl, required this.eventId});
+
+  @override
+  int get hashCode => avatarUrl.hashCode ^ eventId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomAvatarUpdate &&
+          runtimeType == other.runtimeType &&
+          avatarUrl == other.avatarUrl &&
+          eventId == other.eventId;
+}
+
 /// Mutable metadata for a joined non-space room.
 class RoomDetails {
   final String id;
   final String name;
   final bool hasExplicitName;
   final String? avatarUrl;
+  final String? nameEventId;
+  final String? avatarEventId;
   final String? topic;
 
   const RoomDetails({
@@ -1510,6 +1541,8 @@ class RoomDetails {
     required this.name,
     required this.hasExplicitName,
     this.avatarUrl,
+    this.nameEventId,
+    this.avatarEventId,
     this.topic,
   });
 
@@ -1519,6 +1552,8 @@ class RoomDetails {
       name.hashCode ^
       hasExplicitName.hashCode ^
       avatarUrl.hashCode ^
+      nameEventId.hashCode ^
+      avatarEventId.hashCode ^
       topic.hashCode;
 
   @override
@@ -1530,7 +1565,30 @@ class RoomDetails {
           name == other.name &&
           hasExplicitName == other.hasExplicitName &&
           avatarUrl == other.avatarUrl &&
+          nameEventId == other.nameEventId &&
+          avatarEventId == other.avatarEventId &&
           topic == other.topic;
+}
+
+class RoomDetailsUpdate {
+  final String? nameEventId;
+  final String? nameError;
+  final String? topicError;
+
+  const RoomDetailsUpdate({this.nameEventId, this.nameError, this.topicError});
+
+  @override
+  int get hashCode =>
+      nameEventId.hashCode ^ nameError.hashCode ^ topicError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomDetailsUpdate &&
+          runtimeType == other.runtimeType &&
+          nameEventId == other.nameEventId &&
+          nameError == other.nameError &&
+          topicError == other.topicError;
 }
 
 class SessionTokenUpdate {

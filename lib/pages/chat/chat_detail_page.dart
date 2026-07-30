@@ -24,6 +24,8 @@ import 'message_group.dart';
 import 'message_input.dart';
 import 'pinned_messages_page.dart';
 import 'room_management_page.dart';
+import 'room_metadata_patch.dart';
+import 'room_state_edit_tracker.dart';
 import 'send_flight.dart';
 
 final chatRouteObserver = RouteObserver<ModalRoute<dynamic>>();
@@ -32,19 +34,23 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final String roomId;
   final String roomName;
   final String? avatarUrl;
+  final String? nameEventId;
+  final String? avatarEventId;
   final String subtitle;
   final bool isDm;
   final bool embedded;
   final bool detailsPanelOpen;
   final VoidCallback? onToggleDetailsPanel;
   final VoidCallback? onRoomLeft;
-  final ValueChanged<RoomDetails>? onRoomDetailsChanged;
+  final ValueChanged<RoomMetadataPatch>? onRoomDetailsChanged;
 
   const ChatDetailPage({
     super.key,
     required this.roomId,
     required this.roomName,
     this.avatarUrl,
+    this.nameEventId,
+    this.avatarEventId,
     this.subtitle = '在线',
     this.isDm = false,
     this.embedded = false,
@@ -76,11 +82,13 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   bool _hasTimelineGroups = false;
   late String _roomName;
   String? _avatarUrl;
+  String? _nameEventId;
+  String? _avatarEventId;
 
-  /// Snapshot of the name/avatar a local edit replaced. While the room list
-  /// still shows these old values, a lagging sync snapshot must not revert
-  /// the title; cleared once the list catches up.
-  ({String name, String? avatarUrl})? _editedRoomMetaBaseline;
+  /// State-event IDs distinguish repeated values (A → B → A), so a cached A
+  /// cannot be mistaken for the final A's echo.
+  final _roomNameEdit = RoomStateEditTracker();
+  final _roomAvatarEdit = RoomStateEditTracker();
   List<ChatMessage>? _lastMessageMergeInput;
   List<LocalOutgoingMessage>? _lastLocalMergeInput;
   List<ChatMessage> _lastTimelineMessages = const [];
@@ -166,6 +174,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     WidgetsBinding.instance.addObserver(this);
     _roomName = widget.roomName;
     _avatarUrl = widget.avatarUrl;
+    _nameEventId = widget.nameEventId;
+    _avatarEventId = widget.avatarEventId;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -183,29 +193,57 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     if (oldWidget.avatarUrl != widget.avatarUrl) {
       _avatarUrl = widget.avatarUrl;
     }
-  }
-
-  void _handleRoomDetailsChanged(RoomDetails details) {
-    setState(() {
-      _editedRoomMetaBaseline = (name: _roomName, avatarUrl: _avatarUrl);
-      _roomName = details.name;
-      _avatarUrl = details.avatarUrl;
-    });
-    widget.onRoomDetailsChanged?.call(details);
-  }
-
-  void _applySyncedRoomMeta(({String name, String? avatarUrl})? meta) {
-    if (meta == null) return;
-    final baseline = _editedRoomMetaBaseline;
-    if (baseline != null &&
-        meta.name == baseline.name &&
-        meta.avatarUrl == baseline.avatarUrl) {
-      // The list snapshot predates the local edit; keep the edited values.
-      return;
+    if (oldWidget.nameEventId != widget.nameEventId) {
+      _nameEventId = widget.nameEventId;
     }
-    _editedRoomMetaBaseline = null;
-    _roomName = meta.name;
-    _avatarUrl = meta.avatarUrl;
+    if (oldWidget.avatarEventId != widget.avatarEventId) {
+      _avatarEventId = widget.avatarEventId;
+    }
+  }
+
+  void _handleRoomDetailsChanged(RoomMetadataPatch patch) {
+    if (patch.roomId != widget.roomId) return;
+    setState(() {
+      switch (patch) {
+        case RoomNamePatch():
+          _roomNameEdit.record(
+            currentEventId: _nameEventId,
+            nextEventId: patch.nameEventId,
+          );
+          _roomName = patch.name;
+          _nameEventId = patch.nameEventId;
+          break;
+        case RoomAvatarPatch():
+          _roomAvatarEdit.record(
+            currentEventId: _avatarEventId,
+            nextEventId: patch.avatarEventId,
+          );
+          _avatarUrl = patch.avatarUrl;
+          _avatarEventId = patch.avatarEventId;
+          break;
+      }
+    });
+    widget.onRoomDetailsChanged?.call(patch);
+  }
+
+  void _applySyncedRoomMeta(
+    ({
+      String name,
+      String? avatarUrl,
+      String? nameEventId,
+      String? avatarEventId,
+    })?
+    meta,
+  ) {
+    if (meta == null) return;
+    if (_roomNameEdit.shouldAccept(meta.nameEventId)) {
+      _roomName = meta.name;
+      _nameEventId = meta.nameEventId;
+    }
+    if (_roomAvatarEdit.shouldAccept(meta.avatarEventId)) {
+      _avatarUrl = meta.avatarUrl;
+      _avatarEventId = meta.avatarEventId;
+    }
   }
 
   @override
@@ -303,16 +341,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   Future<void> _primeAndRefreshMessages() async {
     await primeMessageCache(ref, widget.roomId);
     if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
-    try {
-      await markRoomAsRead(roomId: widget.roomId);
-      if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
-      setRoomUnreadOverrideById(ref, widget.roomId, unread: false);
-      ref.invalidate(chatRoomsProvider);
-      ref.invalidate(ungroupedRoomsProvider);
-      ref.invalidate(spaceChildrenProvider);
-      ref.invalidate(searchRoomsProvider);
-    } catch (error) {
-      debugPrint('markRoomAsRead failed: $error');
+    if (!ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
+      try {
+        await markRoomAsRead(roomId: widget.roomId);
+        if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
+        setRoomUnreadOverrideById(ref, widget.roomId, unread: false);
+        ref.invalidate(chatRoomsProvider);
+        ref.invalidate(ungroupedRoomsProvider);
+        ref.invalidate(spaceChildrenProvider);
+        ref.invalidate(searchRoomsProvider);
+      } catch (error) {
+        debugPrint('markRoomAsRead failed: $error');
+      }
     }
     if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
     await refreshMessagesFromNetwork(ref, widget.roomId);
@@ -529,6 +569,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           roomId: room.id,
           roomName: room.name,
           avatarUrl: room.avatarUrl,
+          nameEventId: room.nameEventId,
+          avatarEventId: room.avatarEventId,
           isDm: room.roomType == 'dm',
           subtitle: room.unreadCount > 0 ? '${room.unreadCount} 条未读消息' : '在线',
         ),
@@ -1007,7 +1049,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         if (rooms == null) return null;
         for (final room in rooms) {
           if (room.id == widget.roomId) {
-            return (name: room.name, avatarUrl: room.avatarUrl);
+            return (
+              name: room.name,
+              avatarUrl: room.avatarUrl,
+              nameEventId: room.nameEventId,
+              avatarEventId: room.avatarEventId,
+            );
           }
         }
         return null;
