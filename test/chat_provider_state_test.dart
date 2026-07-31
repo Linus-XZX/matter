@@ -38,6 +38,7 @@ class _FailingWritePreferencesStore extends SharedPreferencesStorePlatform {
 
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
+  final typingEvents = StreamController<rust.TypingNotification>.broadcast();
   int ignoredUsersCalls = 0;
   List<String> ignoredUsers = const [];
   bool ignoredUsersFromServer = true;
@@ -156,6 +157,10 @@ class _FakeRustApi implements RustLibApi {
   Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
   @override
+  Stream<rust.TypingNotification> crateApiMatrixWatchTypingNotifications() =>
+      typingEvents.stream;
+
+  @override
   Future<String?> crateApiMatrixGetAccessToken() async => null;
 
   @override
@@ -225,6 +230,7 @@ void main() {
 
   tearDownAll(() async {
     await rustApi.syncEvents.close();
+    await rustApi.typingEvents.close();
     RustLib.dispose();
   });
 
@@ -250,6 +256,7 @@ void main() {
     rustApi.spaceChildrenCalls = 0;
     rustApi.searchRoomsCalls = 0;
     rustApi.knockRequestsCalls = 0;
+    rustApi.membersCalls = 0;
     rustApi.pendingMessages = null;
   });
 
@@ -405,6 +412,161 @@ void main() {
 
     ignoredSubscription.close();
     syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('SyncCompleted retries an errored ignore-list provider', (
+    tester,
+  ) async {
+    rustApi.ignoredUsersError = StateError('offline');
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final syncSubscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    final ignoredSubscription = container.listen(
+      ignoredUserIdsProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    // No persisted snapshot: the failed fetch leaves the provider in its
+    // error state, which nothing else would recover (an empty ignore list
+    // never emits IgnoredUsersChanged).
+    await expectLater(
+      container.read(ignoredUserIdsProvider.future),
+      throwsStateError,
+    );
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await tester.pump();
+    }
+    expect(container.read(ignoredUserIdsProvider).hasError, isTrue);
+    final callsBefore = rustApi.ignoredUsersCalls;
+
+    // Connectivity returns: a completed sync cycle retries the fetch.
+    rustApi.ignoredUsersError = null;
+    rustApi.ignoredUsers = const ['@blocked:example.org'];
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@blocked:example.org',
+    });
+    expect(rustApi.ignoredUsersCalls, greaterThan(callsBefore));
+
+    ignoredSubscription.close();
+    syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('ignore-list recovery retries are throttled', (tester) async {
+    rustApi.ignoredUsersError = StateError('offline');
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    // A distinct account: the throttle record is global per namespace, and
+    // other tests may have attempted a recovery moments ago.
+    container.read(activeUserIdProvider.notifier).value =
+        '@throttle-test:example.org';
+    final syncSubscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    final ignoredSubscription = container.listen(
+      ignoredUserIdsProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    await expectLater(
+      container.read(ignoredUserIdsProvider.future),
+      throwsStateError,
+    );
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await tester.pump();
+    }
+    final callsBefore = rustApi.ignoredUsersCalls;
+
+    // A sync cycle retries the failed fetch (the invalidation may rebuild
+    // lazily, so poll until the fetch actually happened).
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    var retried = false;
+    for (var attempt = 0; attempt < 10 && !retried; attempt++) {
+      await tester.pump();
+      retried = rustApi.ignoredUsersCalls > callsBefore;
+    }
+    expect(retried, isTrue);
+    final callsAfterFirstRetry = rustApi.ignoredUsersCalls;
+
+    // While the endpoint keeps failing, the throttled recovery must not
+    // re-fire on every subsequent sync cycle.
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+    }
+    expect(rustApi.ignoredUsersCalls, callsAfterFirstRetry);
+
+    // Once the throttle window elapses, the next sync cycle retries again.
+    await tester.pump(const Duration(seconds: 31));
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    for (var attempt = 0;
+        attempt < 10 && rustApi.ignoredUsersCalls == callsAfterFirstRetry;
+        attempt++) {
+      await tester.pump();
+    }
+    expect(rustApi.ignoredUsersCalls, callsAfterFirstRetry + 1);
+
+    ignoredSubscription.close();
+    syncSubscription.close();
+    // Leave no recovery-throttle record behind for this namespace: a later
+    // test using the same account would be silently throttled.
+    resetIgnoredListAccountState('@throttle-test:example.org');
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('typing state resets when the session changes', (tester) async {
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final typingSubscription = container.listen(
+      typingStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    // Watch first: the raw auto-dispose state needs a listener for the
+    // written value to survive the frame.
+    final roomTyping = container.read(typingUsersProvider('!room:example.org'));
+    expect(roomTyping, isEmpty);
+
+    rustApi.typingEvents.add(
+      rust.TypingNotification(
+        roomId: '!room:example.org',
+        userIds: const ['@bob:example.org'],
+      ),
+    );
+    await tester.pump();
+    expect(
+      container.read(typingUsersProvider('!room:example.org')),
+      {'@bob:example.org'},
+    );
+
+    // Switch account: typing rows are keyed per account, so the previous
+    // account's state must not leak into the new account's view (the 5s
+    // auto-clear timer died with the old session).
+    container.read(activeUserIdProvider.notifier).value = '@carol:example.org';
+    await tester.pump();
+    expect(
+      container.read(typingUsersProvider('!room:example.org')),
+      isEmpty,
+    );
+
+    typingSubscription.close();
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });

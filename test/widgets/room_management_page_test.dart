@@ -24,6 +24,13 @@ class _FakeRustApi implements RustLibApi {
   Completer<void>? pendingDetailsUpdate;
   Completer<void>? pendingDetailsLoad;
   Completer<void>? pendingMembersLoad;
+  Object? detailsError;
+  Completer<void>? pendingKnockLoad;
+  Completer<void>? pendingInvite;
+  Completer<void>? pendingRejectKnock;
+  Completer<void>? pendingLeave;
+  int inviteCalls = 0;
+  int leaveCalls = 0;
   List<rust.KnockRequest> knockRequests = const [];
   int detailsLoadCalls = 0;
   int membersLoadCalls = 0;
@@ -35,6 +42,7 @@ class _FakeRustApi implements RustLibApi {
   int setIgnoredCalls = 0;
   String? ignoredAccountUserId;
   Completer<void>? pendingMutedUpdate;
+  Completer<void>? pendingMutedRead;
   Completer<void>? pendingApproveKnock;
   Completer<void>? pendingMarkRead;
   Completer<void>? pendingMarkUnread;
@@ -63,6 +71,7 @@ class _FakeRustApi implements RustLibApi {
   }) async {
     detailsLoadCalls++;
     await pendingDetailsLoad?.future;
+    if (detailsError case final error?) throw error;
     return rust.RoomDetails(
       id: roomId,
       name: roomName,
@@ -77,6 +86,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<bool> crateApiMatrixIsRoomMuted({required String roomId}) async {
+    await pendingMutedRead?.future;
     if (failSupplementalLoads) throw StateError('muted unavailable');
     return muted;
   }
@@ -107,8 +117,18 @@ class _FakeRustApi implements RustLibApi {
   Future<List<rust.KnockRequest>> crateApiMatrixGetRoomKnockRequests({
     required String roomId,
   }) async {
+    await pendingKnockLoad?.future;
     if (failSupplementalLoads) throw StateError('knocks unavailable');
     return knockRequests;
+  }
+
+  @override
+  Future<void> crateApiMatrixInviteUserToRoom({
+    required String roomId,
+    required String userId,
+  }) {
+    inviteCalls++;
+    return pendingInvite?.future ?? Future.value();
   }
 
   @override
@@ -168,6 +188,13 @@ class _FakeRustApi implements RustLibApi {
     required String userId,
   }) async {
     rejectKnockCalls++;
+    await pendingRejectKnock?.future;
+  }
+
+  @override
+  Future<void> crateApiMatrixLeaveRoom({required String roomId}) async {
+    leaveCalls++;
+    await pendingLeave?.future;
   }
 
   @override
@@ -206,6 +233,13 @@ void main() {
     rustApi.pendingDetailsUpdate = null;
     rustApi.pendingDetailsLoad = null;
     rustApi.pendingMembersLoad = null;
+    rustApi.detailsError = null;
+    rustApi.pendingKnockLoad = null;
+    rustApi.pendingInvite = null;
+    rustApi.pendingRejectKnock = null;
+    rustApi.pendingLeave = null;
+    rustApi.inviteCalls = 0;
+    rustApi.leaveCalls = 0;
     rustApi.knockRequests = const [];
     rustApi.detailsLoadCalls = 0;
     rustApi.membersLoadCalls = 0;
@@ -217,6 +251,7 @@ void main() {
     rustApi.setIgnoredCalls = 0;
     rustApi.ignoredAccountUserId = null;
     rustApi.pendingMutedUpdate = null;
+    rustApi.pendingMutedRead = null;
     rustApi.pendingApproveKnock = null;
     rustApi.pendingMarkRead = null;
     rustApi.pendingMarkUnread = null;
@@ -1348,5 +1383,473 @@ void main() {
     expect(find.text('打开聊天'), findsOneWidget);
     expect(find.text('打开空间'), findsNothing);
     expect(find.byType(RoomManagementPage), findsNothing);
+  });
+
+  testWidgets('a background refresh clears the full-page load error', (
+    tester,
+  ) async {
+    rustApi.detailsError = StateError('offline');
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('加载失败:'), findsOneWidget);
+
+    // Connectivity returns; the next sync cycle reloads the room state.
+    rustApi.detailsError = null;
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('加载失败:'), findsNothing);
+    expect(find.text('房间信息'), findsOneWidget);
+    expect(find.text('Project room'), findsOneWidget);
+    // The recovery also restores the members the failed initial load never
+    // fetched (the recovered page must not silently show "成员 0").
+    expect(find.text('成员 1'), findsOneWidget);
+    expect(find.text('Alice'), findsOneWidget);
+  });
+
+  testWidgets('knock section keeps its list while a refresh is in flight', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.knockRequests = const [
+      rust.KnockRequest(
+        userId: '@knocker:example.org',
+        displayName: 'Knocker',
+      ),
+    ];
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(
+            () => MutableState<String?>('@alice:example.org'),
+          ),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('加入请求 1'), findsOneWidget);
+    expect(find.byTooltip('批准'), findsOneWidget);
+
+    // A room-list sync event invalidates the knock provider; its reload is
+    // slow. The section must keep showing the previous list instead of
+    // disappearing and re-appearing.
+    rustApi.pendingKnockLoad = Completer<void>();
+    rustApi.syncEvents.add(const rust.SyncEvent.roomListChanged());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+
+    expect(find.text('加入请求 1'), findsOneWidget);
+    expect(find.byTooltip('批准'), findsOneWidget);
+
+    rustApi.pendingKnockLoad!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('加入请求 1'), findsOneWidget);
+  });
+
+  testWidgets('invite dialog disables submit while the invite is in flight', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.byTooltip('邀请用户'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byTooltip('邀请用户'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byType(TextField).last,
+      '@newbie:example.org',
+    );
+    rustApi.pendingInvite = Completer<void>();
+    await tester.tap(find.text('邀请'));
+    await tester.pump();
+
+    // The request is in flight with the dialog still open: both buttons are
+    // disabled, so a second tap cannot send a duplicate invite.
+    expect(rustApi.inviteCalls, 1);
+    expect(
+      tester.widget<TextButton>(find.widgetWithText(TextButton, '邀请')).onPressed,
+      isNull,
+    );
+    await tester.tap(find.text('邀请'), warnIfMissed: false);
+    await tester.pump();
+    expect(rustApi.inviteCalls, 1);
+    expect(find.text('邀请用户'), findsOneWidget);
+
+    rustApi.pendingInvite!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('邀请用户'), findsNothing);
+    expect(find.text('邀请已发送'), findsOneWidget);
+  });
+
+  testWidgets('knock action failures show an error and keep the section', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.knockRequests = const [
+      rust.KnockRequest(userId: '@bob:example.org', displayName: 'Bob'),
+    ];
+
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Approval failure: error surfaced, the request stays actionable.
+    rustApi.pendingApproveKnock = Completer<void>();
+    await tester.tap(find.byTooltip('批准'));
+    await tester.pump();
+    rustApi.pendingApproveKnock!.completeError(StateError('offline'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('操作失败:'), findsOneWidget);
+    expect(find.text('Bob'), findsOneWidget);
+    expect(rustApi.membersLoadCalls, 1);
+
+    // Rejection failure: same behavior on the reject path.
+    rustApi.pendingRejectKnock = Completer<void>();
+    await tester.tap(find.byTooltip('拒绝'));
+    await tester.pump();
+    rustApi.pendingRejectKnock!.completeError(StateError('offline'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('操作失败:'), findsOneWidget);
+    expect(find.text('Bob'), findsOneWidget);
+    expect(rustApi.rejectKnockCalls, 1);
+  });
+
+  testWidgets('invite failure keeps the dialog open and shows an error', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.byTooltip('邀请用户'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byTooltip('邀请用户'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField).last,
+      '@newbie:example.org',
+    );
+
+    rustApi.pendingInvite = Completer<void>();
+    await tester.tap(find.text('邀请'));
+    await tester.pump();
+    rustApi.pendingInvite!.completeError(StateError('offline'));
+    await tester.pumpAndSettle();
+
+    // The dialog stays open so the user can retry, with the failure visible.
+    expect(find.text('邀请用户'), findsOneWidget);
+    expect(find.textContaining('邀请失败:'), findsOneWidget);
+
+    // Let the error snackbar (4s default) expire so the retry result can
+    // surface; pump past the default duration.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+
+    rustApi.pendingInvite = Completer<void>();
+    await tester.tap(find.text('邀请'));
+    await tester.pump();
+    expect(rustApi.inviteCalls, 2);
+    rustApi.pendingInvite!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('邀请用户'), findsNothing);
+    expect(find.text('邀请已发送'), findsOneWidget);
+  });
+
+  testWidgets('leaving a room confirms, calls leave, and closes the page', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: MaterialApp(
+          home: Builder(
+            builder: (rootContext) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(rootContext).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RoomManagementPage(
+                      roomId: '!room:example.org',
+                      roomName: 'Project room',
+                    ),
+                  ),
+                ),
+                child: const Text('打开管理'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开管理'));
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('退出房间'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('退出房间'));
+    await tester.pumpAndSettle();
+    expect(find.text('退出后将无法继续接收此房间的新消息。'), findsOneWidget);
+
+    await tester.tap(find.text('退出'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.leaveCalls, 1);
+    expect(find.byType(RoomManagementPage), findsNothing);
+    expect(find.text('打开管理'), findsOneWidget);
+  });
+
+  testWidgets('leaving a room can be cancelled', (tester) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('退出房间'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('退出房间'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.leaveCalls, 0);
+    expect(find.byType(RoomManagementPage), findsOneWidget);
+  });
+
+  testWidgets('a failed leave keeps the page and shows the error', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('退出房间'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('退出房间'));
+    await tester.pumpAndSettle();
+
+    rustApi.pendingLeave = Completer<void>();
+    await tester.tap(find.text('退出'));
+    await tester.pump();
+    rustApi.pendingLeave!.completeError(StateError('offline'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('退出失败:'), findsOneWidget);
+    expect(find.byType(RoomManagementPage), findsOneWidget);
+  });
+
+  testWidgets('an in-flight mute toggle wins over a stale refresh read', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(Switch), findsOneWidget);
+
+    // A sync cycle starts a muted-state refresh whose read hangs.
+    rustApi.pendingMutedRead = Completer<void>();
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(rustApi.detailsLoadCalls, 2);
+
+    // The user toggles the switch while that read is in flight.
+    rustApi.pendingMutedUpdate = Completer<void>();
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(
+      tester.widget<Switch>(find.byType(Switch)).value,
+      isFalse,
+    );
+
+    // The stale read returns the pre-toggle server value (true): it must
+    // not overwrite the optimistic toggle.
+    rustApi.pendingMutedRead!.complete();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Switch>(find.byType(Switch)).value,
+      isFalse,
+    );
+
+    rustApi.pendingMutedUpdate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('已关闭免打扰'), findsOneWidget);
+    expect(
+      tester.widget<Switch>(find.byType(Switch)).value,
+      isFalse,
+    );
+  });
+
+  testWidgets('a stale failing mute read cannot disable a fresh toggle', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(Switch), findsOneWidget);
+
+    // A sync cycle starts a muted-state read that will fail.
+    rustApi.pendingMutedRead = Completer<void>();
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+
+    // The user toggles the switch while that read is in flight.
+    rustApi.pendingMutedUpdate = Completer<void>();
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(
+      tester.widget<Switch>(find.byType(Switch)).value,
+      isFalse,
+    );
+
+    // The stale read fails after the toggle started: its error must not
+    // disable the switch the user just toggled successfully.
+    rustApi.failSupplementalLoads = true;
+    rustApi.pendingMutedRead!.complete();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Switch>(find.byType(Switch)).value,
+      isFalse,
+    );
+    // No error tile, no retry button: the toggle owns the switch state.
+    expect(find.text('无法加载通知设置'), findsNothing);
+
+    rustApi.pendingMutedUpdate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('已关闭免打扰'), findsOneWidget);
   });
 }

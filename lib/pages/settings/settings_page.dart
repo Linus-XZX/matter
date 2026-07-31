@@ -245,6 +245,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   List<rust.AccountInfo> _accounts = [];
+  Object? _accountsLoadError;
   String _versionLabel = '读取中…';
   String _cacheSizeLabel = '计算中…';
   bool _checkingForUpdate = false;
@@ -415,10 +416,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       if (mounted) {
         setState(() {
           _accounts = accounts;
+          _accountsLoadError = null;
         });
       }
     } catch (e) {
       debugPrint('Failed to load accounts: $e');
+      if (mounted) {
+        setState(() {
+          _accounts = const [];
+          _accountsLoadError = e;
+        });
+      }
     }
   }
 
@@ -575,7 +583,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
 
                   // ── Account switcher ────────────────────────────────
-                  if (_accounts.length > 1) ...[
+                  if (_accountsLoadError != null) ...[
+                    const SizedBox(height: 20),
+                    _buildGroup(
+                      title: '账号',
+                      items: [
+                        _SettingItem(
+                          icon: Icons.error_outline_rounded,
+                          iconColor: AppColors.error,
+                          title: '账号列表加载失败',
+                          subtitle: '$_accountsLoadError',
+                          onTap: _loadAccounts,
+                        ),
+                      ],
+                    ),
+                  ] else if (_accounts.length > 1) ...[
                     const SizedBox(height: 20),
                     _buildGroup(
                       title: '账号切换',
@@ -621,7 +643,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         icon: Icons.notifications_rounded,
                         iconColor: AppColors.warning,
                         title: '通知',
-                        subtitle: '暂未提供应用内设置',
+                        subtitle: '免打扰请在房间管理中设置',
                       ),
                       _SettingItem(
                         icon: Icons.language_rounded,

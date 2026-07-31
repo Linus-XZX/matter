@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -59,11 +60,19 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   Object? _ignoredUsersLoadError;
   bool _muted = false;
   bool _muteSaving = false;
+  /// Generation counter for mute state: refresh/retry reads apply their
+  /// value only if no toggle started after the read was issued, closing the
+  /// window where a slow read lands after the toggle finished.
+  int _muteEpoch = 0;
   bool _loading = true;
   int _ignoredUsersRevision = 0;
   bool _saving = false;
   bool _membersRefreshInFlight = false;
   bool _membersRefreshTrailing = false;
+  /// Set once the full-page-error recovery has re-requested members, so the
+  /// recovery check does not re-fire on every later sync cycle (e.g. for
+  /// rooms whose member list is legitimately empty).
+  bool _membersRecoveryAttempted = false;
   bool _roomStateRefreshInFlight = false;
   bool _roomStateRefreshTrailing = false;
   String? _error;
@@ -134,6 +143,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   Future<void> _load() async {
     if (!mounted) return;
+    // Track whether a background member refresh was already in flight when
+    // this load started: _load manages its own member fetch below and must
+    // not clear the refresh loop's in-flight flag out from under it.
+    final hadMembersRefreshInFlight = _membersRefreshInFlight;
     _membersRefreshInFlight = true;
     setState(() {
       _loading = true;
@@ -153,7 +166,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       final muted = await mutedFuture;
       final members = await membersFuture;
       final ignoredUsers = await ignoredFuture;
-      _membersRefreshInFlight = false;
+      if (!hadMembersRefreshInFlight) _membersRefreshInFlight = false;
       if (!mounted) return;
       setState(() {
         _details = details;
@@ -174,13 +187,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       if (_membersRefreshTrailing) unawaited(_refreshMembers());
       if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
     } catch (error) {
-      _membersRefreshInFlight = false;
+      if (!hadMembersRefreshInFlight) _membersRefreshInFlight = false;
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = '$error';
       });
       if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
+      if (_membersRefreshTrailing) unawaited(_refreshMembers());
     }
   }
 
@@ -203,11 +217,23 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     });
   }
 
-  Future<void> _retryMuted() => _retryPartialLoad(
-    load: () => rust.isRoomMuted(roomId: widget.roomId),
-    updateValue: (value) => _muted = value,
-    updateError: (error) => _mutedLoadError = error,
-  );
+  Future<void> _retryMuted() {
+    final epoch = _muteEpoch;
+    return _retryPartialLoad(
+      load: () => rust.isRoomMuted(roomId: widget.roomId),
+      updateValue: (value) {
+        // A mute toggle issued after this retry's read started owns the
+        // switch state, even if the toggle has already finished by the time
+        // the read lands.
+        if (_muteEpoch != epoch) return;
+        _muted = value;
+      },
+      updateError: (error) {
+        if (_muteEpoch != epoch) return;
+        _mutedLoadError = error;
+      },
+    );
+  }
 
   Future<void> _retryMembers() => _refreshMembers();
 
@@ -219,6 +245,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     do {
       _roomStateRefreshTrailing = false;
       _roomStateRefreshInFlight = true;
+      final muteEpoch = _muteEpoch;
       final detailsFuture = _attempt(
         rust.getRoomDetails(roomId: widget.roomId),
       );
@@ -228,14 +255,35 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       _roomStateRefreshInFlight = false;
       if (!mounted) return;
       setState(() {
-        _mutedLoadError = muted.error;
-        if (muted.value case final value?) _muted = value;
+        // A mute toggle issued after this read started owns the switch state
+        // — including its error display: a stale read failure must not
+        // disable a switch the user just toggled successfully.
+        if (_muteEpoch == muteEpoch) {
+          _mutedLoadError = muted.error;
+          if (muted.value != null) {
+            _muted = muted.value!;
+          }
+        }
         if (details.value case final value?) {
           _mergeRemoteDetails(value);
+          // A background refresh recovering after an initial load failure
+          // must leave the full-page error state, or the page would hold
+          // valid data while still rendering the error screen.
+          _error = null;
         } else if (details.error != null) {
           debugPrint('refresh room details failed: ${details.error}');
         }
       });
+      if (!_membersRecoveryAttempted &&
+          _members.isEmpty &&
+          _membersLoadError == null &&
+          mounted) {
+        // The full-page error path never loaded members (their future was
+        // discarded by the failed initial _load). Restore them once, or the
+        // recovered page would silently show "成员 0" with no retry entry.
+        _membersRecoveryAttempted = true;
+        unawaited(_refreshMembers());
+      }
     } while (_roomStateRefreshTrailing && mounted);
   }
 
@@ -508,6 +556,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   Future<void> _setMuted(bool muted) async {
     if (_muteSaving) return;
+    _muteEpoch++;
     setState(() {
       _muteSaving = true;
       _muted = muted;
@@ -515,6 +564,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     try {
       await rust.setRoomMuted(roomId: widget.roomId, muted: muted);
       if (!mounted) return;
+      // A successful toggle also clears any stale error state from reads
+      // that raced it.
+      setState(() => _mutedLoadError = null);
       _invalidateRoom();
       _showSnackBar(muted ? '已开启免打扰' : '已关闭免打扰');
     } catch (error) {
@@ -532,50 +584,75 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   void _showInviteDialog() {
     final controller = TextEditingController();
+    var inviting = false;
     showDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text(
-          '邀请用户',
-          style: TextStyle(color: AppColors.onBackground),
-        ),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: AppColors.onBackground),
-          decoration: const InputDecoration(
-            hintText: '@user:server.example',
-            hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => PopScope(
+          // The request runs with the dialog still open; dismissing it
+          // mid-flight (barrier tap, system back) must not be possible —
+          // the feedback below is guarded on the dialog still being up.
+          canPop: !inviting,
+          child: AlertDialog(
+            backgroundColor: AppColors.surface,
+            title: const Text(
+              '邀请用户',
+              style: TextStyle(color: AppColors.onBackground),
+            ),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.onBackground),
+              decoration: const InputDecoration(
+                hintText: '@user:server.example',
+                hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: inviting
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: inviting
+                    ? null
+                    : () async {
+                        // Entry guard (not only the disabled button): the
+                        // rebuild lags a frame, so a second tap on the old
+                        // widget could otherwise issue a duplicate invite.
+                        if (inviting) return;
+                        final userId = controller.text.trim();
+                        if (userId.isEmpty) return;
+                        setDialogState(() => inviting = true);
+                        try {
+                          await rust.inviteUserToRoom(
+                            roomId: widget.roomId,
+                            userId: userId,
+                          );
+                          if (!mounted) return;
+                          // Room invalidation and the feedback must not
+                          // depend on the dialog still being up: a dismissal
+                          // race would otherwise swallow the result.
+                          _invalidateRoom();
+                          _showSnackBar('邀请已发送');
+                          if (dialogContext.mounted) {
+                            Navigator.of(dialogContext).pop();
+                          }
+                        } catch (error) {
+                          if (!mounted) return;
+                          if (dialogContext.mounted) {
+                            setDialogState(() => inviting = false);
+                          }
+                          _showSnackBar('邀请失败: $error');
+                        }
+                      },
+                child: const Text('邀请'),
+              ),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () async {
-              final userId = controller.text.trim();
-              if (userId.isEmpty) return;
-              try {
-                await rust.inviteUserToRoom(
-                  roomId: widget.roomId,
-                  userId: userId,
-                );
-                if (!mounted || !dialogContext.mounted) return;
-                _invalidateRoom();
-                Navigator.of(dialogContext).pop();
-                _showSnackBar('邀请已发送');
-              } catch (error) {
-                if (dialogContext.mounted) {
-                  _showSnackBar('邀请失败: $error');
-                }
-              }
-            },
-            child: const Text('邀请'),
-          ),
-        ],
       ),
     );
   }
@@ -677,7 +754,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         );
       }
       if (!mounted) return;
-      setState(() => _handledKnockUserIds[request.userId] = DateTime.now());
+      setState(() => _handledKnockUserIds[request.userId] = clock.now());
       _scheduleHandledKnockExpiry();
       _invalidateRoom();
       if (approve) {
@@ -734,13 +811,13 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   bool _isKnockHidden(String userId) {
     final handledAt = _handledKnockUserIds[userId];
     return handledAt != null &&
-        DateTime.now().difference(handledAt) < _handledKnockGrace;
+        clock.now().difference(handledAt) < _handledKnockGrace;
   }
 
   void _scheduleHandledKnockExpiry() {
     _handledKnockExpiryTimer?.cancel();
     if (_handledKnockUserIds.isEmpty) return;
-    final now = DateTime.now();
+    final now = clock.now();
     final nextExpiry = _handledKnockUserIds.values
         .map((handledAt) => handledAt.add(_handledKnockGrace))
         .reduce((earlier, later) => earlier.isBefore(later) ? earlier : later);
@@ -785,7 +862,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       });
     });
     final knockRequests =
-        (knockRequestsAsync.asData?.value ?? const <rust.KnockRequest>[])
+        // `value` keeps the previous list while a refresh is in flight
+        // (`asData` is null during loading), so the section does not blink
+        // out of existence on every sync cycle.
+        (knockRequestsAsync.value ?? const <rust.KnockRequest>[])
             .where((request) => !_isKnockHidden(request.userId))
             .toList();
     final knocksLoadError = knockRequestsAsync.hasError
@@ -1021,7 +1101,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                             : IconButton(
                                 tooltip: '重试',
                                 icon: const Icon(Icons.refresh_rounded),
-                                onPressed: _retryMuted,
+                                onPressed: _muteSaving
+                                    ? null
+                                    : _retryMuted,
                               ),
                       ),
                       _actionTile(

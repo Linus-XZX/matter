@@ -168,11 +168,42 @@ pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<()
 
 /// Load every accessible pinned event, supplementing the SDK's bounded cache.
 pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
-    let pinned_ids = room
-        .load_pinned_events()
-        .await
-        .map_err(|error| format!("Failed to load pinned messages: {error}"))?
-        .unwrap_or_default();
+    let pinned_ids = match room.load_pinned_events().await {
+        Ok(ids) => ids.unwrap_or_default(),
+        Err(network_error) => {
+            // Offline fallback: the pinned list also lives in the local
+            // state store. It may lag the server (e.g. our own latest toggle
+            // has not echoed yet), but a stale list beats failing the whole
+            // page; the pinned page re-reads after every sync echo.
+            match room
+                .get_state_event_static::<
+                    matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
+                >()
+                .await
+            {
+                Ok(Some(raw)) => raw
+                    .deserialize()
+                    .ok()
+                    .map(|event| match event.as_sync() {
+                        Some(matrix_sdk::ruma::events::SyncStateEvent::Original(
+                            original,
+                        )) => original.content.pinned.clone(),
+                        _ => Vec::new(),
+                    })
+                    .unwrap_or_default(),
+                // `get_state_event_static` is a pure local-store read: `None`
+                // means the synced store definitively has no such state event
+                // (the room was never pinned) — show the empty state rather
+                // than failing the page.
+                Ok(None) => Vec::new(),
+                Err(_) => {
+                    return Err(format!(
+                        "Failed to load pinned messages: {network_error}"
+                    ));
+                }
+            }
+        }
+    };
     if pinned_ids.is_empty() {
         return Ok(Vec::new());
     }

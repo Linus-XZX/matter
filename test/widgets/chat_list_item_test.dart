@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,9 +8,44 @@ import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
+import 'package:matter/src/rust/frb_generated.dart';
+
+class _FakeRustApi implements RustLibApi {
+  int markReadCalls = 0;
+  int markUnreadCalls = 0;
+  Object? markReadError;
+  Object? markUnreadError;
+  Completer<void>? pendingMarkUnread;
+
+  @override
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+    markReadCalls++;
+    if (markReadError case final error?) throw error;
+  }
+
+  @override
+  Future<void> crateApiMatrixMarkRoomUnread({required String roomId}) async {
+    markUnreadCalls++;
+    if (markUnreadError case final error?) throw error;
+    await pendingMarkUnread?.future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
+  }
+}
 
 void main() {
   group('ChatListItem', () {
+    late _FakeRustApi rustApi;
+
+    setUpAll(() {
+      rustApi = _FakeRustApi();
+      RustLib.initMock(api: rustApi);
+    });
+
+    tearDownAll(RustLib.dispose);
     ChatRoom room({
       String id = '!room:example.org',
       String name = 'Room',
@@ -454,6 +491,131 @@ void main() {
 
       expect(find.text('等待对方批准'), findsOneWidget);
       expect(find.text('撤回'), findsOneWidget);
+    });
+
+    testWidgets('marking a room unread from the long-press menu works', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('标记为未读'), findsOneWidget);
+      expect(find.text('标记为已读'), findsOneWidget);
+
+      await tester.tap(find.text('标记为未读'));
+      await tester.pumpAndSettle();
+
+      expect(rustApi.markUnreadCalls, 1);
+      expect(find.text('已标记为未读'), findsOneWidget);
+      // The optimistic unread override and its suppression are applied.
+      expect(
+        container.read(roomAutoReadSuppressedProvider(roomId)),
+        isTrue,
+      );
+      expect(
+        container.read(roomUnreadOverrideProvider(roomId)),
+        isNotNull,
+      );
+    });
+
+    testWidgets('a failed room action restores the suppression', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+      rustApi.markUnreadError = StateError('offline');
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('标记为未读'));
+      await tester.pumpAndSettle();
+
+      expect(rustApi.markUnreadCalls, 1);
+      // The sheet closes first so the failure message is actually visible.
+      expect(find.text('标记为未读'), findsNothing);
+      expect(find.textContaining('操作失败:'), findsOneWidget);
+      // The failed action must not leave the room stuck in suppression.
+      expect(
+        container.read(roomAutoReadSuppressedProvider(roomId)),
+        isFalse,
+      );
+
+      rustApi.markUnreadError = null;
+    });
+
+    testWidgets('a result after the sheet was dismissed still surfaces', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+      rustApi.pendingMarkUnread = Completer<void>();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('标记为未读'));
+      await tester.pump();
+
+      // The user dismisses the sheet while the request is in flight.
+      await tester.tapAt(const Offset(400, 60));
+      await tester.pumpAndSettle();
+      expect(find.text('标记为未读'), findsNothing);
+
+      // The request completes after the sheet is gone: the result must
+      // still be shown (without popping the route below the sheet).
+      rustApi.pendingMarkUnread!.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.text('已标记为未读'), findsOneWidget);
+      expect(find.byType(ChatListItem), findsOneWidget);
+      rustApi.pendingMarkUnread = null;
     });
   });
 }

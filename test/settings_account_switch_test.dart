@@ -28,6 +28,7 @@ class _FakeRustApi implements RustLibApi {
   bool failNextAliceSwitch = false;
   bool failLogout = false;
   String? cleanupError;
+  Object? listAccountsError;
 
   @override
   Future<bool> crateApiMatrixSwitchAccount({required String userId}) async {
@@ -69,7 +70,9 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<List<rust.AccountInfo>> crateApiMatrixListAccounts() async => [
+  Future<List<rust.AccountInfo>> crateApiMatrixListAccounts() async {
+    if (listAccountsError case final error?) throw error;
+    return [
     if (!removedAccounts.contains('@alice:example.org'))
       const rust.AccountInfo(
         userId: '@alice:example.org',
@@ -83,6 +86,7 @@ class _FakeRustApi implements RustLibApi {
         homeserverUrl: 'https://bob.example.org',
       ),
   ];
+  }
 
   @override
   Future<rust.AccountRemovalResult> crateApiMatrixRemoveAccount({
@@ -152,6 +156,7 @@ void main() {
     rustApi.failNextAliceSwitch = false;
     rustApi.failLogout = false;
     rustApi.cleanupError = null;
+    rustApi.listAccountsError = null;
 
     await addSession(
       homeserver: 'https://alice.example.org',
@@ -350,6 +355,41 @@ void main() {
       ]);
     },
   );
+
+  testWidgets('account list load failure shows a retryable error tile', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final container = createContainer();
+    addTearDown(container.dispose);
+    container.read(currentUserProvider.notifier).value = const CurrentUser(
+      id: '@alice:example.org',
+      displayName: 'Alice',
+      homeserver: 'https://alice.example.org',
+    );
+
+    rustApi.listAccountsError = StateError('offline');
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: SettingsPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The failure must not silently hide the account entries.
+    expect(find.text('账号列表加载失败'), findsOneWidget);
+
+    rustApi.listAccountsError = null;
+    await tester.tap(find.text('账号列表加载失败'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('账号列表加载失败'), findsNothing);
+    expect(find.text('账号切换'), findsOneWidget);
+  });
 
   test(
     'last-account removal clears session state through the controller',

@@ -2038,6 +2038,12 @@ async fn room_to_chat_room(
     let unread_count = if server_unread > 0 {
         server_unread
     } else {
+        // Known limitation: this client-side count (`read_receipts.num_unread`)
+        // has no per-sender breakdown, so in muted rooms (where the server
+        // count is always 0) messages from ignored users still contribute to
+        // the subdued unread marker. The SDK does not expose the unread
+        // event senders to filter them out here; the timeline itself and the
+        // preview text do hide ignored senders.
         room.num_unread_messages() as i32
     };
     let is_marked_unread = effective_marked_unread(&room.client(), room).await;
@@ -7291,12 +7297,35 @@ pub async fn approve_room_knock(room_id: String, user_id: String) -> Result<(), 
 /// Decline a knock request by removing the requester from the room.
 #[frb]
 pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+    use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+    use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEventContent};
+    use matrix_sdk::ruma::events::StateEventType;
+
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
         .map_err(|error| format!("Invalid user ID: {error}"))?;
+    // The knock list can lag the server (another admin may have approved the
+    // request, or the user withdrew it): re-verify the current membership
+    // from the server before kicking, since `kick_user` would otherwise
+    // eject a member who is no longer knocking. Fail closed when the state
+    // cannot be read — never kick on stale data.
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomMember,
+        user_id.to_string(),
+    );
+    let response = client
+        .send(request)
+        .await
+        .map_err(|error| format!("Failed to verify knock request: {error}"))?;
+    let content: RoomMemberEventContent = serde_json::from_str(response.event_or_content.get())
+        .map_err(|error| format!("Failed to decode knock requester state: {error}"))?;
+    if content.membership != MembershipState::Knock {
+        return Err("This user is no longer knocking on this room.".to_string());
+    }
     room.kick_user(&user_id, None)
         .await
         .map_err(|error| format!("Failed to reject knock: {error}"))?;

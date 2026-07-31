@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/chat_detail_page.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
 import 'package:matter/pages/chat/message_insert_animation.dart';
+import 'package:matter/pages/chat/pinned_messages_page.dart';
 import 'package:matter/pages/chat/room_metadata_patch.dart';
 import 'package:matter/pages/chat/room_management_page.dart';
 import 'package:matter/pages/chat/send_flight.dart';
@@ -141,6 +142,17 @@ class _FakeRustApi implements RustLibApi {
   @override
   Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
+  int pinnedMessagesCalls = 0;
+  List<rust.ChatMessage> pinnedMessages = const [];
+
+  @override
+  Future<List<rust.ChatMessage>> crateApiMatrixGetPinnedMessages({
+    required String roomId,
+  }) async {
+    pinnedMessagesCalls++;
+    return pinnedMessages;
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) {
     throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
@@ -253,6 +265,36 @@ void main() {
 
     expect(rustApi.typingSubscriptionAccounts, ['@alice:example.org']);
     expect(rustApi.roomSubscriptionAccounts, ['@alice:example.org']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('the chat header opens the pinned messages page', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    rustApi.pinnedMessagesCalls = 0;
+    rustApi.pinnedMessages = const [];
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('置顶消息'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PinnedMessagesPage), findsOneWidget);
+    expect(rustApi.pinnedMessagesCalls, 1);
+    expect(find.text('暂无置顶消息'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();

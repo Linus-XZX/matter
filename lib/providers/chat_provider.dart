@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -112,6 +113,47 @@ bool _deferIgnoredListRevalidation(String namespace) {
 /// since a provider's own ref cannot invalidate itself by reference.
 void _revalidateIgnoredUserIds(String namespace, void Function() invalidate) {
   if (!_deferIgnoredListRevalidation(namespace)) invalidate();
+}
+
+/// Retry a failed [ignoredUserIdsProvider] fetch once sync has completed.
+///
+/// A failed first fetch (no persisted snapshot yet) leaves the provider in an
+/// error state that nothing else recovers: `IgnoredUsersChanged` only fires
+/// when the account-data event actually arrives, and an empty ignore list
+/// never does — timelines and the pinned page would stay blocked until the
+/// user manually retries. This is called on every `SyncCompleted` but only
+/// acts while the provider is in its error state, so healthy sessions add no
+/// traffic. A persistently failing endpoint is throttled: every retry also
+/// cascades into a full room-list refresh (the room collections watch the
+/// ignore list), so it must not re-fire on every sync cycle.
+final _lastIgnoredListRecoveryAttempt = <String, DateTime>{};
+const _ignoredListRecoveryThrottle = Duration(seconds: 30);
+
+void _recoverIgnoredListError(Ref ref) {
+  final namespace = ref.read(activeUserIdProvider) ?? '';
+  if (namespace.isEmpty) return;
+  // Do not instantiate the provider just to check it: a session that never
+  // surfaced the ignore list (and thus has nothing stuck) should not start a
+  // fetch on its behalf.
+  if (!ref.exists(ignoredUserIdsProvider)) return;
+  if (!ref.read(ignoredUserIdsProvider).hasError) return;
+  final lastAttempt = _lastIgnoredListRecoveryAttempt[namespace];
+  final now = clock.now();
+  if (lastAttempt != null &&
+      now.difference(lastAttempt) < _ignoredListRecoveryThrottle) {
+    return;
+  }
+  _lastIgnoredListRecoveryAttempt[namespace] = now;
+  _revalidateIgnoredUserIds(
+    namespace,
+    () => ref.invalidate(ignoredUserIdsProvider),
+  );
+  // Riverpod rebuilds invalidated providers lazily: with no active watcher
+  // (e.g. no chat open) the rebuild would wait for the next read and the
+  // retry might not run until long after connectivity returned. Reading the
+  // future here guarantees the retry actually executes; a further failure
+  // simply re-enters the error state for the next throttled attempt.
+  ref.read(ignoredUserIdsProvider.future).ignore();
 }
 
 final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
@@ -458,6 +500,13 @@ Future<void> _drainIgnoredListWrites(String namespace) async {
     await queue.first();
     queue.removeAt(0);
   }
+  // Drop the drained queue entry so per-account state does not accumulate
+  // across sessions. Writes enqueued while the drain was running were
+  // processed by this same drain (same queue object); a write enqueued after
+  // the entry is removed creates a fresh queue and its own drain.
+  if (identical(_ignoredListWriteQueues[namespace], queue)) {
+    _ignoredListWriteQueues.remove(namespace);
+  }
 }
 
 class RoomUnreadOverride {
@@ -637,6 +686,9 @@ void resetIgnoredListAccountState(String namespace) {
   _confirmedIgnoredLists.remove(namespace);
   _authoritativeIgnoredStoreVersions.remove(namespace);
   _ignoredListWriteVersions[namespace] = _ignoredListVersion(namespace) + 1;
+  // A fresh session starts with a clean recovery throttle: the record is a
+  // per-account global that would otherwise leak across logins (and tests).
+  _lastIgnoredListRecoveryAttempt.remove(namespace);
 }
 
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
@@ -1836,6 +1888,10 @@ final syncStreamProvider =
         switch (event) {
           case rust.SyncEvent_SyncCompleted():
             scheduleSyncRefresh();
+            // A failed ignore-list fetch has no other recovery signal
+            // (empty ignore lists never emit IgnoredUsersChanged); retry it
+            // now that the connection has produced a sync cycle.
+            _recoverIgnoredListError(ref);
           case rust.SyncEvent_FullRefreshRequired():
             scheduleSyncRefresh();
             revalidateIgnoredUsers();
@@ -1874,10 +1930,26 @@ final syncStreamProvider =
 // updates by room id; each room auto-clears after 5s of silence (Matrix typing
 // events are ephemeral and may not always send an explicit "stopped" event).
 
-final typingUsersProvider =
-    NotifierProvider.family<MutableState<Set<String>>, Set<String>, String>(
-      (_) => MutableState({}),
-    );
+/// Raw per-account typing state, keyed by `{accountId}:{roomId}`. Room ids
+/// are global and multiple accounts can share a room, so keying by room
+/// alone would leak one account's "is typing" rows into another account's
+/// view. Auto-disposed: the value only lives while [typingUsersProvider] is
+/// watching it, so a stale entry can never survive into a later session.
+final typingUsersStateProvider =
+    NotifierProvider.autoDispose.family<
+      MutableState<Set<String>>,
+      Set<String>,
+      String
+    >((_) => MutableState({}));
+
+/// The set of user ids currently typing in [roomId] under the active
+/// account. Rebuilds when the account changes and switches to the new
+/// account's state key, so an account switch immediately clears the rows.
+final typingUsersProvider = Provider.family<Set<String>, String>((ref, roomId) {
+  final accountId = ref.watch(activeUserIdProvider);
+  if (accountId == null) return const {};
+  return ref.watch(typingUsersStateProvider('$accountId:$roomId'));
+});
 
 /// Per-room timeout timers so typing status clears after inactivity.
 final _typingTimers = <String, Timer>{};
@@ -1895,12 +1967,14 @@ final typingStreamProvider =
       final stream = rust.watchTypingNotifications();
       final subscription = stream.listen((event) {
         final roomId = event.roomId;
-        ref.read(typingUsersProvider(roomId).notifier).value = event.userIds
+        final stateKey = '$activeUserId:$roomId';
+        ref.read(typingUsersStateProvider(stateKey).notifier).value = event
+            .userIds
             .toSet();
         // (Re)arm the auto-clear timer for this room.
         _typingTimers[roomId]?.cancel();
         _typingTimers[roomId] = Timer(const Duration(seconds: 5), () {
-          ref.read(typingUsersProvider(roomId).notifier).value = {};
+          ref.read(typingUsersStateProvider(stateKey).notifier).value = {};
           _typingTimers.remove(roomId);
         });
       });

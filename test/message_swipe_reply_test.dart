@@ -4,6 +4,32 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/message_group.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
+import 'package:matter/src/rust/frb_generated.dart';
+
+class _FakeRustApi implements RustLibApi {
+  int togglePinnedCalls = 0;
+  String? lastToggleRoomId;
+  String? lastToggleEventId;
+  bool toggleResult = false;
+  Object? toggleError;
+
+  @override
+  Future<bool> crateApiMatrixTogglePinnedMessage({
+    required String roomId,
+    required String eventId,
+  }) async {
+    togglePinnedCalls++;
+    lastToggleRoomId = roomId;
+    lastToggleEventId = eventId;
+    if (toggleError case final error?) throw error;
+    return toggleResult;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
+  }
+}
 
 const _roomId = '!room:example.org';
 const _roomAccountKey = (roomId: _roomId, userId: 'anonymous');
@@ -53,6 +79,15 @@ Widget _buildSubject({
 }
 
 void main() {
+  late _FakeRustApi api;
+
+  setUpAll(() {
+    api = _FakeRustApi();
+    RustLib.initMock(api: api);
+  });
+
+  tearDownAll(RustLib.dispose);
+
   testWidgets('message menu describes pinning as a toggle', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
@@ -68,6 +103,56 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('置顶/取消置顶'), findsOneWidget);
+  });
+
+  testWidgets('pinning from the message menu calls the toggle', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-action', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = null;
+    api.toggleResult = true;
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-action')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 1);
+    expect(api.lastToggleRoomId, _roomId);
+    expect(api.lastToggleEventId, r'$pin-action');
+    // The menu reports the post-write server state.
+    expect(find.text('消息已置顶'), findsOneWidget);
+  });
+
+  testWidgets('a failed pin action surfaces the error', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-fail', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = StateError('offline');
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-fail')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 1);
+    expect(find.textContaining('置顶操作失败:'), findsOneWidget);
   });
 
   testWidgets('left swipe past threshold starts a reply to another user', (

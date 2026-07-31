@@ -290,55 +290,60 @@ class ChatListItem extends ConsumerWidget {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (sheetContext) => Container(
-        margin: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.all(12),
+        child: Material(
+          // A Material host (not a bare decorated container) so the sheet's
+          // ListTiles can paint their ink splashes and backgrounds.
           color: AppColors.surface,
-          borderRadius: BorderRadius.circular(AppRadii.surface),
-        ),
-        child: SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(
-                  Icons.done_all_rounded,
-                  color: AppColors.primary,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadii.surface),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(
+                    Icons.done_all_rounded,
+                    color: AppColors.primary,
+                  ),
+                  title: const Text(
+                    '标记为已读',
+                    style: TextStyle(color: AppColors.onBackground),
+                  ),
+                  onTap: () => _runRoomListAction(
+                    context,
+                    sheetContext,
+                    ref,
+                    room,
+                    markRoomAsRead,
+                    false,
+                    '已标记为已读',
+                  ),
                 ),
-                title: const Text(
-                  '标记为已读',
-                  style: TextStyle(color: AppColors.onBackground),
+                ListTile(
+                  leading: const Icon(
+                    Icons.mark_unread_chat_alt_rounded,
+                    color: AppColors.primary,
+                  ),
+                  title: const Text(
+                    '标记为未读',
+                    style: TextStyle(color: AppColors.onBackground),
+                  ),
+                  onTap: () => _runRoomListAction(
+                    context,
+                    sheetContext,
+                    ref,
+                    room,
+                    markRoomUnread,
+                    true,
+                    '已标记为未读',
+                  ),
                 ),
-                onTap: () => _runRoomListAction(
-                  context,
-                  sheetContext,
-                  ref,
-                  room,
-                  markRoomAsRead,
-                  false,
-                  '已标记为已读',
-                ),
-              ),
-              ListTile(
-                leading: const Icon(
-                  Icons.mark_unread_chat_alt_rounded,
-                  color: AppColors.primary,
-                ),
-                title: const Text(
-                  '标记为未读',
-                  style: TextStyle(color: AppColors.onBackground),
-                ),
-                onTap: () => _runRoomListAction(
-                  context,
-                  sheetContext,
-                  ref,
-                  room,
-                  markRoomUnread,
-                  true,
-                  '已标记为未读',
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -354,6 +359,12 @@ class ChatListItem extends ConsumerWidget {
     bool markedUnread,
     String successMessage,
   ) async {
+    // `mounted` stays true while the sheet is in its exit animation, but
+    // popping then would pop the route *below* the sheet; `isCurrent` turns
+    // false as soon as the pop starts.
+    bool sheetCanPop() =>
+        sheetContext.mounted &&
+        ModalRoute.of(sheetContext)?.isCurrent == true;
     final suppression = roomAutoReadSuppressedProvider(room.id);
     final suppressionNotifier = ref.read(suppression.notifier);
     final previousSuppression = suppressionNotifier.value;
@@ -372,8 +383,9 @@ class ChatListItem extends ConsumerWidget {
       ref.invalidate(ungroupedRoomsProvider);
       ref.invalidate(spaceChildrenProvider);
       ref.invalidate(searchRoomsProvider);
-      if (!sheetContext.mounted) return;
-      Navigator.of(sheetContext).pop();
+      // The user may have dismissed the sheet while the request was in
+      // flight: skip the pop in that case, but always surface the result.
+      if (sheetCanPop()) Navigator.of(sheetContext).pop();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
@@ -381,6 +393,10 @@ class ChatListItem extends ConsumerWidget {
       if (!suppressionToken.isCurrent) return;
       suppressionNotifier.value = previousSuppression;
       if (!context.mounted) return;
+      // Close the sheet first: the modal bottom sheet sits above the
+      // Scaffold that shows the snackbar, so leaving it open would hide the
+      // failure message for its whole duration.
+      if (sheetCanPop()) Navigator.of(sheetContext).pop();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('操作失败: $error')));

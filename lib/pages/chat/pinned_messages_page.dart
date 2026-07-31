@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -23,6 +24,53 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   Object? _loadError;
   bool _loading = true;
   bool _reloadTrailing = false;
+  /// Message ids whose unpin request is in flight, mapped to the moment the
+  /// lock was taken. The server toggle is a read-modify-write: without this
+  /// guard a double-tap on the unpin button would first remove the pin and
+  /// then re-add it (the second toggle runs against the already-unpinned
+  /// server state). Locks expire after [_unpinLockTimeout] so a message that
+  /// gets re-pinned on another device (or a row that never leaves a stale
+  /// list) cannot disable its button forever.
+  final Map<String, DateTime> _pendingUnpinIds = {};
+  static const Duration _unpinLockTimeout = Duration(seconds: 30);
+  Timer? _unpinLockExpiryTimer;
+  /// Toggles still awaiting their server response, independent of the lock:
+  /// a lock may expire while its toggle is still in flight (very slow
+  /// network), and the button must stay disabled either way.
+  final Set<String> _inflightUnpinIds = {};
+
+  bool _unpinLocked(String messageId) {
+    final lockedAt = _pendingUnpinIds[messageId];
+    if (lockedAt == null) return false;
+    if (clock.now().difference(lockedAt) >= _unpinLockTimeout) {
+      _pendingUnpinIds.remove(messageId);
+      return false;
+    }
+    return true;
+  }
+
+  void _scheduleUnpinLockExpiry() {
+    _unpinLockExpiryTimer?.cancel();
+    if (_pendingUnpinIds.isEmpty) return;
+    final now = clock.now();
+    final nextExpiry = _pendingUnpinIds.values
+        .map((lockedAt) => lockedAt.add(_unpinLockTimeout))
+        .reduce((earlier, later) => earlier.isBefore(later) ? earlier : later);
+    final delay = nextExpiry.difference(now);
+    _unpinLockExpiryTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      () {
+        if (!mounted) return;
+        setState(() {
+          _pendingUnpinIds.removeWhere(
+            (_, lockedAt) =>
+                !lockedAt.add(_unpinLockTimeout).isAfter(nextExpiry),
+          );
+        });
+        _scheduleUnpinLockExpiry();
+      },
+    );
+  }
   Completer<void>? _reloadCompletion;
   late final StreamSubscription<rust.SyncEvent> _syncSubscription;
   late final Future<String?> _roomSubscription;
@@ -58,6 +106,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   @override
   void dispose() {
     _syncSubscription.cancel();
+    _unpinLockExpiryTimer?.cancel();
     unawaited(_unsubscribeAfterSubscribe());
     super.dispose();
   }
@@ -104,6 +153,16 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
             _messages = messages;
             _loadError = null;
             _loading = false;
+            // Release only the locks whose message left the list. A reload
+            // can serve a stale snapshot (the offline store fallback, or a
+            // concurrent toggle still queued on the server), so a row that
+            // is still present keeps its lock until a later reload removes
+            // it — otherwise the unlocked row invites a re-pinning tap.
+            // Locked ids whose row left the list are settled either way.
+            _pendingUnpinIds.removeWhere(
+              (id, _) => !messages.any((message) => message.id == id),
+            );
+            _scheduleUnpinLockExpiry();
           });
         } catch (error) {
           if (!mounted) return;
@@ -266,7 +325,10 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
                     color: AppColors.onSurfaceVariant,
                     size: 18,
                   ),
-                  onPressed: () => unawaited(_unpin(message)),
+                  onPressed: _unpinLocked(message.id) ||
+                          _inflightUnpinIds.contains(message.id)
+                      ? null
+                      : () => unawaited(_unpin(message)),
                 ),
               ],
             ),
@@ -277,23 +339,79 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   }
 
   Future<void> _unpin(rust.ChatMessage message) async {
+    if (_unpinLocked(message.id) || _inflightUnpinIds.contains(message.id)) {
+      return;
+    }
+    if (_messages == null) return;
+    final originalIndex = _messages!.indexWhere((m) => m.id == message.id);
+    setState(() {
+      _pendingUnpinIds[message.id] = clock.now();
+      _inflightUnpinIds.add(message.id);
+      _scheduleUnpinLockExpiry();
+      // Drop the row optimistically: the removal was accepted by the server
+      // and keeping the row visible would invite a second tap that re-pins
+      // the message while the confirming reload is still in flight.
+      _messages = List.of(_messages!)..removeWhere((m) => m.id == message.id);
+    });
     try {
-      await rust.togglePinnedMessage(
+      // The toggle returns the message's pinned state *after* the server
+      // write, which is authoritative: a stale list (refreshed elsewhere)
+      // that already dropped the pin flips the message back to pinned, and
+      // reporting that beats claiming "已取消置顶".
+      final pinned = await rust.togglePinnedMessage(
         roomId: widget.roomId,
         eventId: message.id,
       );
       if (!mounted) return;
+      setState(() {
+        _inflightUnpinIds.remove(message.id);
+        if (pinned) {
+          // The server re-pinned the message (the local list was stale):
+          // release the lock so the reload can restore the row with an
+          // actionable button.
+          _pendingUnpinIds.remove(message.id);
+        }
+        _scheduleUnpinLockExpiry();
+      });
+      // Otherwise keep the id in _pendingUnpinIds: the button stays locked
+      // until a reload confirms the message left the list (see _runReloads),
+      // or the lock times out — a stale reload snapshot must not unlock it
+      // early, and a cross-device re-pin must not lock it forever.
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已取消置顶'), duration: Duration(seconds: 1)),
+        SnackBar(
+          content: Text(pinned ? '消息已置顶' : '已取消置顶'),
+          duration: const Duration(seconds: 1),
+        ),
       );
+      // Refresh towards the server state: after a removal the row stays
+      // gone; after a re-pin (stale local list) it must come back.
+      unawaited(_reload());
     } catch (error) {
       if (!mounted) return;
+      setState(() {
+        // The server still has the pin (the request failed): restore the
+        // row at its previous position (the list is ordered by the server's
+        // pinned state, so appending at the top would misrepresent it), and
+        // release the lock so the user can retry.
+        _pendingUnpinIds.remove(message.id);
+        _inflightUnpinIds.remove(message.id);
+        _scheduleUnpinLockExpiry();
+        if (_messages != null &&
+            !_messages!.any((entry) => entry.id == message.id)) {
+          final insertAt = originalIndex.clamp(0, _messages!.length);
+          _messages = List.of(_messages!)..insert(insertAt, message);
+        }
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('取消置顶失败: $error'),
           duration: const Duration(seconds: 2),
         ),
       );
+      // Reconcile against the server: the write may have partially landed
+      // (request reached the server, response lost), so re-read the list
+      // instead of trusting the local restore.
+      unawaited(_reload());
     }
   }
 
