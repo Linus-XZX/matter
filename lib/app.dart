@@ -92,6 +92,11 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         return;
       }
       _handledVerificationFlows.add(status.flowId);
+      // Bound the handled-flow set on long-running sessions: flows are
+      // one-shot, so only recent ones can possibly reappear.
+      while (_handledVerificationFlows.length > 64) {
+        _handledVerificationFlows.remove(_handledVerificationFlows.first);
+      }
       await _showVerificationRequest(status);
     } catch (_) {
       // The active client can be temporarily unavailable during account changes.
@@ -200,7 +205,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       if (selectedRoom != refreshedRoom) {
         setState(() => _selectedRoom = refreshedRoom);
       }
-      ref.read(roomAutoReadSuppressedProvider(room.id).notifier).value = false;
+      setRoomAutoReadSuppressed(ref, room.id, suppressed: false);
       unawaited(_markSelectedRoomAsRead(refreshedRoom));
       return;
     }
@@ -211,7 +216,11 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   Future<void> _markSelectedRoomAsRead(rust.ChatRoom room) async {
     try {
       await rust.markRoomAsRead(roomId: room.id);
-      if (!mounted || _selectedRoom?.id != room.id) return;
+      if (!mounted ||
+          _selectedRoom?.id != room.id ||
+          ref.read(roomAutoReadSuppressedProvider(room.id))) {
+        return;
+      }
       setRoomUnreadOverride(ref, room, unread: false);
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
@@ -369,7 +378,17 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         break;
       }
     }
-    if (refreshedRoom == null) return;
+    if (refreshedRoom == null) {
+      // The selected room no longer exists (e.g. the user left it from the
+      // management page while the desktop panel was open). Clear the stale
+      // selection so the panel does not keep showing a departed room.
+      // Space children live in spaceChildrenProvider, not chatRooms, so
+      // their absence here is not a departure.
+      if (_desktopRoomSource == _DesktopRoomSource.space) return;
+      _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
+      return;
+    }
     _selectedRoom = _reconcileSelectedRoomDetails(selectedRoom, refreshedRoom);
   }
 

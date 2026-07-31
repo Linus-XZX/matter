@@ -355,11 +355,18 @@ class ChatListItem extends ConsumerWidget {
     String successMessage,
   ) async {
     final suppression = roomAutoReadSuppressedProvider(room.id);
-    final previousSuppression = ref.read(suppression);
-    ref.read(suppression.notifier).value = markedUnread;
+    final suppressionNotifier = ref.read(suppression.notifier);
+    final previousSuppression = suppressionNotifier.value;
+    final suppressionToken = setRoomAutoReadSuppressed(
+      ref,
+      room.id,
+      suppressed: markedUnread,
+    );
     try {
       await action(roomId: room.id);
-      if (!context.mounted) return;
+      if (!context.mounted || !suppressionToken.isCurrent) {
+        return;
+      }
       setRoomUnreadOverride(ref, room, unread: markedUnread);
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
@@ -371,8 +378,9 @@ class ChatListItem extends ConsumerWidget {
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
     } catch (error) {
+      if (!suppressionToken.isCurrent) return;
+      suppressionNotifier.value = previousSuppression;
       if (!context.mounted) return;
-      ref.read(suppression.notifier).value = previousSuppression;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('操作失败: $error')));

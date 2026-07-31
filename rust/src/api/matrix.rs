@@ -13,22 +13,25 @@ use matrix_sdk::{
         uiaa::{AuthData, Dummy, RegistrationToken, UiaaInfo},
     },
     ruma::events::{
-        ignored_user_list::IgnoredUserListEventContent,
+        ignored_user_list::{IgnoredUser, IgnoredUserListEventContent},
         key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
+        marked_unread::MarkedUnreadEventContent,
         receipt::SyncReceiptEvent,
         room::{
-            avatar::RoomAvatarEventContent, name::RoomNameEventContent,
-            pinned_events::RoomPinnedEventsEventContent,
+            avatar::RoomAvatarEventContent, member::RoomMemberEventContent,
+            name::RoomNameEventContent, pinned_events::RoomPinnedEventsEventContent,
+            topic::RoomTopicEventContent,
         },
-        AnySyncMessageLikeEvent, GlobalAccountDataEvent, SyncStateEvent,
+        AnySyncMessageLikeEvent, GlobalAccountDataEvent, RoomAccountDataEvent, SyncStateEvent,
     },
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
 };
 use once_cell::sync::Lazy;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Cursor, Read};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -271,11 +274,40 @@ pub async fn read_log_files() -> Vec<LogFileContent> {
 
 static CONNECTION_STATE: Lazy<std::sync::RwLock<ConnectionStatus>> =
     Lazy::new(|| std::sync::RwLock::new(ConnectionStatus::Disconnected));
+static SYNC_PUBLICATION_LOCK: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
 
 fn set_connection_status(status: ConnectionStatus) {
     if let Ok(mut guard) = CONNECTION_STATE.write() {
         *guard = status;
     }
+}
+
+fn advance_sync_generation() -> u64 {
+    let _publication = sync_publication_lock();
+    SYNC_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn set_connection_status_for_generation(generation: u64, status: ConnectionStatus) {
+    let _publication = sync_publication_lock();
+    if SYNC_GENERATION.load(Ordering::SeqCst) == generation {
+        set_connection_status(status);
+    }
+}
+
+fn notify_sync_event_for_generation(generation: u64, event: SyncEvent) {
+    let _publication = sync_publication_lock();
+    if SYNC_GENERATION.load(Ordering::SeqCst) == generation {
+        notify_sync_event(event);
+    }
+}
+
+/// Lock the sync-publication mutex, recovering from a poisoned lock so a
+/// panic in the (tiny, atomic-only) critical section can never wedge all
+/// sync state publication forever.
+fn sync_publication_lock() -> std::sync::MutexGuard<'static, ()> {
+    SYNC_PUBLICATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ── Event bus for real-time updates ─────────────────────────────────
@@ -293,6 +325,8 @@ pub enum SyncEvent {
     MessageSent { room_id: String },
     /// A room's pinned-event state changed.
     PinnedMessagesChanged { room_id: String },
+    /// A room's membership state changed.
+    RoomMembersChanged { room_id: String },
     /// The account's ignored-user list changed.
     IgnoredUsersChanged,
 }
@@ -326,6 +360,22 @@ static MARKED_UNREAD_OVERRIDES: Lazy<RwLock<HashMap<String, MarkedUnreadOverride
 struct IgnoredUserOverride {
     baseline: bool,
     desired: bool,
+    /// Set when an ignored-list event arrived that did not contain this
+    /// target. After the TTL the override expires (ABA protection: a
+    /// cross-device un-ignore may have coalesced the list back to the
+    /// pre-write baseline). None while no event has been seen, so an offline
+    /// window — the exact case overrides exist for — never expires them.
+    event_seen: Option<std::time::Instant>,
+}
+
+/// How long an ignore override survives after an account-data event that
+/// does not confirm its target, before the authoritative store wins.
+const IGNORED_OVERRIDE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn ignored_override_expired(local: &IgnoredUserOverride) -> bool {
+    local
+        .event_seen
+        .is_some_and(|seen| seen.elapsed() >= IGNORED_OVERRIDE_TTL)
 }
 
 /// Per-account ignored-user overrides for locally confirmed writes whose
@@ -482,6 +532,13 @@ async fn set_marked_unread_override(key: String, baseline: bool, desired: bool) 
     }
 }
 
+fn reconcile_marked_unread_override(
+    overrides: &mut HashMap<String, MarkedUnreadOverride>,
+    key: &str,
+) {
+    overrides.remove(key);
+}
+
 fn ignored_user_override_key(client: &Client, target: &matrix_sdk::ruma::UserId) -> Option<String> {
     client
         .user_id()
@@ -506,6 +563,9 @@ async fn effective_is_user_ignored(client: &Client, target: &matrix_sdk::ruma::U
         return synced;
     };
     let mut overrides = IGNORED_USER_OVERRIDES.write().await;
+    if overrides.get(&key).is_some_and(ignored_override_expired) {
+        overrides.remove(&key);
+    }
     let (effective, stale) = resolve_ignored_user(synced, overrides.get(&key).copied());
     if stale {
         overrides.remove(&key);
@@ -518,53 +578,122 @@ async fn set_ignored_user_override(key: String, baseline: bool, desired: bool) {
     if baseline == desired {
         overrides.remove(&key);
     } else {
-        overrides.insert(key, IgnoredUserOverride { baseline, desired });
+        overrides.insert(
+            key,
+            IgnoredUserOverride {
+                baseline,
+                desired,
+                event_seen: None,
+            },
+        );
     }
 }
 
-/// An override stays active while the authoritative ignored-user list still
-/// matches the baseline captured when the local write was confirmed; once the
-/// account-data content advances past that baseline (the echo, or a change
-/// from another device), the override is stale.
-fn ignored_user_override_active(
-    key: &str,
+fn merge_ignored_user_overrides(
     account_prefix: &str,
-    baseline: bool,
-    content: &IgnoredUserListEventContent,
-) -> bool {
-    let Some(target) = key.strip_prefix(account_prefix) else {
-        // Belongs to another account; leave it untouched.
-        return true;
-    };
-    let synced = matrix_sdk::ruma::UserId::parse(target)
-        .map(|user_id| content.ignored_users.contains_key(&user_id))
-        .unwrap_or(false);
-    synced == baseline
+    content: &mut IgnoredUserListEventContent,
+    overrides: &mut HashMap<String, IgnoredUserOverride>,
+) {
+    overrides.retain(|key, local| {
+        let Some(target) = key.strip_prefix(account_prefix) else {
+            return true;
+        };
+        let Ok(user_id) = matrix_sdk::ruma::OwnedUserId::try_from(target) else {
+            return false;
+        };
+        if ignored_override_expired(local) {
+            return false;
+        }
+        let synced = content.ignored_users.contains_key(&user_id);
+        let (effective, stale) = resolve_ignored_user(synced, Some(*local));
+        if effective {
+            content.ignored_users.insert(user_id, IgnoredUser::new());
+        } else {
+            content.ignored_users.remove(&user_id);
+        }
+        !stale
+    })
 }
 
-/// Drop stale ignored-user overrides as soon as the account-data echo
-/// arrives. Preview rendering only consults overrides for the current
-/// last-message sender, so without this reconciliation an override whose
-/// target is no room's latest sender would never be read, never expire, and
-/// would keep hiding previews after another device un-ignores the user.
+async fn merge_current_account_ignored_user_overrides(
+    client: &Client,
+    content: &mut IgnoredUserListEventContent,
+) {
+    let Some(account_prefix) = client.user_id().map(|user_id| format!("{user_id}:")) else {
+        return;
+    };
+    let mut overrides = IGNORED_USER_OVERRIDES.write().await;
+    merge_ignored_user_overrides(&account_prefix, content, &mut overrides);
+}
+
+/// Reconcile ignored-user overrides against an authoritative account-data
+/// event. The event proves the server list advanced past every local write:
+///
+/// - A target that IS in the received content was decided by the server
+///   (echo or a cross-device change); its override is stale either way.
+/// - A target that is NOT in the content, with `desired=false` (an
+///   un-ignore), was confirmed by the server; its override is stale.
+/// - A target that is NOT in the content, with `desired=true` (an ignore),
+///   may still be awaiting its echo (the snapshot predates our write, e.g.
+///   a concurrent write to a different target synced first). It is kept,
+///   but its `event_seen` timestamp is set so the TTL expires it in the
+///   ABA case where a cross-device un-ignore coalesced the list back to
+///   the pre-write baseline. Overrides for other accounts are untouched.
+///
+/// Without the TTL an override whose target is no room's latest sender
+/// would never be read, never expire, and would keep hiding previews after
+/// another device un-ignores the user.
+fn reconcile_ignored_user_overrides_inner(
+    account_prefix: &str,
+    content: &IgnoredUserListEventContent,
+    overrides: &mut HashMap<String, IgnoredUserOverride>,
+) {
+    overrides.retain(|key, local| {
+        let Some(target) = key.strip_prefix(account_prefix) else {
+            // Belongs to another account; leave it untouched.
+            return true;
+        };
+        let Ok(user_id) = matrix_sdk::ruma::UserId::parse(target) else {
+            return false;
+        };
+        if content.ignored_users.contains_key(&user_id) || !local.desired {
+            return false;
+        }
+        if ignored_override_expired(local) {
+            return false;
+        }
+        // Start the TTL clock on the first event that does not confirm the
+        // target. Do NOT refresh it on every event: global account data is
+        // delivered on each sync response even when unchanged, so refreshing
+        // would keep the override alive forever in the ABA case (a
+        // cross-device un-ignore that coalesces the list back to baseline).
+        if local.event_seen.is_none() {
+            local.event_seen = Some(std::time::Instant::now());
+        }
+        true
+    });
+}
+
 async fn reconcile_ignored_user_overrides(client: &Client, content: &IgnoredUserListEventContent) {
     let Some(account_prefix) = client.user_id().map(|user_id| format!("{user_id}:")) else {
         return;
     };
     let mut overrides = IGNORED_USER_OVERRIDES.write().await;
-    overrides.retain(|key, local| {
-        ignored_user_override_active(key, &account_prefix, local.baseline, content)
-    });
+    reconcile_ignored_user_overrides_inner(&account_prefix, content, &mut overrides);
 }
 
 #[cfg(test)]
 mod mutation_queue_tests {
     use super::{
-        enqueue_mutation, ignored_user_override_active, resolve_ignored_user,
-        resolve_marked_unread, IgnoredUserOverride, MarkedUnreadOverride,
+        enqueue_mutation, merge_ignored_user_overrides, reconcile_ignored_user_overrides_inner,
+        reconcile_marked_unread_override, resolve_ignored_user, resolve_marked_unread,
+        IgnoredUserOverride, MarkedUnreadOverride,
     };
     use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
     use tokio::sync::oneshot;
 
     #[tokio::test]
@@ -623,10 +752,29 @@ mod mutation_queue_tests {
     }
 
     #[test]
+    fn marked_unread_event_reconciles_an_aba_override() {
+        let key = "@me:example.org:!room:example.org";
+        let mut overrides = HashMap::from([(
+            key.to_owned(),
+            MarkedUnreadOverride {
+                baseline: false,
+                desired: true,
+            },
+        )]);
+
+        // A sync event is newer than the confirmed local write even when its
+        // final boolean coalesces back to the same pre-write value.
+        reconcile_marked_unread_override(&mut overrides, key);
+
+        assert!(!overrides.contains_key(key));
+    }
+
+    #[test]
     fn ignored_user_override_expires_when_sync_advances() {
         let local = IgnoredUserOverride {
             baseline: false,
             desired: true,
+            event_seen: None,
         };
         assert_eq!(resolve_ignored_user(false, Some(local)), (true, false));
         assert_eq!(resolve_ignored_user(true, Some(local)), (true, true));
@@ -634,6 +782,7 @@ mod mutation_queue_tests {
         let local = IgnoredUserOverride {
             baseline: true,
             desired: false,
+            event_seen: None,
         };
         assert_eq!(resolve_ignored_user(true, Some(local)), (false, false));
         assert_eq!(resolve_ignored_user(false, Some(local)), (false, true));
@@ -647,6 +796,7 @@ mod mutation_queue_tests {
         let local = IgnoredUserOverride {
             baseline: false,
             desired: true,
+            event_seen: None,
         };
         assert_eq!(resolve_ignored_user(false, Some(local)), (true, false));
         // 2. Echo lands: the override is stale and must be dropped. This
@@ -658,39 +808,123 @@ mod mutation_queue_tests {
     }
 
     #[test]
-    fn account_data_echo_reconciles_ignored_user_overrides() {
+    fn account_data_event_reconciles_ignored_user_overrides() {
         let prefix = "@me:example.org:";
-        let key = "@me:example.org:@target:example.org";
         let mut echoed = IgnoredUserListEventContent::default();
         echoed.ignored_users.insert(
             matrix_sdk::ruma::OwnedUserId::try_from("@target:example.org").unwrap(),
             IgnoredUser::default(),
         );
-        let unignored = IgnoredUserListEventContent::default();
+        let mut overrides = HashMap::from([
+            // Target present in the authoritative content: stale either way.
+            (
+                format!("{prefix}@target:example.org"),
+                IgnoredUserOverride {
+                    baseline: false,
+                    desired: true,
+                    event_seen: None,
+                },
+            ),
+            // Target absent and desired=false: the server confirmed the
+            // un-ignore, stale.
+            (
+                format!("{prefix}@unignored:example.org"),
+                IgnoredUserOverride {
+                    baseline: true,
+                    desired: false,
+                    event_seen: None,
+                },
+            ),
+            // Target absent and desired=true: may still await its echo; the
+            // override survives this round (TTL handles the ABA case later).
+            (
+                format!("{prefix}@pending:example.org"),
+                IgnoredUserOverride {
+                    baseline: false,
+                    desired: true,
+                    event_seen: None,
+                },
+            ),
+            // Overrides of other accounts are never touched.
+            (
+                "@someoneelse:example.org:@target:example.org".to_owned(),
+                IgnoredUserOverride {
+                    baseline: false,
+                    desired: true,
+                    event_seen: None,
+                },
+            ),
+        ]);
 
-        // Echo landed: the target is in the authoritative list while the
-        // override's baseline was "not ignored" → stale, drop it.
-        assert!(!ignored_user_override_active(key, prefix, false, &echoed));
-        // Ignore override for a user whose echo has not landed yet: the
-        // list still matches the baseline → keep it.
-        assert!(ignored_user_override_active(
-            "@me:example.org:@other:example.org",
-            prefix,
-            false,
-            &echoed
-        ));
-        // Another device un-ignored the target: an override whose baseline
-        // was "ignored" is now stale.
-        assert!(!ignored_user_override_active(key, prefix, true, &unignored));
-        // An un-ignore override still waiting for its echo stays active.
-        assert!(ignored_user_override_active(key, prefix, true, &echoed));
-        // Overrides of other accounts are never touched.
-        assert!(ignored_user_override_active(
-            "@someoneelse:example.org:@target:example.org",
-            prefix,
-            false,
-            &echoed
-        ));
+        reconcile_ignored_user_overrides_inner(prefix, &echoed, &mut overrides);
+
+        assert!(!overrides.contains_key(&format!("{prefix}@target:example.org")));
+        assert!(!overrides.contains_key(&format!("{prefix}@unignored:example.org")));
+        assert!(overrides.contains_key(&format!("{prefix}@pending:example.org")));
+        assert!(overrides.contains_key("@someoneelse:example.org:@target:example.org"));
+    }
+
+    #[test]
+    fn account_data_event_starts_ttl_only_once() {
+        let prefix = "@me:example.org:";
+        let key = format!("{prefix}@pending:example.org");
+        // Target absent and desired=true: survives the event, and the TTL
+        // clock starts on the FIRST such event. Global account data arrives
+        // on every sync response even when unchanged; refreshing the clock
+        // each time would keep the override alive forever in the ABA case.
+        let mut overrides = HashMap::from([(
+            key.clone(),
+            IgnoredUserOverride {
+                baseline: false,
+                desired: true,
+                event_seen: None,
+            },
+        )]);
+        let empty = IgnoredUserListEventContent::default();
+
+        reconcile_ignored_user_overrides_inner(prefix, &empty, &mut overrides);
+        let first_seen = overrides.get(&key).unwrap().event_seen;
+        assert!(first_seen.is_some());
+
+        // A second unchanged event must NOT reset the clock.
+        reconcile_ignored_user_overrides_inner(prefix, &empty, &mut overrides);
+        let second_seen = overrides.get(&key).unwrap().event_seen;
+        assert_eq!(first_seen.unwrap(), second_seen.unwrap());
+    }
+
+    #[test]
+    fn store_fallback_applies_pending_local_ignore_overrides() {
+        let prefix = "@me:example.org:";
+        let ignored = matrix_sdk::ruma::OwnedUserId::try_from("@ignored:example.org").unwrap();
+        let unignored = matrix_sdk::ruma::OwnedUserId::try_from("@unignored:example.org").unwrap();
+        let mut content = IgnoredUserListEventContent::default();
+        content
+            .ignored_users
+            .insert(unignored.clone(), IgnoredUser::new());
+        let mut overrides = HashMap::from([
+            (
+                format!("{prefix}{ignored}"),
+                IgnoredUserOverride {
+                    baseline: false,
+                    desired: true,
+                    event_seen: None,
+                },
+            ),
+            (
+                format!("{prefix}{unignored}"),
+                IgnoredUserOverride {
+                    baseline: true,
+                    desired: false,
+                    event_seen: None,
+                },
+            ),
+        ]);
+
+        merge_ignored_user_overrides(prefix, &mut content, &mut overrides);
+
+        assert!(content.ignored_users.contains_key(&ignored));
+        assert!(!content.ignored_users.contains_key(&unignored));
+        assert_eq!(overrides.len(), 2);
     }
 }
 
@@ -743,6 +977,22 @@ async fn clear_timeline_cache() {
 struct ClientEntry {
     client: Client,
     data_dir: String,
+    instance_id: u64,
+    room_key_task: JoinHandle<()>,
+}
+
+impl ClientEntry {
+    async fn into_client_and_data_dir(self) -> (Client, String) {
+        let ClientEntry {
+            client,
+            data_dir,
+            room_key_task,
+            ..
+        } = self;
+        room_key_task.abort();
+        let _ = room_key_task.await;
+        (client, data_dir)
+    }
 }
 
 struct PendingEntry {
@@ -754,17 +1004,57 @@ struct PendingEntry {
 /// All logged-in accounts, keyed by user_id.
 static CLIENTS: Lazy<Arc<RwLock<HashMap<String, ClientEntry>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+static NEXT_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Currently active account.
 static ACTIVE_USER: Lazy<Arc<RwLock<Option<String>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
+/// Account allowed to create room-scoped subscriptions.
+///
+/// Callers pass the account that owns their route. Holding this read lock
+/// until the subscription is registered orders an in-flight subscribe before
+/// an account switch; the switch then clears it. Calls arriving after the
+/// switch observe the new account and are rejected.
+static SUBSCRIPTION_USER: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+
+async fn set_subscription_user(user_id: Option<String>) {
+    *SUBSCRIPTION_USER.write().await = user_id;
+}
+
+fn subscription_user_matches(active: Option<&str>, requested: Option<&str>) -> bool {
+    requested.is_none_or(|requested| active == Some(requested))
+}
+
 struct SyncTask {
     user_id: String,
+    generation: u64,
     handle: JoinHandle<()>,
+}
+
+struct PendingSyncTask {
+    handle: JoinHandle<()>,
+    start: tokio::sync::oneshot::Sender<()>,
 }
 
 /// Exactly one account owns the app-wide background sync task at a time.
 static SYNC_TASK: Lazy<Mutex<Option<SyncTask>>> = Lazy::new(|| Mutex::new(None));
+/// Sync startup and one-shot syncs take a read guard; account transitions take
+/// a write guard. This drains untracked sync_once work before a client/store is
+/// replaced or deleted and prevents start_sync from installing a task midway
+/// through that transition.
+static SYNC_LIFECYCLE: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
+static SYNC_GENERATION: AtomicU64 = AtomicU64::new(0);
+static NEXT_ROOM_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
+/// Accounts whose sync loop has been degraded from Sliding Sync to the
+/// traditional loop this session. Prevents the two loops from ping-ponging:
+/// a degraded loop must not re-probe and upgrade back only to fail again
+/// seconds later. Cleared on the next explicit `start_sync()` call so a
+/// fresh session (or a recovered server) can retry Sliding Sync.
+static SYNC_DEGRADED_ACCOUNTS: Lazy<RwLock<HashSet<String>>> =
+    Lazy::new(|| RwLock::new(HashSet::new()));
+tokio::task_local! {
+    static SYNC_EVENT_GENERATION: u64;
+}
 
 /// Runtime Sliding Sync subscription state for mounted room screens.
 ///
@@ -779,38 +1069,54 @@ static SYNC_TASK: Lazy<Mutex<Option<SyncTask>>> = Lazy::new(|| Mutex::new(None))
 /// Sliding Sync receipt extension only emits per-room receipts when the room
 /// is part of the response.
 struct RoomSubscriptionState {
-    /// Mounted chat screens by room. Counts distinguish overlapping routes for
-    /// the same room so disposing an older route cannot cancel a newer one.
-    desired: HashMap<String, usize>,
+    /// Mounted chat screens by room, keyed by opaque owner tokens so a stale
+    /// route from an old account cannot cancel a newer route for the same ID.
+    desired: HashMap<String, HashSet<String>>,
     /// The live Sliding Sync instance, present once the sync loop has built
     /// one (and reset to `None` when it's stopped).
     active: Option<matrix_sdk::sliding_sync::SlidingSync>,
+    active_generation: Option<u64>,
 }
 
 static ROOM_SUBSCRIPTION: Lazy<tokio::sync::Mutex<RoomSubscriptionState>> = Lazy::new(|| {
     tokio::sync::Mutex::new(RoomSubscriptionState {
         desired: HashMap::new(),
         active: None,
+        active_generation: None,
     })
 });
 
 impl RoomSubscriptionState {
-    fn add_desired(&mut self, room_id: &str) -> bool {
-        let count = self.desired.entry(room_id.to_owned()).or_default();
-        *count += 1;
-        *count == 1
+    fn add_desired(&mut self, room_id: &str, subscription_id: String) -> bool {
+        let subscriptions = self.desired.entry(room_id.to_owned()).or_default();
+        subscriptions.insert(subscription_id);
+        subscriptions.len() == 1
     }
 
-    fn remove_desired(&mut self, room_id: &str) -> bool {
-        let Some(count) = self.desired.get_mut(room_id) else {
+    fn remove_desired(&mut self, room_id: &str, subscription_id: &str) -> bool {
+        let Some(subscriptions) = self.desired.get_mut(room_id) else {
             return false;
         };
-        *count -= 1;
-        if *count > 0 {
+        if !subscriptions.remove(subscription_id) || !subscriptions.is_empty() {
             return false;
         }
         self.desired.remove(room_id);
         true
+    }
+
+    fn reset(&mut self, preserve_desired: bool) {
+        self.active = None;
+        self.active_generation = None;
+        if !preserve_desired {
+            self.desired.clear();
+        }
+    }
+
+    fn clear_active_for_generation(&mut self, generation: u64) {
+        if self.active_generation == Some(generation) {
+            self.active = None;
+            self.active_generation = None;
+        }
     }
 }
 
@@ -828,33 +1134,36 @@ fn receipt_extension_for_subscribed_rooms(
 
 #[cfg(test)]
 mod room_subscription_tests {
-    use super::{receipt_extension_for_subscribed_rooms, RoomSubscriptionState};
+    use super::{
+        receipt_extension_for_subscribed_rooms, subscription_user_matches, RoomSubscriptionState,
+    };
     use std::collections::HashMap;
 
     fn state() -> RoomSubscriptionState {
         RoomSubscriptionState {
             desired: HashMap::new(),
             active: None,
+            active_generation: None,
         }
     }
 
     #[test]
     fn duplicate_routes_only_unsubscribe_after_the_last_owner() {
         let mut state = state();
-        assert!(state.add_desired("!room:example.org"));
-        assert!(!state.add_desired("!room:example.org"));
-        assert!(!state.remove_desired("!room:example.org"));
+        assert!(state.add_desired("!room:example.org", "first".to_owned()));
+        assert!(!state.add_desired("!room:example.org", "second".to_owned()));
+        assert!(!state.remove_desired("!room:example.org", "first"));
         assert!(state.desired.contains_key("!room:example.org"));
-        assert!(state.remove_desired("!room:example.org"));
+        assert!(state.remove_desired("!room:example.org", "second"));
         assert!(!state.desired.contains_key("!room:example.org"));
     }
 
     #[test]
     fn stacked_rooms_are_tracked_independently() {
         let mut state = state();
-        assert!(state.add_desired("!first:example.org"));
-        assert!(state.add_desired("!second:example.org"));
-        assert!(state.remove_desired("!second:example.org"));
+        assert!(state.add_desired("!first:example.org", "first".to_owned()));
+        assert!(state.add_desired("!second:example.org", "second".to_owned()));
+        assert!(state.remove_desired("!second:example.org", "second"));
         assert!(state.desired.contains_key("!first:example.org"));
     }
 
@@ -865,29 +1174,182 @@ mod room_subscription_tests {
             serde_json::json!({"enabled": true, "rooms": ["*"]}),
         );
     }
+
+    #[test]
+    fn sync_restart_preserves_subscriptions_registered_before_start() {
+        let mut state = state();
+        state.add_desired("!room:example.org", "owner".to_owned());
+
+        state.reset(true);
+
+        assert!(state.desired.contains_key("!room:example.org"));
+    }
+
+    #[test]
+    fn account_change_clears_old_account_subscriptions() {
+        let mut state = state();
+        state.add_desired("!room:example.org", "old-owner".to_owned());
+
+        state.reset(false);
+
+        assert!(state.desired.is_empty());
+    }
+
+    #[test]
+    fn stale_owner_cannot_unsubscribe_a_new_account_route() {
+        let mut state = state();
+        state.add_desired("!room:example.org", "old-owner".to_owned());
+        state.reset(false);
+        state.add_desired("!room:example.org", "new-owner".to_owned());
+
+        assert!(!state.remove_desired("!room:example.org", "old-owner"));
+        assert!(state.desired.contains_key("!room:example.org"));
+    }
+
+    #[test]
+    fn stale_account_cannot_register_after_a_switch() {
+        assert!(!subscription_user_matches(
+            Some("@bob:example.org"),
+            Some("@alice:example.org"),
+        ));
+        assert!(subscription_user_matches(
+            Some("@bob:example.org"),
+            Some("@bob:example.org"),
+        ));
+    }
+
+    #[test]
+    fn stale_sync_cannot_clear_a_newer_published_generation() {
+        let mut state = state();
+        state.active_generation = Some(2);
+
+        state.clear_active_for_generation(1);
+        assert_eq!(state.active_generation, Some(2));
+
+        state.clear_active_for_generation(2);
+        assert_eq!(state.active_generation, None);
+    }
 }
 
-async fn stop_sync_task(user_id: Option<&str>) {
+#[cfg(test)]
+mod sync_lifecycle_tests {
+    use std::sync::Arc;
+    use tokio::sync::{oneshot, RwLock};
+
+    #[tokio::test]
+    async fn account_transition_drains_and_blocks_sync_admissions() {
+        let lifecycle = Arc::new(RwLock::new(()));
+        let running_sync = lifecycle.read().await;
+        let transition_lifecycle = lifecycle.clone();
+        let (transition_acquired_tx, transition_acquired_rx) = oneshot::channel();
+        let (release_transition_tx, release_transition_rx) = oneshot::channel();
+
+        let transition = tokio::spawn(async move {
+            let _transition = transition_lifecycle.write().await;
+            let _ = transition_acquired_tx.send(());
+            let _ = release_transition_rx.await;
+        });
+
+        tokio::task::yield_now().await;
+        drop(running_sync);
+        transition_acquired_rx.await.unwrap();
+
+        let waiting_sync_lifecycle = lifecycle.clone();
+        let waiting_sync = tokio::spawn(async move {
+            let _sync = waiting_sync_lifecycle.read().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting_sync.is_finished());
+
+        let _ = release_transition_tx.send(());
+        transition.await.unwrap();
+        waiting_sync.await.unwrap();
+    }
+}
+
+async fn stop_sync_task(user_id: Option<&str>, preserve_subscriptions: bool) -> u64 {
     let mut task = SYNC_TASK.lock().await;
-    let should_stop = task
-        .as_ref()
-        .is_some_and(|running| user_id.is_none_or(|id| running.user_id == id));
+    let should_stop = user_id.is_none()
+        || task
+            .as_ref()
+            .is_some_and(|running| user_id.is_some_and(|id| running.user_id == id));
+    let generation = if should_stop {
+        advance_sync_generation()
+    } else {
+        SYNC_GENERATION.load(Ordering::SeqCst)
+    };
     if should_stop {
-        if let Some(running) = task.take() {
-            running.handle.abort();
+        let running = task.take();
+        // A same-account restart must retain mounted rooms registered before
+        // start_sync. Account changes clear them so they cannot be replayed
+        // into another account's Sliding Sync instance.
+        let mut sub = ROOM_SUBSCRIPTION.lock().await;
+        let graceful_stop = running.as_ref().and_then(|running| {
+            (sub.active_generation == Some(running.generation))
+                .then(|| sub.active.clone())
+                .flatten()
+        });
+        let graceful_stop_requested = graceful_stop
+            .as_ref()
+            .is_some_and(|sliding_sync| sliding_sync.stop_sync().is_ok());
+        sub.reset(preserve_subscriptions);
+        drop(sub);
+        if !preserve_subscriptions {
+            let mut typing = TYPING_TASK.lock().await;
+            if let Some(task) = typing.take() {
+                task.handle.abort();
+            }
+        }
+        if let Some(running) = running {
+            if !graceful_stop_requested {
+                running.handle.abort();
+            }
+            // Sliding Sync deliberately finishes response processing in an
+            // uncancellable SDK task. Waiting for the loop after stop_sync()
+            // drains that work before an A -> B -> A account transition can
+            // make its old handlers look current again.
+            let user_id = running.user_id;
+            let _ = running.handle.await;
             app_log(
                 "info",
                 "sync",
-                format!("Stopped sync loop for user {}", running.user_id),
+                format!("Stopped sync loop for user {user_id}"),
             );
         }
-        // Drop the published Sliding Sync handle and the desired room so
-        // stale subscribers can't route room subscriptions to a dead
-        // instance, and a later session doesn't replay an old room.
-        let mut sub = ROOM_SUBSCRIPTION.lock().await;
-        sub.active = None;
-        sub.desired.clear();
     }
+    generation
+}
+
+async fn sync_generation_is_active(generation: u64, user_id: &str) -> bool {
+    if SYNC_GENERATION.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    let matches = ACTIVE_USER.read().await.as_deref() == Some(user_id);
+    matches && SYNC_GENERATION.load(Ordering::SeqCst) == generation
+}
+
+/// Retry-delay sleep that aborts early once the sync generation is no longer
+/// active. Without this, `stop_sync_task` (account switch, logout, restart)
+/// would wait out the whole delay while the loop sits in this sleep, because
+/// `stop_sync()` cannot interrupt a `sleep()`.
+async fn interruptible_retry_sleep(generation: u64, user_id: &str, duration: std::time::Duration) {
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        if !sync_generation_is_active(generation, user_id).await {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline - now;
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(100))).await;
+    }
+}
+
+async fn clear_published_sync(generation: u64) {
+    let mut subscriptions = ROOM_SUBSCRIPTION.lock().await;
+    subscriptions.clear_active_for_generation(generation);
 }
 
 /// Temporary client during login (before we know the user_id for a per-user dir).
@@ -905,76 +1367,169 @@ struct VerificationSession {
 static VERIFICATION_SESSION: Lazy<Arc<RwLock<Option<VerificationSession>>>> =
     Lazy::new(|| Arc::new(RwLock::new(None)));
 
-fn install_verification_event_handler(client: &Client) {
-    client.add_event_handler(
-        |event: ToDeviceKeyVerificationRequestEvent, client: Client| async move {
-            let Some(own_user_id) = client.user_id() else {
-                return;
-            };
-            if event.sender != own_user_id {
-                return;
-            }
+#[derive(Clone)]
+struct ClientIdentity {
+    user_id: String,
+    instance_id: u64,
+}
 
-            let session = VerificationSession {
-                user_id: event.sender.to_string(),
-                device_id: event.content.from_device.to_string(),
-                flow_id: event.content.transaction_id.to_string(),
-                incoming: true,
-                accepted: false,
-            };
-            *VERIFICATION_SESSION.write().await = Some(session);
-            app_log(
-                "info",
-                "encryption",
-                "Received a device verification request".to_string(),
-            );
+async fn active_generation_for_client(identity: &ClientIdentity) -> Option<u64> {
+    let generation = SYNC_EVENT_GENERATION
+        .try_with(|generation| *generation)
+        .unwrap_or_else(|_| SYNC_GENERATION.load(Ordering::SeqCst));
+    if !sync_generation_is_active(generation, &identity.user_id).await {
+        return None;
+    }
+    let is_current_instance = CLIENTS
+        .read()
+        .await
+        .get(&identity.user_id)
+        .is_some_and(|entry| entry.instance_id == identity.instance_id);
+    if !is_current_instance || !sync_generation_is_active(generation, &identity.user_id).await {
+        return None;
+    }
+    Some(generation)
+}
+
+async fn notify_sync_event_for_client(identity: &ClientIdentity, event: SyncEvent) {
+    if let Some(generation) = active_generation_for_client(identity).await {
+        notify_sync_event_for_generation(generation, event);
+    }
+}
+
+fn install_verification_event_handler(client: &Client, identity: ClientIdentity) {
+    client.add_event_handler(
+        move |event: ToDeviceKeyVerificationRequestEvent, client: Client| {
+            let identity = identity.clone();
+            async move {
+                let Some(own_user_id) = client.user_id() else {
+                    return;
+                };
+                if event.sender != own_user_id
+                    || active_generation_for_client(&identity).await.is_none()
+                {
+                    return;
+                }
+
+                let session = VerificationSession {
+                    user_id: event.sender.to_string(),
+                    device_id: event.content.from_device.to_string(),
+                    flow_id: event.content.transaction_id.to_string(),
+                    incoming: true,
+                    accepted: false,
+                };
+                *VERIFICATION_SESSION.write().await = Some(session);
+                app_log(
+                    "info",
+                    "encryption",
+                    "Received a device verification request".to_string(),
+                );
+            }
         },
     );
 }
 
-fn install_live_update_event_handlers(client: &Client) {
-    client.add_event_handler(|_event: AnySyncMessageLikeEvent, room: Room| async move {
-        notify_sync_event(SyncEvent::MessageSent {
-            room_id: room.room_id().to_string(),
-        });
+fn install_live_update_event_handlers(client: &Client, identity: ClientIdentity) {
+    let message_identity = identity.clone();
+    client.add_event_handler(move |_event: AnySyncMessageLikeEvent, room: Room| {
+        let identity = message_identity.clone();
+        async move {
+            notify_sync_event_for_client(
+                &identity,
+                SyncEvent::MessageSent {
+                    room_id: room.room_id().to_string(),
+                },
+            )
+            .await;
+        }
     });
 
-    client.add_event_handler(|event: SyncReceiptEvent, room: Room| async move {
-        let room_id = room.room_id().to_string();
-        let public_receipt_count = event
-            .content
-            .values()
-            .filter_map(|receipts| {
-                receipts.get(&matrix_sdk::ruma::events::receipt::ReceiptType::Read)
-            })
-            .map(|receipts| receipts.len())
-            .sum::<usize>();
-        app_log(
-            "info",
-            "receipts",
-            format!(
-                "Received explicit receipt event for room {room_id}: {} public receipt(s)",
-                public_receipt_count
-            ),
-        );
-        notify_sync_event(SyncEvent::MessageSent { room_id });
+    let receipt_identity = identity.clone();
+    client.add_event_handler(move |event: SyncReceiptEvent, room: Room| {
+        let identity = receipt_identity.clone();
+        async move {
+            let room_id = room.room_id().to_string();
+            let public_receipt_count = event
+                .content
+                .values()
+                .filter_map(|receipts| {
+                    receipts.get(&matrix_sdk::ruma::events::receipt::ReceiptType::Read)
+                })
+                .map(|receipts| receipts.len())
+                .sum::<usize>();
+            app_log(
+                "info",
+                "receipts",
+                format!(
+                    "Received explicit receipt event for room {room_id}: {} public receipt(s)",
+                    public_receipt_count
+                ),
+            );
+            notify_sync_event_for_client(&identity, SyncEvent::MessageSent { room_id }).await;
+        }
     });
 
+    let pinned_identity = identity.clone();
     client.add_event_handler(
-        |_event: SyncStateEvent<RoomPinnedEventsEventContent>, room: Room| async move {
-            notify_sync_event(SyncEvent::PinnedMessagesChanged {
-                room_id: room.room_id().to_string(),
-            });
+        move |_event: SyncStateEvent<RoomPinnedEventsEventContent>, room: Room| {
+            let identity = pinned_identity.clone();
+            async move {
+                notify_sync_event_for_client(
+                    &identity,
+                    SyncEvent::PinnedMessagesChanged {
+                        room_id: room.room_id().to_string(),
+                    },
+                )
+                .await;
+            }
         },
     );
 
-    let ignored_overrides_client = client.clone();
+    let member_identity = identity.clone();
     client.add_event_handler(
-        move |event: GlobalAccountDataEvent<IgnoredUserListEventContent>| {
-            let client = ignored_overrides_client.clone();
+        move |_event: SyncStateEvent<RoomMemberEventContent>, room: Room| {
+            let identity = member_identity.clone();
             async move {
+                notify_sync_event_for_client(
+                    &identity,
+                    SyncEvent::RoomMembersChanged {
+                        room_id: room.room_id().to_string(),
+                    },
+                )
+                .await;
+            }
+        },
+    );
+
+    let marked_unread_identity = identity.clone();
+    client.add_event_handler(
+        move |_event: RoomAccountDataEvent<MarkedUnreadEventContent>,
+              room: Room,
+              client: Client| {
+            let identity = marked_unread_identity.clone();
+            async move {
+                if active_generation_for_client(&identity).await.is_none() {
+                    return;
+                }
+                if let Some(key) = marked_unread_override_key(&client, &room) {
+                    let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
+                    reconcile_marked_unread_override(&mut overrides, &key);
+                }
+                notify_sync_event_for_client(&identity, SyncEvent::RoomListChanged).await;
+            }
+        },
+    );
+
+    let ignored_identity = identity;
+    client.add_event_handler(
+        move |event: GlobalAccountDataEvent<IgnoredUserListEventContent>, client: Client| {
+            let identity = ignored_identity.clone();
+            async move {
+                if active_generation_for_client(&identity).await.is_none() {
+                    return;
+                }
                 reconcile_ignored_user_overrides(&client, &event.content).await;
-                notify_sync_event(SyncEvent::IgnoredUsersChanged);
+                notify_sync_event_for_client(&identity, SyncEvent::IgnoredUsersChanged).await;
             }
         },
     );
@@ -999,7 +1554,7 @@ async fn wait_for_e2ee_initialization(client: &Client, context: &str) {
     );
 }
 
-fn install_room_key_event_handler(client: &Client) {
+fn install_room_key_event_handler(client: &Client, identity: ClientIdentity) -> JoinHandle<()> {
     let client = client.clone();
     tokio::spawn(async move {
         let Some(mut stream) = client.encryption().room_keys_received_stream().await else {
@@ -1033,7 +1588,8 @@ fn install_room_key_event_handler(client: &Client) {
                         ),
                     );
                     for room_id in rooms {
-                        notify_sync_event(SyncEvent::MessageSent { room_id });
+                        notify_sync_event_for_client(&identity, SyncEvent::MessageSent { room_id })
+                            .await;
                     }
                 }
                 Err(error) => {
@@ -1044,11 +1600,11 @@ fn install_room_key_event_handler(client: &Client) {
                             "Room-key stream lagged ({error}); refreshing visible encrypted timelines"
                         ),
                     );
-                    notify_sync_event(SyncEvent::SyncCompleted);
+                    notify_sync_event_for_client(&identity, SyncEvent::SyncCompleted).await;
                 }
             }
         }
-    });
+    })
 }
 
 fn sanitize_for_path(s: &str) -> String {
@@ -1069,19 +1625,57 @@ fn build_sdk_data_dir(base: &str, user_id: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-/// Return the currently active client, or the pending one if no account is active yet.
-async fn get_client() -> Option<Client> {
+async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), String> {
+    let sdk_dir = build_sdk_data_dir(data_dir, Some(user_id));
+    if !sdk_dir.exists() {
+        return Ok(());
+    }
+    app_log(
+        "info",
+        "auth",
+        format!("Deleting SDK store for {user_id}: {}", sdk_dir.display()),
+    );
+    info!("Deleting SDK store for {user_id}: {}", sdk_dir.display());
+    remove_dir_all_if_exists(&sdk_dir)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("Failed to delete SDK store for {user_id}: {error}"))
+}
+
+struct ClientLease {
+    client: Client,
+    _lifecycle: tokio::sync::RwLockReadGuard<'static, ()>,
+}
+
+impl Deref for ClientLease {
+    type Target = Client;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+/// Return the currently active client, or the pending one if no account is
+/// active yet. The lease keeps account removal/replacement from dropping its
+/// SQLite store while any API call still holds the Client or a derived Room.
+async fn get_client() -> Option<ClientLease> {
+    let lifecycle = SYNC_LIFECYCLE.read().await;
     let active = ACTIVE_USER.read().await;
-    if let Some(user_id) = active.as_ref() {
+    let client = if let Some(user_id) = active.as_ref() {
         let clients = CLIENTS.read().await;
         clients.get(user_id).map(|e| e.client.clone())
     } else {
         PENDING.read().await.as_ref().map(|p| p.client.clone())
-    }
+    }?;
+    Some(ClientLease {
+        client,
+        _lifecycle: lifecycle,
+    })
 }
 
 /// After a successful auth on the pending client, migrate it to a per-user store.
 async fn finalize_pending() -> Result<String, String> {
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
     let (pending_client, data_dir, homeserver_url) = {
         let pending = PENDING.read().await;
         let p = pending.as_ref().ok_or("No pending client to finalize")?;
@@ -1116,6 +1710,9 @@ async fn finalize_pending() -> Result<String, String> {
         format!("finalize_pending: starting for user {}", user_id),
     );
     info!("finalize_pending: starting for user {}", user_id);
+    if CLIENTS.read().await.contains_key(&user_id) {
+        return Err("This account is already signed in.".to_string());
+    }
 
     // Build per-user directory
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
@@ -1123,11 +1720,7 @@ async fn finalize_pending() -> Result<String, String> {
     // A password login creates the crypto identity in the pending store. Keep
     // that exact store: rebuilding an empty store with the same Matrix device
     // ID discards the Olm account and makes encrypted messages undecryptable.
-    stop_sync_task(Some(&user_id)).await;
-    {
-        let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id);
-    }
+    stop_sync_task(Some(&user_id), false).await;
     clear_account_runtime_state(&user_id).await;
 
     // Release every reference before moving SQLite files (required on Windows
@@ -1221,11 +1814,19 @@ async fn finalize_pending() -> Result<String, String> {
         format!("finalize_pending: session restored for {}", user_id),
     );
     info!("finalize_pending: session restored for {}", user_id);
-    install_verification_event_handler(&new_client);
-    install_live_update_event_handlers(&new_client);
-    install_room_key_event_handler(&new_client);
+    let instance_id = NEXT_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    let identity = ClientIdentity {
+        user_id: user_id.clone(),
+        instance_id,
+    };
+    install_verification_event_handler(&new_client, identity.clone());
+    install_live_update_event_handlers(&new_client, identity.clone());
+    let room_key_task = install_room_key_event_handler(&new_client, identity);
 
-    // Store in the multi-account map
+    // Stop event publication before replacing the client entry. This orders
+    // callbacks from the old instance before the identity swap.
+    set_subscription_user(None).await;
+    stop_sync_task(None, false).await;
     {
         let mut clients = CLIENTS.write().await;
         clients.insert(
@@ -1233,15 +1834,19 @@ async fn finalize_pending() -> Result<String, String> {
             ClientEntry {
                 client: new_client,
                 data_dir: data_dir.clone(),
+                instance_id,
+                room_key_task,
             },
         );
     }
 
-    // Set as active
+    // Invalidate builders on both sides of the active-account write.
     {
         let mut active = ACTIVE_USER.write().await;
         *active = Some(user_id.clone());
     }
+    stop_sync_task(None, false).await;
+    set_subscription_user(Some(user_id.clone())).await;
 
     app_log("info", "auth", format!("Account finalized: {}", user_id));
     info!("Account finalized: {}", user_id);
@@ -1338,6 +1943,7 @@ pub struct RoomDetails {
     pub avatar_url: Option<String>,
     pub name_event_id: Option<String>,
     pub avatar_event_id: Option<String>,
+    pub topic_event_id: Option<String>,
     pub topic: Option<String>,
 }
 
@@ -1345,6 +1951,7 @@ pub struct RoomDetails {
 #[derive(Clone, Debug)]
 pub struct RoomDetailsUpdate {
     pub name_event_id: Option<String>,
+    pub topic_event_id: Option<String>,
     pub name_error: Option<String>,
     pub topic_error: Option<String>,
 }
@@ -1393,6 +2000,15 @@ async fn room_avatar_event_id(room: &Room) -> Option<String> {
     raw.deserialize().ok()?.event_id().map(ToString::to_string)
 }
 
+async fn room_topic_event_id(room: &Room) -> Option<String> {
+    let raw = room
+        .get_state_event_static::<RoomTopicEventContent>()
+        .await
+        .ok()
+        .flatten()?;
+    raw.deserialize().ok()?.event_id().map(ToString::to_string)
+}
+
 async fn room_to_chat_room(
     room: &matrix_sdk::Room,
     ignored_user_ids: Option<&std::collections::HashSet<String>>,
@@ -1414,7 +2030,16 @@ async fn room_to_chat_room(
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let (name_event_id, avatar_event_id) =
         tokio::join!(room_name_event_id(room), room_avatar_event_id(room));
-    let unread_count = room.unread_notification_counts().notification_count as i32;
+    // `notification_count` is 0 for muted rooms, which would hide the unread
+    // indicator entirely for them. Fall back to the client-side unread count
+    // (tracked from the last read receipt, independent of push rules) so
+    // muted rooms still show a subdued unread marker.
+    let server_unread = room.unread_notification_counts().notification_count as i32;
+    let unread_count = if server_unread > 0 {
+        server_unread
+    } else {
+        room.num_unread_messages() as i32
+    };
     let is_marked_unread = effective_marked_unread(&room.client(), room).await;
     let (mut last_message, mut last_message_sender_id, last_message_time, last_event_id) =
         get_last_message_info(room);
@@ -1562,7 +2187,7 @@ fn uint_to_i32(value: Option<matrix_sdk::ruma::UInt>) -> Option<i32> {
 }
 
 fn image_info_dimensions(
-    info: Option<&Box<matrix_sdk::ruma::events::room::ImageInfo>>,
+    info: Option<&matrix_sdk::ruma::events::room::ImageInfo>,
 ) -> (Option<i32>, Option<i32>) {
     info.map(|info| (uint_to_i32(info.width), uint_to_i32(info.height)))
         .unwrap_or((None, None))
@@ -2577,22 +3202,17 @@ pub async fn list_accounts() -> Vec<AccountInfo> {
 /// Switch the active account. Returns true if the account exists and was activated.
 #[frb]
 pub async fn switch_account(user_id: String) -> bool {
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
     let clients = CLIENTS.read().await;
     if clients.contains_key(&user_id) {
         drop(clients);
-        let mut sync_task = SYNC_TASK.lock().await;
-        if let Some(running) = sync_task.take() {
-            running.handle.abort();
-            app_log(
-                "info",
-                "sync",
-                format!("Stopped sync loop for user {}", running.user_id),
-            );
-        }
+        set_subscription_user(None).await;
+        stop_sync_task(None, false).await;
         let mut active = ACTIVE_USER.write().await;
         *active = Some(user_id.clone());
         drop(active);
-        drop(sync_task);
+        stop_sync_task(None, false).await;
+        set_subscription_user(Some(user_id.clone())).await;
         clear_verification_session().await;
         clear_timeline_cache().await;
         app_log("info", "auth", format!("Switched to account: {}", user_id));
@@ -2610,7 +3230,16 @@ pub async fn switch_account(user_id: String) -> bool {
 
 /// Logout the active user and remove its data.
 #[frb]
-pub async fn logout() -> Result<(), String> {
+#[derive(Clone, Debug)]
+pub struct AccountRemovalResult {
+    /// The account is already removed when this is set; only stale local SDK
+    /// files may remain and can be cleaned on a later app start.
+    pub cleanup_error: Option<String>,
+}
+
+#[frb]
+pub async fn logout() -> Result<AccountRemovalResult, String> {
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
     let active_user = {
         let active = ACTIVE_USER.read().await;
         active.clone()
@@ -2618,16 +3247,17 @@ pub async fn logout() -> Result<(), String> {
 
     let user_id = active_user.ok_or("No active account to logout")?;
     clear_verification_session().await;
-    stop_sync_task(Some(&user_id)).await;
+    set_subscription_user(None).await;
+    stop_sync_task(None, false).await;
     clear_timeline_cache().await;
 
-    let (client, data_dir) = {
-        let clients = CLIENTS.read().await;
-        let entry = clients
-            .get(&user_id)
-            .ok_or("Active account missing from store")?;
-        (entry.client.clone(), entry.data_dir.clone())
+    let entry = {
+        let mut clients = CLIENTS.write().await;
+        clients
+            .remove(&user_id)
+            .ok_or("Active account missing from store")?
     };
+    let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     if client.matrix_auth().logged_in() {
         if let Err(e) = client.matrix_auth().logout().await {
@@ -2640,30 +3270,16 @@ pub async fn logout() -> Result<(), String> {
         }
     }
 
-    {
-        let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id);
-    }
     clear_account_runtime_state(&user_id).await;
-
-    // Delete the per-user SDK data directory after the client has been removed.
-    let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
-    if sdk_dir.exists() {
-        app_log(
-            "info",
-            "auth",
-            format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()),
-        );
-        info!("Deleting SDK store for {}: {}", user_id, sdk_dir.display());
-        if let Err(e) = remove_dir_all_if_exists(&sdk_dir).await {
-            warn!("Failed to delete SDK store: {e}");
-        }
-    }
+    drop(client);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let store_delete_result = delete_account_sdk_store(&data_dir, &user_id).await;
 
     // Update active user to another available account, or None
     let clients = CLIENTS.write().await;
     let mut active = ACTIVE_USER.write().await;
-    if let Some((next_id, _)) = clients.iter().next() {
+    let next_user_id = clients.iter().next().map(|(id, _)| id.clone());
+    if let Some(next_id) = next_user_id.as_ref() {
         *active = Some(next_id.clone());
         app_log(
             "info",
@@ -2680,25 +3296,40 @@ pub async fn logout() -> Result<(), String> {
         );
         info!("No more accounts, active cleared");
     }
+    drop(active);
+    drop(clients);
+    // A start_sync already building when logout began can install itself
+    // after the first stop while ACTIVE_USER still names this account. Stop
+    // once more after changing ACTIVE_USER, before new routes may subscribe.
+    stop_sync_task(None, false).await;
+    set_subscription_user(next_user_id).await;
 
-    Ok(())
+    Ok(AccountRemovalResult {
+        cleanup_error: store_delete_result.err(),
+    })
 }
 
 /// Remove a specific account by user_id (logout + delete data).
 #[frb]
-pub async fn remove_account(user_id: String) -> Result<(), String> {
+pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, String> {
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
     let removing_active = ACTIVE_USER.read().await.as_ref() == Some(&user_id);
     if removing_active {
         clear_verification_session().await;
         clear_timeline_cache().await;
+        set_subscription_user(None).await;
     }
-    stop_sync_task(Some(&user_id)).await;
+    if removing_active {
+        stop_sync_task(None, false).await;
+    } else {
+        stop_sync_task(Some(&user_id), false).await;
+    }
 
-    let (client, data_dir) = {
-        let clients = CLIENTS.read().await;
-        let entry = clients.get(&user_id).ok_or("Account not found")?;
-        (entry.client.clone(), entry.data_dir.clone())
+    let entry = {
+        let mut clients = CLIENTS.write().await;
+        clients.remove(&user_id).ok_or("Account not found")?
     };
+    let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     if client.matrix_auth().logged_in() {
         if let Err(e) = client.matrix_auth().logout().await {
@@ -2711,34 +3342,29 @@ pub async fn remove_account(user_id: String) -> Result<(), String> {
         }
     }
 
-    {
-        let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id);
-    }
     clear_account_runtime_state(&user_id).await;
-
-    // Delete the per-user SDK data directory
-    let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
-    if sdk_dir.exists() {
-        app_log(
-            "info",
-            "auth",
-            format!("Deleting SDK store for {}: {}", user_id, sdk_dir.display()),
-        );
-        info!("Deleting SDK store for {}: {}", user_id, sdk_dir.display());
-        if let Err(e) = remove_dir_all_if_exists(&sdk_dir).await {
-            warn!("Failed to delete SDK store: {e}");
-        }
-    }
+    drop(client);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let store_delete_result = delete_account_sdk_store(&data_dir, &user_id).await;
 
     // If this was the active account, switch to another or clear
     let mut active = ACTIVE_USER.write().await;
+    let mut next_user_id = active.clone();
     if active.as_ref() == Some(&user_id) {
         let clients = CLIENTS.read().await;
-        *active = clients.iter().next().map(|(id, _)| id.clone());
+        next_user_id = clients.iter().next().map(|(id, _)| id.clone());
+        *active = next_user_id.clone();
+    }
+    drop(active);
+    if removing_active {
+        // Close the same start_sync installation race as logout().
+        stop_sync_task(None, false).await;
+        set_subscription_user(next_user_id).await;
     }
 
-    Ok(())
+    Ok(AccountRemovalResult {
+        cleanup_error: store_delete_result.err(),
+    })
 }
 
 // ── Session persistence ──────────────────────────────────────────────
@@ -2776,6 +3402,11 @@ pub async fn get_session() -> Option<StoredSession> {
 /// Uses a per-user store directory so multiple accounts coexist.
 #[frb]
 pub async fn restore_session(session: StoredSession, data_dir: String) -> Result<(), String> {
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+    if CLIENTS.read().await.contains_key(&session.user_id) {
+        return Ok(());
+    }
+    stop_sync_task(Some(&session.user_id), false).await;
     init_log_store(&data_dir);
     app_log(
         "info",
@@ -2837,12 +3468,19 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
             msg
         })?;
     wait_for_e2ee_initialization(&client, "session restore").await;
-    install_verification_event_handler(&client);
-    install_live_update_event_handlers(&client);
-    install_room_key_event_handler(&client);
+    let instance_id = NEXT_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    let identity = ClientIdentity {
+        user_id: session.user_id.clone(),
+        instance_id,
+    };
+    install_verification_event_handler(&client, identity.clone());
+    install_live_update_event_handlers(&client, identity.clone());
+    let room_key_task = install_room_key_event_handler(&client, identity);
 
     // Add to multi-account store, dropping any runtime state bound to a
     // previous client for this account (e.g. after an engine rebuild).
+    set_subscription_user(None).await;
+    stop_sync_task(None, false).await;
     clear_account_runtime_state(&session.user_id).await;
     {
         let mut clients = CLIENTS.write().await;
@@ -2851,15 +3489,20 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
             ClientEntry {
                 client,
                 data_dir: data_dir.clone(),
+                instance_id,
+                room_key_task,
             },
         );
     }
 
-    // Set as active
+    // Set as active while closing the installation window for a sync builder
+    // that started against the previously active account.
     {
         let mut active = ACTIVE_USER.write().await;
         *active = Some(session.user_id.clone());
     }
+    stop_sync_task(None, false).await;
+    set_subscription_user(Some(session.user_id.clone())).await;
 
     app_log(
         "info",
@@ -2882,7 +3525,7 @@ fn active_session_meta(client: &Client) -> Result<(String, String), String> {
     ))
 }
 
-async fn current_verification_session() -> Result<(Client, VerificationSession), String> {
+async fn current_verification_session() -> Result<(ClientLease, VerificationSession), String> {
     let client = get_client().await.ok_or("No active client")?;
     let session = VERIFICATION_SESSION
         .read()
@@ -3198,6 +3841,8 @@ pub async fn get_encryption_recovery_info() -> Result<EncryptionRecoveryInfo, St
 
 #[frb]
 pub async fn recover_encryption(recovery_key_or_passphrase: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let value = recovery_key_or_passphrase.trim();
     if value.is_empty() {
         return Err("Recovery key or passphrase is empty".into());
@@ -3209,7 +3854,7 @@ pub async fn recover_encryption(recovery_key_or_passphrase: String) -> Result<()
         .recover(value)
         .await
         .map_err(|e| format!("Failed to recover encryption data: {e}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -3254,6 +3899,10 @@ pub async fn sync_once() -> Result<(), String> {
         "No client created.".to_string()
     })?;
     let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+    if !sync_generation_is_active(generation, &user_id).await {
+        return Err("Active account changed before syncing.".to_string());
+    }
     let hs = client.homeserver().to_string();
     app_log(
         "info",
@@ -3263,18 +3912,25 @@ pub async fn sync_once() -> Result<(), String> {
             user_id
         ),
     );
-    set_connection_status(ConnectionStatus::Connecting);
+    set_connection_status_for_generation(generation, ConnectionStatus::Connecting);
 
-    client
-        .event_cache()
-        .subscribe()
-        .map_err(|e| format!("Failed to subscribe to the event cache: {e}"))?;
+    if let Err(error) = client.event_cache().subscribe() {
+        set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
+        return Err(format!("Failed to subscribe to the event cache: {error}"));
+    }
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        client.sync_once(matrix_sdk::config::SyncSettings::default()),
+        SYNC_EVENT_GENERATION.scope(
+            generation,
+            client.sync_once(matrix_sdk::config::SyncSettings::default()),
+        ),
     )
     .await;
+
+    if !sync_generation_is_active(generation, &user_id).await {
+        return Err("Active account changed while syncing.".to_string());
+    }
 
     match result {
         Ok(Ok(_)) => {
@@ -3283,14 +3939,14 @@ pub async fn sync_once() -> Result<(), String> {
                 "sync",
                 format!("sync_once: completed for user {}", user_id),
             );
-            set_connection_status(ConnectionStatus::Connected);
-            notify_sync_event(SyncEvent::SyncCompleted);
+            set_connection_status_for_generation(generation, ConnectionStatus::Connected);
+            notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
             Ok(())
         }
         Ok(Err(e)) => {
             let msg = format!("sync_once: failed for user {}: {e}", user_id);
             app_log("error", "sync", msg.clone());
-            set_connection_status(ConnectionStatus::Disconnected);
+            set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
             Err(format!("Sync failed: {e}"))
         }
         Err(_) => {
@@ -3299,7 +3955,7 @@ pub async fn sync_once() -> Result<(), String> {
                 user_id
             );
             app_log("error", "sync", msg.clone());
-            set_connection_status(ConnectionStatus::Disconnected);
+            set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
             Err("Sync timed out after 10 seconds. Check your network connection and homeserver URL.".to_string())
         }
     }
@@ -3309,98 +3965,238 @@ pub async fn sync_once() -> Result<(), String> {
 /// Falls back to traditional sync_once loop if Sliding Sync is unavailable.
 #[frb]
 pub async fn start_sync() -> Result<(), String> {
-    let client = get_client().await.ok_or_else(|| {
-        app_log("error", "sync", "start_sync: no client created".to_string());
-        set_connection_status(ConnectionStatus::Disconnected);
-        "No client created.".to_string()
-    })?;
-    let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
-    let hs = client.homeserver().to_string();
-    app_log(
-        "info",
-        "sync",
-        format!(
-            "start_sync: beginning for user {} (homeserver: {hs})",
-            user_id
-        ),
-    );
+    // A fresh, explicit start (app launch, manual reconnect) resets any
+    // earlier degrade decision so a recovered server can use Sliding Sync
+    // again. In-session upgrades from the traditional loop do not clear it.
+    {
+        let mut degraded = SYNC_DEGRADED_ACCOUNTS.write().await;
+        degraded.clear();
+    }
+    start_sync_internal(false).await
+}
 
-    client.event_cache().subscribe().map_err(|e| {
-        set_connection_status(ConnectionStatus::Disconnected);
-        format!("Failed to subscribe to the event cache: {e}")
-    })?;
+/// Shared implementation behind [`start_sync`]. `force_traditional` is used
+/// by the sync loops themselves when they decide to switch modes at runtime:
+/// a Sliding Sync loop that fails repeatedly degrades to the traditional
+/// loop, and the traditional loop re-probes for MSC3575 support and upgrades
+/// back — the probe (and the /versions request it makes) is skipped when
+/// forcing the traditional mode to avoid a pointless round-trip.
+fn start_sync_internal(
+    force_traditional: bool,
+) -> std::pin::Pin<Box<dyn futures_util::Future<Output = Result<(), String>> + Send + 'static>> {
+    Box::pin(async move {
+        let client = get_client().await.ok_or_else(|| {
+            app_log("error", "sync", "start_sync: no client created".to_string());
+            "No client created.".to_string()
+        })?;
+        let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
+        let hs = client.homeserver().to_string();
+        app_log(
+            "info",
+            "sync",
+            format!(
+                "start_sync: beginning for user {} (homeserver: {hs})",
+                user_id
+            ),
+        );
 
-    stop_sync_task(None).await;
-
-    // Try Sliding Sync first
-    let handle = match try_start_sliding_sync(client.clone()).await {
-        Ok(handle) => {
-            app_log(
-                "info",
-                "sync",
-                format!("start_sync: Sliding Sync started for user {}", user_id),
-            );
-            handle
+        let generation = stop_sync_task(None, true).await;
+        if !sync_generation_is_active(generation, &user_id).await {
+            return Err("Active account changed while starting sync.".to_string());
         }
-        Err(e) => {
-            app_log(
-                "warn",
-                "sync",
-                format!(
-                    "start_sync: Sliding Sync failed ({}), falling back to traditional sync loop",
-                    e
-                ),
-            );
-            // Fallback: traditional sync loop
-            let loop_user_id = user_id.clone();
-            tokio::spawn(async move {
+        if let Err(error) = client.event_cache().subscribe() {
+            set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
+            return Err(format!("Failed to subscribe to the event cache: {error}"));
+        }
+
+        // Try Sliding Sync first
+        let pending = if force_traditional {
+            Err("Traditional sync mode forced by the running sync loop".to_string())
+        } else {
+            try_start_sliding_sync(client.clone(), generation, user_id.clone()).await
+        };
+        let pending = match pending {
+            Ok(pending) => {
                 app_log(
                     "info",
                     "sync",
-                    format!("Traditional sync loop started for user {}", loop_user_id),
+                    format!("start_sync: Sliding Sync started for user {}", user_id),
                 );
-                loop {
-                    set_connection_status(ConnectionStatus::Updating);
-                    match client
-                        .sync_once(matrix_sdk::config::SyncSettings::default())
-                        .await
-                    {
-                        Ok(_) => {
-                            app_log("info", "sync", "Traditional sync completed".to_string());
-                            set_connection_status(ConnectionStatus::Connected);
-                            notify_sync_event(SyncEvent::SyncCompleted);
-                        }
-                        Err(e) => {
-                            app_log("error", "sync", format!("Traditional sync error: {e}"));
-                            set_connection_status(ConnectionStatus::Disconnected);
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        }
+                pending
+            }
+            Err(e) => {
+                app_log(
+                    "warn",
+                    "sync",
+                    format!(
+                    "start_sync: Sliding Sync failed ({}), falling back to traditional sync loop",
+                    e
+                ),
+                );
+                // Fallback: traditional sync loop
+                let loop_user_id = user_id.clone();
+                let (start, start_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(async move {
+                    if start_rx.await.is_err() {
+                        return;
                     }
-                }
-            })
+                    SYNC_EVENT_GENERATION
+                        .scope(generation, async move {
+                            app_log(
+                                "info",
+                                "sync",
+                                format!("Traditional sync loop started for user {}", loop_user_id),
+                            );
+                            // Re-probe for MSC3575 after a few successful syncs.
+                            // The initial probe may have failed because /versions
+                            // was unreachable (server up but network flaky at
+                            // startup); upgrading back to Sliding Sync restores
+                            // receipt push and the room subscription extension.
+                            let mut successful_syncs: u32 = 0;
+                            loop {
+                                if !sync_generation_is_active(generation, &loop_user_id).await {
+                                    break;
+                                }
+                                set_connection_status_for_generation(
+                                    generation,
+                                    ConnectionStatus::Updating,
+                                );
+                                match client
+                                    .sync_once(matrix_sdk::config::SyncSettings::default())
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        if !sync_generation_is_active(generation, &loop_user_id)
+                                            .await
+                                        {
+                                            break;
+                                        }
+                                        app_log(
+                                            "info",
+                                            "sync",
+                                            "Traditional sync completed".to_string(),
+                                        );
+                                        set_connection_status_for_generation(
+                                            generation,
+                                            ConnectionStatus::Connected,
+                                        );
+                                        notify_sync_event_for_generation(
+                                            generation,
+                                            SyncEvent::SyncCompleted,
+                                        );
+                                        successful_syncs += 1;
+                                        // Only upgrade back to Sliding Sync when
+                                        // this session never degraded away from it
+                                        // (the probe was flaky at startup). After
+                                        // an explicit degrade, re-probing would
+                                        // ping-pong: fail 5x -> traditional ->
+                                        // probe OK -> sliding -> fail 5x -> ...
+                                        let degraded = SYNC_DEGRADED_ACCOUNTS
+                                            .read()
+                                            .await
+                                            .contains(&loop_user_id);
+                                        if successful_syncs >= 10
+                                            && !degraded
+                                            && !client
+                                                .available_sliding_sync_versions()
+                                                .await
+                                                .is_empty()
+                                        {
+                                            app_log(
+                                                "info",
+                                                "sync",
+                                                "Sliding Sync support detected; upgrading loop"
+                                                    .to_string(),
+                                            );
+                                            // Switch mode by restarting the whole
+                                            // sync task (this task ends first, so
+                                            // the restart is not self-aborting).
+                                            // Fire-and-forget: the restarted task
+                                            // stops this one via stop_sync_task.
+                                            let _handle = tokio::spawn(async move {
+                                                let _ = start_sync_internal(false).await;
+                                            });
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if !sync_generation_is_active(generation, &loop_user_id)
+                                            .await
+                                        {
+                                            break;
+                                        }
+                                        app_log(
+                                            "error",
+                                            "sync",
+                                            format!("Traditional sync error: {e}"),
+                                        );
+                                        set_connection_status_for_generation(
+                                            generation,
+                                            ConnectionStatus::Disconnected,
+                                        );
+                                        successful_syncs = 0;
+                                        interruptible_retry_sleep(
+                                            generation,
+                                            &loop_user_id,
+                                            std::time::Duration::from_secs(5),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        })
+                        .await;
+                });
+                PendingSyncTask { handle, start }
+            }
+        };
+
+        if !sync_generation_is_active(generation, &user_id).await {
+            pending.handle.abort();
+            clear_published_sync(generation).await;
+            return Err("Active account changed while starting sync.".to_string());
         }
-    };
 
-    let mut current_task = SYNC_TASK.lock().await;
-    let active_user = ACTIVE_USER.read().await.clone();
-    if active_user.as_deref() != Some(&user_id) {
-        handle.abort();
-        set_connection_status(ConnectionStatus::Disconnected);
-        return Err("Active account changed while starting sync.".to_string());
-    }
-
-    if let Some(running) = current_task.take() {
-        running.handle.abort();
-    }
-    *current_task = Some(SyncTask { user_id, handle });
-    Ok(())
+        let mut current_task = SYNC_TASK.lock().await;
+        if !sync_generation_is_active(generation, &user_id).await {
+            pending.handle.abort();
+            drop(current_task);
+            clear_published_sync(generation).await;
+            return Err("Active account changed while starting sync.".to_string());
+        }
+        if let Some(running) = current_task.take() {
+            running.handle.abort();
+        }
+        *current_task = Some(SyncTask {
+            user_id,
+            generation,
+            handle: pending.handle,
+        });
+        let _ = pending.start.send(());
+        Ok(())
+    })
 }
 
 /// Try to set up Sliding Sync with the SDK's built-in support.
-async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String> {
+async fn try_start_sliding_sync(
+    client: Client,
+    generation: u64,
+    user_id: String,
+) -> Result<PendingSyncTask, String> {
     use futures_util::StreamExt;
     use matrix_sdk::ruma::events::StateEventType as RoomStateType;
     use matrix_sdk::sliding_sync::{SlidingSync, SlidingSyncList, SlidingSyncMode, Version};
+
+    // Probe the server before committing to Sliding Sync. `build()` below is
+    // purely local and `Version::Native` skips the version check, so without
+    // this probe a server without MSC3575 (matrix.org, mozilla.org, …) would
+    // fail on the first sync request and then retry forever in the rebuild
+    // loop instead of falling back to the traditional sync loop. The probe
+    // also returns empty when /versions is unreachable, in which case the
+    // traditional loop is the safer choice anyway.
+    if client.available_sliding_sync_versions().await.is_empty() {
+        return Err("Homeserver does not advertise Sliding Sync (MSC3575) support".to_string());
+    }
 
     async fn build_sliding_sync(client: &Client) -> Result<SlidingSync, String> {
         client
@@ -3442,77 +4238,182 @@ async fn try_start_sliding_sync(client: Client) -> Result<JoinHandle<()>, String
 
     build_sliding_sync(&client).await?;
 
-    // Spawn the sync loop
+    // The loop waits until start_sync installs its handle in SYNC_TASK. This
+    // makes every response-processing task reachable by account transitions.
+    let (start, start_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        app_log("info", "sync", "Sliding Sync loop started".to_string());
-        loop {
-            let sliding_sync = match build_sliding_sync(&client).await {
-                Ok(sync) => sync,
-                Err(e) => {
-                    app_log("error", "sync", format!("Sliding Sync rebuild failed: {e}"));
-                    set_connection_status(ConnectionStatus::Disconnected);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-            // Atomically publish the live instance and replay mounted rooms'
-            // subscriptions onto it. The old instance (and its sticky
-            // subscriptions) is gone after a reconnect, so without replay the
-            // mounted rooms would stop receiving receipt deltas until re-entry.
-            // subscribe_to_rooms is synchronous, so we do it
-            // under the same lock to keep desired/active consistent.
-            let mut sub_state = ROOM_SUBSCRIPTION.lock().await;
-            sub_state.active = Some(sliding_sync.clone());
-            for room_id in sub_state.desired.keys() {
-                if let Ok(parsed) = matrix_sdk::ruma::RoomId::parse(room_id.as_str()) {
-                    sliding_sync.subscribe_to_rooms(
-                        &[&parsed],
-                        Some(live_room_subscription()),
-                        false,
-                    );
-                }
-            }
-            drop(sub_state);
-
-            let stream = sliding_sync.sync();
-            futures_util::pin_mut!(stream);
-            while let Some(update) = stream.next().await {
-                match update {
-                    Ok(summary) => {
-                        app_log(
-                            "info",
-                            "sync",
-                            format!("Sliding Sync update: {} rooms", summary.rooms.len()),
-                        );
-                        set_connection_status(ConnectionStatus::Connected);
-                        notify_sync_event(SyncEvent::SyncCompleted);
-                    }
-                    Err(e) => {
-                        app_log("error", "sync", format!("Sliding Sync error: {e}"));
-                        set_connection_status(ConnectionStatus::Disconnected);
-                        // The instance has failed; drop the published handle
-                        // so subscribe/unsubscribe calls during the retry
-                        // delay don't mutate a stale, soon-discarded instance.
-                        ROOM_SUBSCRIPTION.lock().await.active = None;
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                }
-            }
-            app_log(
-                "warn",
-                "sync",
-                "Sliding Sync stream ended; restarting".to_string(),
-            );
-            set_connection_status(ConnectionStatus::Disconnected);
-            // The stream ended (e.g. server closed the connection); the
-            // instance is no longer live, so clear the handle before the
-            // retry delay to avoid routing room subscriptions to it.
-            ROOM_SUBSCRIPTION.lock().await.active = None;
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if start_rx.await.is_err() {
+            return;
         }
+        SYNC_EVENT_GENERATION
+            .scope(generation, async move {
+                app_log("info", "sync", "Sliding Sync loop started".to_string());
+                // Consecutive stream/rebuild failures above this threshold
+                // degrade to the traditional sync loop instead of retrying
+                // forever: a server that advertises MSC3575 but fails every
+                // request (or a proxy mangling the endpoint) must not pin the
+                // app to an unusable sync path for the whole session.
+                const DEGRADE_AFTER_FAILURES: u32 = 5;
+                let mut consecutive_failures: u32 = 0;
+                'rebuild: loop {
+                    if !sync_generation_is_active(generation, &user_id).await {
+                        break;
+                    }
+                    let sliding_sync = match build_sliding_sync(&client).await {
+                        Ok(sync) => sync,
+                        Err(e) => {
+                            if !sync_generation_is_active(generation, &user_id).await {
+                                break;
+                            }
+                            app_log("error", "sync", format!("Sliding Sync rebuild failed: {e}"));
+                            set_connection_status_for_generation(
+                                generation,
+                                ConnectionStatus::Disconnected,
+                            );
+                            consecutive_failures += 1;
+                            if consecutive_failures >= DEGRADE_AFTER_FAILURES {
+                                degrade_to_traditional_sync(generation, &user_id).await;
+                                break;
+                            }
+                            interruptible_retry_sleep(
+                                generation,
+                                &user_id,
+                                std::time::Duration::from_secs(5),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    if !sync_generation_is_active(generation, &user_id).await {
+                        break;
+                    }
+                    // Atomically publish the live instance and replay mounted rooms'
+                    // subscriptions onto it. The old instance (and its sticky
+                    // subscriptions) is gone after a reconnect, so without replay the
+                    // mounted rooms would stop receiving receipt deltas until re-entry.
+                    // subscribe_to_rooms is synchronous, so we do it
+                    // under the same lock to keep desired/active consistent.
+                    let mut sub_state = ROOM_SUBSCRIPTION.lock().await;
+                    if !sync_generation_is_active(generation, &user_id).await {
+                        drop(sub_state);
+                        break;
+                    }
+                    sub_state.active = Some(sliding_sync.clone());
+                    sub_state.active_generation = Some(generation);
+                    for room_id in sub_state.desired.keys() {
+                        if let Ok(parsed) = matrix_sdk::ruma::RoomId::parse(room_id.as_str()) {
+                            sliding_sync.subscribe_to_rooms(
+                                &[&parsed],
+                                Some(live_room_subscription()),
+                                false,
+                            );
+                        }
+                    }
+                    drop(sub_state);
+
+                    let stream = sliding_sync.sync();
+                    futures_util::pin_mut!(stream);
+                    while let Some(update) = stream.next().await {
+                        if !sync_generation_is_active(generation, &user_id).await {
+                            clear_published_sync(generation).await;
+                            return;
+                        }
+                        match update {
+                            Ok(summary) => {
+                                app_log(
+                                    "info",
+                                    "sync",
+                                    format!("Sliding Sync update: {} rooms", summary.rooms.len()),
+                                );
+                                set_connection_status_for_generation(
+                                    generation,
+                                    ConnectionStatus::Connected,
+                                );
+                                notify_sync_event_for_generation(
+                                    generation,
+                                    SyncEvent::SyncCompleted,
+                                );
+                                consecutive_failures = 0;
+                            }
+                            Err(e) => {
+                                app_log("error", "sync", format!("Sliding Sync error: {e}"));
+                                set_connection_status_for_generation(
+                                    generation,
+                                    ConnectionStatus::Disconnected,
+                                );
+                                // The instance has failed; drop the published handle
+                                // so subscribe/unsubscribe calls during the retry
+                                // delay don't mutate a stale, soon-discarded instance.
+                                clear_published_sync(generation).await;
+                                consecutive_failures += 1;
+                                if consecutive_failures >= DEGRADE_AFTER_FAILURES {
+                                    degrade_to_traditional_sync(generation, &user_id).await;
+                                    break 'rebuild;
+                                }
+                                interruptible_retry_sleep(
+                                    generation,
+                                    &user_id,
+                                    std::time::Duration::from_secs(5),
+                                )
+                                .await;
+                                continue 'rebuild;
+                            }
+                        }
+                    }
+                    if !sync_generation_is_active(generation, &user_id).await {
+                        clear_published_sync(generation).await;
+                        break;
+                    }
+                    app_log(
+                        "warn",
+                        "sync",
+                        "Sliding Sync stream ended; restarting".to_string(),
+                    );
+                    set_connection_status_for_generation(
+                        generation,
+                        ConnectionStatus::Disconnected,
+                    );
+                    // The stream ended (e.g. server closed the connection); the
+                    // instance is no longer live, so clear the handle before the
+                    // retry delay to avoid routing room subscriptions to it.
+                    clear_published_sync(generation).await;
+                    interruptible_retry_sleep(
+                        generation,
+                        &user_id,
+                        std::time::Duration::from_secs(1),
+                    )
+                    .await;
+                }
+                clear_published_sync(generation).await;
+            })
+            .await;
     });
 
-    Ok(handle)
+    Ok(PendingSyncTask { handle, start })
+}
+
+/// Hand the sync loop over to the traditional mode by restarting the whole
+/// sync task. Called from inside the running loop, so it must not touch the
+/// loop's own generation bookkeeping; the restarted `start_sync_internal`
+/// stops the current task via `stop_sync_task` and installs a fresh
+/// traditional loop.
+async fn degrade_to_traditional_sync(generation: u64, user_id: &str) {
+    app_log(
+        "warn",
+        "sync",
+        format!(
+            "Sliding Sync failing repeatedly (generation {generation}); degrading to traditional sync"
+        ),
+    );
+    {
+        let mut degraded = SYNC_DEGRADED_ACCOUNTS.write().await;
+        degraded.insert(user_id.to_string());
+    }
+    clear_published_sync(generation).await;
+    // Fire-and-forget: the restarted task stops this one via stop_sync_task.
+    let _handle = tokio::spawn(async move {
+        let _ = start_sync_internal(true).await;
+    });
 }
 
 fn lagged_sync_event() -> SyncEvent {
@@ -3521,7 +4422,7 @@ fn lagged_sync_event() -> SyncEvent {
 
 #[cfg(test)]
 mod sync_event_tests {
-    use super::{lagged_sync_event, SyncEvent};
+    use super::{lagged_sync_event, SyncEvent, SYNC_EVENT_GENERATION};
 
     #[test]
     fn lagged_receivers_request_a_full_refresh() {
@@ -3529,6 +4430,22 @@ mod sync_event_tests {
             lagged_sync_event(),
             SyncEvent::FullRefreshRequired
         ));
+    }
+
+    #[tokio::test]
+    async fn sync_event_generation_is_bound_to_the_processing_future() {
+        assert!(SYNC_EVENT_GENERATION.try_with(|_| ()).is_err());
+
+        let generation = SYNC_EVENT_GENERATION
+            .scope(42, async {
+                SYNC_EVENT_GENERATION
+                    .try_with(|generation| *generation)
+                    .unwrap()
+            })
+            .await;
+
+        assert_eq!(generation, 42);
+        assert!(SYNC_EVENT_GENERATION.try_with(|_| ()).is_err());
     }
 }
 
@@ -3580,17 +4497,22 @@ static TYPING_TX: Lazy<tokio::sync::broadcast::Sender<TypingNotification>> = Laz
 /// so we can abort it when switching rooms or leaving.
 struct TypingTask {
     room_id: String,
+    subscription_id: String,
     handle: tokio::task::JoinHandle<()>,
 }
 
 static TYPING_TASK: Lazy<tokio::sync::Mutex<Option<TypingTask>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
+static NEXT_TYPING_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 
-fn take_typing_task_for_room(task: &mut Option<TypingTask>, room_id: &str) -> Option<TypingTask> {
-    if task
-        .as_ref()
-        .is_some_and(|active| active.room_id == room_id)
-    {
+fn take_typing_task_for_owner(
+    task: &mut Option<TypingTask>,
+    room_id: &str,
+    subscription_id: &str,
+) -> Option<TypingTask> {
+    if task.as_ref().is_some_and(|active| {
+        active.room_id == room_id && active.subscription_id == subscription_id
+    }) {
         task.take()
     } else {
         None
@@ -3602,11 +4524,17 @@ fn take_typing_task_for_room(task: &mut Option<TypingTask>, room_id: &str) -> Op
 #[frb]
 pub fn watch_typing_notifications(sink: crate::frb_generated::StreamSink<TypingNotification>) {
     let mut rx = TYPING_TX.subscribe();
-    std::thread::spawn(move || {
-        while let Ok(event) = rx.blocking_recv() {
-            if sink.add(event).is_err() {
-                break; // Dart side disconnected
+    std::thread::spawn(move || loop {
+        match rx.blocking_recv() {
+            Ok(event) => {
+                if sink.add(event).is_err() {
+                    break; // Dart side disconnected
+                }
             }
+            // A slow Dart side can overflow the broadcast buffer; drop the
+            // stale backlog and keep listening instead of dying.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     });
 }
@@ -3615,16 +4543,22 @@ pub fn watch_typing_notifications(sink: crate::frb_generated::StreamSink<TypingN
 /// subscription for another room is cancelled first (only one room is
 /// tracked at a time). Call `unsubscribe_typing` when leaving the room.
 #[frb]
-pub async fn subscribe_typing_for_room(room_id: String) -> Result<(), String> {
+pub async fn subscribe_typing_for_room(
+    room_id: String,
+    account_user_id: Option<String>,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-
-    // Cancel any previous typing task before starting a new one.
-    {
-        let mut task = TYPING_TASK.lock().await;
-        if let Some(prev) = task.take() {
-            prev.handle.abort();
-        }
+    let subscription_user = SUBSCRIPTION_USER.read().await;
+    if !subscription_user_matches(subscription_user.as_deref(), account_user_id.as_deref()) {
+        return Err("Typing subscription belongs to an inactive account".to_string());
+    }
+    let subscription_id = NEXT_TYPING_SUBSCRIPTION_ID
+        .fetch_add(1, Ordering::Relaxed)
+        .to_string();
+    let mut task = TYPING_TASK.lock().await;
+    if let Some(prev) = task.take() {
+        prev.handle.abort();
     }
 
     // subscribe_to_typing_notifications returns (drop_guard, receiver).
@@ -3646,34 +4580,41 @@ pub async fn subscribe_typing_for_room(room_id: String) -> Result<(), String> {
         }
     });
 
-    let mut task = TYPING_TASK.lock().await;
-    *task = Some(TypingTask { room_id, handle });
-    Ok(())
+    *task = Some(TypingTask {
+        room_id,
+        subscription_id: subscription_id.clone(),
+        handle,
+    });
+    Ok(subscription_id)
 }
 
 /// Stop tracking typing notifications (e.g. when leaving the room screen).
 #[frb]
-pub async fn unsubscribe_typing(room_id: String) {
+pub async fn unsubscribe_typing(room_id: String, subscription_id: String) {
     let mut task = TYPING_TASK.lock().await;
-    if let Some(task) = take_typing_task_for_room(&mut task, &room_id) {
+    if let Some(task) = take_typing_task_for_owner(&mut task, &room_id, &subscription_id) {
         task.handle.abort();
     }
 }
 
 #[cfg(test)]
 mod typing_subscription_tests {
-    use super::{take_typing_task_for_room, TypingTask};
+    use super::{take_typing_task_for_owner, TypingTask};
 
     #[tokio::test]
-    async fn stale_unsubscribe_does_not_cancel_a_newer_room() {
+    async fn stale_unsubscribe_does_not_cancel_a_newer_owner() {
         let handle = tokio::spawn(std::future::pending());
         let mut task = Some(TypingTask {
             room_id: "!current:example.org".to_string(),
+            subscription_id: "new-owner".to_string(),
             handle,
         });
 
-        assert!(take_typing_task_for_room(&mut task, "!stale:example.org").is_none());
+        assert!(
+            take_typing_task_for_owner(&mut task, "!current:example.org", "old-owner",).is_none()
+        );
         assert_eq!(task.as_ref().unwrap().room_id, "!current:example.org");
+        assert_eq!(task.as_ref().unwrap().subscription_id, "new-owner",);
 
         task.take().unwrap().handle.abort();
     }
@@ -3718,17 +4659,27 @@ mod live_room_subscription_tests {
 /// can't interleave (a late-finishing old subscribe can't overwrite a newer
 /// room).
 #[frb]
-pub async fn subscribe_room_for_receipts(room_id: String) -> Result<(), String> {
+pub async fn subscribe_room_for_receipts(
+    room_id: String,
+    account_user_id: Option<String>,
+) -> Result<String, String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
         .map_err(|e| format!("Invalid room id: {e}"))?;
+    let subscription_user = SUBSCRIPTION_USER.read().await;
+    if !subscription_user_matches(subscription_user.as_deref(), account_user_id.as_deref()) {
+        return Err("Room subscription belongs to an inactive account".to_string());
+    }
+    let subscription_id = NEXT_ROOM_SUBSCRIPTION_ID
+        .fetch_add(1, Ordering::Relaxed)
+        .to_string();
     let mut state = ROOM_SUBSCRIPTION.lock().await;
-    let first_subscriber = state.add_desired(&room_id);
+    let first_subscriber = state.add_desired(&room_id, subscription_id.clone());
     if first_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
             sliding_sync.subscribe_to_rooms(&[&parsed], Some(live_room_subscription()), true);
         }
     }
-    Ok(())
+    Ok(subscription_id)
 }
 
 /// Unsubscribe the given room from Sliding Sync (e.g. when leaving the room
@@ -3741,11 +4692,14 @@ pub async fn subscribe_room_for_receipts(room_id: String) -> Result<(), String> 
 /// update runs under the same lock as subscribe, so overlapping routes cannot
 /// cancel each other's subscription.
 #[frb]
-pub async fn unsubscribe_room_for_receipts(room_id: String) -> Result<(), String> {
+pub async fn unsubscribe_room_for_receipts(
+    room_id: String,
+    subscription_id: String,
+) -> Result<(), String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
         .map_err(|e| format!("Invalid room id: {e}"))?;
     let mut state = ROOM_SUBSCRIPTION.lock().await;
-    let last_subscriber = state.remove_desired(&room_id);
+    let last_subscriber = state.remove_desired(&room_id, &subscription_id);
     if last_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
             sliding_sync.unsubscribe_to_rooms(&[&parsed], true);
@@ -3790,7 +4744,13 @@ fn mxc_to_thumbnail_http(
     if url.scheme() != "mxc" {
         return None;
     }
-    let server_name = url.host_str()?;
+    let mut server_name = url.host_str()?.to_owned();
+    // Keep the port (e.g. media.example:8448): self-hosted media servers on
+    // non-default ports would otherwise resolve to a URL that 404s.
+    if let Some(port) = url.port() {
+        server_name.push(':');
+        server_name.push_str(&port.to_string());
+    }
     let media_id = url.path().trim_start_matches('/');
     if server_name.is_empty() || media_id.is_empty() {
         return None;
@@ -3849,7 +4809,13 @@ pub async fn mxc_to_http_full(mxc_url: String) -> Option<String> {
     if url.scheme() != "mxc" {
         return None;
     }
-    let server_name = url.host_str()?;
+    let mut server_name = url.host_str()?.to_owned();
+    // Keep the port (e.g. media.example:8448): self-hosted media servers on
+    // non-default ports would otherwise resolve to a URL that 404s.
+    if let Some(port) = url.port() {
+        server_name.push(':');
+        server_name.push_str(&port.to_string());
+    }
     let media_id = url.path().trim_start_matches('/');
     if server_name.is_empty() || media_id.is_empty() {
         return None;
@@ -3877,7 +4843,13 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
     if url.scheme() != "mxc" {
         return None;
     }
-    let server_name = url.host_str()?.to_string();
+    // Keep the port (e.g. media.example:8448): self-hosted media servers on
+    // non-default ports would otherwise resolve to a different host.
+    let mut server_name = url.host_str()?.to_string();
+    if let Some(port) = url.port() {
+        server_name.push(':');
+        server_name.push_str(&port.to_string());
+    }
     let media_id = url.path().trim_start_matches('/').to_string();
     if server_name.is_empty() || media_id.is_empty() {
         return None;
@@ -4121,11 +5093,45 @@ pub async fn get_chat_rooms(
 
         let mut chat_room =
             room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
-        if room.state() == matrix_sdk::RoomState::Joined && !room.is_space() {
-            chat_room.room_type = match room.is_direct().await {
-                Ok(true) => "dm".to_string(),
-                _ => "group".to_string(),
+        if !room.is_space() {
+            // `is_direct` covers both joined rooms (m.direct account data)
+            // and invited rooms (the invite event's is_direct flag), so it
+            // is the primary signal. Only fall back to a member-count
+            // heuristic for JOINED rooms whose m.direct entry is absent —
+            // and use members_no_sync (a pure store read): `members()`
+            // would trigger a serial HTTP /members request per room,
+            // stalling the whole room list behind the network. Invited and
+            // knocked rooms never fall back: their cache holds only
+            // stripped state (~1-2 members), so a large group invite would
+            // be misclassified as a DM.
+            let is_dm = if room.state() == matrix_sdk::RoomState::Joined {
+                match room.is_direct().await {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        room.members_no_sync(matrix_sdk::RoomMemberships::JOIN)
+                            .await
+                            .map(|members| members.len() <= 2)
+                            .unwrap_or(false)
+                            && room
+                                .members_no_sync(matrix_sdk::RoomMemberships::INVITE)
+                                .await
+                                .map(|members| members.len() <= 2)
+                                .unwrap_or(true)
+                    }
+                    Err(_) => room
+                        .members_no_sync(matrix_sdk::RoomMemberships::JOIN)
+                        .await
+                        .map(|members| members.len() <= 2)
+                        .unwrap_or(false),
+                }
+            } else {
+                room.is_direct().await.unwrap_or(false)
             };
+            if is_dm {
+                chat_room.room_type = "dm".to_string();
+            } else if room.state() == matrix_sdk::RoomState::Joined {
+                chat_room.room_type = "group".to_string();
+            }
         }
         result.push(chat_room);
     }
@@ -4293,15 +5299,15 @@ fn strip_reply_fallback(body: &str) -> String {
     if let Some(rest) = body.strip_prefix("> <") {
         if let Some(line_end) = rest.find('\n') {
             let after_first_line = &rest[line_end + 1..];
-            if after_first_line.starts_with('\n') {
-                return after_first_line[1..].to_string();
+            if let Some(rest) = after_first_line.strip_prefix('\n') {
+                return rest.to_string();
             }
             if let Some(after_crlf) = after_first_line.strip_prefix("\r\n") {
-                if after_crlf.starts_with('\n') {
-                    return after_crlf[1..].to_string();
+                if let Some(rest) = after_crlf.strip_prefix('\n') {
+                    return rest.to_string();
                 }
-                if after_crlf.starts_with("\r\n") {
-                    return after_crlf[2..].to_string();
+                if let Some(rest) = after_crlf.strip_prefix("\r\n") {
+                    return rest.to_string();
                 }
             }
         }
@@ -4641,6 +5647,8 @@ pub async fn send_message(
     room_id: String,
     message: FormattedMessageInput,
 ) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -4653,9 +5661,12 @@ pub async fn send_message(
 
     app_log("info", "rooms", format!("Message sent to {}", room_id));
     info!("Message sent to {}", room_id);
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(response.response.event_id.to_string())
 }
 
@@ -4688,6 +5699,8 @@ pub async fn forward_message(
     event_id: String,
     text: FormattedMessageInput,
 ) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let source_room = get_room_by_id(&client, &source_room_id)?;
     let target_room = get_room_by_id(&client, &target_room_id)?;
@@ -4770,9 +5783,12 @@ pub async fn forward_message(
         "rooms",
         format!("Message forwarded to {}", target_room_id),
     );
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: target_room_id,
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: target_room_id,
+        },
+    );
     Ok(event_id)
 }
 
@@ -4870,6 +5886,8 @@ pub async fn send_image_message(
     width: Option<i32>,
     height: Option<i32>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
     let mime_type = image_mime_type(&filename, mime_type)?;
@@ -4912,9 +5930,12 @@ pub async fn send_image_message(
     );
     info!("Image message sent to {}", room_id);
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -4927,6 +5948,8 @@ pub async fn send_file_message(
     mime_type: Option<String>,
     size: Option<i32>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -4978,9 +6001,12 @@ pub async fn send_file_message(
     app_log("info", "rooms", format!("File message sent to {}", room_id));
     info!("File message sent to {}", room_id);
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -4997,6 +6023,8 @@ pub async fn send_video_message(
     duration_ms: Option<i32>,
     size: Option<i32>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -5044,9 +6072,12 @@ pub async fn send_video_message(
     );
     info!("Video message sent to {}", room_id);
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -5120,6 +6151,8 @@ fn location_message_content(
 /// `geo:37.786971,-122.399677`.
 #[frb]
 pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let content = location_message_content(&body, &geo_uri)?;
 
     let client = get_client().await.ok_or("No client created.")?;
@@ -5135,9 +6168,12 @@ pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Re
     );
     info!("Location message sent to {}", room_id);
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -5207,6 +6243,8 @@ pub async fn send_poll(
     disclosed: bool,
     max_selections: i32,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let max_selections = usize::try_from(max_selections)
         .map_err(|_| "A poll's maximum selections must be positive.".to_string())?;
     let content = poll_start_content(&question, answers, disclosed, max_selections)?;
@@ -5220,9 +6258,12 @@ pub async fn send_poll(
     app_log("info", "rooms", format!("Poll message sent to {}", room_id));
     info!("Poll message sent to {}", room_id);
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -5245,6 +6286,8 @@ pub async fn send_poll_response(
     poll_start_event_id: String,
     answer_ids: Vec<String>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     use matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent;
 
     validate_poll_answer_ids(&answer_ids)?;
@@ -5259,15 +6302,20 @@ pub async fn send_poll_response(
         .await
         .map_err(|e| format!("Send poll response failed: {e}"))?;
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
 /// Close a poll so no further votes are accepted.
 #[frb]
 pub async fn end_poll(room_id: String, poll_start_event_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     use matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent;
 
     let event_id = matrix_sdk::ruma::EventId::parse(poll_start_event_id.as_str())
@@ -5281,9 +6329,12 @@ pub async fn end_poll(room_id: String, poll_start_event_id: String) -> Result<()
         .await
         .map_err(|e| format!("End poll failed: {e}"))?;
 
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -5480,6 +6531,8 @@ pub async fn send_sticker(
     width: Option<i32>,
     height: Option<i32>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let room = client
@@ -5524,9 +6577,12 @@ pub async fn send_sticker(
         format!("Sticker message sent to {}", room_id),
     );
     info!("Sticker message sent to {}", room_id);
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -5643,6 +6699,8 @@ pub async fn create_space(name: String, topic: Option<String>) -> Result<String,
 /// Join a room or space by room ID or alias.
 #[frb]
 pub async fn join_room(identifier: String) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let id_or_alias = matrix_sdk::ruma::RoomOrAliasId::parse(identifier.clone())
@@ -5655,12 +6713,14 @@ pub async fn join_room(identifier: String) -> Result<String, String> {
 
     app_log("info", "rooms", format!("Joined room: {}", room.room_id()));
     info!("Joined room: {}", room.room_id());
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(room.room_id().to_string())
 }
 
 #[frb]
 pub async fn accept_room_invite(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
@@ -5669,12 +6729,14 @@ pub async fn accept_room_invite(room_id: String) -> Result<(), String> {
     room.join()
         .await
         .map_err(|e| format!("Accept invite failed: {e}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
 pub async fn reject_room_invite(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
@@ -5683,12 +6745,14 @@ pub async fn reject_room_invite(room_id: String) -> Result<(), String> {
     room.leave()
         .await
         .map_err(|e| format!("Reject invite failed: {e}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
 pub async fn withdraw_room_knock(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Knocked {
@@ -5697,7 +6761,7 @@ pub async fn withdraw_room_knock(room_id: String) -> Result<(), String> {
     room.leave()
         .await
         .map_err(|e| format!("Withdraw knock failed: {e}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -5712,12 +6776,14 @@ fn joined_non_space_room(client: &Client, room_id: &str) -> Result<Room, String>
 /// Leave a joined non-space room.
 #[frb]
 pub async fn leave_room(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     room.leave()
         .await
         .map_err(|error| format!("Leave room failed: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -5727,8 +6793,11 @@ pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let has_explicit_name = room.name().is_some_and(|name| !name.trim().is_empty());
-    let (name_event_id, avatar_event_id) =
-        tokio::join!(room_name_event_id(&room), room_avatar_event_id(&room));
+    let (name_event_id, avatar_event_id, topic_event_id) = tokio::join!(
+        room_name_event_id(&room),
+        room_avatar_event_id(&room),
+        room_topic_event_id(&room)
+    );
     Ok(RoomDetails {
         id: room_id,
         name: room_display_name(&room),
@@ -5736,6 +6805,7 @@ pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
         avatar_url: room.avatar_url().map(|url| url.to_string()),
         name_event_id,
         avatar_event_id,
+        topic_event_id,
         topic: room
             .topic()
             .map(|topic| topic.trim().to_string())
@@ -5746,6 +6816,8 @@ pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
 /// Invite a Matrix user to a joined non-space room.
 #[frb]
 pub async fn invite_user_to_room(room_id: String, user_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
@@ -5753,7 +6825,7 @@ pub async fn invite_user_to_room(room_id: String, user_id: String) -> Result<(),
     room.invite_user_by_id(&user_id)
         .await
         .map_err(|error| format!("Invite user failed: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -5766,6 +6838,8 @@ pub async fn update_room_details(
     update_topic: bool,
     topic: Option<String>,
 ) -> Result<RoomDetailsUpdate, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let name = name.trim();
@@ -5781,25 +6855,24 @@ pub async fn update_room_details(
     } else {
         (None, None)
     };
-    let (topic_updated, topic_error) = if update_topic {
+    let (topic_event_id, topic_error) = if update_topic {
         let new_topic = topic.unwrap_or_default().trim().to_owned();
-        let current_topic = room.topic().unwrap_or_default().trim().to_owned();
-        if new_topic != current_topic {
-            match room.set_room_topic(&new_topic).await {
-                Ok(_) => (true, None),
-                Err(error) => (false, Some(format!("Failed to update room topic: {error}"))),
-            }
-        } else {
-            (false, None)
+        // Dart already sends update_topic only for an edited value. Do not
+        // compare against room.topic(): the SDK snapshot may still predate a
+        // just-completed write, which would drop a quick A -> B -> A change.
+        match room.set_room_topic(&new_topic).await {
+            Ok(response) => (Some(response.event_id.to_string()), None),
+            Err(error) => (None, Some(format!("Failed to update room topic: {error}"))),
         }
     } else {
-        (false, None)
+        (None, None)
     };
-    if name_event_id.is_some() || topic_updated {
-        notify_sync_event(SyncEvent::SyncCompleted);
+    if name_event_id.is_some() || topic_event_id.is_some() {
+        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     }
     Ok(RoomDetailsUpdate {
         name_event_id,
+        topic_event_id,
         name_error,
         topic_error,
     })
@@ -5812,6 +6885,8 @@ pub async fn upload_room_avatar(
     content_type: String,
     data: Vec<u8>,
 ) -> Result<RoomAvatarUpdate, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let mime: mime::Mime = content_type
@@ -5833,7 +6908,7 @@ pub async fn upload_room_avatar(
         .set_avatar_url(&upload.content_uri, Some(info))
         .await
         .map_err(|error| format!("Failed to update room avatar: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(RoomAvatarUpdate {
         avatar_url: upload.content_uri.to_string(),
         event_id: response.event_id.to_string(),
@@ -5859,16 +6934,19 @@ pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
 /// Create or remove an explicit mute push rule for a room.
 #[frb]
 pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let mutation_client = client.clone();
     enqueue_mutation(format!("muted:{user_id}:{room_id}"), async move {
         // Push-rule updates are read-modify-write server calls; serialize per
         // room so rapid toggles apply in click order instead of racing. The
         // shared per-account instance applies its own writes to its internal
         // ruleset, so a re-toggle right after the previous write cannot
         // misread the pre-write state from the store and no-op.
-        let settings = notification_settings_for(&client, &user_id).await;
+        let settings = notification_settings_for(&mutation_client, &user_id).await;
         if muted {
             settings
                 .set_room_notification_mode(
@@ -5878,11 +6956,15 @@ pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> 
                 .await
                 .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
         } else {
-            let is_encrypted = room
-                .latest_encryption_state()
-                .await
-                .map(|state| state.is_encrypted())
-                .unwrap_or(false);
+            // Unknown encryption state (room joined but `m.room.encryption`
+            // not synced yet) must default to encrypted: unmuting with
+            // "not encrypted" would downgrade the rule to all-messages in a
+            // room that is actually encrypted, leaking notification noise
+            // (and hinting the room content to the push gateway).
+            let is_encrypted = !matches!(
+                room.latest_encryption_state().await,
+                Ok(state) if !state.is_encrypted()
+            );
             let is_one_to_one = room.is_direct().await.unwrap_or(false);
             settings
                 .unmute_room(
@@ -5896,13 +6978,15 @@ pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> 
         Ok(())
     })
     .await?;
-    notify_sync_event(SyncEvent::RoomListChanged);
+    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
     Ok(())
 }
 
 /// Toggle a message's membership in `m.room.pinned_events`.
 #[frb]
 pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<bool, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let event_id = matrix_sdk::ruma::EventId::parse(event_id)
@@ -5940,7 +7024,7 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
     })
     .await?;
     let pinned = pinned_result.load(Ordering::Relaxed);
-    notify_sync_event(SyncEvent::PinnedMessagesChanged { room_id });
+    notify_sync_event_for_generation(generation, SyncEvent::PinnedMessagesChanged { room_id });
     Ok(pinned)
 }
 
@@ -5955,25 +7039,43 @@ pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, St
 /// Explicitly mark all currently loaded messages in a room as read.
 #[frb]
 pub async fn mark_room_as_read(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = client.user_id().ok_or("No active user")?.to_string();
     let mutation_key = format!("read:{user_id}:{room_id}");
     let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    let mutation_client = client.clone();
     enqueue_mutation(mutation_key, async move {
         let baseline = synced_marked_unread(&room).await;
-        sdk_timeline::mark_room_as_read(&client, &room).await?;
+        let had_pending_unread_override = MARKED_UNREAD_OVERRIDES
+            .read()
+            .await
+            .get(&override_key)
+            .is_some_and(|local| local.desired);
+        sdk_timeline::mark_room_as_read(&mutation_client, &room).await?;
+        // The store-based check inside mark_room_as_read can lag our own
+        // write: `m.marked_unread=true` was set but its echo has not synced
+        // yet, so the store still reads false and the auto-clear skips it.
+        // If we are the account that marked it unread (pending override),
+        // clear the server flag explicitly to honor the read action.
+        if had_pending_unread_override {
+            sdk_timeline::clear_marked_unread(&room).await?;
+        }
         set_marked_unread_override(override_key, baseline, false).await;
         Ok(())
     })
     .await?;
-    notify_sync_event(SyncEvent::RoomListChanged);
+    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
     Ok(())
 }
 
 /// Persist an explicit unread marker for a room in room account data.
 #[frb]
 pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
 
     let client = get_client().await.ok_or("No client created.")?;
@@ -5991,7 +7093,7 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
         Ok(())
     })
     .await?;
-    notify_sync_event(SyncEvent::RoomListChanged);
+    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
     Ok(())
 }
 
@@ -6000,9 +7102,9 @@ pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
 pub struct IgnoredUsers {
     pub user_ids: Vec<String>,
     /// True when fetched from the server; false when served from the local
-    /// state store (offline fallback), which can lag the latest confirmed
-    /// state in either direction and must never be persisted or treated as
-    /// authoritative by callers.
+    /// state store (offline fallback). Pending confirmed local writes are
+    /// applied to the fallback, but it can still lag remote changes unless
+    /// the caller is handling a completed sync notification.
     pub from_server: bool,
 }
 
@@ -6030,11 +7132,14 @@ pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
             false,
         ),
     };
-    let content = raw
+    let mut content = raw
         .map(|raw| raw.deserialize())
         .transpose()
         .map_err(|error| format!("Failed to decode ignored users: {error}"))?
         .unwrap_or_default();
+    if !from_server {
+        merge_current_account_ignored_user_overrides(&client, &mut content).await;
+    }
     Ok(IgnoredUsers {
         user_ids: content
             .ignored_users
@@ -6051,16 +7156,22 @@ pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
 /// authoritative snapshot instead of merging a delta into a possibly
 /// unknown local baseline.
 #[frb]
-pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<String>, String> {
-    use matrix_sdk::ruma::events::ignored_user_list::IgnoredUser;
-
+pub async fn set_user_ignored(
+    account_user_id: String,
+    user_id: String,
+    ignored: bool,
+) -> Result<Vec<String>, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    if active_user_id != account_user_id {
+        return Err("Active account changed before updating ignored users.".to_string());
+    }
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
         .map_err(|error| format!("Invalid user ID: {error}"))?
         .to_owned();
-    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    let mutation_client = client.clone();
     enqueue_mutation(format!("ignored:{active_user_id}"), async move {
-        let account = client.account();
+        let account = mutation_client.account();
         let mut content = account
             .fetch_account_data_static::<IgnoredUserListEventContent>()
             .await
@@ -6083,8 +7194,8 @@ pub async fn set_user_ignored(user_id: String, ignored: bool) -> Result<Vec<Stri
             .collect();
         // Baseline of the local store before the write: the store only
         // advances on the sync echo, and previews consult it until then.
-        let synced_baseline = client.is_user_ignored(&user_id).await;
-        let override_key = ignored_user_override_key(&client, &user_id);
+        let synced_baseline = mutation_client.is_user_ignored(&user_id).await;
+        let override_key = ignored_user_override_key(&mutation_client, &user_id);
         account
             .set_account_data(content)
             .await
@@ -6164,6 +7275,8 @@ mod knock_request_tests {
 /// Accept a knock request by inviting the requester to the room.
 #[frb]
 pub async fn approve_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
@@ -6171,13 +7284,15 @@ pub async fn approve_room_knock(room_id: String, user_id: String) -> Result<(), 
     room.invite_user_by_id(&user_id)
         .await
         .map_err(|error| format!("Failed to approve knock: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 /// Decline a knock request by removing the requester from the room.
 #[frb]
 pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
@@ -6185,7 +7300,7 @@ pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), S
     room.kick_user(&user_id, None)
         .await
         .map_err(|error| format!("Failed to reject knock: {error}"))?;
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -6309,6 +7424,8 @@ pub async fn update_space_details(
     name: String,
     topic: Option<String>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
@@ -6341,13 +7458,15 @@ pub async fn update_space_details(
         format!("Updated space details: {}", space_id),
     );
     info!("Updated space details: {}", space_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 /// Add a room to a space, and advertise the reciprocal parent relation.
 #[frb]
 pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
@@ -6390,12 +7509,14 @@ pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), 
         format!("Added room {} to space {}", room_id, space_id),
     );
     info!("Added room {} to space {}", room_id, space_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
 pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
@@ -6462,12 +7583,14 @@ pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result
         format!("Removed room {} from space {}", room_id, space_id),
     );
     info!("Removed room {} from space {}", room_id, space_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
 pub async fn leave_space(space_id: String) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
@@ -6486,7 +7609,7 @@ pub async fn leave_space(space_id: String) -> Result<(), String> {
 
     app_log("info", "rooms", format!("Left space: {}", space_id));
     info!("Left space: {}", space_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
@@ -6627,6 +7750,8 @@ pub async fn send_reply(
     reply_to_event_id: String,
     reply_to_user_id: Option<String>,
 ) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -6659,9 +7784,12 @@ pub async fn send_reply(
         format!("Reply sent to {} in room {}", reply_to_event_id, room_id),
     );
     info!("Reply sent to {} in room {}", reply_to_event_id, room_id);
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(response.response.event_id.to_string())
 }
 
@@ -6679,6 +7807,8 @@ pub async fn edit_message(
     previous_mentioned_user_ids: Vec<String>,
     previous_mentions_room: bool,
 ) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -6703,9 +7833,12 @@ pub async fn edit_message(
         format!("Edited event {} in room {}", event_id, room_id),
     );
     info!("Edited event {} in room {}", event_id, room_id);
-    notify_sync_event(SyncEvent::MessageSent {
-        room_id: room_id.clone(),
-    });
+    notify_sync_event_for_generation(
+        generation,
+        SyncEvent::MessageSent {
+            room_id: room_id.clone(),
+        },
+    );
     Ok(response.response.event_id.to_string())
 }
 
@@ -6719,6 +7852,8 @@ pub async fn send_reaction(
     event_id: String,
     key: String,
 ) -> Result<String, String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -6743,7 +7878,7 @@ pub async fn send_reaction(
         format!("Reaction '{}' on {} in room {}", key, event_id, room_id),
     );
     info!("Reaction '{}' on {} in room {}", key, event_id, room_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(new_event_id)
 }
 
@@ -6754,6 +7889,8 @@ pub async fn redact_message(
     event_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
@@ -6770,7 +7907,7 @@ pub async fn redact_message(
         format!("Redacted event {} in room {}", event_id, room_id),
     );
     info!("Redacted event {} in room {}", event_id, room_id);
-    notify_sync_event(SyncEvent::SyncCompleted);
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 

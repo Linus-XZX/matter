@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'auth_provider.dart';
@@ -169,17 +170,29 @@ Future<Set<String>> _loadIgnoredUserIds(Ref ref, String namespace) async {
   // sources: a completed write-through or a server fetch) outranks the
   // persisted snapshot, which stays best-effort — a SharedPreferences write
   // can fail after a confirmed write-through, leaving the snapshot stale.
+  final initialVersion = _ignoredListVersion(namespace);
   final persisted =
       _confirmedIgnoredLists[namespace] ??
       await _loadPersistedIgnoredUserIds(namespace);
+  if (!_ignoredListSessionIsCurrent(ref, namespace)) {
+    throw StateError('Ignored-user load superseded by an account change');
+  }
   if (persisted != null) {
     unawaited(_refreshIgnoredUserIds(ref, namespace, persisted));
     return persisted;
   }
-  final version = _ignoredListVersion(namespace);
+  final version = initialVersion;
+  if (_ignoredListVersion(namespace) != version) {
+    throw StateError('Ignored-user load superseded by a newer session');
+  }
   final result = await rust.getIgnoredUsers();
+  if (!_ignoredListSessionIsCurrent(ref, namespace)) {
+    throw StateError('Ignored-user load superseded by an account change');
+  }
   final fresh = result.userIds.toSet();
-  if (!result.fromServer) {
+  final syncedStoreIsAuthoritative =
+      _authoritativeIgnoredStoreVersions[namespace] == version;
+  if (!result.fromServer && !syncedStoreIsAuthoritative) {
     // Offline store fallback: serve it (better than unknown on a first
     // run), but never persist or confirm it — the store can lag the latest
     // confirmed state in either direction and must not overwrite a
@@ -192,7 +205,11 @@ Future<Set<String>> _loadIgnoredUserIds(Ref ref, String namespace) async {
     });
     // Re-check after the persist: a confirmed change may have landed while
     // the write was queued or on disk; this response is stale then.
-    if (_ignoredListVersion(namespace) == version) {
+    if (_ignoredListSessionIsCurrent(ref, namespace) &&
+        _ignoredListVersion(namespace) == version) {
+      if (_authoritativeIgnoredStoreVersions[namespace] == version) {
+        _authoritativeIgnoredStoreVersions.remove(namespace);
+      }
       _confirmedIgnoredLists[namespace] = fresh;
       return fresh;
     }
@@ -294,6 +311,7 @@ Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
   // authoritative from this point (the server has accepted the change), and
   // a later IgnoredUsersChanged demotes it again until revalidated.
   _confirmedIgnoredLists[namespace] = Set.unmodifiable(ids);
+  _authoritativeIgnoredStoreVersions.remove(namespace);
   // Bump synchronously so any refresh whose fetch started earlier is
   // recognized as stale when it completes. The queued write itself must
   // always run: queued writes execute in order, so rapid consecutive
@@ -315,8 +333,13 @@ Future<void> _refreshIgnoredUserIds(
   // write-through, nor revalidate the provider over newer state.
   final version = _ignoredListVersion(namespace);
   try {
+    if (!_ignoredListSessionIsCurrent(ref, namespace)) return;
     final result = await rust.getIgnoredUsers();
-    if (!result.fromServer) {
+    if (!_ignoredListSessionIsCurrent(ref, namespace)) return;
+    final fresh = result.userIds.toSet();
+    final syncedStoreIsAuthoritative =
+        _authoritativeIgnoredStoreVersions[namespace] == version;
+    if (!result.fromServer && !syncedStoreIsAuthoritative) {
       // Offline store fallback: it can lag a confirmed write-through in
       // either direction, so it must never REMOVE ids from the snapshot.
       final confirmed = _confirmedIgnoredLists[namespace];
@@ -343,16 +366,19 @@ Future<void> _refreshIgnoredUserIds(
       }
       return;
     }
-    final fresh = result.userIds.toSet();
     await _enqueueIgnoredListWrite(namespace, version, () async {
       await _persistIgnoredUserIds(namespace, fresh);
     });
-    if (_ignoredListVersion(namespace) == version) {
+    if (_ignoredListSessionIsCurrent(ref, namespace) &&
+        _ignoredListVersion(namespace) == version) {
       // The fetch completed against the current version: the persisted
       // snapshot now reflects a server-confirmed state, so previews may
       // treat it as authoritative again.
       final confirmed = _confirmedIgnoredLists[namespace];
       final wasConfirmed = confirmed != null && setEquals(confirmed, fresh);
+      if (_authoritativeIgnoredStoreVersions[namespace] == version) {
+        _authoritativeIgnoredStoreVersions.remove(namespace);
+      }
       _confirmedIgnoredLists[namespace] = fresh;
       // Revalidate dependents when the content changed OR the freshness
       // just upgraded (cached → confirmed): the list value alone does not
@@ -381,6 +407,15 @@ final _ignoredListWriteQueues = <String, List<Future<void> Function()>>{};
 /// equal to this value may override the lagging SDK store in Rust; anything
 /// else is only merged with the store.
 final _confirmedIgnoredLists = <String, Set<String>>{};
+
+/// Store snapshots read after a sync event are complete account-data state,
+/// even when the direct server request used by `getIgnoredUsers` failed.
+/// Tying this trust to a version prevents an older event refresh from
+/// overriding a newer confirmed local write.
+final _authoritativeIgnoredStoreVersions = <String, int>{};
+
+bool _ignoredListSessionIsCurrent(Ref ref, String namespace) =>
+    ref.mounted && (ref.read(activeUserIdProvider) ?? '') == namespace;
 
 int _ignoredListVersion(String namespace) =>
     _ignoredListWriteVersions[namespace] ?? 0;
@@ -468,6 +503,59 @@ final roomAutoReadSuppressedProvider =
       (_) => MutableState(false),
     );
 
+final roomAutoReadSuppressionRevisionProvider =
+    NotifierProvider.family<MutableState<int>, int, String>(
+      (_) => MutableState(0),
+    );
+
+class RoomAutoReadSuppressionToken {
+  final MutableState<int> _revision;
+  final MutableState<bool> _sessionReady;
+  final MutableState<String?> _activeUserId;
+  final int value;
+  final bool sessionReadyValue;
+  final String? accountId;
+
+  const RoomAutoReadSuppressionToken(
+    this._revision,
+    this._sessionReady,
+    this._activeUserId,
+    this.value,
+    this.sessionReadyValue,
+    this.accountId,
+  );
+
+  bool get isCurrent =>
+      _revision.mounted &&
+      _sessionReady.mounted &&
+      _sessionReady.value == sessionReadyValue &&
+      _activeUserId.mounted &&
+      _activeUserId.value == accountId &&
+      _revision.value == value;
+}
+
+RoomAutoReadSuppressionToken setRoomAutoReadSuppressed(
+  WidgetRef ref,
+  String roomId, {
+  required bool suppressed,
+}) {
+  final revision = ref.read(
+    roomAutoReadSuppressionRevisionProvider(roomId).notifier,
+  );
+  final sessionReady = ref.read(sessionReadyProvider.notifier);
+  final activeUserId = ref.read(activeUserIdProvider.notifier);
+  revision.value++;
+  ref.read(roomAutoReadSuppressedProvider(roomId).notifier).value = suppressed;
+  return RoomAutoReadSuppressionToken(
+    revision,
+    sessionReady,
+    activeUserId,
+    revision.value,
+    sessionReady.value,
+    activeUserId.value,
+  );
+}
+
 RoomUnreadOverride? _roomUnreadOverrideFor(
   rust.ChatRoom room, {
   required bool unread,
@@ -507,7 +595,20 @@ void setRoomUnreadOverrideById(
   }
 }
 
-void invalidateSessionCollections(WidgetRef ref) {
+class _ProviderAccess {
+  final T Function<T>(ProviderListenable<T> provider) read;
+  final void Function(ProviderOrFamily provider) invalidate;
+
+  _ProviderAccess.fromWidgetRef(WidgetRef ref)
+    : read = ref.read,
+      invalidate = ref.invalidate;
+
+  _ProviderAccess.fromRef(Ref ref)
+    : read = ref.read,
+      invalidate = ref.invalidate;
+}
+
+void _invalidateSessionCollections(_ProviderAccess ref) {
   ref.invalidate(chatRoomsProvider);
   ref.invalidate(spacesProvider);
   ref.invalidate(ungroupedRoomsProvider);
@@ -519,6 +620,11 @@ void invalidateSessionCollections(WidgetRef ref) {
   ref.invalidate(roomKnockRequestsProvider);
   ref.invalidate(roomUnreadOverrideProvider);
   ref.invalidate(roomAutoReadSuppressedProvider);
+  ref.invalidate(roomAutoReadSuppressionRevisionProvider);
+}
+
+void invalidateSessionCollections(WidgetRef ref) {
+  _invalidateSessionCollections(_ProviderAccess.fromWidgetRef(ref));
 }
 
 /// Drop the per-account ignore-list freshness and invalidate any refresh
@@ -529,10 +635,28 @@ void invalidateSessionCollections(WidgetRef ref) {
 /// must never mark the persisted snapshot authoritative for a new session.
 void resetIgnoredListAccountState(String namespace) {
   _confirmedIgnoredLists.remove(namespace);
+  _authoritativeIgnoredStoreVersions.remove(namespace);
   _ignoredListWriteVersions[namespace] = _ignoredListVersion(namespace) + 1;
 }
 
 void clearActiveSessionState(WidgetRef ref, {bool markSessionReady = false}) {
+  _clearActiveSessionState(
+    _ProviderAccess.fromWidgetRef(ref),
+    markSessionReady: markSessionReady,
+  );
+}
+
+void clearActiveSessionStateFromRef(Ref ref, {bool markSessionReady = false}) {
+  _clearActiveSessionState(
+    _ProviderAccess.fromRef(ref),
+    markSessionReady: markSessionReady,
+  );
+}
+
+void _clearActiveSessionState(
+  _ProviderAccess ref, {
+  bool markSessionReady = false,
+}) {
   // Drop the ignore-list freshness of the outgoing account and invalidate
   // any refresh still in flight for it: while the session is down the sync
   // subscription is stopped, so the IgnoredUsersChanged that would normally
@@ -556,6 +680,42 @@ Future<void> applyActiveSessionState(
   bool persistActiveUser = false,
   bool refreshStoredSessions = false,
   bool markLoggedIn = true,
+}) => _applyActiveSessionState(
+  _ProviderAccess.fromWidgetRef(ref),
+  userId: userId,
+  displayName: displayName,
+  homeserver: homeserver,
+  persistActiveUser: persistActiveUser,
+  refreshStoredSessions: refreshStoredSessions,
+  markLoggedIn: markLoggedIn,
+);
+
+Future<void> applyActiveSessionStateFromRef(
+  Ref ref, {
+  required String userId,
+  required String displayName,
+  required String homeserver,
+  bool persistActiveUser = false,
+  bool refreshStoredSessions = false,
+  bool markLoggedIn = true,
+}) => _applyActiveSessionState(
+  _ProviderAccess.fromRef(ref),
+  userId: userId,
+  displayName: displayName,
+  homeserver: homeserver,
+  persistActiveUser: persistActiveUser,
+  refreshStoredSessions: refreshStoredSessions,
+  markLoggedIn: markLoggedIn,
+);
+
+Future<void> _applyActiveSessionState(
+  _ProviderAccess ref, {
+  required String userId,
+  required String displayName,
+  required String homeserver,
+  required bool persistActiveUser,
+  required bool refreshStoredSessions,
+  required bool markLoggedIn,
 }) async {
   // Every session (re-)establishment — login, account switch and its
   // rollback, startup restore — funnels through here. A confirmed ignore
@@ -585,12 +745,16 @@ Future<void> applyActiveSessionState(
     ref.read(isLoggedInProvider.notifier).value = true;
   }
   ref.read(connectionProvider.notifier).value = AppConnectionState.connecting;
-  unawaited(refreshCurrentUserProfile(ref));
+  unawaited(_refreshCurrentUserProfile(ref));
 }
 
 /// Fetch the server-side profile (display name + avatar) and merge it into
 /// [currentUserProvider]. Fire-and-forget: failures keep the cached state.
-Future<void> refreshCurrentUserProfile(WidgetRef ref) async {
+Future<void> refreshCurrentUserProfile(WidgetRef ref) {
+  return _refreshCurrentUserProfile(_ProviderAccess.fromWidgetRef(ref));
+}
+
+Future<void> _refreshCurrentUserProfile(_ProviderAccess ref) async {
   try {
     final profile = await rust.getProfile();
     final current = ref.read(currentUserProvider);
@@ -623,6 +787,21 @@ Future<void> bootstrapActiveSessionSync(
   delay: (duration) => Future<void>.delayed(duration),
 );
 
+Future<void> bootstrapActiveSessionSyncFromRef(
+  Ref ref, {
+  required String attemptLabel,
+  required String startSyncLabel,
+  bool requireSyncLoop = false,
+}) => _bootstrapActiveSessionSync(
+  _ProviderAccess.fromRef(ref),
+  attemptLabel: attemptLabel,
+  startSyncLabel: startSyncLabel,
+  syncOnce: rust.syncOnce,
+  startSync: rust.startSync,
+  delay: (duration) => Future<void>.delayed(duration),
+  requireSyncLoop: requireSyncLoop,
+);
+
 @visibleForTesting
 Future<void> bootstrapActiveSessionSyncForTest(
   WidgetRef ref, {
@@ -631,6 +810,25 @@ Future<void> bootstrapActiveSessionSyncForTest(
   required Future<void> Function() syncOnce,
   required Future<void> Function() startSync,
   required Future<void> Function(Duration duration) delay,
+  bool requireSyncLoop = false,
+}) => _bootstrapActiveSessionSync(
+  _ProviderAccess.fromWidgetRef(ref),
+  attemptLabel: attemptLabel,
+  startSyncLabel: startSyncLabel,
+  syncOnce: syncOnce,
+  startSync: startSync,
+  delay: delay,
+  requireSyncLoop: requireSyncLoop,
+);
+
+Future<void> _bootstrapActiveSessionSync(
+  _ProviderAccess ref, {
+  required String attemptLabel,
+  required String startSyncLabel,
+  required Future<void> Function() syncOnce,
+  required Future<void> Function() startSync,
+  required Future<void> Function(Duration duration) delay,
+  required bool requireSyncLoop,
 }) async {
   var initialSyncSucceeded = false;
   for (var attempt = 0; attempt < 3; attempt++) {
@@ -639,7 +837,7 @@ Future<void> bootstrapActiveSessionSyncForTest(
       initialSyncSucceeded = true;
       ref.read(connectionProvider.notifier).value =
           AppConnectionState.connected;
-      invalidateSessionCollections(ref);
+      _invalidateSessionCollections(ref);
       break;
     } catch (e) {
       debugPrint('$attemptLabel ${attempt + 1} failed: $e');
@@ -660,8 +858,9 @@ Future<void> bootstrapActiveSessionSyncForTest(
     debugPrint('$startSyncLabel: $e');
     ref.read(connectionProvider.notifier).value =
         AppConnectionState.disconnected;
+    if (requireSyncLoop) rethrow;
   }
-  invalidateSessionCollections(ref);
+  _invalidateSessionCollections(ref);
 }
 
 final currentRoomIdProvider = NotifierProvider<MutableState<String?>, String?>(
@@ -903,27 +1102,61 @@ class LocalOutgoingMessage {
   final rust.ChatMessage message;
   final String? sourceImageUrl;
 
-  const LocalOutgoingMessage({required this.message, this.sourceImageUrl});
+  /// Sender of the message this outgoing message replies to. Preserved so a
+  /// failed reply can be retried with the correct `reply_to` mention.
+  final String? replyToUserId;
+
+  const LocalOutgoingMessage({
+    required this.message,
+    this.sourceImageUrl,
+    this.replyToUserId,
+  });
 }
+
+typedef RoomAccountKey = ({String roomId, String userId});
+
+RoomAccountKey activeRoomAccountKey(WidgetRef ref, String roomId) => (
+  roomId: roomId,
+  userId:
+      ref.read(activeUserIdProvider) ??
+      ref.read(currentUserProvider)?.id ??
+      'anonymous',
+);
+
+/// Per-room composer state must also be account-scoped: Matrix room IDs are
+/// shared across every member account.
+final replyingToProvider =
+    NotifierProvider.family<
+      MutableState<rust.ChatMessage?>,
+      rust.ChatMessage?,
+      RoomAccountKey
+    >((_) => MutableState(null));
+
+final editingMessageProvider =
+    NotifierProvider.family<
+      MutableState<rust.ChatMessage?>,
+      rust.ChatMessage?,
+      RoomAccountKey
+    >((_) => MutableState(null));
 
 final localOutgoingMessagesProvider =
     NotifierProvider.family<
       MutableState<List<LocalOutgoingMessage>>,
       List<LocalOutgoingMessage>,
-      String
+      RoomAccountKey
     >((_) => MutableState(const <LocalOutgoingMessage>[]));
 
 void upsertLocalOutgoingMessage(
   WidgetRef ref,
-  String roomId,
+  RoomAccountKey key,
   LocalOutgoingMessage message,
 ) {
-  final messages = ref.read(localOutgoingMessagesProvider(roomId));
+  final messages = ref.read(localOutgoingMessagesProvider(key));
   final index = messages.indexWhere(
     (existing) => existing.message.id == message.message.id,
   );
   if (index == -1) {
-    ref.read(localOutgoingMessagesProvider(roomId).notifier).value = [
+    ref.read(localOutgoingMessagesProvider(key).notifier).value = [
       ...messages,
       message,
     ];
@@ -932,27 +1165,163 @@ void upsertLocalOutgoingMessage(
 
   final next = [...messages];
   next[index] = message;
-  ref.read(localOutgoingMessagesProvider(roomId).notifier).value = next;
+  ref.read(localOutgoingMessagesProvider(key).notifier).value = next;
 }
 
 void removeLocalOutgoingMessage(
   WidgetRef ref,
-  String roomId,
+  RoomAccountKey key,
   String messageId,
 ) {
-  final messages = ref.read(localOutgoingMessagesProvider(roomId));
-  ref.read(localOutgoingMessagesProvider(roomId).notifier).value = messages
+  final messages = ref.read(localOutgoingMessagesProvider(key));
+  ref.read(localOutgoingMessagesProvider(key).notifier).value = messages
       .where((message) => message.message.id != messageId)
       .toList();
 }
 
+/// Retry a failed local outgoing message: flip it back to pending and
+/// re-send it. On success the local message is marked sent and the timeline
+/// refreshes to reconcile it against the server event; on failure the
+/// message returns to the failed state so the user can retry again later.
+Future<void> retryFailedLocalMessage(
+  WidgetRef ref,
+  RoomAccountKey key,
+  String failedId,
+) async {
+  final messages = ref.read(localOutgoingMessagesProvider(key));
+  final index = messages.indexWhere(
+    (message) => message.message.id == failedId,
+  );
+  if (index == -1) return;
+  final failed = messages[index];
+  final message = failed.message;
+  if (message.msgType != rust.MessageType.text) {
+    throw StateError('仅支持重试文本消息');
+  }
+  final pendingId = failedId.startsWith(localOutgoingFailedPrefix)
+      ? '$localOutgoingPendingPrefix'
+            '${failedId.substring(localOutgoingFailedPrefix.length)}'
+      : failedId;
+  // Re-stamp the message with the retry time. Keeping the original timestamp
+  // would make the local/remote matcher (which pairs events within a window
+  // around the local time) never match a retried send, leaving a permanent
+  // duplicate bubble after a delayed retry.
+  var retryTimestamp = DateTime.now().millisecondsSinceEpoch;
+  final cached = ref.read(messageCacheProvider(key.roomId));
+  for (final cachedMessage in cached) {
+    final ts = int.tryParse(cachedMessage.timestamp) ?? 0;
+    if (ts >= retryTimestamp) retryTimestamp = ts + 1;
+  }
+  for (final outgoing in messages) {
+    final ts = int.tryParse(outgoing.message.timestamp) ?? 0;
+    if (ts >= retryTimestamp) retryTimestamp = ts + 1;
+  }
+  final pending = LocalOutgoingMessage(
+    message: rust.ChatMessage(
+      id: pendingId,
+      senderId: message.senderId,
+      senderName: message.senderName,
+      content: message.content,
+      formattedBody: message.formattedBody,
+      caption: message.caption,
+      captionFormattedBody: message.captionFormattedBody,
+      mentionedUserIds: message.mentionedUserIds,
+      mentionsRoom: message.mentionsRoom,
+      timestamp: retryTimestamp.toString(),
+      isMe: true,
+      msgType: message.msgType,
+      imageUrl: message.imageUrl,
+      mediaSourceJson: message.mediaSourceJson,
+      imageWidth: message.imageWidth,
+      imageHeight: message.imageHeight,
+      inReplyTo: message.inReplyTo,
+      isEdited: message.isEdited,
+      editHistory: message.editHistory,
+      reactions: message.reactions,
+      readers: message.readers,
+      totalMembers: message.totalMembers,
+    ),
+    sourceImageUrl: failed.sourceImageUrl,
+    // Keep the reply target across the retry so the resent reply mentions
+    // the original message's author (sendReply takes replyToUserId).
+    replyToUserId: failed.replyToUserId,
+  );
+  // Replace the failed entry in place: keeping both would render the same
+  // row twice (failed + pending) with duplicate row keys.
+  final next = [...messages];
+  next[index] = pending;
+  ref.read(localOutgoingMessagesProvider(key).notifier).value = next;
+  try {
+    final input = rust.FormattedMessageInput(
+      body: message.content,
+      formattedBody: message.formattedBody,
+      mentionedUserIds: message.mentionedUserIds,
+      mentionsRoom: message.mentionsRoom,
+    );
+    final replyTo = message.inReplyTo;
+    if (replyTo != null) {
+      await rust.sendReply(
+        roomId: key.roomId,
+        message: input,
+        replyToEventId: replyTo,
+        replyToUserId: failed.replyToUserId,
+      );
+    } else {
+      await rust.sendMessage(roomId: key.roomId, message: input);
+    }
+    markLocalOutgoingMessageSent(ref, key, pendingId);
+    // Poll the timeline a few times so the sent local bubble is replaced by
+    // the server echo even when the echo lands just after a refresh (same
+    // behavior as a fresh send; a single refresh can leave the "sent" bubble
+    // lingering for several seconds).
+    unawaited(reconcileSentLocalMessage(ref, key, pendingId));
+  } catch (_) {
+    // Restore the failed entry so the bubble keeps its error state. Guard
+    // against the page (and its ref) being disposed while the request was
+    // in flight: reads through a stale ref can throw, and the provider
+    // state dies with the page anyway.
+    try {
+      removeLocalOutgoingMessage(ref, key, pendingId);
+      upsertLocalOutgoingMessage(ref, key, failed);
+    } catch (_) {
+      // Provider already disposed; nothing to restore into.
+    }
+    rethrow;
+  }
+}
+
+/// Repeatedly refresh the timeline until the local `sent:` message is
+/// reconciled away by its server echo, or the retry budget runs out.
+Future<void> reconcileSentLocalMessage(
+  WidgetRef ref,
+  RoomAccountKey key,
+  String localId,
+) async {
+  const retryDelays = [
+    Duration.zero,
+    Duration(milliseconds: 500),
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+  ];
+  for (final delay in retryDelays) {
+    if (delay != Duration.zero) await Future<void>.delayed(delay);
+    final stillLocal = ref
+        .read(localOutgoingMessagesProvider(key))
+        .any((message) => message.message.id == localId);
+    if (!stillLocal) return;
+    await refreshMessages(ref, key.roomId);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+  }
+}
+
 String markLocalOutgoingMessageSent(
   WidgetRef ref,
-  String roomId,
+  RoomAccountKey key,
   String pendingId,
 ) {
   final sentId = sentLocalOutgoingId(pendingId);
-  final messages = ref.read(localOutgoingMessagesProvider(roomId));
+  final messages = ref.read(localOutgoingMessagesProvider(key));
   final index = messages.indexWhere(
     (message) => message.message.id == pendingId,
   );
@@ -988,7 +1357,7 @@ String markLocalOutgoingMessageSent(
     ),
     sourceImageUrl: local.sourceImageUrl,
   );
-  ref.read(localOutgoingMessagesProvider(roomId).notifier).value = next;
+  ref.read(localOutgoingMessagesProvider(key).notifier).value = next;
   return sentId;
 }
 
@@ -1341,13 +1710,14 @@ final syncStreamProvider =
       }
 
       void revalidateIgnoredUsers() {
-        // A remote change or a dropped specific event makes the last
-        // confirmed list suspect. Bump the version so an older in-flight
-        // fetch cannot confirm stale data.
+        // Rust overlays pending confirmed local writes onto its store
+        // fallback, so both a specific account-data event and a dropped-event
+        // compensation can safely treat that effective snapshot as complete.
         final namespace = ref.read(activeUserIdProvider) ?? '';
         _confirmedIgnoredLists.remove(namespace);
-        _ignoredListWriteVersions[namespace] =
-            _ignoredListVersion(namespace) + 1;
+        final version = _ignoredListVersion(namespace) + 1;
+        _ignoredListWriteVersions[namespace] = version;
+        _authoritativeIgnoredStoreVersions[namespace] = version;
         _revalidateIgnoredUserIds(
           namespace,
           () => ref.invalidate(ignoredUserIdsProvider),
@@ -1410,7 +1780,11 @@ final syncStreamProvider =
               }
               try {
                 await rust.markRoomAsRead(roomId: roomId);
-                if (disposed || !ref.mounted) return;
+                if (disposed ||
+                    !ref.mounted ||
+                    ref.read(roomAutoReadSuppressedProvider(roomId))) {
+                  return;
+                }
                 if (unreadRoom != null) {
                   ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
                       _roomUnreadOverrideFor(unreadRoom, unread: false);
@@ -1474,6 +1848,8 @@ final syncStreamProvider =
             scheduleRoomRefresh();
           case rust.SyncEvent_PinnedMessagesChanged():
             break;
+          case rust.SyncEvent_RoomMembersChanged():
+            scheduleRoomRefresh();
           case rust.SyncEvent_IgnoredUsersChanged():
             revalidateIgnoredUsers();
         }

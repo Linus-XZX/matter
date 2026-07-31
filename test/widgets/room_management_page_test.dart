@@ -19,43 +19,66 @@ final _sessionReadyOverride = sessionReadyProvider.overrideWith(
 );
 
 class _FakeRustApi implements RustLibApi {
+  final syncEvents = StreamController<rust.SyncEvent>.broadcast();
   bool failSupplementalLoads = true;
   Completer<void>? pendingDetailsUpdate;
+  Completer<void>? pendingDetailsLoad;
+  Completer<void>? pendingMembersLoad;
   List<rust.KnockRequest> knockRequests = const [];
   int detailsLoadCalls = 0;
   int membersLoadCalls = 0;
   int approveKnockCalls = 0;
   int rejectKnockCalls = 0;
+  int markReadCalls = 0;
   int markUnreadCalls = 0;
   int setMutedCalls = 0;
   int setIgnoredCalls = 0;
+  String? ignoredAccountUserId;
   Completer<void>? pendingMutedUpdate;
   Completer<void>? pendingApproveKnock;
+  Completer<void>? pendingMarkRead;
+  Completer<void>? pendingMarkUnread;
   Completer<List<String>>? pendingSetIgnored;
   String? nameUpdateError;
   String? topicUpdateError;
   String? updatedName;
   String? updatedTopic;
   bool? updatedTopicFlag;
+  bool ignoredUsersFromServer = true;
+  List<String> ignoredUsers = const ['@blocked:example.org'];
+  String roomName = 'Project room';
+  String? roomTopic = 'Topic';
+  String? roomAvatarUrl;
+  String? roomNameEventId = r'$name-0';
+  String? roomAvatarEventId;
+  String? roomTopicEventId = r'$topic-0';
+  bool muted = true;
+  List<rust.Contact> members = const [
+    rust.Contact(id: '@alice:example.org', name: 'Alice', status: 'online'),
+  ];
 
   @override
   Future<rust.RoomDetails> crateApiMatrixGetRoomDetails({
     required String roomId,
   }) async {
     detailsLoadCalls++;
+    await pendingDetailsLoad?.future;
     return rust.RoomDetails(
       id: roomId,
-      name: 'Project room',
+      name: roomName,
       hasExplicitName: true,
-      topic: 'Topic',
-      nameEventId: r'$name-0',
+      avatarUrl: roomAvatarUrl,
+      topic: roomTopic,
+      nameEventId: roomNameEventId,
+      avatarEventId: roomAvatarEventId,
+      topicEventId: roomTopicEventId,
     );
   }
 
   @override
   Future<bool> crateApiMatrixIsRoomMuted({required String roomId}) async {
     if (failSupplementalLoads) throw StateError('muted unavailable');
-    return true;
+    return muted;
   }
 
   @override
@@ -72,11 +95,13 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     membersLoadCalls++;
+    await pendingMembersLoad?.future;
     if (failSupplementalLoads) throw StateError('members unavailable');
-    return const [
-      rust.Contact(id: '@alice:example.org', name: 'Alice', status: 'online'),
-    ];
+    return members;
   }
+
+  @override
+  Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
   @override
   Future<List<rust.KnockRequest>> crateApiMatrixGetRoomKnockRequests({
@@ -90,17 +115,19 @@ class _FakeRustApi implements RustLibApi {
   Future<rust.IgnoredUsers> crateApiMatrixGetIgnoredUsers() async {
     if (failSupplementalLoads) throw StateError('ignored unavailable');
     return rust.IgnoredUsers(
-      userIds: const ['@blocked:example.org'],
-      fromServer: true,
+      userIds: ignoredUsers,
+      fromServer: ignoredUsersFromServer,
     );
   }
 
   @override
   Future<List<String>> crateApiMatrixSetUserIgnored({
+    required String accountUserId,
     required String userId,
     required bool ignored,
   }) {
     setIgnoredCalls++;
+    ignoredAccountUserId = accountUserId;
     return pendingSetIgnored?.future ?? Future.value(const []);
   }
 
@@ -118,6 +145,9 @@ class _FakeRustApi implements RustLibApi {
     await pendingDetailsUpdate?.future;
     return rust.RoomDetailsUpdate(
       nameEventId: updateName && nameUpdateError == null ? r'$name-1' : null,
+      topicEventId: updateTopic && topicUpdateError == null
+          ? r'$topic-1'
+          : null,
       nameError: nameUpdateError,
       topicError: topicUpdateError,
     );
@@ -141,8 +171,15 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
+  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+    markReadCalls++;
+    await pendingMarkRead?.future;
+  }
+
+  @override
   Future<void> crateApiMatrixMarkRoomUnread({required String roomId}) async {
     markUnreadCalls++;
+    await pendingMarkUnread?.future;
   }
 
   @override
@@ -159,27 +196,49 @@ void main() {
     RustLib.initMock(api: rustApi);
   });
 
-  tearDownAll(RustLib.dispose);
+  tearDownAll(() async {
+    await rustApi.syncEvents.close();
+    RustLib.dispose();
+  });
 
   setUp(() {
     rustApi.failSupplementalLoads = true;
     rustApi.pendingDetailsUpdate = null;
+    rustApi.pendingDetailsLoad = null;
+    rustApi.pendingMembersLoad = null;
     rustApi.knockRequests = const [];
     rustApi.detailsLoadCalls = 0;
     rustApi.membersLoadCalls = 0;
     rustApi.approveKnockCalls = 0;
     rustApi.rejectKnockCalls = 0;
+    rustApi.markReadCalls = 0;
     rustApi.markUnreadCalls = 0;
     rustApi.setMutedCalls = 0;
     rustApi.setIgnoredCalls = 0;
+    rustApi.ignoredAccountUserId = null;
     rustApi.pendingMutedUpdate = null;
     rustApi.pendingApproveKnock = null;
+    rustApi.pendingMarkRead = null;
+    rustApi.pendingMarkUnread = null;
     rustApi.pendingSetIgnored = null;
     rustApi.nameUpdateError = null;
     rustApi.topicUpdateError = null;
     rustApi.updatedName = null;
     rustApi.updatedTopic = null;
     rustApi.updatedTopicFlag = null;
+    rustApi.ignoredUsersFromServer = true;
+    rustApi.ignoredUsers = const ['@blocked:example.org'];
+    rustApi.roomName = 'Project room';
+    rustApi.roomTopic = 'Topic';
+    rustApi.roomAvatarUrl = null;
+    rustApi.roomNameEventId = r'$name-0';
+    rustApi.roomAvatarEventId = null;
+    rustApi.roomTopicEventId = r'$topic-0';
+    rustApi.muted = true;
+    rustApi.members = const [
+      rust.Contact(id: '@alice:example.org', name: 'Alice', status: 'online'),
+    ];
+    SharedPreferences.setMockInitialValues({});
   });
 
   testWidgets('shows partial load failures instead of empty room data', (
@@ -243,6 +302,253 @@ void main() {
     expect(find.text('无法加载加入请求'), findsOneWidget);
   });
 
+  testWidgets('refreshes members for room membership sync events', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('成员 1'), findsOneWidget);
+
+    rustApi.members = const [
+      rust.Contact(id: '@alice:example.org', name: 'Alice', status: 'online'),
+      rust.Contact(id: '@bob:example.org', name: 'Bob', status: 'online'),
+    ];
+    rustApi.syncEvents.add(
+      const rust.SyncEvent.roomMembersChanged(roomId: '!other:example.org'),
+    );
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(rustApi.membersLoadCalls, 1);
+
+    rustApi.syncEvents.add(
+      const rust.SyncEvent.roomMembersChanged(roomId: '!room:example.org'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.membersLoadCalls, 2);
+    expect(find.text('成员 2'), findsOneWidget);
+    expect(find.text('Bob'), findsOneWidget);
+  });
+
+  testWidgets(
+    'sync refreshes remote room state without overwriting a local draft',
+    (tester) async {
+      rustApi.failSupplementalLoads = false;
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [_sessionReadyOverride],
+          child: const MaterialApp(
+            home: RoomManagementPage(
+              roomId: '!room:example.org',
+              roomName: 'Project room',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      rustApi.roomName = 'Remote name';
+      rustApi.roomTopic = 'Remote topic';
+      rustApi.roomAvatarUrl = 'mxc://example.org/remote';
+      rustApi.roomNameEventId = r'$name-remote';
+      rustApi.roomAvatarEventId = r'$avatar-remote';
+      rustApi.roomTopicEventId = r'$topic-remote';
+      rustApi.muted = false;
+      rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+      await tester.pumpAndSettle();
+
+      final nameField = find.widgetWithText(TextField, '房间名称');
+      final topicField = find.widgetWithText(TextField, '房间主题');
+      expect(
+        tester.widget<TextField>(nameField).controller!.text,
+        'Remote name',
+      );
+      expect(
+        tester.widget<TextField>(topicField).controller!.text,
+        'Remote topic',
+      );
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isFalse,
+      );
+
+      await tester.enterText(nameField, 'Local draft');
+      rustApi.roomName = 'Newer remote name';
+      rustApi.roomTopic = 'Newer remote topic';
+      rustApi.roomNameEventId = r'$name-newer-remote';
+      rustApi.roomTopicEventId = r'$topic-newer-remote';
+      rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(nameField).controller!.text,
+        'Local draft',
+      );
+      expect(
+        tester.widget<TextField>(topicField).controller!.text,
+        'Newer remote topic',
+      );
+    },
+  );
+
+  testWidgets('refreshes ignored users for account-data sync events', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(
+            () => MutableState<String?>('@remote-ignore-test:example.org'),
+          ),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('已忽略用户 (1)'), findsOneWidget);
+    expect(find.byTooltip('忽略用户'), findsOneWidget);
+
+    rustApi.ignoredUsers = const [
+      '@blocked:example.org',
+      '@alice:example.org',
+      '@remote:example.org',
+    ];
+    rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+    await tester.pumpAndSettle();
+
+    expect(find.text('已忽略用户 (3)'), findsOneWidget);
+    expect(find.byTooltip('取消忽略'), findsOneWidget);
+
+    rustApi.ignoredUsers = const ['@blocked:example.org'];
+    rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+    await tester.pumpAndSettle();
+
+    expect(find.text('已忽略用户 (1)'), findsOneWidget);
+    expect(find.byTooltip('忽略用户'), findsOneWidget);
+  });
+
+  testWidgets('initial load cannot overwrite a newer ignored-user snapshot', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    rustApi.pendingMembersLoad = Completer<void>();
+    final staleIgnoredUsers = Completer<Set<String>>();
+    var ignoredBuilds = 0;
+    final container = ProviderContainer(
+      overrides: [
+        _sessionReadyOverride,
+        ignoredUserIdsProvider.overrideWith((ref) {
+          ignoredBuilds++;
+          return ignoredBuilds == 1
+              ? staleIgnoredUsers.future
+              : Future.value({'@new-one:example.org', '@new-two:example.org'});
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    container.invalidate(ignoredUserIdsProvider);
+    expect(await container.read(ignoredUserIdsProvider.future), hasLength(2));
+    await tester.pump();
+    await tester.pump();
+
+    staleIgnoredUsers.complete({'@stale:example.org'});
+    rustApi.pendingMembersLoad!.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('已忽略用户 (2)'), findsOneWidget);
+    expect(find.text('已忽略用户 (1)'), findsNothing);
+  });
+
+  testWidgets('full refresh keeps a newer confirmed ignore list', (
+    tester,
+  ) async {
+    const userId = '@confirmed-management:example.org';
+    rustApi.failSupplementalLoads = false;
+    rustApi.ignoredUsersFromServer = false;
+    // The raw SDK store still lacks Alice, but Rust's FFI fallback overlays
+    // the pending local override before returning this effective list.
+    rustApi.ignoredUsers = const ['@blocked:example.org', '@alice:example.org'];
+    await persistIgnoredUserList(userId, {
+      '@blocked:example.org',
+      '@alice:example.org',
+    });
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(
+            () => MutableState<String?>(userId),
+          ),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('已忽略用户 (2)'), findsOneWidget);
+    expect(find.byTooltip('取消忽略'), findsOneWidget);
+
+    // A lag-compensation refresh is not proof that the SDK store has seen
+    // this device's successful account-data write yet.
+    rustApi.syncEvents.add(const rust.SyncEvent.fullRefreshRequired());
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await tester.pump();
+    }
+
+    expect(find.text('已忽略用户 (2)'), findsOneWidget);
+    expect(find.byTooltip('取消忽略'), findsOneWidget);
+  });
+
   testWidgets('finishing a save after leaving does not update disposed state', (
     tester,
   ) async {
@@ -303,6 +609,7 @@ void main() {
       await tester.tap(find.byTooltip('忽略用户'));
       await tester.pump();
       expect(rustApi.setIgnoredCalls, 1);
+      expect(rustApi.ignoredAccountUserId, '@carol:example.org');
 
       // The page is popped while the server request is still in flight; the
       // write-through must still land in the persisted snapshot, otherwise
@@ -322,6 +629,46 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('ignore actions adopt the complete server list', (tester) async {
+    rustApi.failSupplementalLoads = false;
+    final ignore = Completer<List<String>>();
+    rustApi.pendingSetIgnored = ignore;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(
+            () => MutableState<String?>('@carol:example.org'),
+          ),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('忽略用户'));
+    await tester.pump();
+    const updated = [
+      '@blocked:example.org',
+      '@alice:example.org',
+      '@remote:example.org',
+    ];
+    rustApi.ignoredUsers = updated;
+    ignore.complete(updated);
+    await tester.pumpAndSettle();
+
+    expect(find.text('已忽略用户 (3)'), findsOneWidget);
+    expect(find.byTooltip('取消忽略'), findsOneWidget);
+  });
 
   testWidgets('keeps saved room details instead of reloading stale cache', (
     tester,
@@ -364,6 +711,78 @@ void main() {
       'Updated topic',
     );
     expect(changedName?.name, 'Renamed room');
+
+    // A sync can arrive before the SDK room state sees this device's state
+    // event echo. The stale pre-save snapshot must not revert the form.
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(fields.at(0)).controller!.text,
+      'Renamed room',
+    );
+    expect(
+      tester.widget<TextField>(fields.at(1)).controller!.text,
+      'Updated topic',
+    );
+
+    // Once the matching state-event IDs arrive, the pending edits reconcile.
+    rustApi.roomName = 'Renamed room';
+    rustApi.roomTopic = 'Updated topic';
+    rustApi.roomNameEventId = r'$name-1';
+    rustApi.roomTopicEventId = r'$topic-1';
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pumpAndSettle();
+    expect(rustApi.detailsLoadCalls, 3);
+  });
+
+  testWidgets('save completion preserves a concurrent room-state refresh', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    rustApi.pendingDetailsLoad = Completer<void>();
+    rustApi.pendingDetailsUpdate = Completer<void>();
+    rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+    await tester.pump();
+    expect(rustApi.detailsLoadCalls, 2);
+
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pump();
+    expect(rustApi.updatedName, 'Project room');
+
+    rustApi.roomName = 'Remote name during save';
+    rustApi.roomTopic = 'Remote topic during save';
+    rustApi.roomAvatarUrl = 'mxc://example.org/remote-during-save';
+    rustApi.roomNameEventId = r'$name-remote-during-save';
+    rustApi.roomTopicEventId = r'$topic-remote-during-save';
+    rustApi.roomAvatarEventId = r'$avatar-remote-during-save';
+    rustApi.pendingDetailsLoad!.complete();
+    await tester.pump();
+
+    rustApi.pendingDetailsUpdate!.complete();
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextField);
+    expect(
+      tester.widget<TextField>(fields.at(0)).controller!.text,
+      'Remote name during save',
+    );
+    expect(
+      tester.widget<TextField>(fields.at(1)).controller!.text,
+      'Remote topic during save',
+    );
   });
 
   testWidgets('renaming does not submit an untouched topic', (tester) async {
@@ -543,7 +962,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('a re-knock becomes visible again after the server echo', (
+  testWidgets('a re-knock becomes visible after the echo or grace expiry', (
     tester,
   ) async {
     rustApi.failSupplementalLoads = false;
@@ -576,6 +995,12 @@ void main() {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(RoomManagementPage)),
     );
+
+    // A direct re-knock snapshot may arrive without an observed empty state.
+    // The grace expiry must reveal it without another provider refresh.
+    await tester.pump(const Duration(seconds: 11));
+    await tester.pump();
+    expect(find.text('Bob'), findsOneWidget);
 
     // Server echo: the rejected knock is gone from the membership list.
     rustApi.knockRequests = const [];
@@ -681,6 +1106,182 @@ void main() {
     expect(find.byType(RoomManagementPage), findsNothing);
     expect(find.text('打开房间'), findsOneWidget);
   });
+
+  testWidgets('a failed pending unread action restores state after leaving', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.pendingMarkUnread = Completer<void>();
+    final container = ProviderContainer(overrides: [_sessionReadyOverride]);
+    addTearDown(container.dispose);
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RoomManagementPage(
+                      roomId: '!room:example.org',
+                      roomName: 'Project room',
+                    ),
+                  ),
+                ),
+                child: const Text('打开房间'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开房间'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('标记为未读'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('标记为未读'));
+    await tester.pump();
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isTrue,
+    );
+
+    Navigator.of(tester.element(find.byType(RoomManagementPage))).pop();
+    await tester.pumpAndSettle();
+    rustApi.pendingMarkUnread!.completeError(StateError('offline'));
+    await tester.pump();
+
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isFalse,
+    );
+    expect(
+      container.read(roomUnreadOverrideProvider('!room:example.org')),
+      isNull,
+    );
+  });
+
+  testWidgets('a failed pending read action restores state after leaving', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.pendingMarkRead = Completer<void>();
+    final container = ProviderContainer(overrides: [_sessionReadyOverride]);
+    addTearDown(container.dispose);
+    container
+            .read(roomAutoReadSuppressedProvider('!room:example.org').notifier)
+            .value =
+        true;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RoomManagementPage(
+                      roomId: '!room:example.org',
+                      roomName: 'Project room',
+                    ),
+                  ),
+                ),
+                child: const Text('打开房间'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开房间'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('标记为已读'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('标记为已读'));
+    await tester.pump();
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isFalse,
+    );
+
+    Navigator.of(tester.element(find.byType(RoomManagementPage))).pop();
+    await tester.pumpAndSettle();
+    rustApi.pendingMarkRead!.completeError(StateError('offline'));
+    await tester.pump();
+
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isTrue,
+    );
+  });
+
+  testWidgets(
+    'a completed room action does not pop a page the user already left',
+    (tester) async {
+      rustApi.failSupplementalLoads = false;
+      rustApi.pendingMarkUnread = Completer<void>();
+      final container = ProviderContainer(overrides: [_sessionReadyOverride]);
+      addTearDown(container.dispose);
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const RoomManagementPage(
+                        roomId: '!room:example.org',
+                        roomName: 'Project room',
+                      ),
+                    ),
+                  ),
+                  child: const Text('打开房间'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开房间'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('标记为未读'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('标记为未读'));
+      await tester.pump();
+
+      // The user leaves via the back button while the request is in flight.
+      Navigator.of(tester.element(find.byType(RoomManagementPage))).pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(RoomManagementPage), findsNothing);
+
+      // The action completes after the page is gone: the management page is
+      // no longer the current route, so it must not pop the underlying
+      // scaffold route too (that would drop the user out of the app).
+      rustApi.pendingMarkUnread!.complete();
+      await tester.pumpAndSettle();
+      expect(find.byType(RoomManagementPage), findsNothing);
+      expect(find.text('打开房间'), findsOneWidget);
+    },
+  );
 
   testWidgets('closing a nested chat preserves its parent route', (
     tester,

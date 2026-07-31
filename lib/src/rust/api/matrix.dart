@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `joined_non_space_room`, `knock_member_events_request`, `lagged_sync_event`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `remove_desired`, `remove_dir_all_if_exists`, `resolve_ignored_user`, `resolve_marked_unread`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `synced_marked_unread`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_generation_for_client`, `active_session_meta`, `add_desired`, `advance_sync_generation`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_active_for_generation`, `clear_published_sync`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `delete_account_sdk_store`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_user_override_active`, `ignored_user_override_key`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `into_client_and_data_dir`, `joined_non_space_room`, `knock_member_events_request`, `lagged_sync_event`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `marked_unread_override_key`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `merge_current_account_ignored_user_overrides`, `merge_ignored_user_overrides`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event_for_client`, `notify_sync_event_for_generation`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides`, `reconcile_marked_unread_override`, `remove_desired`, `remove_dir_all_if_exists`, `reset`, `resolve_ignored_user`, `resolve_marked_unread`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `room_topic_event_id`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status_for_generation`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `set_subscription_user`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `subscription_user_matches`, `sync_generation_is_active`, `synced_marked_unread`, `take_typing_task_for_owner`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `ClientIdentity`, `ClientLease`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MutationTail`, `PendingEntry`, `PendingSyncTask`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -134,11 +134,11 @@ Future<List<AccountInfo>> listAccounts() =>
 Future<bool> switchAccount({required String userId}) =>
     RustLib.instance.api.crateApiMatrixSwitchAccount(userId: userId);
 
-/// Logout the active user and remove its data.
-Future<void> logout() => RustLib.instance.api.crateApiMatrixLogout();
+Future<AccountRemovalResult> logout() =>
+    RustLib.instance.api.crateApiMatrixLogout();
 
 /// Remove a specific account by user_id (logout + delete data).
-Future<void> removeAccount({required String userId}) =>
+Future<AccountRemovalResult> removeAccount({required String userId}) =>
     RustLib.instance.api.crateApiMatrixRemoveAccount(userId: userId);
 
 /// Get the current session if logged in, for persisting to disk.
@@ -214,12 +214,22 @@ Stream<TypingNotification> watchTypingNotifications() =>
 /// Begin listening for typing notifications in `room_id`. Any previous
 /// subscription for another room is cancelled first (only one room is
 /// tracked at a time). Call `unsubscribe_typing` when leaving the room.
-Future<void> subscribeTypingForRoom({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixSubscribeTypingForRoom(roomId: roomId);
+Future<String> subscribeTypingForRoom({
+  required String roomId,
+  String? accountUserId,
+}) => RustLib.instance.api.crateApiMatrixSubscribeTypingForRoom(
+  roomId: roomId,
+  accountUserId: accountUserId,
+);
 
 /// Stop tracking typing notifications (e.g. when leaving the room screen).
-Future<void> unsubscribeTyping({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixUnsubscribeTyping(roomId: roomId);
+Future<void> unsubscribeTyping({
+  required String roomId,
+  required String subscriptionId,
+}) => RustLib.instance.api.crateApiMatrixUnsubscribeTyping(
+  roomId: roomId,
+  subscriptionId: subscriptionId,
+);
 
 /// Subscribe to the given room in the Sliding Sync instance so that it is
 /// included in every sync roundtrip, ensuring read-receipt deltas and pinned
@@ -232,8 +242,13 @@ Future<void> unsubscribeTyping({required String roomId}) =>
 /// `desired`/`active` are updated under a single lock so concurrent calls
 /// can't interleave (a late-finishing old subscribe can't overwrite a newer
 /// room).
-Future<void> subscribeRoomForReceipts({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixSubscribeRoomForReceipts(roomId: roomId);
+Future<String> subscribeRoomForReceipts({
+  required String roomId,
+  String? accountUserId,
+}) => RustLib.instance.api.crateApiMatrixSubscribeRoomForReceipts(
+  roomId: roomId,
+  accountUserId: accountUserId,
+);
 
 /// Unsubscribe the given room from Sliding Sync (e.g. when leaving the room
 /// screen). Receipts for it will still arrive when the room has timeline
@@ -244,10 +259,13 @@ Future<void> subscribeRoomForReceipts({required String roomId}) =>
 /// The room is removed only after its last mounted owner unsubscribes. The
 /// update runs under the same lock as subscribe, so overlapping routes cannot
 /// cancel each other's subscription.
-Future<void> unsubscribeRoomForReceipts({required String roomId}) => RustLib
-    .instance
-    .api
-    .crateApiMatrixUnsubscribeRoomForReceipts(roomId: roomId);
+Future<void> unsubscribeRoomForReceipts({
+  required String roomId,
+  required String subscriptionId,
+}) => RustLib.instance.api.crateApiMatrixUnsubscribeRoomForReceipts(
+  roomId: roomId,
+  subscriptionId: subscriptionId,
+);
 
 /// Check if background sync is alive.
 Future<bool> isConnected() => RustLib.instance.api.crateApiMatrixIsConnected();
@@ -589,9 +607,11 @@ Future<IgnoredUsers> getIgnoredUsers() =>
 /// authoritative snapshot instead of merging a delta into a possibly
 /// unknown local baseline.
 Future<List<String>> setUserIgnored({
+  required String accountUserId,
   required String userId,
   required bool ignored,
 }) => RustLib.instance.api.crateApiMatrixSetUserIgnored(
+  accountUserId: accountUserId,
   userId: userId,
   ignored: ignored,
 );
@@ -793,6 +813,25 @@ class AccountInfo {
           userId == other.userId &&
           deviceId == other.deviceId &&
           homeserverUrl == other.homeserverUrl;
+}
+
+/// Logout the active user and remove its data.
+class AccountRemovalResult {
+  /// The account is already removed when this is set; only stale local SDK
+  /// files may remain and can be cleaned on a later app start.
+  final String? cleanupError;
+
+  const AccountRemovalResult({this.cleanupError});
+
+  @override
+  int get hashCode => cleanupError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountRemovalResult &&
+          runtimeType == other.runtimeType &&
+          cleanupError == other.cleanupError;
 }
 
 /// A single log entry visible to the user.
@@ -1254,9 +1293,9 @@ class IgnoredUsers {
   final List<String> userIds;
 
   /// True when fetched from the server; false when served from the local
-  /// state store (offline fallback), which can lag the latest confirmed
-  /// state in either direction and must never be persisted or treated as
-  /// authoritative by callers.
+  /// state store (offline fallback). Pending confirmed local writes are
+  /// applied to the fallback, but it can still lag remote changes unless
+  /// the caller is handling a completed sync notification.
   final bool fromServer;
 
   const IgnoredUsers({required this.userIds, required this.fromServer});
@@ -1535,6 +1574,7 @@ class RoomDetails {
   final String? avatarUrl;
   final String? nameEventId;
   final String? avatarEventId;
+  final String? topicEventId;
   final String? topic;
 
   const RoomDetails({
@@ -1544,6 +1584,7 @@ class RoomDetails {
     this.avatarUrl,
     this.nameEventId,
     this.avatarEventId,
+    this.topicEventId,
     this.topic,
   });
 
@@ -1555,6 +1596,7 @@ class RoomDetails {
       avatarUrl.hashCode ^
       nameEventId.hashCode ^
       avatarEventId.hashCode ^
+      topicEventId.hashCode ^
       topic.hashCode;
 
   @override
@@ -1568,19 +1610,29 @@ class RoomDetails {
           avatarUrl == other.avatarUrl &&
           nameEventId == other.nameEventId &&
           avatarEventId == other.avatarEventId &&
+          topicEventId == other.topicEventId &&
           topic == other.topic;
 }
 
 class RoomDetailsUpdate {
   final String? nameEventId;
+  final String? topicEventId;
   final String? nameError;
   final String? topicError;
 
-  const RoomDetailsUpdate({this.nameEventId, this.nameError, this.topicError});
+  const RoomDetailsUpdate({
+    this.nameEventId,
+    this.topicEventId,
+    this.nameError,
+    this.topicError,
+  });
 
   @override
   int get hashCode =>
-      nameEventId.hashCode ^ nameError.hashCode ^ topicError.hashCode;
+      nameEventId.hashCode ^
+      topicEventId.hashCode ^
+      nameError.hashCode ^
+      topicError.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1588,6 +1640,7 @@ class RoomDetailsUpdate {
       other is RoomDetailsUpdate &&
           runtimeType == other.runtimeType &&
           nameEventId == other.nameEventId &&
+          topicEventId == other.topicEventId &&
           nameError == other.nameError &&
           topicError == other.topicError;
 }
@@ -1805,6 +1858,10 @@ sealed class SyncEvent with _$SyncEvent {
   /// A room's pinned-event state changed.
   const factory SyncEvent.pinnedMessagesChanged({required String roomId}) =
       SyncEvent_PinnedMessagesChanged;
+
+  /// A room's membership state changed.
+  const factory SyncEvent.roomMembersChanged({required String roomId}) =
+      SyncEvent_RoomMembersChanged;
 
   /// The account's ignored-user list changed.
   const factory SyncEvent.ignoredUsersChanged() = SyncEvent_IgnoredUsersChanged;

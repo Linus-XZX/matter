@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import '../../widgets/app_avatar.dart';
 import '../settings/avatar_crop_editor_page.dart';
 import 'pinned_messages_page.dart';
 import 'room_metadata_patch.dart';
+import 'room_state_edit_tracker.dart';
 
 class RoomManagementPage extends ConsumerStatefulWidget {
   final String roomId;
@@ -37,6 +39,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   final _nameController = TextEditingController();
   final _topicController = TextEditingController();
   final _imagePicker = ImagePicker();
+  final _roomNameEdit = RoomStateEditTracker();
+  final _roomAvatarEdit = RoomStateEditTracker();
+  final _roomTopicEdit = RoomStateEditTracker();
   rust.RoomDetails? _details;
   Uint8List? _avatarPreviewBytes;
   List<rust.Contact> _members = const [];
@@ -48,23 +53,72 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   final Map<String, DateTime> _handledKnockUserIds = {};
   final Set<String> _pendingKnockUserIds = {};
   static const Duration _handledKnockGrace = Duration(seconds: 10);
+  Timer? _handledKnockExpiryTimer;
   Object? _mutedLoadError;
   Object? _membersLoadError;
   Object? _ignoredUsersLoadError;
   bool _muted = false;
   bool _muteSaving = false;
   bool _loading = true;
+  int _ignoredUsersRevision = 0;
   bool _saving = false;
+  bool _membersRefreshInFlight = false;
+  bool _membersRefreshTrailing = false;
+  bool _roomStateRefreshInFlight = false;
+  bool _roomStateRefreshTrailing = false;
   String? _error;
+  late final StreamSubscription<rust.SyncEvent> _syncSubscription;
+  late final ProviderSubscription<AsyncValue<Set<String>>>
+  _ignoredUsersSubscription;
 
   @override
   void initState() {
     super.initState();
+    _ignoredUsersSubscription = ref.listenManual(ignoredUserIdsProvider, (
+      _,
+      next,
+    ) {
+      if (!mounted) return;
+      next.when(
+        data: (ids) {
+          setState(() {
+            _ignoredUsersRevision++;
+            _ignoredUsers = ids.toList()..sort();
+            _ignoredUsersLoadError = null;
+          });
+        },
+        error: (error, _) {
+          setState(() {
+            _ignoredUsersRevision++;
+            _ignoredUsersLoadError = error;
+          });
+        },
+        loading: () {},
+      );
+    });
     _load();
+    _syncSubscription = rust.watchSyncEvents().listen((event) {
+      if (!mounted) return;
+      switch (event) {
+        case rust.SyncEvent_SyncCompleted():
+          unawaited(_refreshRoomState());
+        case rust.SyncEvent_RoomMembersChanged(:final roomId)
+            when roomId == widget.roomId:
+          unawaited(_refreshMembers());
+        case rust.SyncEvent_FullRefreshRequired():
+          unawaited(_refreshMembers());
+          unawaited(_refreshRoomState());
+        case _:
+          break;
+      }
+    });
   }
 
   @override
   void dispose() {
+    _handledKnockExpiryTimer?.cancel();
+    _syncSubscription.cancel();
+    _ignoredUsersSubscription.close();
     _nameController.dispose();
     _topicController.dispose();
     super.dispose();
@@ -80,6 +134,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   Future<void> _load() async {
     if (!mounted) return;
+    _membersRefreshInFlight = true;
     setState(() {
       _loading = true;
       _error = null;
@@ -93,31 +148,39 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       final membersFuture = _attempt(
         rust.getRoomMembers(roomId: widget.roomId),
       );
-      final ignoredFuture = _attempt(
-        rust.getIgnoredUsers().then((result) => result.userIds),
-      );
+      final ignoredUsersRevision = _ignoredUsersRevision;
+      final ignoredFuture = _attempt(ref.read(ignoredUserIdsProvider.future));
       final muted = await mutedFuture;
       final members = await membersFuture;
       final ignoredUsers = await ignoredFuture;
+      _membersRefreshInFlight = false;
       if (!mounted) return;
       setState(() {
         _details = details;
         _mutedLoadError = muted.error;
         _membersLoadError = members.error;
-        _ignoredUsersLoadError = ignoredUsers.error;
+        if (_ignoredUsersRevision == ignoredUsersRevision) {
+          _ignoredUsersLoadError = ignoredUsers.error;
+          if (ignoredUsers.value case final value?) {
+            _ignoredUsers = value.toList()..sort();
+          }
+        }
         if (muted.value case final value?) _muted = value;
         if (members.value case final value?) _members = value;
-        if (ignoredUsers.value case final value?) _ignoredUsers = value;
         _nameController.text = details.hasExplicitName ? details.name : '';
         _topicController.text = details.topic ?? '';
         _loading = false;
       });
+      if (_membersRefreshTrailing) unawaited(_refreshMembers());
+      if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
     } catch (error) {
+      _membersRefreshInFlight = false;
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = '$error';
       });
+      if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
     }
   }
 
@@ -146,11 +209,103 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     updateError: (error) => _mutedLoadError = error,
   );
 
-  Future<void> _retryMembers() => _retryPartialLoad(
-    load: () => rust.getRoomMembers(roomId: widget.roomId),
-    updateValue: (value) => _members = value,
-    updateError: (error) => _membersLoadError = error,
-  );
+  Future<void> _retryMembers() => _refreshMembers();
+
+  Future<void> _refreshRoomState() async {
+    if (_loading || _saving || _muteSaving || _roomStateRefreshInFlight) {
+      _roomStateRefreshTrailing = true;
+      return;
+    }
+    do {
+      _roomStateRefreshTrailing = false;
+      _roomStateRefreshInFlight = true;
+      final detailsFuture = _attempt(
+        rust.getRoomDetails(roomId: widget.roomId),
+      );
+      final mutedFuture = _attempt(rust.isRoomMuted(roomId: widget.roomId));
+      final details = await detailsFuture;
+      final muted = await mutedFuture;
+      _roomStateRefreshInFlight = false;
+      if (!mounted) return;
+      setState(() {
+        _mutedLoadError = muted.error;
+        if (muted.value case final value?) _muted = value;
+        if (details.value case final value?) {
+          _mergeRemoteDetails(value);
+        } else if (details.error != null) {
+          debugPrint('refresh room details failed: ${details.error}');
+        }
+      });
+    } while (_roomStateRefreshTrailing && mounted);
+  }
+
+  void _mergeRemoteDetails(rust.RoomDetails remote) {
+    final current = _details;
+    if (current == null) {
+      _details = remote;
+      _nameController.text = remote.hasExplicitName ? remote.name : '';
+      _topicController.text = remote.topic ?? '';
+      _avatarPreviewBytes = null;
+      return;
+    }
+
+    final currentNameText = current.hasExplicitName ? current.name : '';
+    final currentTopicText = current.topic ?? '';
+    final nameEdited = _nameController.text != currentNameText;
+    final topicEdited = _topicController.text != currentTopicText;
+    final acceptName =
+        !nameEdited && _roomNameEdit.shouldAccept(remote.nameEventId);
+    final acceptTopic =
+        !topicEdited && _roomTopicEdit.shouldAccept(remote.topicEventId);
+    final acceptAvatar = _roomAvatarEdit.shouldAccept(remote.avatarEventId);
+    final avatarChanged =
+        acceptAvatar &&
+        (current.avatarUrl != remote.avatarUrl ||
+            current.avatarEventId != remote.avatarEventId);
+
+    if (acceptName) {
+      _nameController.text = remote.hasExplicitName ? remote.name : '';
+    }
+    if (acceptTopic) {
+      _topicController.text = remote.topic ?? '';
+    }
+    if (acceptAvatar && (_avatarPreviewBytes != null || avatarChanged)) {
+      _avatarPreviewBytes = null;
+    }
+
+    _details = rust.RoomDetails(
+      id: remote.id,
+      name: acceptName ? remote.name : current.name,
+      hasExplicitName: acceptName
+          ? remote.hasExplicitName
+          : current.hasExplicitName,
+      avatarUrl: acceptAvatar ? remote.avatarUrl : current.avatarUrl,
+      nameEventId: acceptName ? remote.nameEventId : current.nameEventId,
+      avatarEventId: acceptAvatar
+          ? remote.avatarEventId
+          : current.avatarEventId,
+      topicEventId: acceptTopic ? remote.topicEventId : current.topicEventId,
+      topic: acceptTopic ? remote.topic : current.topic,
+    );
+  }
+
+  Future<void> _refreshMembers() async {
+    if (_membersRefreshInFlight) {
+      _membersRefreshTrailing = true;
+      return;
+    }
+    do {
+      _membersRefreshTrailing = false;
+      _membersRefreshInFlight = true;
+      final result = await _attempt(rust.getRoomMembers(roomId: widget.roomId));
+      _membersRefreshInFlight = false;
+      if (!mounted) return;
+      setState(() {
+        _membersLoadError = result.error;
+        if (result.value case final value?) _members = value;
+      });
+    } while (_membersRefreshTrailing && mounted);
+  }
 
   Future<void> _retryKnocks() async {
     ref.invalidate(roomKnockRequestsProvider(widget.roomId));
@@ -161,11 +316,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     }
   }
 
-  Future<void> _retryIgnoredUsers() => _retryPartialLoad(
-    load: () => rust.getIgnoredUsers().then((result) => result.userIds),
-    updateValue: (value) => _ignoredUsers = value,
-    updateError: (error) => _ignoredUsersLoadError = error,
-  );
+  Future<void> _retryIgnoredUsers() async {
+    ref.invalidate(ignoredUserIdsProvider);
+    try {
+      await ref.read(ignoredUserIdsProvider.future);
+    } catch (_) {
+      // The provider listener exposes the retry error in the section.
+    }
+  }
 
   void _invalidateRoom() {
     if (!mounted) return;
@@ -179,6 +337,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   void _closeCurrentRoom() {
     final navigator = Navigator.of(context);
+    // An async room action may complete after the user already popped this
+    // page (e.g. back button while the action was in flight). Popping the
+    // chat underneath then would kick the user out of the conversation they
+    // intended to stay in, so only close when this page is still the active
+    // route. During a pop animation the route is already removed from the
+    // navigator history, which `isCurrent` reflects immediately.
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isCurrent) return;
     final handledByParent = widget.onRoomClosed != null;
     widget.onRoomClosed?.call();
     if (navigator.canPop()) navigator.pop();
@@ -212,24 +378,45 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       _invalidateRoom();
       if (!mounted) return;
+      final currentDetails = _details;
+      if (currentDetails == null) return;
       final nameUpdated = updateName && result.nameError == null;
+      if (nameUpdated) {
+        _roomNameEdit.record(
+          currentEventId: currentDetails.nameEventId,
+          nextEventId: result.nameEventId,
+        );
+      }
+      if (updateTopic && result.topicError == null) {
+        _roomTopicEdit.record(
+          currentEventId: currentDetails.topicEventId,
+          nextEventId: result.topicEventId,
+        );
+      }
       final updatedDetails = rust.RoomDetails(
-        id: details.id,
-        name: nameUpdated ? name : details.name,
-        hasExplicitName: details.hasExplicitName || nameUpdated,
-        avatarUrl: details.avatarUrl,
-        nameEventId: nameUpdated ? result.nameEventId : details.nameEventId,
-        avatarEventId: details.avatarEventId,
-        topic: updateTopic && result.topicError == null ? topic : details.topic,
+        id: currentDetails.id,
+        name: nameUpdated ? name : currentDetails.name,
+        hasExplicitName: currentDetails.hasExplicitName || nameUpdated,
+        avatarUrl: currentDetails.avatarUrl,
+        nameEventId: nameUpdated
+            ? result.nameEventId
+            : currentDetails.nameEventId,
+        avatarEventId: currentDetails.avatarEventId,
+        topicEventId: updateTopic && result.topicError == null
+            ? result.topicEventId
+            : currentDetails.topicEventId,
+        topic: updateTopic && result.topicError == null
+            ? topic
+            : currentDetails.topic,
       );
-      final detailsChanged = updatedDetails != details;
+      final detailsChanged = updatedDetails != currentDetails;
       if (detailsChanged) {
         setState(() => _details = updatedDetails);
       }
       if (nameUpdated) {
         widget.onRoomDetailsChanged?.call(
           RoomNamePatch(
-            roomId: details.id,
+            roomId: currentDetails.id,
             name: name,
             nameEventId: result.nameEventId,
           ),
@@ -248,7 +435,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     } catch (error) {
       if (mounted) _showSnackBar('更新失败: $error');
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() => _saving = false);
+        if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
+      }
     }
   }
 
@@ -280,6 +470,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       _invalidateRoom();
       if (!mounted) return;
       final details = _details!;
+      _roomAvatarEdit.record(
+        currentEventId: details.avatarEventId,
+        nextEventId: avatarUpdate.eventId,
+      );
       final updatedDetails = rust.RoomDetails(
         id: details.id,
         name: details.name,
@@ -287,6 +481,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         avatarUrl: avatarUpdate.avatarUrl,
         nameEventId: details.nameEventId,
         avatarEventId: avatarUpdate.eventId,
+        topicEventId: details.topicEventId,
         topic: details.topic,
       );
       setState(() {
@@ -304,7 +499,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     } catch (error) {
       if (mounted) _showSnackBar('头像更新失败: $error');
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() => _saving = false);
+        if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
+      }
     }
   }
 
@@ -325,7 +523,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         _showSnackBar('通知设置更新失败: $error');
       }
     } finally {
-      if (mounted) setState(() => _muteSaving = false);
+      if (mounted) {
+        setState(() => _muteSaving = false);
+        if (_roomStateRefreshTrailing) unawaited(_refreshRoomState());
+      }
     }
   }
 
@@ -385,6 +586,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final namespace = ref.read(activeUserIdProvider) ?? '';
     try {
       final updated = await rust.setUserIgnored(
+        accountUserId: namespace,
         userId: userId,
         ignored: ignored,
       );
@@ -398,9 +600,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       await persistIgnoredUserList(namespace, updated.toSet());
       if (!mounted) return;
       setState(() {
-        _ignoredUsers = ignored
-            ? {..._ignoredUsers, userId}.toList()
-            : _ignoredUsers.where((id) => id != userId).toList();
+        _ignoredUsers = updated.toList()..sort();
       });
       _showSnackBar(ignored ? '已忽略 $userId' : '已取消忽略 $userId');
     } catch (error) {
@@ -478,6 +678,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       }
       if (!mounted) return;
       setState(() => _handledKnockUserIds[request.userId] = DateTime.now());
+      _scheduleHandledKnockExpiry();
       _invalidateRoom();
       if (approve) {
         await _retryMembers();
@@ -536,8 +737,35 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         DateTime.now().difference(handledAt) < _handledKnockGrace;
   }
 
+  void _scheduleHandledKnockExpiry() {
+    _handledKnockExpiryTimer?.cancel();
+    if (_handledKnockUserIds.isEmpty) return;
+    final now = DateTime.now();
+    final nextExpiry = _handledKnockUserIds.values
+        .map((handledAt) => handledAt.add(_handledKnockGrace))
+        .reduce((earlier, later) => earlier.isBefore(later) ? earlier : later);
+    final delay = nextExpiry.difference(now);
+    _handledKnockExpiryTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      () {
+        if (!mounted) return;
+        setState(() {
+          _handledKnockUserIds.removeWhere(
+            (_, handledAt) =>
+                !handledAt.add(_handledKnockGrace).isAfter(nextExpiry),
+          );
+        });
+        _scheduleHandledKnockExpiry();
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Keep the shared sync handler alive so ignoredUserIdsProvider receives
+    // account-data and lag-compensation invalidations even when this page is
+    // tested or presented outside the usual app shell.
+    ref.watch(syncStreamProvider);
     final details = _details;
     final knockRequestsAsync = ref.watch(
       roomKnockRequestsProvider(widget.roomId),
@@ -552,6 +780,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         );
         if (mounted && previousCount != _handledKnockUserIds.length) {
           setState(() {});
+          _scheduleHandledKnockExpiry();
         }
       });
     });
@@ -812,11 +1041,20 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           final suppression = roomAutoReadSuppressedProvider(
                             widget.roomId,
                           );
-                          final previousSuppression = ref.read(suppression);
-                          ref.read(suppression.notifier).value = false;
+                          final suppressionNotifier = ref.read(
+                            suppression.notifier,
+                          );
+                          final previousSuppression = suppressionNotifier.value;
+                          final suppressionToken = setRoomAutoReadSuppressed(
+                            ref,
+                            widget.roomId,
+                            suppressed: false,
+                          );
                           try {
                             await rust.markRoomAsRead(roomId: widget.roomId);
-                            if (!mounted) return;
+                            if (!mounted || !suppressionToken.isCurrent) {
+                              return;
+                            }
                             setRoomUnreadOverrideById(
                               ref,
                               widget.roomId,
@@ -825,9 +1063,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                             _invalidateRoom();
                             _showSnackBar('已标记为已读');
                           } catch (error) {
+                            if (!suppressionToken.isCurrent) return;
+                            suppressionNotifier.value = previousSuppression;
                             if (!mounted) return;
-                            ref.read(suppression.notifier).value =
-                                previousSuppression;
                             _showSnackBar('操作失败: $error');
                           }
                         },
@@ -839,23 +1077,39 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           final suppression = roomAutoReadSuppressedProvider(
                             widget.roomId,
                           );
-                          final previousSuppression = ref.read(suppression);
-                          ref.read(suppression.notifier).value = true;
+                          final suppressionNotifier = ref.read(
+                            suppression.notifier,
+                          );
+                          final unreadOverrideNotifier = ref.read(
+                            roomUnreadOverrideProvider(widget.roomId).notifier,
+                          );
+                          final previousSuppression = suppressionNotifier.value;
+                          final previousUnreadOverride =
+                              unreadOverrideNotifier.value;
+                          final suppressionToken = setRoomAutoReadSuppressed(
+                            ref,
+                            widget.roomId,
+                            suppressed: true,
+                          );
+                          setRoomUnreadOverrideById(
+                            ref,
+                            widget.roomId,
+                            unread: true,
+                          );
                           try {
                             await rust.markRoomUnread(roomId: widget.roomId);
-                            if (!mounted) return;
-                            setRoomUnreadOverrideById(
-                              ref,
-                              widget.roomId,
-                              unread: true,
-                            );
+                            if (!mounted || !suppressionToken.isCurrent) {
+                              return;
+                            }
                             _invalidateRoom();
                             _showSnackBar('已标记为未读');
                             _closeCurrentRoom();
                           } catch (error) {
+                            if (!suppressionToken.isCurrent) return;
+                            suppressionNotifier.value = previousSuppression;
+                            unreadOverrideNotifier.value =
+                                previousUnreadOverride;
                             if (!mounted) return;
-                            ref.read(suppression.notifier).value =
-                                previousSuppression;
                             _showSnackBar('操作失败: $error');
                           }
                         },

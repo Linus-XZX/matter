@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -209,7 +210,14 @@ void main() {
     await tester.enterText(find.byType(TextField), 'unfinished draft');
     await tester.pump();
 
-    container.read(editingMessageProvider(roomId).notifier).value =
+    container
+            .read(
+              editingMessageProvider((
+                roomId: roomId,
+                userId: '@alice:example.org',
+              )).notifier,
+            )
+            .value =
         _messageToEdit();
     await tester.pump();
     await tester.pump();

@@ -149,7 +149,21 @@ pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<()
     let timeline = get_or_create_timeline(client, room).await?;
     ensure_initial_window(&timeline, 100).await?;
     mark_as_read(&timeline, room).await?;
-    clear_marked_unread(room).await
+    // Only clear an explicit `m.marked_unread` when one is actually set.
+    // Auto-reads fire on every incoming message while the chat is open, so
+    // unconditionally writing the flag (and triggering its sync echo +
+    // RoomListChanged refresh) would be a per-message write amplification.
+    let marked_unread = room
+        .account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.deserialize().ok())
+        .is_some_and(|event| event.content.unread);
+    if marked_unread {
+        clear_marked_unread(room).await?;
+    }
+    Ok(())
 }
 
 /// Load every accessible pinned event, supplementing the SDK's bounded cache.
@@ -291,14 +305,7 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         }
     }
 
-    if by_id.is_empty() {
-        return Err(focused_error
-            .map(|error| format!("Failed to load pinned messages: {error}"))
-            .or(cache_error)
-            .unwrap_or_else(|| "Failed to load any pinned messages.".to_owned()));
-    }
-
-    Ok(ordered_pinned_messages(&pinned_ids, &by_id))
+    complete_pinned_messages(&pinned_ids, &by_id, focused_error, cache_error)
 }
 
 async fn load_focused_message(
@@ -322,6 +329,7 @@ async fn load_focused_message(
         .find(|message| message.id == event_id.as_str()))
 }
 
+#[cfg(test)]
 fn ordered_pinned_messages(
     pinned_ids: &[matrix_sdk::ruma::OwnedEventId],
     by_id: &HashMap<String, ChatMessage>,
@@ -341,6 +349,47 @@ fn missing_pinned_event_ids(
         .filter(|event_id| !by_id.contains_key(event_id.as_str()))
         .cloned()
         .collect()
+}
+
+fn complete_pinned_messages(
+    pinned_ids: &[matrix_sdk::ruma::OwnedEventId],
+    by_id: &HashMap<String, ChatMessage>,
+    focused_error: Option<String>,
+    cache_error: Option<String>,
+) -> Result<Vec<ChatMessage>, String> {
+    let missing_count = missing_pinned_event_ids(pinned_ids, by_id).len();
+    if !pinned_ids.is_empty() && by_id.is_empty() {
+        if let Some(error) = focused_error {
+            return Err(format!("Failed to load pinned messages: {error}"));
+        }
+        return Err(cache_error
+            .unwrap_or_else(|| format!("Failed to load {missing_count} pinned message(s).")));
+    }
+    Ok(pinned_ids
+        .iter()
+        .map(|event_id| {
+            by_id
+                .get(event_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| unavailable_pinned_message(event_id))
+        })
+        .collect())
+}
+
+fn unavailable_pinned_message(event_id: &matrix_sdk::ruma::EventId) -> ChatMessage {
+    base_message(
+        event_id.as_str(),
+        "",
+        "系统",
+        "",
+        false,
+        "此置顶消息不可用或已被删除".to_owned(),
+        None,
+        Vec::new(),
+        false,
+        MessageType::Event,
+        None,
+    )
 }
 
 async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
@@ -399,7 +448,7 @@ async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
 }
 
 /// Drop the explicit `m.marked_unread` flag for an explicit read action.
-async fn clear_marked_unread(room: &Room) -> Result<(), String> {
+pub(super) async fn clear_marked_unread(room: &Room) -> Result<(), String> {
     use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
 
     room.set_account_data(MarkedUnreadEventContent::new(false))
@@ -420,16 +469,35 @@ pub(super) async fn get_messages_before(
         return Ok(Vec::new());
     }
 
-    let current = convert_snapshot(room, &snapshot(&timeline).await).await;
-    let available = messages_before(&current, from_event_id).len();
-    if available < limit {
-        timeline
-            .paginate_backwards((limit - available).max(20) as u16)
+    // The anchor (usually the oldest cached message from a previous session)
+    // can sit outside the current timeline window when the cache is deeper
+    // than the window. Paginate until the anchor is visible or history ends;
+    // otherwise the first page would silently return nothing and the caller
+    // would stop paginating, cutting off all older history.
+    let mut anchor_visible = false;
+    for _ in 0..16 {
+        let current = convert_snapshot(room, &snapshot(&timeline).await).await;
+        if current.iter().any(|message| message.id == from_event_id) {
+            anchor_visible = true;
+            break;
+        }
+        let hit_start = timeline
+            .paginate_backwards(20u16)
             .await
             .map_err(|error| format!("Failed to paginate room timeline: {error}"))?;
+        if hit_start {
+            break;
+        }
     }
 
     let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
+    if !anchor_visible {
+        // The anchor is deeper than the bounded pagination reached (or it
+        // never existed, e.g. it was redacted). Hand back the tail of the
+        // window instead of an empty page: the caller can still render and
+        // anchor its next request on a message we actually delivered.
+        return Ok(messages[messages.len().saturating_sub(limit)..].to_vec());
+    }
     let before = messages_before(&messages, from_event_id);
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }
@@ -875,7 +943,7 @@ fn message_to_chat_message(
                 matrix_sdk::ruma::events::room::MediaSource::Plain(mxc) => Some(mxc.to_string()),
                 _ => None,
             };
-            let (image_width, image_height) = image_info_dimensions(image.info.as_ref());
+            let (image_width, image_height) = image_info_dimensions(image.info.as_deref());
             let (caption, caption_formatted_body) =
                 media_caption_parts(image.formatted_caption(), image.caption());
             let (mentioned_user_ids, mentions_room) = mentions_parts(mentions);
@@ -1226,9 +1294,10 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        loaded_expected_event_count, messages_before, missing_pinned_event_ids,
-        newest_receipt_position, ordered_pinned_messages, pinned_events_ready,
-        reader_ids_for_position, record_latest_receipt_position, resolve_receipt_position,
+        complete_pinned_messages, loaded_expected_event_count, messages_before,
+        missing_pinned_event_ids, newest_receipt_position, ordered_pinned_messages,
+        pinned_events_ready, reader_ids_for_position, record_latest_receipt_position,
+        resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
@@ -1345,6 +1414,46 @@ mod tests {
         assert_eq!(ordered.len(), 130);
         assert_eq!(ordered.first().unwrap().id, "$pin-0:example.org");
         assert_eq!(ordered.last().unwrap().id, "$pin-129:example.org");
+    }
+
+    #[test]
+    fn partial_pinned_results_keep_available_messages_and_add_a_placeholder() {
+        use matrix_sdk::ruma::EventId;
+
+        let first = EventId::parse("$first:example.org").unwrap();
+        let second = EventId::parse("$second:example.org").unwrap();
+        let pinned_ids = vec![first.clone(), second];
+        let partial = HashMap::from([(first.to_string(), message(first.as_str()))]);
+
+        let messages = complete_pinned_messages(
+            &pinned_ids,
+            &partial,
+            Some("event unavailable".to_owned()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "$first:example.org");
+        assert_eq!(messages[1].id, "$second:example.org");
+        assert!(matches!(messages[1].msg_type, MessageType::Event));
+        assert!(messages[1].content.contains("不可用"));
+    }
+
+    #[test]
+    fn wholly_unavailable_pinned_results_still_surface_the_load_error() {
+        use matrix_sdk::ruma::EventId;
+
+        let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
+        let error = complete_pinned_messages(
+            &pinned_ids,
+            &HashMap::new(),
+            Some("event unavailable".to_owned()),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("event unavailable"));
     }
 
     #[test]

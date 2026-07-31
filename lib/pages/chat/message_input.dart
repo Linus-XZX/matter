@@ -18,27 +18,9 @@ import 'latest_message_control.dart';
 import 'send_flight.dart';
 import 'sticker_catalog.dart';
 
-/// Provider to hold the message being replied to (per room).
-final replyingToProvider =
-    NotifierProvider.family<
-      MutableState<rust.ChatMessage?>,
-      rust.ChatMessage?,
-      String
-    >((_) => MutableState(null));
-
-/// Provider to hold the message being edited (per room).
-final editingMessageProvider =
-    NotifierProvider.family<
-      MutableState<rust.ChatMessage?>,
-      rust.ChatMessage?,
-      String
-    >((_) => MutableState(null));
-
-typedef MessageDraftKey = ({String roomId, String userId});
-
 /// In-memory draft text, isolated by both account and room.
 final messageDraftProvider =
-    NotifierProvider.family<MutableState<String>, String, MessageDraftKey>(
+    NotifierProvider.family<MutableState<String>, String, RoomAccountKey>(
       (_) => MutableState(''),
     );
 
@@ -97,10 +79,11 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   final _textFieldKey = GlobalKey();
-  late final MessageDraftKey _draftKey;
+  RoomAccountKey get _draftKey => activeRoomAccountKey(ref, widget.roomId);
   bool _hasText = false;
   bool _isSending = false;
   Timer? _typingTimer;
+  Timer? _typingKeepAliveTimer;
   bool _isTyping = false;
   ComposerPickerTab _pickerTab = ComposerPickerTab.emoji;
   int _pickerInstance = 0;
@@ -116,13 +99,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     if (widget.panelMode == InputPanelMode.attachment) {
       _lastPickerPanelMode = InputPanelMode.attachment;
     }
-    _draftKey = (
-      roomId: widget.roomId,
-      userId:
-          ref.read(activeUserIdProvider) ??
-          ref.read(currentUserProvider)?.id ??
-          'anonymous',
-    );
     final draft = ref.read(messageDraftProvider(_draftKey));
     _controller.value = TextEditingValue(
       text: draft,
@@ -165,6 +141,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   @override
   void dispose() {
     _typingTimer?.cancel();
+    _typingKeepAliveTimer?.cancel();
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
@@ -175,7 +152,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
-    if (ref.read(editingMessageProvider(widget.roomId)) == null) {
+    if (ref.read(editingMessageProvider(_draftKey)) == null) {
       ref.read(messageDraftProvider(_draftKey).notifier).value =
           _controller.text;
     }
@@ -195,6 +172,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     if (!_isTyping) {
       _isTyping = true;
       _sendTypingNotice(true);
+      // The server expires a typing notice after ~4s. While the user keeps
+      // typing (which resets the 3s idle timer below), re-send the notice
+      // periodically so the remote end does not lose the indicator mid-
+      // sentence.
+      _typingKeepAliveTimer?.cancel();
+      _typingKeepAliveTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (_isTyping) _sendTypingNotice(true);
+      });
     }
     // Reset the timer
     _typingTimer?.cancel();
@@ -208,6 +193,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       _isTyping = false;
       _sendTypingNotice(false);
     }
+    _typingKeepAliveTimer?.cancel();
+    _typingKeepAliveTimer = null;
   }
 
   void _sendTypingNotice(bool typing) {
@@ -287,8 +274,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final compiled = _markdownComposer.compile(text);
     if (compiled.body.trim().isEmpty) return;
 
-    final editing = ref.read(editingMessageProvider(widget.roomId));
-    final replyTo = ref.read(replyingToProvider(widget.roomId));
+    final editing = ref.read(editingMessageProvider(_draftKey));
+    final replyTo = ref.read(replyingToProvider(_draftKey));
     final shouldRestoreKeyboard =
         widget.panelMode == InputPanelMode.keyboard || _focusNode.hasFocus;
 
@@ -305,9 +292,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         _registerTextSendFlight(localId, compiled.body);
       }
       widget.onMessageQueued(sendFlightId(localId), sendPresentation!);
+      // Capture the reply target now: it is cleared from the provider below,
+      // but a failed send needs it to retry with the correct mention.
+      final replyToUserId = (replyTo == null || replyTo.isMe)
+          ? null
+          : replyTo.senderId;
       upsertLocalOutgoingMessage(
         ref,
-        widget.roomId,
+        _draftKey,
         LocalOutgoingMessage(
           message: _localTextMessage(
             id: localId,
@@ -315,11 +307,12 @@ class _MessageInputState extends ConsumerState<MessageInput> {
             inReplyTo: replyTo?.id,
             timestamp: localTimestamp,
           ),
+          replyToUserId: replyToUserId,
         ),
       );
       _controller.clear();
       if (replyTo != null) {
-        ref.read(replyingToProvider(widget.roomId).notifier).value = null;
+        ref.read(replyingToProvider(_draftKey).notifier).value = null;
       }
     }
 
@@ -349,28 +342,31 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         );
       }
       final persistMarkdownSource = await _canPersistMarkdownSource();
-      await _markdownSourceStore.save(
-        userId: _draftKey.userId,
-        roomId: widget.roomId,
-        eventId: editing?.id ?? remoteEventId,
-        source: compiled.source,
-        body: compiled.body,
-        formattedBody: compiled.formattedBody,
-        persist: persistMarkdownSource,
-      );
+      try {
+        await _markdownSourceStore.save(
+          userId: _draftKey.userId,
+          roomId: widget.roomId,
+          eventId: editing?.id ?? remoteEventId,
+          source: compiled.source,
+          body: compiled.body,
+          formattedBody: compiled.formattedBody,
+          persist: persistMarkdownSource,
+        );
+      } catch (e) {
+        // The message was already accepted by the server; failing to persist
+        // the markdown source must not flip the bubble into "failed" (which
+        // would then offer a retry that duplicates the send).
+        debugPrint('Failed to save markdown source: $e');
+      }
       if (!mounted) return;
       _stopTyping();
       if (!isNewMessage) _controller.clear();
       if (editing != null) {
-        ref.read(editingMessageProvider(widget.roomId).notifier).value = null;
+        ref.read(editingMessageProvider(_draftKey).notifier).value = null;
         _restoreDraft();
       }
       if (localId != null && mounted) {
-        final sentId = markLocalOutgoingMessageSent(
-          ref,
-          widget.roomId,
-          localId,
-        );
+        final sentId = markLocalOutgoingMessageSent(ref, _draftKey, localId);
         widget.onMessageSent(sendPresentation!, true);
         unawaited(_reconcileSentLocalMessage(sentId));
       } else {
@@ -378,10 +374,10 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       }
     } catch (e) {
       if (localId != null && mounted) {
-        removeLocalOutgoingMessage(ref, widget.roomId, localId);
+        removeLocalOutgoingMessage(ref, _draftKey, localId);
         upsertLocalOutgoingMessage(
           ref,
-          widget.roomId,
+          _draftKey,
           LocalOutgoingMessage(
             message: _localTextMessage(
               id: failedLocalOutgoingId(localId),
@@ -389,6 +385,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
               inReplyTo: replyTo?.id,
               timestamp: localTimestamp,
             ),
+            replyToUserId: (replyTo == null || replyTo.isMe)
+                ? null
+                : replyTo.senderId,
           ),
         );
       }
@@ -453,23 +452,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   Future<void> _reconcileSentLocalMessage(String localId) async {
-    const retryDelays = [
-      Duration.zero,
-      Duration(milliseconds: 500),
-      Duration(seconds: 1),
-      Duration(seconds: 2),
-      Duration(seconds: 4),
-    ];
-    for (final delay in retryDelays) {
-      if (delay != Duration.zero) await Future<void>.delayed(delay);
-      if (!mounted) return;
-      final stillLocal = ref
-          .read(localOutgoingMessagesProvider(widget.roomId))
-          .any((message) => message.message.id == localId);
-      if (!stillLocal) return;
-      await refreshMessages(ref, widget.roomId);
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-    }
+    // Shared with failed-message retry so both paths reconcile the local
+    // sent bubble with the server echo identically.
+    await reconcileSentLocalMessage(ref, _draftKey, localId);
   }
 
   int _nextLocalTimestamp() {
@@ -479,7 +464,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       final ts = int.tryParse(message.timestamp) ?? 0;
       if (ts >= timestamp) timestamp = ts + 1;
     }
-    final local = ref.read(localOutgoingMessagesProvider(widget.roomId));
+    final local = ref.read(localOutgoingMessagesProvider(_draftKey));
     for (final outgoing in local) {
       final ts = int.tryParse(outgoing.message.timestamp) ?? 0;
       if (ts >= timestamp) timestamp = ts + 1;
@@ -598,7 +583,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     widget.onMessageQueued(sendFlightId(localId), sendPresentation);
     upsertLocalOutgoingMessage(
       ref,
-      widget.roomId,
+      _draftKey,
       LocalOutgoingMessage(
         message: _localStickerMessage(
           id: localId,
@@ -621,15 +606,15 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       );
       _stopTyping();
       if (!mounted) return;
-      final sentId = markLocalOutgoingMessageSent(ref, widget.roomId, localId);
+      final sentId = markLocalOutgoingMessageSent(ref, _draftKey, localId);
       widget.onMessageSent(sendPresentation, true);
       unawaited(_reconcileSentLocalMessage(sentId));
     } catch (e) {
       if (mounted) {
-        removeLocalOutgoingMessage(ref, widget.roomId, localId);
+        removeLocalOutgoingMessage(ref, _draftKey, localId);
         upsertLocalOutgoingMessage(
           ref,
-          widget.roomId,
+          _draftKey,
           LocalOutgoingMessage(
             message: _localStickerMessage(
               id: failedLocalOutgoingId(localId),
@@ -646,8 +631,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   @override
   Widget build(BuildContext context) {
-    final replyTo = ref.watch(replyingToProvider(widget.roomId));
-    final editing = ref.watch(editingMessageProvider(widget.roomId));
+    final replyTo = ref.watch(replyingToProvider(_draftKey));
+    final editing = ref.watch(editingMessageProvider(_draftKey));
     final visiblePickerMode =
         widget.panelMode == InputPanelMode.emoji ||
             widget.panelMode == InputPanelMode.attachment
@@ -1044,7 +1029,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           ),
           GestureDetector(
             onTap: () {
-              ref.read(replyingToProvider(widget.roomId).notifier).value = null;
+              ref.read(replyingToProvider(_draftKey).notifier).value = null;
             },
             child: const Icon(
               Icons.close_rounded,
@@ -1097,8 +1082,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           ),
           GestureDetector(
             onTap: () {
-              ref.read(editingMessageProvider(widget.roomId).notifier).value =
-                  null;
+              ref.read(editingMessageProvider(_draftKey).notifier).value = null;
               _restoreDraft();
             },
             child: const Icon(

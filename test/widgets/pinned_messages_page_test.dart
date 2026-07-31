@@ -37,13 +37,18 @@ class _FakeRustApi implements RustLibApi {
   Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
   @override
-  Future<void> crateApiMatrixSubscribeRoomForReceipts({
+  Future<String> crateApiMatrixSubscribeRoomForReceipts({
     required String roomId,
-  }) => subscribeHandler?.call(roomId) ?? Future.value();
+    String? accountUserId,
+  }) async {
+    await subscribeHandler?.call(roomId);
+    return 'pinned-subscription';
+  }
 
   @override
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
+    required String subscriptionId,
   }) => unsubscribeHandler?.call(roomId) ?? Future.value();
 
   @override
@@ -170,6 +175,44 @@ void main() {
 
     expect(api.callCount, 2);
     expect(find.text('Loaded after retry'), findsOneWidget);
+  });
+
+  testWidgets('failed background refresh marks retained messages as stale', (
+    tester,
+  ) async {
+    api.reset([
+      () async => [_message(r'$old', '@alice:example.org', 'Old pinned')],
+      () async => throw Exception('offline'),
+      () async => [_message(r'$new', '@alice:example.org', 'New pinned')],
+    ]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    api.syncEvents.add(
+      const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Old pinned'), findsOneWidget);
+    expect(find.text('刷新失败，当前显示上次结果'), findsOneWidget);
+    expect(find.byTooltip('重试刷新'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('重试刷新'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('刷新失败，当前显示上次结果'), findsNothing);
+    expect(find.text('Old pinned'), findsNothing);
+    expect(find.text('New pinned'), findsOneWidget);
   });
 
   testWidgets(

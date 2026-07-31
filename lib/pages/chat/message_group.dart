@@ -24,7 +24,6 @@ import 'message_insert_animation.dart';
 import 'message_text.dart';
 import 'poll_message_bubble.dart';
 import 'video_message_bubble.dart';
-import 'message_input.dart';
 import 'send_flight.dart';
 
 class MessageGroup {
@@ -410,7 +409,13 @@ class MessageGroupWidget extends ConsumerWidget {
 
     final messageRow = GestureDetector(
       onLongPress: isLocalOutgoing
-          ? null
+          ? (isLocalFailed
+                ? () => _showFailedMessageMenu(
+                    bubbleContext ?? context,
+                    ref,
+                    message,
+                  )
+                : null)
           : () => _showContextMenu(bubbleContext ?? context, ref, message),
       behavior: HitTestBehavior.opaque,
       child: Padding(
@@ -1273,7 +1278,14 @@ class MessageGroupWidget extends ConsumerWidget {
           }
         },
         onEdit: () {
-          ref.read(editingMessageProvider(roomId).notifier).value = message;
+          ref
+                  .read(
+                    editingMessageProvider(
+                      activeRoomAccountKey(ref, roomId),
+                    ).notifier,
+                  )
+                  .value =
+              message;
         },
         onRecall: () async {
           try {
@@ -1334,9 +1346,80 @@ class MessageGroupWidget extends ConsumerWidget {
   }
 
   void _startReply(WidgetRef ref, ChatMessage message) {
-    ref.read(editingMessageProvider(roomId).notifier).value = null;
-    ref.read(replyingToProvider(roomId).notifier).value = message;
+    final roomAccountKey = activeRoomAccountKey(ref, roomId);
+    ref.read(editingMessageProvider(roomAccountKey).notifier).value = null;
+    ref.read(replyingToProvider(roomAccountKey).notifier).value = message;
     onReplyRequested?.call();
+  }
+
+  /// Menu for a failed local outgoing message: retry the send or drop the
+  /// message. Failed sends are otherwise a dead end — no long-press menu,
+  /// no retry, no delete — so the user can only retype the message.
+  void _showFailedMessageMenu(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    final roomAccountKey = activeRoomAccountKey(ref, roomId);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.refresh_rounded),
+              title: const Text('重试发送'),
+              subtitle: message.msgType == MessageType.text
+                  ? null
+                  : const Text('仅文本消息支持重试'),
+              enabled: message.msgType == MessageType.text,
+              onTap: () async {
+                Navigator.of(sheetContext).pop();
+                try {
+                  await retryFailedLocalMessage(
+                    ref,
+                    roomAccountKey,
+                    message.id,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已重新发送'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  }
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('重试失败: $error'),
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.delete_outline_rounded,
+                color: AppColors.error,
+              ),
+              title: const Text(
+                '删除消息',
+                style: TextStyle(color: AppColors.error),
+              ),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                removeLocalOutgoingMessage(ref, roomAccountKey, message.id);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

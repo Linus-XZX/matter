@@ -16,18 +16,22 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
+  final syncEvents = StreamController<rust.SyncEvent>.broadcast();
   int subscribeTypingCalls = 0;
   int unsubscribeTypingCalls = 0;
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
   int markRoomAsReadCalls = 0;
   int getMessagesBeforeCalls = 0;
+  final typingSubscriptionAccounts = <String?>[];
+  final roomSubscriptionAccounts = <String?>[];
   final messagesBeforeEventIds = <String>[];
   List<rust.ChatMessage> messagesBefore = const [];
   Object? messagesBeforeError;
   Completer<String>? pendingSend;
   Completer<bool>? pendingRoomEncryption;
   List<rust.ChatRoom> chatRooms = const [];
+  final sentMessages = <rust.FormattedMessageInput>[];
 
   @override
   Future<List<rust.ChatRoom>> crateApiMatrixGetChatRooms({
@@ -42,7 +46,9 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
     required rust.FormattedMessageInput message,
   }) {
-    return (pendingSend ??= Completer<String>()).future;
+    pendingSend = Completer<String>();
+    sentMessages.add(message);
+    return pendingSend!.future;
   }
 
   @override
@@ -51,6 +57,7 @@ class _FakeRustApi implements RustLibApi {
     required bool typing,
   }) async {}
   String? activeTypingRoom;
+  String? activeTypingSubscription;
   final activeReceiptRooms = <String>{};
   Completer<void>? typingSubscribeBarrier;
   Completer<void>? typingUnsubscribeBarrier;
@@ -62,31 +69,45 @@ class _FakeRustApi implements RustLibApi {
       pendingRoomEncryption?.future ?? Future.value(false);
 
   @override
-  Future<void> crateApiMatrixSubscribeTypingForRoom({
+  Future<String> crateApiMatrixSubscribeTypingForRoom({
     required String roomId,
+    String? accountUserId,
   }) async {
     subscribeTypingCalls++;
+    typingSubscriptionAccounts.add(accountUserId);
     final barrier = typingSubscribeBarrier;
     if (barrier != null) await barrier.future;
     activeTypingRoom = roomId;
+    activeTypingSubscription = 'typing-subscription-$subscribeTypingCalls';
+    return activeTypingSubscription!;
   }
 
   @override
-  Future<void> crateApiMatrixUnsubscribeTyping({required String roomId}) async {
+  Future<void> crateApiMatrixUnsubscribeTyping({
+    required String roomId,
+    required String subscriptionId,
+  }) async {
     unsubscribeTypingCalls++;
     final barrier = typingUnsubscribeBarrier;
     if (barrier != null) await barrier.future;
-    if (activeTypingRoom == roomId) activeTypingRoom = null;
+    if (activeTypingRoom == roomId &&
+        activeTypingSubscription == subscriptionId) {
+      activeTypingRoom = null;
+      activeTypingSubscription = null;
+    }
   }
 
   @override
-  Future<void> crateApiMatrixSubscribeRoomForReceipts({
+  Future<String> crateApiMatrixSubscribeRoomForReceipts({
     required String roomId,
+    String? accountUserId,
   }) async {
     subscribeRoomCalls++;
+    roomSubscriptionAccounts.add(accountUserId);
     final barrier = roomSubscribeBarrier;
     if (barrier != null) await barrier.future;
     activeReceiptRooms.add(roomId);
+    return 'subscription-$subscribeRoomCalls';
   }
 
   @override
@@ -109,12 +130,16 @@ class _FakeRustApi implements RustLibApi {
   @override
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
+    required String subscriptionId,
   }) async {
     unsubscribeRoomCalls++;
     final barrier = roomUnsubscribeBarrier;
     if (barrier != null) await barrier.future;
     activeReceiptRooms.remove(roomId);
   }
+
+  @override
+  Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -179,7 +204,10 @@ void main() {
     RustLib.initMock(api: rustApi);
   });
 
-  tearDownAll(RustLib.dispose);
+  tearDownAll(() async {
+    await rustApi.syncEvents.close();
+    RustLib.dispose();
+  });
 
   setUp(() {
     rustApi.subscribeTypingCalls = 0;
@@ -188,10 +216,13 @@ void main() {
     rustApi.unsubscribeRoomCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
     rustApi.getMessagesBeforeCalls = 0;
+    rustApi.typingSubscriptionAccounts.clear();
+    rustApi.roomSubscriptionAccounts.clear();
     rustApi.messagesBeforeEventIds.clear();
     rustApi.messagesBefore = const [];
     rustApi.messagesBeforeError = null;
     rustApi.pendingSend = null;
+    rustApi.sentMessages.clear();
     rustApi.pendingRoomEncryption = null;
     rustApi.chatRooms = const [];
     rustApi.activeTypingRoom = null;
@@ -201,6 +232,30 @@ void main() {
     rustApi.roomSubscribeBarrier = null;
     rustApi.roomUnsubscribeBarrier = null;
     SharedPreferences.setMockInitialValues({});
+  });
+
+  testWidgets('room subscriptions are bound to the active account', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(rustApi.typingSubscriptionAccounts, ['@alice:example.org']);
+    expect(rustApi.roomSubscriptionAccounts, ['@alice:example.org']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
   });
 
   testWidgets('leaving a chat clears its active room without using ref', (
@@ -421,6 +476,42 @@ void main() {
 
     expect(container.read(currentRoomIdProvider), '!room:example.org');
     expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsWhileCovered));
+  });
+
+  testWidgets('returning to a chat preserves pending unread suppression', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    final navigator = Navigator.of(tester.element(find.byType(ChatDetailPage)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('management')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+        true;
+    final readCallsWhileCovered = rustApi.markRoomAsReadCalls;
+
+    navigator.pop();
+    await tester.pumpAndSettle();
+
+    expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+    expect(rustApi.markRoomAsReadCalls, readCallsWhileCovered);
   });
 
   testWidgets('manual unread suppresses auto-read delayed by cache priming', (
@@ -854,6 +945,63 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets(
+    'stops automatic back-pagination when every older page is ignored',
+    (tester) async {
+      const roomId = '!ignored-dead-end:example.org';
+      // Every historical page is from an ignored sender: auto-pagination must
+      // stop after one page instead of pulling the whole history.
+      rustApi.messagesBefore = [
+        _message(r'$ignored-1'),
+        _message(r'$ignored-2'),
+        _message(r'$ignored-3'),
+      ];
+      final container = ProviderContainer(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith(
+            (ref) async => const {'@alice:example.org'},
+          ),
+          roomMembersProvider(roomId).overrideWith((ref) async => const []),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(roomMembersProvider(roomId).future);
+      container.read(messageCacheProvider(roomId).notifier).value = [
+        _message(r'$ignored-anchor'),
+      ];
+      container.read(messageCacheOwnerProvider(roomId).notifier).value =
+          'anonymous';
+      container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(rustApi.getMessagesBeforeCalls, greaterThanOrEqualTo(1));
+      // No visible message came back, so the timeline shows the manual retry
+      // affordance and no further automatic pages are fetched.
+      await tester.pump(const Duration(seconds: 1));
+      final callsAfterIdle = rustApi.getMessagesBeforeCalls;
+      await tester.pump(const Duration(seconds: 1));
+      expect(rustApi.getMessagesBeforeCalls, callsAfterIdle);
+      expect(
+        find.byKey(const ValueKey(r'text-bubble:$ignored-1')),
+        findsNothing,
+      );
+      expect(find.text('重试加载更早消息'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
   testWidgets('removes newly ignored user messages from an open timeline', (
     tester,
   ) async {
@@ -955,6 +1103,219 @@ void main() {
       findsOneWidget,
     );
 
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets(
+    'a failed send offers retry and delete from its long-press menu',
+    (tester) async {
+      const roomId = '!failed-send:example.org';
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(find.byType(TextField), 'doomed message');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+      expect(rustApi.pendingSend, isNotNull);
+
+      // Fail the send: the bubble becomes a failed local message with an
+      // error icon, and long-pressing must offer retry/delete instead of
+      // being a dead end.
+      rustApi.pendingSend!.completeError(StateError('offline'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.error_rounded), findsOneWidget);
+
+      final failedBubble = find.byKey(
+        const ValueKey(r'text-bubble:$failed-message'),
+      );
+      expect(failedBubble, findsNothing);
+      // Locate the failed bubble: it renders under the failed prefix id.
+      final failedId = find.byWidgetPredicate(
+        (widget) =>
+            widget.key is ValueKey<String> &&
+            (widget.key! as ValueKey<String>).value.startsWith(
+              'text-bubble:$localOutgoingFailedPrefix',
+            ),
+      );
+      expect(failedId, findsOneWidget);
+
+      // Delete from the long-press menu removes the failed message.
+      await tester.scrollUntilVisible(
+        failedId,
+        100,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.longPress(failedId, warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(find.text('删除消息'), findsOneWidget);
+      await tester.tap(find.text('删除消息'));
+      await tester.pumpAndSettle();
+      expect(failedId, findsNothing);
+      expect(tester.takeException(), isNull);
+
+      // Let the send-flight expiry timer run out before the test ends.
+      await tester.pump(const Duration(seconds: 3));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  testWidgets('retrying a failed send re-sends and marks the message sent', (
+    tester,
+  ) async {
+    const roomId = '!failed-retry:example.org';
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'retry me');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+    expect(rustApi.sentMessages, hasLength(1));
+    rustApi.pendingSend!.completeError(StateError('offline'));
+    await tester.pump();
+    await tester.pump();
+
+    final failedId = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith(
+            'text-bubble:$localOutgoingFailedPrefix',
+          ),
+    );
+    expect(failedId, findsOneWidget);
+
+    // Retry: the send is attempted again and the message returns to a
+    // normal (sent) state instead of staying failed.
+    await tester.scrollUntilVisible(
+      failedId,
+      100,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.longPress(failedId, warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重试发送'));
+    await tester.pump();
+    await tester.pump();
+    expect(rustApi.sentMessages, hasLength(2));
+
+    // Complete the retry successfully; the failed bubble disappears.
+    rustApi.pendingSend!.complete(r'$retried');
+    await tester.pump();
+    await tester.pump();
+    expect(failedId, findsNothing);
+
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('retrying a failed send re-stamps the message timestamp', (
+    tester,
+  ) async {
+    const roomId = '!failed-retry-stamp:example.org';
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final key = (roomId: roomId, userId: '@alice:example.org');
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'retry stamp');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+    rustApi.pendingSend!.completeError(StateError('offline'));
+    await tester.pump();
+    await tester.pump();
+
+    final failedId = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith(
+            'text-bubble:$localOutgoingFailedPrefix',
+          ),
+    );
+    expect(failedId, findsOneWidget);
+    final failedMessages = container.read(localOutgoingMessagesProvider(key));
+    final failedTimestamp =
+        int.tryParse(failedMessages.first.message.timestamp) ?? 0;
+
+    // Retry through the long-press menu (same UI path as production).
+    await tester.scrollUntilVisible(
+      failedId,
+      100,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.longPress(failedId, warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重试发送'));
+    await tester.pump();
+    await tester.pump();
+
+    // The resent local message must carry a NEW timestamp: keeping the old
+    // one would never match the server echo within the matcher's window and
+    // leave a permanent duplicate bubble.
+    final retriedMessages = container.read(localOutgoingMessagesProvider(key));
+    final retried = retriedMessages
+        .where(
+          (message) =>
+              message.message.id.startsWith(localOutgoingPendingPrefix),
+        )
+        .toList();
+    expect(retried, hasLength(1));
+    final retriedTimestamp = int.tryParse(retried.first.message.timestamp) ?? 0;
+    expect(retriedTimestamp, greaterThan(failedTimestamp));
+
+    rustApi.pendingSend!.complete(r'$retried-stamp');
+    await tester.pump();
+    await tester.pump();
+    expect(failedId, findsNothing);
+
+    await tester.pump(const Duration(seconds: 3));
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });

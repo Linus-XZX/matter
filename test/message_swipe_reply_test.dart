@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/message_group.dart';
-import 'package:matter/pages/chat/message_input.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
 
 const _roomId = '!room:example.org';
+const _roomAccountKey = (roomId: _roomId, userId: 'anonymous');
 
 ChatMessage _message({required String id, required bool isMe}) => ChatMessage(
   id: id,
@@ -91,7 +92,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
     expect(replyRequests, 1);
   });
 
@@ -112,7 +113,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(container.read(replyingToProvider(_roomId)), isNull);
+    expect(container.read(replyingToProvider(_roomAccountKey)), isNull);
   });
 
   testWidgets('left swipe can start from empty space in the message row', (
@@ -141,7 +142,7 @@ void main() {
     await gesture.up();
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
   });
 
   testWidgets('own synced messages can also be swiped to reply', (
@@ -161,7 +162,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
   });
 
   testWidgets('reply icon animates in on the right while swiping', (

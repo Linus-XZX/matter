@@ -409,6 +409,116 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  testWidgets('a sync event lets the store remove a cross-device un-ignore', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@blocked:example.org'],
+    });
+    rustApi.ignoredUsers = const ['@blocked:example.org'];
+
+    final container = ProviderContainer();
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final syncSubscription = container.listen(
+      syncStreamProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    final ignoredSubscription = container.listen(
+      ignoredUserIdsProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@blocked:example.org',
+    });
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await tester.pump();
+    }
+    final callsBeforeEvent = rustApi.ignoredUsersCalls;
+
+    // The direct server read fails, but the account-data sync event means
+    // the SDK store already contains the complete new list.
+    rustApi.ignoredUsersFromServer = false;
+    rustApi.ignoredUsers = const [];
+    rustApi.syncEvents.add(const rust.SyncEvent.ignoredUsersChanged());
+
+    await tester.pump();
+    await container.read(ignoredUserIdsProvider.future);
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await tester.pump();
+    }
+
+    expect(rustApi.ignoredUsersCalls, greaterThan(callsBeforeEvent));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList('ignored_users_v1_@alice:example.org'), isEmpty);
+    expect(await container.read(ignoredUserIdsProvider.future), isEmpty);
+
+    ignoredSubscription.close();
+    syncSubscription.close();
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets(
+    'a full refresh lets the effective store remove a missed cross-device un-ignore',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'ignored_users_v1_@alice:example.org': const ['@blocked:example.org'],
+      });
+      rustApi.ignoredUsers = const ['@blocked:example.org'];
+
+      final container = ProviderContainer();
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      final syncSubscription = container.listen(
+        syncStreamProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+      final ignoredSubscription = container.listen(
+        ignoredUserIdsProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@blocked:example.org',
+      });
+      for (var attempt = 0; attempt < 6; attempt++) {
+        await tester.pump();
+      }
+
+      // Rust's fallback has already applied any pending local overrides. An
+      // empty effective store therefore means the missed sync event really
+      // did un-ignore the user and may shrink the Dart snapshot.
+      rustApi.ignoredUsersFromServer = false;
+      rustApi.ignoredUsers = const [];
+      rustApi.syncEvents.add(const rust.SyncEvent.fullRefreshRequired());
+
+      await tester.pump();
+      await container.read(ignoredUserIdsProvider.future);
+      for (var attempt = 0; attempt < 6; attempt++) {
+        await tester.pump();
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getStringList('ignored_users_v1_@alice:example.org'),
+        isEmpty,
+      );
+      expect(await container.read(ignoredUserIdsProvider.future), isEmpty);
+
+      ignoredSubscription.close();
+      syncSubscription.close();
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
   testWidgets(
     'ignored users stay unknown without a snapshot when the fetch fails',
     (tester) async {
@@ -667,6 +777,47 @@ void main() {
     secondContainer.dispose();
     await tester.pump(const Duration(seconds: 1));
   });
+
+  testWidgets(
+    'a first ignore load cannot persist the next account under the old namespace',
+    (tester) async {
+      final firstFetch = Completer<List<String>>();
+      rustApi.pendingIgnoredUsers = firstFetch;
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(sessionReadyProvider.notifier).value = true;
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      final staleFuture = container.read(ignoredUserIdsProvider.future);
+      staleFuture.ignore();
+      await tester.pump();
+      expect(rustApi.ignoredUsersCalls, 1);
+
+      resetIgnoredListAccountState('@alice:example.org');
+      container.read(sessionReadyProvider.notifier).value = false;
+      container.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+
+      rustApi.pendingIgnoredUsers = null;
+      rustApi.ignoredUsers = const ['@bob-blocked:example.org'];
+      firstFetch.complete(const ['@bob-blocked:example.org']);
+      await tester.pump();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getStringList('ignored_users_v1_@alice:example.org'),
+        isNull,
+      );
+      expect(await container.read(ignoredUserIdsProvider.future), {
+        '@bob-blocked:example.org',
+      });
+
+      container.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
 
   testWidgets(
     'a first load publishes the newer snapshot when a change lands mid-persist',

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
@@ -24,7 +25,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   bool _reloadTrailing = false;
   Completer<void>? _reloadCompletion;
   late final StreamSubscription<rust.SyncEvent> _syncSubscription;
-  late final Future<void> _roomSubscription;
+  late final Future<String?> _roomSubscription;
 
   @override
   void initState() {
@@ -43,11 +44,15 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     });
     // Keep room-level state in Sliding Sync while this page covers the chat.
     _roomSubscription = rust
-        .subscribeRoomForReceipts(roomId: widget.roomId)
+        .subscribeRoomForReceipts(
+          roomId: widget.roomId,
+          accountUserId: ref.read(activeUserIdProvider),
+        )
+        .then<String?>((subscriptionId) => subscriptionId)
         .catchError((error) {
           debugPrint('subscribe pinned room updates failed: $error');
+          return null;
         });
-    unawaited(_roomSubscription);
   }
 
   @override
@@ -58,9 +63,13 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   }
 
   Future<void> _unsubscribeAfterSubscribe() async {
-    await _roomSubscription;
+    final subscriptionId = await _roomSubscription;
+    if (subscriptionId == null) return;
     try {
-      await rust.unsubscribeRoomForReceipts(roomId: widget.roomId);
+      await rust.unsubscribeRoomForReceipts(
+        roomId: widget.roomId,
+        subscriptionId: subscriptionId,
+      );
     } catch (error) {
       debugPrint('unsubscribe pinned room updates failed: $error');
     }
@@ -98,12 +107,10 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
           });
         } catch (error) {
           if (!mounted) return;
-          if (_messages == null) {
-            setState(() {
-              _loadError = error;
-              _loading = false;
-            });
-          }
+          setState(() {
+            _loadError = error;
+            _loading = false;
+          });
         }
       } while (_reloadTrailing && mounted);
     } finally {
@@ -183,16 +190,18 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       return RefreshIndicator(
         color: AppColors.primary,
         onRefresh: _reload,
-        child: const CustomScrollView(
-          physics: AlwaysScrollableScrollPhysics(),
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             SliverFillRemaining(
               hasScrollBody: false,
               child: Center(
-                child: Text(
-                  '暂无置顶消息',
-                  style: TextStyle(color: AppColors.onSurfaceVariant),
-                ),
+                child: _loadError == null
+                    ? const Text(
+                        '暂无置顶消息',
+                        style: TextStyle(color: AppColors.onSurfaceVariant),
+                      )
+                    : _refreshErrorTile(),
               ),
             ),
           ],
@@ -205,11 +214,12 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       child: ListView.separated(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        itemCount: messages.length,
+        itemCount: messages.length + (_loadError == null ? 0 : 1),
         separatorBuilder: (_, _) =>
             const Divider(color: AppColors.surfaceVariant, height: 1),
         itemBuilder: (context, index) {
-          final message = messages[index];
+          if (_loadError != null && index == 0) return _refreshErrorTile();
+          final message = messages[index - (_loadError == null ? 0 : 1)];
           final content = message.content.trim().isEmpty
               ? (message.filename ?? '媒体消息')
               : message.content;
@@ -238,15 +248,72 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
                 height: 1.35,
               ),
             ),
-            trailing: Text(
-              formatChatListTime(message.timestamp),
-              style: const TextStyle(
-                color: AppColors.onSurfaceVariant,
-                fontSize: 12,
-              ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  formatChatListTime(message.timestamp),
+                  style: const TextStyle(
+                    color: AppColors.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: '取消置顶',
+                  icon: const Icon(
+                    Icons.push_pin_outlined,
+                    color: AppColors.onSurfaceVariant,
+                    size: 18,
+                  ),
+                  onPressed: () => unawaited(_unpin(message)),
+                ),
+              ],
             ),
           );
         },
+      ),
+    );
+  }
+
+  Future<void> _unpin(rust.ChatMessage message) async {
+    try {
+      await rust.togglePinnedMessage(
+        roomId: widget.roomId,
+        eventId: message.id,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已取消置顶'), duration: Duration(seconds: 1)),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('取消置顶失败: $error'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  Widget _refreshErrorTile() {
+    return ListTile(
+      leading: const Icon(Icons.sync_problem_rounded, color: AppColors.error),
+      title: const Text(
+        '刷新失败，当前显示上次结果',
+        style: TextStyle(color: AppColors.onBackground),
+      ),
+      subtitle: Text(
+        '$_loadError',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: AppColors.onSurfaceVariant),
+      ),
+      trailing: IconButton(
+        tooltip: '重试刷新',
+        onPressed: () => unawaited(_reload()),
+        icon: const Icon(Icons.refresh_rounded),
       ),
     );
   }

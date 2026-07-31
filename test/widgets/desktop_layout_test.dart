@@ -25,23 +25,27 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiMatrixSubscribeRoomForReceipts({
+  Future<String> crateApiMatrixSubscribeRoomForReceipts({
     required String roomId,
-  }) async {}
+    String? accountUserId,
+  }) async => 'desktop-subscription';
 
   @override
-  Future<void> crateApiMatrixSubscribeTypingForRoom({
+  Future<String> crateApiMatrixSubscribeTypingForRoom({
     required String roomId,
-  }) async {}
+    String? accountUserId,
+  }) async => 'desktop-typing-subscription';
 
   @override
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
+    required String subscriptionId,
   }) async {}
 
   @override
   Future<void> crateApiMatrixUnsubscribeTyping({
     required String roomId,
+    required String subscriptionId,
   }) async {}
 
   @override

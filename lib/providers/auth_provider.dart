@@ -83,6 +83,9 @@ String _tokenKey(String userId) =>
 String _refreshTokenKey(String userId) =>
     'matrix_refresh_token_${base64Url.encode(utf8.encode(userId))}';
 
+String _removedSessionKey(String userId) =>
+    'matrix_session_removed_${base64Url.encode(utf8.encode(userId))}';
+
 /// All saved sessions (for multi-account).
 final sessionsProvider =
     NotifierProvider<
@@ -132,6 +135,8 @@ Future<void> addSession({
     await _secureStorage.delete(key: _refreshTokenKey(userId));
   }
 
+  await unmarkSessionRemoved(userId);
+
   // Save
   await prefs.setString(
     _kSessions,
@@ -173,6 +178,9 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
       try {
         final e = item as Map<String, dynamic>;
         userId = e['user_id'] as String;
+        if (prefs.getBool(_removedSessionKey(userId)) == true) {
+          continue;
+        }
         var accessToken = await _secureStorage.read(key: _tokenKey(userId));
         var refreshToken = await _secureStorage.read(
           key: _refreshTokenKey(userId),
@@ -306,33 +314,77 @@ Future<String> loadDisplayName(String userId) async {
 /// Remove a session for a specific user_id.
 Future<void> removeSession(String userId) async {
   final prefs = await SharedPreferences.getInstance();
-  final sessions = await loadAllSessions();
-  final removedSessions = sessions.where((s) => s.userId == userId).toList();
-  sessions.removeWhere((s) => s.userId == userId);
-  await _saveSessionMetadata(prefs, sessions);
+  await markSessionRemoved(userId);
+
+  final removedHomeservers = <String>[];
+  final raw = prefs.getString(_kSessions);
+  final remainingMetadata = <Map<String, dynamic>>[];
+  if (raw != null) {
+    final list = jsonDecode(raw) as List<dynamic>;
+    for (final item in list) {
+      final metadata = Map<String, dynamic>.from(item as Map);
+      if (metadata['user_id'] == userId) {
+        final homeserver = metadata['homeserver_url'];
+        if (homeserver is String) removedHomeservers.add(homeserver);
+      } else {
+        remainingMetadata.add(metadata);
+      }
+    }
+    await prefs.setString(_kSessions, jsonEncode(remainingMetadata));
+  }
+
+  final activeId = prefs.getString(_kActiveUserId);
+  if (activeId == userId) {
+    String? nextUserId;
+    for (final metadata in remainingMetadata) {
+      final candidate = metadata['user_id'];
+      if (candidate is String &&
+          prefs.getBool(_removedSessionKey(candidate)) != true) {
+        // Skip accounts whose secure token is gone; loadAllSessions would
+        // skip them too, and activating one would strand the app at the
+        // login page after the next restart.
+        final token = await _secureStorage.read(key: _tokenKey(candidate));
+        if (token == null || token.isEmpty) continue;
+        nextUserId = candidate;
+        break;
+      }
+    }
+    if (nextUserId != null) {
+      await prefs.setString(_kActiveUserId, nextUserId);
+    } else {
+      await prefs.remove(_kActiveUserId);
+    }
+  }
+
   await _secureStorage.delete(key: _tokenKey(userId));
   await _secureStorage.delete(key: _refreshTokenKey(userId));
   await clearCachedMessagesForNamespace(userId);
   await const MarkdownSourceStore().clearForUser(userId);
-  for (final session in removedSessions) {
+  for (final homeserver in removedHomeservers) {
     await clearAuthenticatedMediaCacheForSession(
-      userId: session.userId,
-      homeserver: session.homeserverUrl,
+      userId: userId,
+      homeserver: homeserver,
     );
   }
 
   final namesMap = await _loadDisplayNames();
   namesMap.remove(userId);
   await prefs.setString(_kSessionDisplayNames, jsonEncode(namesMap));
+}
 
-  // If this was the active user, switch to another or clear
-  final activeId = prefs.getString(_kActiveUserId);
-  if (activeId == userId) {
-    if (sessions.isNotEmpty) {
-      await prefs.setString(_kActiveUserId, sessions.first.userId);
-    } else {
-      await prefs.remove(_kActiveUserId);
-    }
+Future<void> markSessionRemoved(String userId) async {
+  final prefs = await SharedPreferences.getInstance();
+  final persisted = await prefs.setBool(_removedSessionKey(userId), true);
+  if (!persisted) {
+    throw StateError('无法持久化账号删除状态');
+  }
+}
+
+Future<void> unmarkSessionRemoved(String userId) async {
+  final prefs = await SharedPreferences.getInstance();
+  final removed = await prefs.remove(_removedSessionKey(userId));
+  if (!removed && prefs.containsKey(_removedSessionKey(userId))) {
+    throw StateError('无法撤销账号删除状态');
   }
 }
 
@@ -354,6 +406,11 @@ Future<void> clearAllSessions() async {
   await prefs.remove(_kSessions);
   await prefs.remove(_kSessionDisplayNames);
   await prefs.remove(_kActiveUserId);
+  for (final key in prefs.getKeys().where(
+    (key) => key.startsWith('matrix_session_removed_'),
+  )) {
+    await prefs.remove(key);
+  }
 }
 
 // ── Legacy single-session compat (migration) ───────────────────────────

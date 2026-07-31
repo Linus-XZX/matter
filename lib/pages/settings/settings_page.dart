@@ -19,6 +19,223 @@ import 'encryption_page.dart';
 import 'log_viewer_page.dart';
 import 'profile_edit_page.dart';
 
+final accountSwitchControllerProvider = Provider(AccountSwitchController.new);
+final accountSessionRemoverProvider = Provider<Future<void> Function(String)>(
+  (_) => removeSession,
+);
+
+class AccountSwitchController {
+  final Ref _ref;
+  Future<void> _operationTail = Future.value();
+
+  AccountSwitchController(this._ref);
+
+  Future<T> _serialize<T>(Future<T> Function() operation) {
+    final result = _operationTail.then((_) => operation());
+    _operationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  String? _appendCleanupWarning(String? current, Object error) {
+    final next = '本地会话清理失败: $error';
+    return current == null ? next : '$current；$next';
+  }
+
+  Future<T> _runWithPersistedRemovalIntent<T>(
+    String userId,
+    Future<T> Function() removeFromRust,
+  ) async {
+    await markSessionRemoved(userId);
+    try {
+      return await removeFromRust();
+    } catch (error, stackTrace) {
+      try {
+        await unmarkSessionRemoved(userId);
+      } catch (rollbackError) {
+        throw StateError('账号删除失败：$error；本地删除状态回滚失败：$rollbackError');
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+  }
+
+  Future<String?> _commitLocalAccountRemoval(
+    String userId,
+    String? cleanupWarning,
+  ) async {
+    var warning = cleanupWarning;
+    try {
+      await _ref.read(accountSessionRemoverProvider)(userId);
+    } catch (error) {
+      warning = _appendCleanupWarning(warning, error);
+    }
+
+    final current = _ref
+        .read(sessionsProvider)
+        .where((session) => session.userId != userId)
+        .toList();
+    try {
+      _ref.read(sessionsProvider.notifier).value = (await loadAllSessions())
+          .where((session) => session.userId != userId)
+          .toList();
+    } catch (error) {
+      _ref.read(sessionsProvider.notifier).value = current;
+      warning = _appendCleanupWarning(warning, error);
+    }
+    return warning;
+  }
+
+  Future<void> switchTo(String userId) => _serialize(() => _switchTo(userId));
+
+  Future<String?> removeAccount(String userId) =>
+      _serialize(() => _removeAccount(userId));
+
+  Future<void> _switchTo(String userId) async {
+    final activeId = _ref.read(activeUserIdProvider);
+    if (userId == activeId) return;
+
+    final sessions = await loadAllSessions();
+    rust.StoredSession? sessionFor(String id) => sessions
+        .cast<rust.StoredSession?>()
+        .firstWhere((session) => session?.userId == id, orElse: () => null);
+
+    final targetSession = sessionFor(userId);
+    if (targetSession == null) {
+      throw StateError('找不到已保存的账号会话');
+    }
+    final targetDisplayName = await loadDisplayName(userId);
+    final previousSession = activeId == null ? null : sessionFor(activeId);
+    if (activeId != null && previousSession == null) {
+      throw StateError('找不到当前账号的已保存会话');
+    }
+    final previousDisplayName = activeId == null
+        ? null
+        : await loadDisplayName(activeId);
+
+    var switchedClient = false;
+    if (activeId != null) {
+      // Invalidate outgoing async work before the process-wide Rust client
+      // changes accounts.
+      resetIgnoredListAccountState(activeId);
+    }
+    _ref.read(sessionReadyProvider.notifier).value = false;
+    var restoreSessionGate = false;
+    try {
+      final success = await rust.switchAccount(userId: userId);
+      if (!success) throw StateError('账号切换未生效');
+      switchedClient = true;
+
+      await applyActiveSessionStateFromRef(
+        _ref,
+        userId: userId,
+        displayName: targetDisplayName,
+        homeserver: targetSession.homeserverUrl,
+        persistActiveUser: true,
+        refreshStoredSessions: true,
+      );
+      await bootstrapActiveSessionSyncFromRef(
+        _ref,
+        attemptLabel: 'syncOnce after switch attempt',
+        startSyncLabel: 'startSync after switch failed',
+        requireSyncLoop: true,
+      );
+      restoreSessionGate = true;
+    } catch (error, stackTrace) {
+      if (switchedClient &&
+          activeId != null &&
+          previousSession != null &&
+          previousDisplayName != null) {
+        try {
+          final reverted = await rust.switchAccount(userId: activeId);
+          if (!reverted) throw StateError('原账号回滚未生效');
+          await applyActiveSessionStateFromRef(
+            _ref,
+            userId: activeId,
+            displayName: previousDisplayName,
+            homeserver: previousSession.homeserverUrl,
+            persistActiveUser: true,
+            refreshStoredSessions: true,
+          );
+          await bootstrapActiveSessionSyncFromRef(
+            _ref,
+            attemptLabel: 'syncOnce after switch rollback attempt',
+            startSyncLabel: 'startSync after switch rollback failed',
+            requireSyncLoop: true,
+          );
+          restoreSessionGate = true;
+        } catch (rollbackError) {
+          throw StateError('账号切换失败：$error；回滚失败：$rollbackError');
+        }
+      } else {
+        restoreSessionGate = true;
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      _ref.read(sessionReadyProvider.notifier).value = restoreSessionGate;
+    }
+  }
+
+  Future<String?> _removeAccount(String userId) async {
+    final activeId = _ref.read(activeUserIdProvider);
+    final isCurrentAccount = userId == activeId;
+    final remaining = isCurrentAccount
+        ? (await loadAllSessions())
+              .where((session) => session.userId != userId)
+              .toList()
+        : const <rust.StoredSession>[];
+
+    if (remaining.isNotEmpty) {
+      // This whole switch-and-remove sequence stays inside the same queue, so
+      // no later account action can reactivate the account being deleted.
+      await _switchTo(remaining.first.userId);
+      final result = await _runWithPersistedRemovalIntent(
+        userId,
+        () => rust.removeAccount(userId: userId),
+      );
+      return _commitLocalAccountRemoval(userId, result.cleanupError);
+    } else if (isCurrentAccount) {
+      _ref.read(sessionReadyProvider.notifier).value = false;
+      late final rust.AccountRemovalResult result;
+      try {
+        result = await _runWithPersistedRemovalIntent(userId, rust.logout);
+      } catch (error, stackTrace) {
+        try {
+          await bootstrapActiveSessionSyncFromRef(
+            _ref,
+            attemptLabel: 'syncOnce after logout failure attempt',
+            startSyncLabel: 'startSync after logout failure failed',
+            requireSyncLoop: true,
+          );
+          _ref.read(sessionReadyProvider.notifier).value = true;
+        } catch (recoveryError) {
+          clearActiveSessionStateFromRef(_ref, markSessionReady: true);
+          throw StateError('退出失败：$error；恢复同步失败：$recoveryError');
+        }
+        Error.throwWithStackTrace(error, stackTrace);
+      }
+      final warning = await _commitLocalAccountRemoval(
+        userId,
+        result.cleanupError,
+      );
+      try {
+        return warning;
+      } finally {
+        _ref.read(sessionsProvider.notifier).value =
+            const <rust.StoredSession>[];
+        clearActiveSessionStateFromRef(_ref, markSessionReady: true);
+      }
+    } else {
+      final result = await _runWithPersistedRemovalIntent(
+        userId,
+        () => rust.removeAccount(userId: userId),
+      );
+      return _commitLocalAccountRemoval(userId, result.cleanupError);
+    }
+  }
+}
+
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
@@ -206,67 +423,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 
   Future<void> _switchAccount(String userId) async {
-    final activeId = ref.read(activeUserIdProvider);
-    if (userId == activeId) return;
-
-    var switchedClient = false;
+    final controller = ref.read(accountSwitchControllerProvider);
     try {
-      ref.read(sessionReadyProvider.notifier).value = false;
-      final success = await rust.switchAccount(userId: userId);
-      if (!success) {
-        throw StateError('账号切换未生效');
-      }
-      switchedClient = true;
-      if (mounted) {
-        final sessions = await loadAllSessions();
-        final session = sessions.cast<rust.StoredSession?>().firstWhere(
-          (s) => s?.userId == userId,
-          orElse: () => null,
-        );
-        if (session == null) {
-          throw StateError('找不到已保存的账号会话');
-        }
-
-        final displayName = await loadDisplayName(userId);
-        await applyActiveSessionState(
-          ref,
-          userId: userId,
-          displayName: displayName,
-          homeserver: session.homeserverUrl,
-          persistActiveUser: true,
-          refreshStoredSessions: true,
-        );
-        await bootstrapActiveSessionSync(
-          ref,
-          attemptLabel: 'syncOnce after switch attempt',
-          startSyncLabel: 'startSync after switch failed',
-        );
-      }
+      await controller.switchTo(userId);
     } catch (e) {
-      if (switchedClient && activeId != null) {
-        try {
-          final reverted = await rust.switchAccount(userId: activeId);
-          if (reverted) {
-            final sessions = await loadAllSessions();
-            final activeSession = sessions
-                .cast<rust.StoredSession?>()
-                .firstWhere((s) => s?.userId == activeId, orElse: () => null);
-            if (activeSession != null) {
-              final displayName = await loadDisplayName(activeId);
-              await applyActiveSessionState(
-                ref,
-                userId: activeId,
-                displayName: displayName,
-                homeserver: activeSession.homeserverUrl,
-                refreshStoredSessions: true,
-              );
-            }
-          }
-        } catch (rollbackError) {
-          debugPrint('Failed to roll back account switch: $rollbackError');
-        }
-      }
-      ref.read(sessionReadyProvider.notifier).value = true;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -275,15 +435,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
-      return;
     }
-
-    ref.read(sessionReadyProvider.notifier).value = true;
   }
 
   Future<void> _removeAccount(String userId) async {
     final activeId = ref.read(activeUserIdProvider);
     final isCurrentAccount = userId == activeId;
+    final accountController = ref.read(accountSwitchControllerProvider);
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -314,28 +472,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (confirmed != true) return;
 
     try {
-      if (isCurrentAccount) {
-        await rust.logout();
-      } else {
-        await rust.removeAccount(userId: userId);
-      }
-      await removeSession(userId);
+      final cleanupError = await accountController.removeAccount(userId);
       await _loadAccounts();
-
-      if (isCurrentAccount) {
-        // Check if there are other accounts
-        final remaining = await loadAllSessions();
-        if (remaining.isNotEmpty) {
-          // Switch to the first remaining account
-          final nextSession = remaining.first;
-          await _switchAccount(nextSession.userId);
-        } else {
-          // No accounts left, go to login
-          clearActiveSessionState(ref, markSessionReady: true);
-        }
+      if (cleanupError != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('账号已移除，但本地缓存清理失败: $cleanupError'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
       }
-
-      ref.read(sessionsProvider.notifier).value = await loadAllSessions();
     } catch (e) {
       debugPrint('Failed to remove account: $e');
       if (mounted) {

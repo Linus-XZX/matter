@@ -142,6 +142,31 @@ void main() {
       },
     );
 
+    test('a removal marker prevents restart restore until re-login', () async {
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+
+      await markSessionRemoved('@alice:example.org');
+      expect(await loadAllSessions(), isEmpty);
+
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-b',
+        userId: '@alice:example.org',
+        deviceId: 'DEVICE_B',
+        displayName: 'Alice',
+      );
+
+      final sessions = await loadAllSessions();
+      expect(sessions.single.deviceId, 'DEVICE_B');
+      expect(sessions.single.accessToken, 'token-b');
+    });
+
     test('persistSessionTokens replaces rotated tokens', () async {
       await addSession(
         homeserver: 'https://example.org',
