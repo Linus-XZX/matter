@@ -66,11 +66,29 @@ class ChatDetailPage extends ConsumerStatefulWidget {
 
 class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     with RouteAware, WidgetsBindingObserver {
+  /// Monotonic counter for room activations across page instances. The
+  /// dispose microtask clears the global current-room only when THIS page
+  /// still holds the latest activation: a re-push of the same room during
+  /// the pop animation must not have its activation wiped by the dying
+  /// page (its microtask would otherwise match the shared room id).
+  static int _activationCounter = 0;
+
+  /// The activation id this page last wrote (0 = never activated).
+  int _activationId = 0;
+
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
   late final MutableState<String?> _currentRoomIdNotifier;
+
+  /// Cached in initState: `ref` must not be read inside `dispose()`.
+  late final MutableState<String?> _roomViewOwnerState;
+
   Future<void> _subscriptionLifecycle = Future.value();
   bool _subscriptionsDesired = false;
+
+  /// The account the subscriptions were (last) opened under; used to detect
+  /// an account switch-back that must re-subscribe.
+  String? _subscriptionsAccount;
   String? _typingSubscriptionId;
   String? _roomSubscriptionId;
   ModalRoute<dynamic>? _route;
@@ -106,6 +124,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   bool _hasMoreMessages = true;
   bool _olderLoadArmed = true;
   bool _automaticOlderLoadBlocked = false;
+  // Set when the auto-pagination block was decided while the ignore list
+  // was still unknown (first load with no snapshot): "no visible messages"
+  // computed without the filter must not block the room forever. The build
+  // clears it once the list arrives (see _rebuildDerivedMessages / the
+  // ignored-list watch).
+  bool _olderLoadBlockedWithUnknownList = false;
   String _derivedMessagesFingerprint = '';
   InputPanelMode _inputPanelMode = InputPanelMode.none;
   double? _inputChromeHeight;
@@ -182,11 +206,67 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _nameEventId = widget.nameEventId;
     _avatarEventId = widget.avatarEventId;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
+    // Cached for dispose(): reading through `ref` there is unsafe (the
+    // element is being unmounted).
+    _roomViewOwnerState = ref.read(
+      roomViewOwnerProvider(widget.roomId).notifier,
+    );
+
     final roomAccountKey = activeRoomAccountKey(ref, widget.roomId);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(replyingToProvider(roomAccountKey).notifier).value = null;
       _activateRoom(resetAutoReadSuppression: true);
+    });
+    // Switching away clears the Rust-side room/typing subscriptions; coming
+    // back to the original account must re-subscribe (and re-mark the room
+    // as being viewed under the right account). `_activateRoom`'s
+    // `_setSubscriptionsDesired` early-returns when the desired flag already
+    // matches, so reset it first. Switching to another account (defense in
+    // depth: navigation usually already deactivates) drops the view
+    // ownership so no auto-read or subscription runs under the new account.
+    ref.listenManual(activeUserIdProvider, (_, next) {
+      if (!mounted) return;
+      if (_subscriptionsAccount == null && next != null) {
+        // Opened before login completed: adopt the first account and
+        // activate under it (same as the management/pinned pages), instead
+        // of misreading it as a switch-away and tearing down forever.
+        // `_activateRoom`'s `_setSubscriptionsDesired` early-returns when
+        // the desired flag already matches, so reset it first — a pre-login
+        // postFrame activation may have registered subscriptions against
+        // the pending (account-less) client, and they must be rebuilt under
+        // the real account (same discipline as the switch-back branch).
+        if (_subscriptionsDesired) {
+          _setSubscriptionsDesired(false);
+        }
+        _subscriptionsAccount = next;
+        _activateRoom(resetAutoReadSuppression: true);
+      } else if (next == _subscriptionsAccount) {
+        // Back on the original account: re-subscribe and re-mark the room
+        // as being viewed. `_activateRoom`'s `_setSubscriptionsDesired`
+        // early-returns when the desired flag already matches, so reset it
+        // first — through the real unsubscribe path so the old subscription
+        // ids are torn down, not by clobbering the flag.
+        if (_subscriptionsDesired) {
+          _setSubscriptionsDesired(false);
+        }
+        _activateRoom(resetAutoReadSuppression: true);
+      } else if (next != null) {
+        // Switched to another account: drop the view ownership so no
+        // auto-read or subscription runs under the new account.
+        if (_currentRoomIdNotifier.value == widget.roomId) {
+          _currentRoomIdNotifier.value = null;
+          _roomViewOwnerState.value = null;
+        }
+        _setSubscriptionsDesired(false);
+      } else {
+        // Logged out entirely: same teardown as switching away.
+        if (_currentRoomIdNotifier.value == widget.roomId) {
+          _currentRoomIdNotifier.value = null;
+          _roomViewOwnerState.value = null;
+        }
+        _setSubscriptionsDesired(false);
+      }
     });
   }
 
@@ -302,6 +382,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   void _deactivateRoom() {
     if (_currentRoomIdNotifier.value == widget.roomId) {
       _currentRoomIdNotifier.value = null;
+      ref.read(roomViewOwnerProvider(widget.roomId).notifier).value = null;
     }
     _setSubscriptionsDesired(false);
   }
@@ -319,7 +400,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     if (!(_route?.isCurrent ?? ModalRoute.of(context)?.isCurrent ?? false)) {
       return;
     }
+    // The page belongs to the account it was first subscribed under (or the
+    // one it switched back to). Reactivation after an account switch (route
+    // pop, app resume) must not activate — and advance receipts — under a
+    // different account: the switch-away listener already tore down the
+    // ownership, and only the switch-back listener may re-activate.
+    final activeAccount = ref.read(activeUserIdProvider);
+    if (_subscriptionsAccount != null &&
+        activeAccount != _subscriptionsAccount) {
+      return;
+    }
     _currentRoomIdNotifier.value = widget.roomId;
+    _activationId = ++_activationCounter;
+    ref.read(roomViewOwnerProvider(widget.roomId).notifier).value =
+        activeAccount;
     if (resetAutoReadSuppression) {
       setRoomAutoReadSuppressed(ref, widget.roomId, suppressed: false);
     }
@@ -332,6 +426,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _subscriptionsDesired = desired;
     final roomId = widget.roomId;
     final accountUserId = desired ? ref.read(activeUserIdProvider) : null;
+    // Only record the account when subscribing: on teardown the account must
+    // stay at the last opened one so a switch-back listener can detect it.
+    if (desired) {
+      _subscriptionsAccount = accountUserId;
+    }
     _subscriptionLifecycle = _subscriptionLifecycle.then((_) async {
       await Future.wait([
         _updateTypingSubscription(
@@ -409,25 +508,59 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   Future<void> _primeAndRefreshMessages() async {
     await primeMessageCache(ref, widget.roomId);
     if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
+    // Fire the read marker without blocking the timeline: awaiting it first
+    // delays message rendering on a slow network, and awaiting the refresh
+    // first would leave the room marked unread for the whole refresh
+    // duration (and permanently, if the user leaves mid-refresh).
     if (!ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
-      try {
-        await markRoomAsRead(roomId: widget.roomId);
-        if (!mounted ||
-            _currentRoomIdNotifier.value != widget.roomId ||
-            ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
-          return;
-        }
-        setRoomUnreadOverrideById(ref, widget.roomId, unread: false);
-        ref.invalidate(chatRoomsProvider);
-        ref.invalidate(ungroupedRoomsProvider);
-        ref.invalidate(spaceChildrenProvider);
-        ref.invalidate(searchRoomsProvider);
-      } catch (error) {
-        debugPrint('markRoomAsRead failed: $error');
-      }
+      unawaited(_markRoomReadAndRefreshList());
     }
-    if (!mounted || _currentRoomIdNotifier.value != widget.roomId) return;
     await refreshMessagesFromNetwork(ref, widget.roomId);
+  }
+
+  Future<void> _markRoomReadAndRefreshList() async {
+    // The receipts are written for the account that starts this call:
+    // capture it before the await, and require the room's current viewer to
+    // be that same account — both before sending (a switch between
+    // activation and the call must not advance receipts for an account the
+    // user is not looking at) and after (the local unread bookkeeping must
+    // not apply to a different account that took over the room meanwhile).
+    final startAccount = ref.read(activeUserIdProvider);
+    // No account yet (deep-link before login completed): skip — a write
+    // with an empty account id would be rejected by the Rust guard anyway
+    // (same guard as clearViewedMarkedUnread / the flush path).
+    if (startAccount == null) return;
+    if (ref.read(roomViewOwnerProvider(widget.roomId)) != startAccount) {
+      return;
+    }
+    try {
+      final cleared = await markRoomAsRead(
+        accountUserId: startAccount,
+        roomId: widget.roomId,
+        // Opening the room clears a marked-unread flag via the store-checked
+        // inner path (and our own pending override) — not the unconditional
+        // explicit write, which is reserved for the explicit "标记为已读"
+        // actions to avoid a per-open account-data write.
+        explicit: false,
+      );
+      if (!mounted ||
+          _currentRoomIdNotifier.value != widget.roomId ||
+          ref.read(roomViewOwnerProvider(widget.roomId)) != startAccount ||
+          ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
+        return;
+      }
+      // Only claim the room is read when the flag was actually cleared (a
+      // skipped clear's tail may still fail).
+      if (cleared) {
+        setRoomUnreadOverrideById(ref, widget.roomId, unread: false);
+      }
+      ref.invalidate(chatRoomsProvider);
+      ref.invalidate(ungroupedRoomsProvider);
+      ref.invalidate(spaceChildrenProvider);
+      ref.invalidate(searchRoomsProvider);
+    } catch (error) {
+      debugPrint('markRoomAsRead failed: $error');
+    }
   }
 
   Map<String, String?> _buildAvatarMap(List<Contact> members) {
@@ -444,10 +577,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     chatRouteObserver.unsubscribe(this);
     final currentRoomIdNotifier = _currentRoomIdNotifier;
     final roomId = widget.roomId;
+    final roomViewOwnerState = _roomViewOwnerState;
+    // Riverpod forbids touching providers during dispose; defer both the
+    // active-room and the view-owner clears to a microtask (the same batch
+    // the sync stream observes, so an auto-read cannot slip in between).
     Future.microtask(() {
       if (currentRoomIdNotifier.mounted &&
+          _activationId == _activationCounter &&
           currentRoomIdNotifier.value == roomId) {
+        _activationId = 0;
         currentRoomIdNotifier.value = null;
+        // The cached notifier may already be released if its container was
+        // torn down; guard before touching it.
+        if (roomViewOwnerState.mounted) {
+          roomViewOwnerState.value = null;
+        }
       }
     });
     _setSubscriptionsDesired(false);
@@ -501,8 +645,13 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final distanceFromOlderEdge = _distanceFromOlderEdge(metrics);
     final triggerDistance = _olderLoadTriggerDistance(metrics);
     if (distanceFromOlderEdge > triggerDistance + _olderLoadRearmDistance) {
+      // Re-arm the auto-load when the user scrolls away from the older
+      // edge — but do NOT clear the automatic-load block: an all-ignored
+      // page set it to stop auto-paginating through ignored history, and
+      // scrolling away must not let each return to the top pull another
+      // page. The manual retry entry and the ignore-list arrival re-arm
+      // it instead.
       _olderLoadArmed = true;
-      _automaticOlderLoadBlocked = false;
     }
 
     if (_olderLoadArmed &&
@@ -635,7 +784,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           nameEventId: room.nameEventId,
           avatarEventId: room.avatarEventId,
           isDm: room.roomType == 'dm',
-          subtitle: room.unreadCount > 0 ? '${room.unreadCount} 条未读消息' : '在线',
+          // Override-aware like the room list (the pushed page's header
+          // recomputes live, but the snapshot must not claim "在线" for a
+          // marked-unread target).
+          subtitle: (() {
+            final unreadOverride = ref.read(
+              roomUnreadOverrideProvider(room.id),
+            );
+            final overrideApplies = unreadOverride?.appliesTo(room) ?? false;
+            final hasUnread = overrideApplies
+                ? unreadOverride!.unread
+                : room.unreadCount > 0 || room.isMarkedUnread;
+            return hasUnread
+                ? (room.unreadCount > 0 ? '${room.unreadCount} 条未读消息' : '已标记未读')
+                : '在线';
+          })(),
         ),
       ),
     );
@@ -712,7 +875,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         // an empty timeline then shows the manual retry affordance instead of
         // looping through the whole room history.
         _automaticOlderLoadBlocked = !producedVisibleMessages;
-        _hasMoreMessages = older.isNotEmpty;
+        // A decision made without the filter (ignore list still unknown)
+        // must not stick: remember it so the build re-arms auto-pagination
+        // once the list arrives.
+        _olderLoadBlockedWithUnknownList =
+            ignoredUserIds == null && _automaticOlderLoadBlocked;
+        // A page whose messages are ALL already known (the bounded
+        // anchor-fallback page can sit entirely within the caller's loaded
+        // set) makes no progress: end history loading instead of looping
+        // on the same page forever. (A page that yields new but invisible
+        // messages — every sender ignored — still counts as progress: the
+        // anchor advances and manual retries keep working.)
+        _hasMoreMessages = older.isNotEmpty && newMessages.isNotEmpty;
         _isLoadingOlder = false;
       });
       if (newMessages.isNotEmpty) {
@@ -1131,27 +1305,63 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     );
     final activeUserId = ref.watch(activeUserIdProvider) ?? 'anonymous';
     final ignoredUserIdsAsync = ref.watch(ignoredUserIdsProvider);
+    // Re-arm auto-pagination once the ignore list becomes known: the block
+    // may have been decided without the filter (see _rebuildDerivedMessages),
+    // and no further page load will happen on its own to re-decide it.
+    if (_olderLoadBlockedWithUnknownList &&
+        _automaticOlderLoadBlocked &&
+        _hasMoreMessages &&
+        ignoredUserIdsAsync.value != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        setState(() {
+          _olderLoadBlockedWithUnknownList = false;
+          _automaticOlderLoadBlocked = false;
+          // The blocked load consumed the armed flag; re-arm it so the
+          // immediate _maybeLoadOlderMessages below actually loads (the
+          // user is at the top, where the scroll handler would otherwise
+          // never re-arm).
+          _olderLoadArmed = true;
+        });
+        _maybeLoadOlderMessages(_scrollController.position);
+      });
+    }
     final membersAsync = ref.watch(roomMembersProvider(widget.roomId));
     // Follow server-side renames/avatar changes for this room. select() keeps
     // unrelated room list churn from rebuilding the timeline.
-    final syncedRoomMeta = ref.watch(
+    final syncedRoom = ref.watch(
       chatRoomsProvider.select((roomsAsync) {
         final rooms = roomsAsync.value;
         if (rooms == null) return null;
         for (final room in rooms) {
-          if (room.id == widget.roomId) {
-            return (
-              name: room.name,
-              avatarUrl: room.avatarUrl,
-              nameEventId: room.nameEventId,
-              avatarEventId: room.avatarEventId,
-            );
-          }
+          if (room.id == widget.roomId) return room;
         }
         return null;
       }),
     );
-    _applySyncedRoomMeta(syncedRoomMeta);
+    _applySyncedRoomMeta(
+      syncedRoom == null
+          ? null
+          : (
+              name: syncedRoom.name,
+              avatarUrl: syncedRoom.avatarUrl,
+              nameEventId: syncedRoom.nameEventId,
+              avatarEventId: syncedRoom.avatarEventId,
+            ),
+    );
+    // Match the room list's unread display (including the local override
+    // for pending mark-read/unread writes) so the header subtitle and the
+    // list's red dot never disagree during the echo window. syncedRoom can
+    // be null while the room list is in its error state — the override
+    // must not crash the page then.
+    final unreadOverride = ref.watch(roomUnreadOverrideProvider(widget.roomId));
+    final overrideApplies = syncedRoom == null
+        ? false
+        : unreadOverride?.appliesTo(syncedRoom) ?? false;
+    final hasUnread = overrideApplies
+        ? unreadOverride!.unread
+        : (syncedRoom?.unreadCount ?? 0) > 0 ||
+              (syncedRoom?.isMarkedUnread ?? false);
     final cachedTotalMembers = cachedMessages.fold<int>(
       0,
       (count, message) => math.max(count, message.totalMembers),
@@ -1274,7 +1484,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                       overflow: TextOverflow.ellipsis,
                     ),
                     Text(
-                      widget.subtitle,
+                      // Live unread state (override-aware, matching the
+                      // room list), not the push-time snapshot: the snapshot
+                      // would stay stale (e.g. "3 条未读消息") after the
+                      // auto-read fired or the user marked the room
+                      // read/unread.
+                      syncedRoom == null
+                          ? widget.subtitle
+                          : hasUnread
+                          ? (syncedRoom.unreadCount > 0
+                                ? '${syncedRoom.unreadCount} 条未读消息'
+                                : '已标记未读')
+                          : '在线',
                       style: const TextStyle(
                         color: AppColors.onSurfaceVariant,
                         fontSize: 12,
@@ -1341,6 +1562,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   final messages = messageCacheOwner == activeUserId
                       ? cachedMessages
                       : const <ChatMessage>[];
+                  // The account switched while this page stayed mounted:
+                  // the old account's messages must not render (the gate
+                  // above) and the empty timeline must not mislead with its
+                  // retry affordances — show a neutral placeholder instead
+                  // (same discipline as the sibling pages).
+                  if (messageCacheOwner != activeUserId &&
+                      messageCacheOwner != null) {
+                    return const Center(
+                      child: Text(
+                        '账号已切换',
+                        style: TextStyle(color: AppColors.onSurfaceVariant),
+                      ),
+                    );
+                  }
                   final ignoredUserIds = ignoredUserIdsAsync.value;
                   // An unknown ignore list (first load, or a failed load
                   // without any snapshot) must not degrade into "nobody is
@@ -1545,23 +1780,35 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildTypingIndicator(),
-                    MessageInput(
-                      key: ValueKey('msg_input_${widget.roomId}'),
-                      roomId: widget.roomId,
-                      totalMembers: totalMembers,
-                      panelMode: _inputPanelMode,
-                      pickerHeight: pickerHeight,
-                      pickerFullHeight: pickerFullHeight,
-                      pickerBaseHeight: pickerBaseHeight,
-                      pickerMaxHeight: pickerMaxHeight,
-                      animatePickerHeight: animatePanelChange,
-                      onPanelModeChanged: _setInputPanelMode,
-                      onPickerHeightChanged: (height) =>
-                          _handlePickerHeightChanged(height, pickerBaseHeight),
-                      resolveSendPresentation: _resolveSendPresentation,
-                      onMessageQueued: _handleMessageQueued,
-                      onMessageSent: _handleMessageSent,
-                    ),
+                    // The input panel belongs to the account the page was
+                    // opened under. After a switch-away the timeline is
+                    // cleared (messageCacheOwner mismatch) and subscriptions
+                    // are torn down, but the panel itself would remain
+                    // usable — typing or sending then would act as the new
+                    // account. Hide it until the switch-back listener
+                    // re-activates the page.
+                    if (_subscriptionsAccount == null ||
+                        activeUserId == _subscriptionsAccount)
+                      MessageInput(
+                        key: ValueKey('msg_input_${widget.roomId}'),
+                        roomId: widget.roomId,
+                        totalMembers: totalMembers,
+                        panelMode: _inputPanelMode,
+                        pickerHeight: pickerHeight,
+                        pickerFullHeight: pickerFullHeight,
+                        pickerBaseHeight: pickerBaseHeight,
+                        pickerMaxHeight: pickerMaxHeight,
+                        animatePickerHeight: animatePanelChange,
+                        onPanelModeChanged: _setInputPanelMode,
+                        onPickerHeightChanged: (height) =>
+                            _handlePickerHeightChanged(
+                              height,
+                              pickerBaseHeight,
+                            ),
+                        resolveSendPresentation: _resolveSendPresentation,
+                        onMessageQueued: _handleMessageQueued,
+                        onMessageSent: _handleMessageSent,
+                      ),
                   ],
                 ),
               ),

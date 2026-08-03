@@ -18,13 +18,21 @@ class _FakeRustApi implements RustLibApi {
   Completer<void>? pendingMarkUnread;
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
     markReadCalls++;
     if (markReadError case final error?) throw error;
+    return true;
   }
 
   @override
-  Future<void> crateApiMatrixMarkRoomUnread({required String roomId}) async {
+  Future<void> crateApiMatrixMarkRoomUnread({
+    required String accountUserId,
+    required String roomId,
+  }) async {
     markUnreadCalls++;
     if (markUnreadError case final error?) throw error;
     await pendingMarkUnread?.future;
@@ -526,14 +534,8 @@ void main() {
       expect(rustApi.markUnreadCalls, 1);
       expect(find.text('已标记为未读'), findsOneWidget);
       // The optimistic unread override and its suppression are applied.
-      expect(
-        container.read(roomAutoReadSuppressedProvider(roomId)),
-        isTrue,
-      );
-      expect(
-        container.read(roomUnreadOverrideProvider(roomId)),
-        isNotNull,
-      );
+      expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+      expect(container.read(roomUnreadOverrideProvider(roomId)), isNotNull);
     });
 
     testWidgets('a failed room action restores the suppression', (
@@ -568,10 +570,7 @@ void main() {
       expect(find.text('标记为未读'), findsNothing);
       expect(find.textContaining('操作失败:'), findsOneWidget);
       // The failed action must not leave the room stuck in suppression.
-      expect(
-        container.read(roomAutoReadSuppressedProvider(roomId)),
-        isFalse,
-      );
+      expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
 
       rustApi.markUnreadError = null;
     });

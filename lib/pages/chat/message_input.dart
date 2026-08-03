@@ -171,7 +171,12 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   void _handleTyping() {
     if (!_isTyping) {
       _isTyping = true;
-      _sendTypingNotice(true);
+      // Session start: force the notice even when a stale stop notice is
+      // still in flight — dropping it would hide the typing indicator for
+      // the whole remaining flight (~90s on a dead network) while the
+      // user is actively typing. A late `false` flips the remote briefly;
+      // the next keep-alive (≤3s) corrects it.
+      _sendTypingNotice(true, force: true);
       // The server expires a typing notice after ~4s. While the user keeps
       // typing (which resets the 3s idle timer below), re-send the notice
       // periodically so the remote end does not lose the indicator mid-
@@ -197,12 +202,35 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     _typingKeepAliveTimer = null;
   }
 
-  void _sendTypingNotice(bool typing) {
-    rust.sendTypingNotice(roomId: widget.roomId, typing: typing).catchError((
-      e,
-    ) {
-      debugPrint('sendTypingNotice failed: $e');
-    });
+  // One typing write in flight at a time: the SDK call can take ~90s to
+  // fail on a dead network (30s timeout × 3 retries) while holding the
+  // client lease — a keep-alive firing every 3s without this guard would
+  // stack dozens of concurrent calls and stall account switching behind
+  // the lock for the whole period. Only the periodic keep-alive (true) is
+  // skipped while in flight; the stop notice (false) always goes out.
+  // The sequence number ties the in-flight flag to the LATEST call: an
+  // older call completing (e.g. a slow `true` resolving after the `false`
+  // that superseded it) must not reopen the gate while the newer call is
+  // still on the wire.
+  int _typingNoticeSeq = 0;
+  bool _typingNoticeInFlight = false;
+
+  void _sendTypingNotice(bool typing, {bool force = false}) {
+    // [force] is used by the session-start notice: it must go out even
+    // while a stale stop notice is in flight (see _handleTyping).
+    if (!force && _typingNoticeInFlight && typing) return;
+    _typingNoticeInFlight = true;
+    final seq = ++_typingNoticeSeq;
+    rust
+        .sendTypingNotice(roomId: widget.roomId, typing: typing)
+        .whenComplete(() {
+          if (seq == _typingNoticeSeq) {
+            _typingNoticeInFlight = false;
+          }
+        })
+        .catchError((e) {
+          debugPrint('sendTypingNotice failed: $e');
+        });
   }
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
@@ -271,11 +299,12 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
+    final draftKey = _draftKey;
     final compiled = _markdownComposer.compile(text);
     if (compiled.body.trim().isEmpty) return;
 
-    final editing = ref.read(editingMessageProvider(_draftKey));
-    final replyTo = ref.read(replyingToProvider(_draftKey));
+    final editing = ref.read(editingMessageProvider(draftKey));
+    final replyTo = ref.read(replyingToProvider(draftKey));
     final shouldRestoreKeyboard =
         widget.panelMode == InputPanelMode.keyboard || _focusNode.hasFocus;
 
@@ -287,6 +316,8 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final sendPresentation = localId != null
         ? widget.resolveSendPresentation()
         : null;
+    MutableState<List<LocalOutgoingMessage>>? localOutgoing;
+    LocalOutgoingMessage? failedLocalMessage;
     if (localId != null) {
       if (sendPresentation == MessageSendPresentation.flight) {
         _registerTextSendFlight(localId, compiled.body);
@@ -297,9 +328,21 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       final replyToUserId = (replyTo == null || replyTo.isMe)
           ? null
           : replyTo.senderId;
+      localOutgoing = ref.read(
+        localOutgoingMessagesProvider(draftKey).notifier,
+      );
+      failedLocalMessage = LocalOutgoingMessage(
+        message: _localTextMessage(
+          id: failedLocalOutgoingId(localId),
+          compiled: compiled,
+          inReplyTo: replyTo?.id,
+          timestamp: localTimestamp,
+        ),
+        replyToUserId: replyToUserId,
+      );
       upsertLocalOutgoingMessage(
         ref,
-        _draftKey,
+        draftKey,
         LocalOutgoingMessage(
           message: _localTextMessage(
             id: localId,
@@ -312,7 +355,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       );
       _controller.clear();
       if (replyTo != null) {
-        ref.read(replyingToProvider(_draftKey).notifier).value = null;
+        ref.read(replyingToProvider(draftKey).notifier).value = null;
       }
     }
 
@@ -344,7 +387,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       final persistMarkdownSource = await _canPersistMarkdownSource();
       try {
         await _markdownSourceStore.save(
-          userId: _draftKey.userId,
+          userId: draftKey.userId,
           roomId: widget.roomId,
           eventId: editing?.id ?? remoteEventId,
           source: compiled.source,
@@ -358,37 +401,28 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         // would then offer a retry that duplicates the send).
         debugPrint('Failed to save markdown source: $e');
       }
+      final sentId = localId == null
+          ? null
+          : markLocalOutgoingMessageSentInState(localOutgoing!, localId);
       if (!mounted) return;
       _stopTyping();
       if (!isNewMessage) _controller.clear();
       if (editing != null) {
-        ref.read(editingMessageProvider(_draftKey).notifier).value = null;
+        ref.read(editingMessageProvider(draftKey).notifier).value = null;
         _restoreDraft();
       }
-      if (localId != null && mounted) {
-        final sentId = markLocalOutgoingMessageSent(ref, _draftKey, localId);
+      if (localId != null) {
         widget.onMessageSent(sendPresentation!, true);
-        unawaited(_reconcileSentLocalMessage(sentId));
+        unawaited(_reconcileSentLocalMessage(draftKey, sentId!));
       } else {
         unawaited(refreshMessages(ref, widget.roomId));
       }
     } catch (e) {
-      if (localId != null && mounted) {
-        removeLocalOutgoingMessage(ref, _draftKey, localId);
-        upsertLocalOutgoingMessage(
-          ref,
-          _draftKey,
-          LocalOutgoingMessage(
-            message: _localTextMessage(
-              id: failedLocalOutgoingId(localId),
-              compiled: compiled,
-              inReplyTo: replyTo?.id,
-              timestamp: localTimestamp,
-            ),
-            replyToUserId: (replyTo == null || replyTo.isMe)
-                ? null
-                : replyTo.senderId,
-          ),
+      if (localId != null) {
+        markLocalOutgoingMessageFailedInState(
+          localOutgoing!,
+          localId,
+          failedLocalMessage!,
         );
       }
       if (mounted) {
@@ -451,10 +485,13 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
   }
 
-  Future<void> _reconcileSentLocalMessage(String localId) async {
+  Future<void> _reconcileSentLocalMessage(
+    RoomAccountKey draftKey,
+    String localId,
+  ) async {
     // Shared with failed-message retry so both paths reconcile the local
     // sent bubble with the server echo identically.
-    await reconcileSentLocalMessage(ref, _draftKey, localId);
+    await reconcileSentLocalMessage(ref, draftKey, localId);
   }
 
   int _nextLocalTimestamp() {
@@ -548,6 +585,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   Future<void> _sendSticker(StickerItem sticker, Rect? sourceRect) async {
+    final draftKey = _draftKey;
     final imageUrl = sticker.imageUrl;
     if (imageUrl == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -581,9 +619,21 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       );
     }
     widget.onMessageQueued(sendFlightId(localId), sendPresentation);
+    final localOutgoing = ref.read(
+      localOutgoingMessagesProvider(draftKey).notifier,
+    );
+    final failedLocalMessage = LocalOutgoingMessage(
+      message: _localStickerMessage(
+        id: failedLocalOutgoingId(localId),
+        sticker: sticker,
+        displayImageUrl: displayImageUrl,
+        timestamp: localTimestamp,
+      ),
+      sourceImageUrl: imageUrl,
+    );
     upsertLocalOutgoingMessage(
       ref,
-      _draftKey,
+      draftKey,
       LocalOutgoingMessage(
         message: _localStickerMessage(
           id: localId,
@@ -604,28 +654,20 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         width: sticker.width,
         height: sticker.height,
       );
-      _stopTyping();
+      final sentId = markLocalOutgoingMessageSentInState(
+        localOutgoing,
+        localId,
+      );
       if (!mounted) return;
-      final sentId = markLocalOutgoingMessageSent(ref, _draftKey, localId);
+      _stopTyping();
       widget.onMessageSent(sendPresentation, true);
-      unawaited(_reconcileSentLocalMessage(sentId));
+      unawaited(_reconcileSentLocalMessage(draftKey, sentId));
     } catch (e) {
-      if (mounted) {
-        removeLocalOutgoingMessage(ref, _draftKey, localId);
-        upsertLocalOutgoingMessage(
-          ref,
-          _draftKey,
-          LocalOutgoingMessage(
-            message: _localStickerMessage(
-              id: failedLocalOutgoingId(localId),
-              sticker: sticker,
-              displayImageUrl: displayImageUrl,
-              timestamp: localTimestamp,
-            ),
-            sourceImageUrl: imageUrl,
-          ),
-        );
-      }
+      markLocalOutgoingMessageFailedInState(
+        localOutgoing,
+        localId,
+        failedLocalMessage,
+      );
     }
   }
 
@@ -950,9 +992,10 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   Future<void> _prefillEditingSource(rust.ChatMessage editing) async {
+    final draftKey = _draftKey;
     final allowPersistence = await _canPersistMarkdownSource();
     final source = await _markdownSourceStore.load(
-      userId: _draftKey.userId,
+      userId: draftKey.userId,
       roomId: widget.roomId,
       eventId: editing.id,
       body: editing.content,

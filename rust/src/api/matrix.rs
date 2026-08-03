@@ -1,6 +1,7 @@
 use flutter_rust_bridge::frb;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use log::{info, warn};
+use matrix_sdk::config::RequestConfig;
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
     encryption::{
@@ -22,7 +23,8 @@ use matrix_sdk::{
             name::RoomNameEventContent, pinned_events::RoomPinnedEventsEventContent,
             topic::RoomTopicEventContent,
         },
-        AnySyncMessageLikeEvent, GlobalAccountDataEvent, RoomAccountDataEvent, SyncStateEvent,
+        AnySyncMessageLikeEvent, GlobalAccountDataEvent, RoomAccountDataEvent, StateEventType,
+        SyncStateEvent,
     },
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
@@ -332,11 +334,23 @@ pub enum SyncEvent {
 }
 
 static SYNC_EVENT_TX: Lazy<tokio::sync::broadcast::Sender<SyncEvent>> = Lazy::new(|| {
-    let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    // Generous capacity: a large catch-up sync (reconnect, cold start) can
+    // emit one MessageSent per message-like event, and a lagging Dart side
+    // must not force a FullRefreshRequired storm on every such burst.
+    let (tx, _rx) = tokio::sync::broadcast::channel(512);
     tx
 });
 
 type MutationFuture = Shared<BoxFuture<'static, Result<(), String>>>;
+type LifecycleProtection = Arc<tokio::sync::RwLockReadGuard<'static, ()>>;
+
+/// The caller-side timeout message of `run_bounded_mutation`. Kept as a
+/// single constant because `mark_room_as_read` distinguishes the queue-wait
+/// timeout (the clear never ran and keeps running in the background) from a
+/// genuine clear failure by comparing against this exact string — a
+/// reworded message would otherwise turn "still running" into a bogus
+/// "failed, retry".
+const MUTATION_TIMEOUT_MESSAGE: &str = "操作超时，请稍后查看最终状态。";
 
 struct MutationTail {
     id: u64,
@@ -351,7 +365,23 @@ static NEXT_MUTATION_ID: AtomicU64 = AtomicU64::new(1);
 struct MarkedUnreadOverride {
     baseline: bool,
     desired: bool,
+    /// When the override was created. `{baseline:true, desired:false}`
+    /// (a clear in flight) must survive the pending `true` echo of the
+    /// cleared flag — but only for a short window: a *new* `true` set by
+    /// another device after the clear must not be suppressed forever. The
+    /// TTL bounds the suppression window; afterwards a matching echo is
+    /// treated as a fresh server state and the override is dropped.
+    /// The TTL is equally load-bearing in the other direction
+    /// (`{baseline:false, desired:true}`, a mark-unread in flight): if the
+    /// write failed there is no echo for `reconcile` to drop the override
+    /// on, so without the TTL a failed mark would show unread forever.
+    /// The echo-side latency this exposes (up to TTL + echo delay the
+    /// display shows the pre-echo state) is the accepted price for that
+    /// bound.
+    created_at: std::time::Instant,
 }
+
+const MARKED_UNREAD_OVERRIDE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 static MARKED_UNREAD_OVERRIDES: Lazy<RwLock<HashMap<String, MarkedUnreadOverride>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -397,17 +427,56 @@ static NOTIFICATION_SETTINGS: Lazy<
 async fn notification_settings_for(
     client: &Client,
     user_id: &str,
+    expected_instance_id: Option<u64>,
 ) -> matrix_sdk::notification_settings::NotificationSettings {
-    if let Some(settings) = NOTIFICATION_SETTINGS.read().await.get(user_id) {
+    // Key by (user_id, instance_id) so a restored/replaced client can never
+    // reuse the old client's handle. Queue-tail callers pass the instance id
+    // their own guard captured, so the key always matches the client the
+    // settings were built from.
+    let instance_id = match expected_instance_id {
+        Some(id) => Some(id),
+        None => CLIENTS
+            .read()
+            .await
+            .get(user_id)
+            .map(|entry| entry.instance_id),
+    };
+    let cache_key = match instance_id {
+        Some(id) => format!("{user_id}:{id}"),
+        None => user_id.to_string(),
+    };
+    if let Some(settings) = NOTIFICATION_SETTINGS.read().await.get(&cache_key) {
         return settings.clone();
     }
     let settings = client.notification_settings().await;
     NOTIFICATION_SETTINGS
         .write()
         .await
-        .entry(user_id.to_string())
+        .entry(cache_key)
         .or_insert(settings)
         .clone()
+}
+
+/// Request configuration for user-initiated operations.
+///
+/// The SDK default already has a 30s per-request timeout and does not retry
+/// network failures, but it retries transient server errors (5xx/429)
+/// indefinitely, bounded only by a 15-minute total delay — a server stuck in
+/// an error loop would leave a P0 operation (leave, invite, rename, mute,
+/// pin, read markers, ignore, knock) spinning without feedback for minutes.
+/// `retry_limit(3)` caps that at three attempts (~93s worst case with
+/// backoff, matching the 90s call-side bounds closely), at the cost of also
+/// retrying network failures up to twice — a bounded, user-visible failure
+/// either way (an operation that outlives the call-side bound keeps running
+/// in its background queue task). Sliding Sync builds its own request config
+/// and is unaffected. Media uploads inherit the retry limit but override the
+/// timeout by size; media downloads also inherit the retry limit (their
+/// timeout is lifted to unlimited) — a flaky-network large download fails
+/// after three attempts instead of retrying forever.
+fn bounded_request_config() -> RequestConfig {
+    RequestConfig::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .retry_limit(3)
 }
 
 /// Drop per-account runtime state whenever a client is removed or replaced
@@ -415,8 +484,11 @@ async fn notification_settings_for(
 /// later session never reuses state bound to the old client or sync position.
 async fn clear_account_runtime_state(user_id: &str) {
     {
+        // Prefix match: since the instance-keyed change, entries are
+        // `{user_id}:{instance_id}` (the bare `{user_id}` key survives from
+        // before the change).
         let mut settings = NOTIFICATION_SETTINGS.write().await;
-        settings.remove(user_id);
+        settings.retain(|key, _| key != user_id && !key.starts_with(&format!("{user_id}:")));
     }
     {
         let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
@@ -426,6 +498,15 @@ async fn clear_account_runtime_state(user_id: &str) {
         let mut overrides = IGNORED_USER_OVERRIDES.write().await;
         overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
     }
+    // Queued mutations for this account (keys are `{kind}:{user_id}:...`,
+    // `ignored:{user_id}`, or the room-scoped `pinned:{room_id}` shared
+    // across accounts) are deliberately NOT dropped. Their background tails
+    // retain lifecycle read protection until completion, so teardown drains
+    // them before revoking the session or deleting its store. Keeping the
+    // queue entries also preserves serialization with any successor.
+    // Note: Matrix user IDs contain a colon (`@alice:example.org`), so the
+    // kind must be split off with `split_once`, never by splitting the whole
+    // key on colons.
 }
 
 #[frb]
@@ -443,48 +524,183 @@ fn notify_sync_event(event: SyncEvent) {
     let _ = SYNC_EVENT_TX.send(event);
 }
 
+/// Queue-wait timeout for mutations sharing a key (seconds). Test overrides
+/// this so they do not wait the real 30s.
+static MUTATION_WAIT_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(30);
+
 async fn enqueue_mutation<F, T>(key: String, operation: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>> + Send + 'static,
     T: Clone + Send + Sync + 'static,
 {
     let id = NEXT_MUTATION_ID.fetch_add(1, Ordering::Relaxed);
+    let log_key = key.clone();
     let future = {
         let mut tails = MUTATION_TAILS
             .lock()
-            .map_err(|_| "Mutation queue is unavailable.".to_string())?;
+            .map_err(|_| "操作队列不可用，请重试。".to_string())?;
         let previous = tails.get(&key).map(|tail| tail.future.clone());
-        let future = async move {
+        let future = std::panic::AssertUnwindSafe(async move {
             if let Some(previous) = previous {
-                let _ = previous.await;
+                // The SDK's HTTP timeout (see bounded_request_config) bounds
+                // a single request at ~93s (3 attempts with backoff), but
+                // several operations can still back up behind a slow one.
+                // State mutations are server-side read-modify-writes:
+                // running two
+                // concurrently would make one overwrite the other (lost
+                // pins, resurrected ignored users).
+                let wait_timeout = std::time::Duration::from_secs(
+                    MUTATION_WAIT_TIMEOUT_SECS.load(Ordering::Relaxed),
+                );
+                if tokio::time::timeout(wait_timeout, previous.clone())
+                    .await
+                    .is_err()
+                {
+                    // The predecessor outlived the queue wait. Never run
+                    // concurrently with it (state mutations are server-side
+                    // read-modify-writes), and keep this entry chained so
+                    // successors still serialize behind the chain — but once
+                    // the predecessor finishes (it is itself bounded by the
+                    // HTTP timeout), running our own operation is serial-safe
+                    // and honors the user's latest intent. Only when the
+                    // predecessor still has not finished do we give up: wait
+                    // for it (bounded by the HTTP timeout) so this entry
+                    // completes only after the predecessor, keeping
+                    // successors chained on it serialized — completing early
+                    // would release them to run concurrently with the
+                    // in-flight predecessor.
+                    app_log(
+                        "warn",
+                        "mutation",
+                        format!(
+                            "Mutation queue wait timed out for key {log_key}; waiting for the predecessor to finish."
+                        ),
+                    );
+                    if tokio::time::timeout(std::time::Duration::from_secs(120), previous.clone())
+                        .await
+                        .is_err()
+                    {
+                        app_log(
+                            "warn",
+                            "mutation",
+                            format!(
+                                "Predecessor for key {log_key} still running; waiting for it to finish before running this operation."
+                            ),
+                        );
+                        // Wait for the predecessor before running our own
+                        // operation: this entry must not execute while the
+                        // predecessor is still running, or successors chained
+                        // on it would run concurrently with it (both
+                        // server-side read-modify-writes). The bound is the
+                        // predecessor's own completion (its requests are
+                        // individually bounded by the HTTP timeout; a chained
+                        // queue can accumulate across several predecessors).
+                        // Dropping the operation here would silently lose the
+                        // user's latest intent AND contradict the caller-side
+                        // "操作超时，仍在后台执行" wording (the operation
+                        // never ran) — so run it once the predecessor is
+                        // done, exactly like the 120s branch.
+                        let _ = previous.await;
+                        return operation.await;
+                    }
+                }
             }
             operation.await
-        }
+        })
+        // A panicking predecessor (or operation) would otherwise unwind
+        // through this future, skipping the tail cleanup below and leaving a
+        // stale queue entry that panics every successor. Catch it and turn
+        // it into a regular error so cleanup always runs.
+        .catch_unwind()
+        .map(|result| result.unwrap_or_else(|_| Err("操作执行异常，请重试。".to_string())))
         .boxed()
         .shared();
+        // Chain on a unit-typed projection so operations with different
+        // payload types can share one queue per key. The cleanup is part of
+        // the tail itself: it runs when the operation finishes regardless of
+        // whether the caller is still awaiting (a caller that times out in
+        // `run_bounded_mutation` drops its future — without the spawn below
+        // the shared future would freeze un-polled, and without this cleanup
+        // the tail would linger forever).
+        let cleanup_id = id;
+        let cleanup_key = key.clone();
+        let tail_future = future
+            .clone()
+            .map(move |result| {
+                if let Ok(mut tails) = MUTATION_TAILS.lock() {
+                    if tails
+                        .get(&cleanup_key)
+                        .is_some_and(|tail| tail.id == cleanup_id)
+                    {
+                        tails.remove(&cleanup_key);
+                    }
+                }
+                result.map(|_| ())
+            })
+            .boxed()
+            .shared();
         tails.insert(
             key.clone(),
             MutationTail {
                 id,
-                // Chain on a unit-typed projection so operations with
-                // different payload types can share one queue per key.
-                future: future
-                    .clone()
-                    .map(|result| result.map(|_| ()))
-                    .boxed()
-                    .shared(),
+                future: tail_future.clone(),
             },
         );
+        // Drive the shared future in the background: `Shared` only polls its
+        // inner future while at least one clone is being awaited, so a
+        // caller that drops its clone (timeout) would otherwise freeze the
+        // operation mid-flight — and a later successor would revive it,
+        // double-applying a non-idempotent toggle (pin/unpin). Drive the
+        // tail future (not the raw one) so the cleanup hook always runs.
+        tokio::spawn(tail_future.clone());
         future
     };
 
-    let result = future.await;
-    if let Ok(mut tails) = MUTATION_TAILS.lock() {
-        if tails.get(&key).is_some_and(|tail| tail.id == id) {
-            tails.remove(&key);
-        }
-    }
-    result
+    future.await
+}
+
+/// Enqueue a mutation with a total bound on the caller's side. The queue
+/// itself stays correct after a timeout (the tail keeps running to
+/// completion under its share of the client lease), but the caller must not
+/// wait unboundedly: the queue wait alone can reach 30s + 120s, plus the
+/// operation's own HTTP attempts.
+async fn run_bounded_mutation<F, T>(
+    key: String,
+    lifecycle_protection: LifecycleProtection,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    // Move a share of the caller's lifecycle lease into the queued operation
+    // itself. When the caller times out, the spawned tail can keep using its
+    // Client/Room safely while logout or account removal waits for this share.
+    let protected_operation = async move {
+        let _lifecycle_protection = lifecycle_protection;
+        operation.await
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        enqueue_mutation(key, protected_operation),
+    )
+    .await
+    .map_err(|_| MUTATION_TIMEOUT_MESSAGE.to_string())?
+}
+
+/// Total bound for a non-queued P0 write. These hold the client lease
+/// (blocking logout/account switch) for their whole duration, and each
+/// request inside is individually bounded by `bounded_request_config` — but
+/// multi-request operations (name+topic, upload+state, verify+invite)
+/// could otherwise hold the lease for minutes.
+async fn run_bounded<F, T>(operation: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(90), operation)
+        .await
+        .map_err(|_| "操作超时，请重试。".to_string())?
 }
 
 async fn synced_marked_unread(room: &Room) -> bool {
@@ -504,7 +720,23 @@ fn marked_unread_override_key(client: &Client, room: &Room) -> Option<String> {
 
 fn resolve_marked_unread(synced: bool, local: Option<MarkedUnreadOverride>) -> (bool, bool) {
     match local {
-        Some(local) if synced == local.baseline => (local.desired, false),
+        // A fresh override matching the synced value is effective. A
+        // `{baseline:true, desired:false}` clear in flight must ALSO be
+        // effective while the store still reads false — the window between
+        // issuing the clear and the pending `true` echo of the cleared
+        // flag. Without this, the first read in that window would drop the
+        // override as stale (synced != baseline) and the pending `true`
+        // echo would briefly resurrect the unread marker. The TTL still
+        // bounds the whole suppression: an expired override is stale
+        // regardless of the synced value — a `true` arriving long after a
+        // clear was issued is a *new* cross-device mark that must not be
+        // suppressed for the rest of the session.
+        Some(local)
+            if local.created_at.elapsed() <= MARKED_UNREAD_OVERRIDE_TTL
+                && (synced == local.baseline || (local.baseline && !local.desired && !synced)) =>
+        {
+            (local.desired, false)
+        }
         Some(_) => (synced, true),
         None => (synced, false),
     }
@@ -528,15 +760,35 @@ async fn set_marked_unread_override(key: String, baseline: bool, desired: bool) 
     if baseline == desired {
         overrides.remove(&key);
     } else {
-        overrides.insert(key, MarkedUnreadOverride { baseline, desired });
+        overrides.insert(
+            key,
+            MarkedUnreadOverride {
+                baseline,
+                desired,
+                created_at: std::time::Instant::now(),
+            },
+        );
     }
 }
 
 fn reconcile_marked_unread_override(
     overrides: &mut HashMap<String, MarkedUnreadOverride>,
     key: &str,
+    synced: bool,
 ) {
-    overrides.remove(key);
+    // The override lives until the synced value reaches its baseline (the
+    // state it was snapshot against); a different synced value means the
+    // snapshot is stale. Crucially, a `{baseline:true, desired:false}`
+    // override (a clear in flight) must survive the pending `true` echo —
+    // synced == baseline — to keep suppressing the marker until the `false`
+    // echo arrives. The TTL bounds that suppression: a `true` arriving long
+    // after the clear was issued is a *new* cross-device mark, not the
+    // pending echo, and must not be hidden for the rest of the session.
+    if overrides.get(key).is_some_and(|local| {
+        synced != local.baseline || local.created_at.elapsed() > MARKED_UNREAD_OVERRIDE_TTL
+    }) {
+        overrides.remove(key);
+    }
 }
 
 fn ignored_user_override_key(client: &Client, target: &matrix_sdk::ruma::UserId) -> Option<String> {
@@ -685,16 +937,39 @@ async fn reconcile_ignored_user_overrides(client: &Client, content: &IgnoredUser
 #[cfg(test)]
 mod mutation_queue_tests {
     use super::{
-        enqueue_mutation, merge_ignored_user_overrides, reconcile_ignored_user_overrides_inner,
-        reconcile_marked_unread_override, resolve_ignored_user, resolve_marked_unread,
-        IgnoredUserOverride, MarkedUnreadOverride,
+        clear_account_runtime_state, enqueue_mutation, merge_ignored_user_overrides,
+        reconcile_ignored_user_overrides_inner, reconcile_marked_unread_override,
+        resolve_ignored_user, resolve_marked_unread, run_bounded_mutation, IgnoredUserOverride,
+        MarkedUnreadOverride, MUTATION_WAIT_TIMEOUT_SECS,
     };
     use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
+    use std::sync::atomic::Ordering;
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
     };
     use tokio::sync::oneshot;
+
+    /// Serializes the timeout tests, which override the global
+    /// MUTATION_WAIT_TIMEOUT_SECS and must not run concurrently. Tokio mutex
+    /// so the guard may be held across awaits without clippy warnings.
+    static TEST_TIMEOUT_LOCK: super::Lazy<tokio::sync::Mutex<()>> =
+        super::Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    /// Restores MUTATION_WAIT_TIMEOUT_SECS on drop, even when a test
+    /// assertion panics mid-way.
+    struct TimeoutOverrideGuard;
+    impl TimeoutOverrideGuard {
+        fn acquire() -> Self {
+            MUTATION_WAIT_TIMEOUT_SECS.store(1, Ordering::Relaxed);
+            TimeoutOverrideGuard
+        }
+    }
+    impl Drop for TimeoutOverrideGuard {
+        fn drop(&mut self) {
+            MUTATION_WAIT_TIMEOUT_SECS.store(30, Ordering::Relaxed);
+        }
+    }
 
     #[tokio::test]
     async fn serializes_mutations_with_the_same_key() {
@@ -734,11 +1009,191 @@ mod mutation_queue_tests {
         assert_eq!(*order.lock().unwrap(), [1, 2]);
     }
 
+    #[tokio::test]
+    async fn dropped_mutation_waiter_retains_lifecycle_until_tail_finishes() {
+        let lifecycle = Box::leak(Box::new(tokio::sync::RwLock::new(())));
+        let protection = Arc::new(lifecycle.read().await);
+        let key = format!("test-lifecycle:{}", std::process::id());
+        let (release, wait_for_release) = oneshot::channel();
+        let (started, wait_for_start) = oneshot::channel();
+
+        let caller = tokio::spawn(run_bounded_mutation(key, protection, async move {
+            let _ = started.send(());
+            let _ = wait_for_release.await;
+            Ok(())
+        }));
+        wait_for_start.await.unwrap();
+
+        // Cancel the caller just as the 90s wrapper does on timeout. The
+        // spawned queue tail must still hold the lifecycle read protection.
+        caller.abort();
+        let _ = caller.await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), lifecycle.write())
+                .await
+                .is_err()
+        );
+
+        let _ = release.send(());
+        let _write_guard =
+            tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.write())
+                .await
+                .expect("tail should release lifecycle protection");
+    }
+
+    #[tokio::test]
+    async fn timed_out_queue_wait_fails_instead_of_racing() {
+        // The two timeout tests share the global MUTATION_WAIT_TIMEOUT_SECS
+        // override, so they must not run concurrently.
+        let _timeout_lock = TEST_TIMEOUT_LOCK.lock().await;
+        let _timeout_override = TimeoutOverrideGuard::acquire();
+        let key = format!("test-timeout:{}", std::process::id());
+        let (release_first, wait_for_release) = oneshot::channel();
+        let (first_started, wait_for_first) = oneshot::channel();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            enqueue_mutation(first_key, async move {
+                let _ = first_started.send(());
+                let _ = wait_for_release.await;
+                Ok(())
+            })
+            .await
+        });
+
+        wait_for_first.await.unwrap();
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let second_order = order.clone();
+        let second = tokio::spawn(async move {
+            enqueue_mutation(key, async move {
+                second_order.lock().unwrap().push(2);
+                Ok(())
+            })
+            .await
+        });
+
+        // Wait past the 1s queue-wait timeout: the second mutation refuses
+        // to run concurrently, but its queue entry stays chained on the
+        // (bounded) first mutation, so it must not complete yet either.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!second.is_finished());
+        assert_eq!(*order.lock().unwrap(), Vec::<i32>::new());
+
+        // Once the first mutation finishes, the second runs its own
+        // operation: serial-safe by then, and it honors the user's latest
+        // intent instead of dropping it.
+        let _ = release_first.send(());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), [2]);
+    }
+
+    #[tokio::test]
+    async fn timed_out_waiter_keeps_successors_serialized_behind_the_predecessor() {
+        let _timeout_lock = TEST_TIMEOUT_LOCK.lock().await;
+        let _timeout_override = TimeoutOverrideGuard::acquire();
+        let key = format!("test-restore:{}", std::process::id());
+        let (release_first, wait_for_release) = oneshot::channel();
+        let (first_started, wait_for_first) = oneshot::channel();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            enqueue_mutation(first_key, async move {
+                let _ = first_started.send(());
+                let _ = wait_for_release.await;
+                Ok(())
+            })
+            .await
+        });
+
+        wait_for_first.await.unwrap();
+
+        // B queues behind A; C queues behind B.
+        let second_key = key.clone();
+        let second =
+            tokio::spawn(async move { enqueue_mutation(second_key, async move { Ok(()) }).await });
+        let third_key = key.clone();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let third_order = order.clone();
+        let third = tokio::spawn(async move {
+            enqueue_mutation(third_key, async move {
+                third_order.lock().unwrap().push(3);
+                Ok(())
+            })
+            .await
+        });
+
+        // After B's wait times out, neither B nor C may complete: B stays
+        // chained on the still-running A, and C stays chained on B. Letting
+        // B complete would release C to run concurrently with A (both
+        // server-side read-modify-writes racing each other).
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!second.is_finished());
+        assert!(!third.is_finished());
+        assert_eq!(*order.lock().unwrap(), Vec::<i32>::new());
+
+        // Once A finishes, B (then C) runs their own operations in queue
+        // order — serial-safe, never concurrent with A.
+        let _ = release_first.send(());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        third.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), [3]);
+    }
+
+    #[tokio::test]
+    async fn account_runtime_cleanup_keeps_inflight_mutations_serialized() {
+        let (release_me, wait_me) = oneshot::channel();
+        let (started_me, wait_started_me) = oneshot::channel();
+        let my_key = "muted:@me:example.org:!room:example.org".to_string();
+        let my_task = tokio::spawn({
+            let key = my_key.clone();
+            async move {
+                enqueue_mutation(key, async move {
+                    let _ = started_me.send(());
+                    let _ = wait_me.await;
+                    Ok(())
+                })
+                .await
+            }
+        });
+        wait_started_me.await.unwrap();
+
+        // Account cleanup (logout/removal) must NOT drop the in-flight tail:
+        // after a same-account relogin, a new operation on the same key must
+        // still serialize behind the running one — removing the tail would
+        // let both run concurrently as server-side read-modify-writes.
+        clear_account_runtime_state("@me:example.org").await;
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let second_order = order.clone();
+        let second = tokio::spawn({
+            let key = my_key.clone();
+            async move {
+                enqueue_mutation(key, async move {
+                    second_order.lock().unwrap().push(2);
+                    Ok(())
+                })
+                .await
+            }
+        });
+
+        // The successor must not run while the in-flight operation is still
+        // pending.
+        tokio::task::yield_now().await;
+        assert_eq!(*order.lock().unwrap(), Vec::<i32>::new());
+
+        let _ = release_me.send(());
+        my_task.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), [2]);
+    }
+
     #[test]
     fn marked_unread_override_expires_when_sync_advances() {
         let local = MarkedUnreadOverride {
             baseline: false,
             desired: true,
+            created_at: std::time::Instant::now(),
         };
         assert_eq!(resolve_marked_unread(false, Some(local)), (true, false));
         assert_eq!(resolve_marked_unread(true, Some(local)), (true, true));
@@ -746,9 +1201,17 @@ mod mutation_queue_tests {
         let local = MarkedUnreadOverride {
             baseline: true,
             desired: false,
+            created_at: std::time::Instant::now(),
         };
         assert_eq!(resolve_marked_unread(true, Some(local)), (false, false));
-        assert_eq!(resolve_marked_unread(false, Some(local)), (false, true));
+        // synced=false with a fresh clear-in-flight override: the store can
+        // lag the clear (the pending `true` echo of the cleared flag has
+        // not landed — or a forced-baseline install where the flag never
+        // synced locally). Keeping the override effective (showing read)
+        // prevents the pending `true` echo from briefly resurrecting the
+        // marker; the reconcile at the `false` echo or the TTL expiry drops
+        // it. A genuinely cleared flag displays read either way.
+        assert_eq!(resolve_marked_unread(false, Some(local)), (false, false));
     }
 
     #[test]
@@ -759,13 +1222,37 @@ mod mutation_queue_tests {
             MarkedUnreadOverride {
                 baseline: false,
                 desired: true,
+                created_at: std::time::Instant::now(),
             },
         )]);
 
         // A sync event is newer than the confirmed local write even when its
-        // final boolean coalesces back to the same pre-write value.
-        reconcile_marked_unread_override(&mut overrides, key);
+        // final boolean coalesces back to the same pre-write value: the
+        // synced `true` no longer matches the baseline snapshot `false`.
+        reconcile_marked_unread_override(&mut overrides, key, true);
 
+        assert!(!overrides.contains_key(key));
+    }
+
+    #[test]
+    fn clear_in_flight_override_survives_the_pending_true_echo() {
+        let key = "@me:example.org:!room:example.org";
+        let mut overrides = HashMap::from([(
+            key.to_owned(),
+            MarkedUnreadOverride {
+                baseline: true,
+                desired: false,
+                created_at: std::time::Instant::now(),
+            },
+        )]);
+
+        // A clear was issued while the store lagged; the pending `true` echo
+        // matches the override's baseline, so the override must keep
+        // suppressing the marker (no unread flicker) until the `false` echo.
+        reconcile_marked_unread_override(&mut overrides, key, true);
+        assert!(overrides.contains_key(key));
+
+        reconcile_marked_unread_override(&mut overrides, key, false);
         assert!(!overrides.contains_key(key));
     }
 
@@ -970,6 +1457,73 @@ pub fn watch_session_token_updates(sink: crate::frb_generated::StreamSink<Sessio
 
 async fn clear_timeline_cache() {
     sdk_timeline::clear_all().await;
+}
+
+/// Drop only the removed/logged-out account's timelines: a global clear
+/// would tear down the timelines of every other active account (the one
+/// the user is currently in included), forcing an avoidable rebuild.
+async fn clear_timeline_cache_for(user_id: &str) {
+    sdk_timeline::clear_for_user(user_id).await;
+}
+
+/// Accounts whose remote logout failed or timed out (their access token may
+/// still be valid on the server): user_id → (access_token, homeserver_url).
+/// Retried best-effort when the same account logs in again on the SAME
+/// homeserver (`finalize_pending`), so a dead-network logout does not leave
+/// a permanently valid ghost session behind.
+static PENDING_REMOTE_LOGOUTS: Lazy<RwLock<HashMap<String, (String, String)>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Fire-and-forget retry of a pending remote logout for [user_id] using the
+/// freshly logged-in client's HTTP transport (the new session is up either
+/// way). A cross-homeserver re-login cannot invalidate the old token — the
+/// retry is skipped unless the homeserver matches; a 401 response means the
+/// token was already revoked server-side, so the pending entry is dropped.
+async fn retry_pending_remote_logout(user_id: &str, client: &Client) {
+    let (token, homeserver) = match PENDING_REMOTE_LOGOUTS.read().await.get(user_id) {
+        Some(entry) => entry.clone(),
+        None => return,
+    };
+    let current_hs = client.homeserver().to_string();
+    if current_hs.trim_end_matches('/') != homeserver.trim_end_matches('/') {
+        return;
+    }
+    let client = client.clone();
+    let user_id = user_id.to_string();
+    tokio::spawn(async move {
+        // Url Display always ends with '/': trim it so the path join does
+        // not produce a double slash (some servers 404 on those).
+        let base = client.homeserver().to_string();
+        let url = format!("{}/_matrix/client/v3/logout", base.trim_end_matches('/'));
+        let outcome = match client
+            .http_client()
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                // 401: the token was already revoked server-side — the
+                // ghost session is gone. 2xx: the retry itself revoked it.
+                // Either way the pending entry is settled; drop it.
+                if status == 401 || (200..300).contains(&status) {
+                    PENDING_REMOTE_LOGOUTS.write().await.remove(&user_id);
+                    None
+                } else {
+                    Some(response.error_for_status())
+                }
+            }
+            Err(error) => Some(Err(error)),
+        };
+        if let Some(Err(error)) = outcome {
+            app_log(
+                "warn",
+                "auth",
+                format!("Retried remote logout failed for {user_id}: {error}"),
+            );
+        }
+    });
 }
 
 // ── Multi-account store ──────────────────────────────────────────────
@@ -1304,12 +1858,35 @@ async fn stop_sync_task(user_id: Option<&str>, preserve_subscriptions: bool) -> 
             if !graceful_stop_requested {
                 running.handle.abort();
             }
+            // Drop the task lock before awaiting the old loop: a hung SDK
+            // task must not block start_sync (or logout/switch) forever.
+            // The generation barrier already isolates the old loop's
+            // callbacks, so waiting outside the lock stays safe.
+            drop(task);
             // Sliding Sync deliberately finishes response processing in an
             // uncancellable SDK task. Waiting for the loop after stop_sync()
             // drains that work before an A -> B -> A account transition can
-            // make its old handlers look current again.
+            // make its old handlers look current again. The timeout bounds
+            // the wait for the pathological case where the SDK task never
+            // exits (the SDK has no HTTP timeout); after it fires, the
+            // generation barrier alone keeps the old loop inert.
             let user_id = running.user_id;
-            let _ = running.handle.await;
+            let abort_handle = running.handle.abort_handle();
+            if tokio::time::timeout(std::time::Duration::from_secs(10), running.handle)
+                .await
+                .is_err()
+            {
+                // The old loop did not exit in time (a hung SDK task with no
+                // HTTP timeout). Abort it so it stops holding the old client
+                // and connection; the generation barrier already keeps its
+                // callbacks from surfacing to the UI.
+                abort_handle.abort();
+                app_log(
+                    "warn",
+                    "sync",
+                    format!("Sync loop for user {user_id} did not exit in time; aborted."),
+                );
+            }
             app_log(
                 "info",
                 "sync",
@@ -1503,9 +2080,7 @@ fn install_live_update_event_handlers(client: &Client, identity: ClientIdentity)
 
     let marked_unread_identity = identity.clone();
     client.add_event_handler(
-        move |_event: RoomAccountDataEvent<MarkedUnreadEventContent>,
-              room: Room,
-              client: Client| {
+        move |event: RoomAccountDataEvent<MarkedUnreadEventContent>, room: Room, client: Client| {
             let identity = marked_unread_identity.clone();
             async move {
                 if active_generation_for_client(&identity).await.is_none() {
@@ -1513,7 +2088,8 @@ fn install_live_update_event_handlers(client: &Client, identity: ClientIdentity)
                 }
                 if let Some(key) = marked_unread_override_key(&client, &room) {
                     let mut overrides = MARKED_UNREAD_OVERRIDES.write().await;
-                    reconcile_marked_unread_override(&mut overrides, &key);
+                    let synced = event.content.unread;
+                    reconcile_marked_unread_override(&mut overrides, &key, synced);
                 }
                 notify_sync_event_for_client(&identity, SyncEvent::RoomListChanged).await;
             }
@@ -1644,7 +2220,7 @@ async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), S
 
 struct ClientLease {
     client: Client,
-    _lifecycle: tokio::sync::RwLockReadGuard<'static, ()>,
+    lifecycle: LifecycleProtection,
 }
 
 impl Deref for ClientLease {
@@ -1652,6 +2228,12 @@ impl Deref for ClientLease {
 
     fn deref(&self) -> &Self::Target {
         &self.client
+    }
+}
+
+impl ClientLease {
+    fn lifecycle_protection(&self) -> LifecycleProtection {
+        self.lifecycle.clone()
     }
 }
 
@@ -1669,7 +2251,7 @@ async fn get_client() -> Option<ClientLease> {
     }?;
     Some(ClientLease {
         client,
-        _lifecycle: lifecycle,
+        lifecycle: Arc::new(lifecycle),
     })
 }
 
@@ -1768,6 +2350,7 @@ async fn finalize_pending() -> Result<String, String> {
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
+        .request_config(bounded_request_config())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -1827,6 +2410,11 @@ async fn finalize_pending() -> Result<String, String> {
     // callbacks from the old instance before the identity swap.
     set_subscription_user(None).await;
     stop_sync_task(None, false).await;
+    // A previous logout of this account may have failed to reach the
+    // server (dead network): its old token may still be valid there —
+    // retry the remote logout best-effort (fire-and-forget) with this
+    // client's transport.
+    retry_pending_remote_logout(&user_id, &new_client).await;
     {
         let mut clients = CLIENTS.write().await;
         clients.insert(
@@ -2030,20 +2618,49 @@ async fn room_to_chat_room(
     let avatar_url = room.avatar_url().map(|u| u.to_string());
     let (name_event_id, avatar_event_id) =
         tokio::join!(room_name_event_id(room), room_avatar_event_id(room));
-    // `notification_count` is 0 for muted rooms, which would hide the unread
-    // indicator entirely for them. Fall back to the client-side unread count
-    // (tracked from the last read receipt, independent of push rules) so
-    // muted rooms still show a subdued unread marker.
+    // `notification_count` is 0 for muted rooms (which would hide the
+    // indicator entirely) AND for non-muted rooms whose unread messages do
+    // not trigger notifications (default group push rules only count
+    // mentions) or whose notification state was settled by another device's
+    // receipt — which is not the same as THIS device having read them. So
+    // whenever the server count is 0, fall back to the client-side unread
+    // count (tracked from this device's own read marker, independent of
+    // push rules): the badge then reflects this device's actual unread
+    // state. The only inaccuracy is a brief, conservative "unread" while
+    // our own read receipt's echo lags the server count by up to a sync
+    // cycle — opening the room clears it.
+    let notification_settings = notification_settings_for(
+        &room.client(),
+        &room
+            .client()
+            .user_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        None,
+    )
+    .await;
+    let is_muted = notification_settings
+        .get_user_defined_room_notification_mode(room.room_id())
+        .await
+        == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute);
     let server_unread = room.unread_notification_counts().notification_count as i32;
     let unread_count = if server_unread > 0 {
+        // Known limitation: the server-side count has no per-sender
+        // dimension, so messages from ignored users still contribute to
+        // the unread badge (the fallback below shares this for the same
+        // reason).
         server_unread
     } else {
-        // Known limitation: this client-side count (`read_receipts.num_unread`)
-        // has no per-sender breakdown, so in muted rooms (where the server
-        // count is always 0) messages from ignored users still contribute to
-        // the subdued unread marker. The SDK does not expose the unread
-        // event senders to filter them out here; the timeline itself and the
-        // preview text do hide ignored senders.
+        // Known limitations of this client-side count
+        // (`read_receipts.num_unread`): it has no per-sender breakdown, so
+        // messages from ignored users still contribute to the unread
+        // marker; and without any read receipt the SDK recounts the events
+        // in the local cache window, so a room the user never opened shows
+        // an approximate count bounded by that window (truncated when the
+        // window is small), and a room with no cached events shows none.
+        // The SDK does not expose the unread event senders to filter them
+        // out here; the timeline itself and the preview text do hide
+        // ignored senders.
         room.num_unread_messages() as i32
     };
     let is_marked_unread = effective_marked_unread(&room.client(), room).await;
@@ -2124,19 +2741,6 @@ async fn room_to_chat_room(
         .await
         .map(|state| state.is_encrypted())
         .unwrap_or(true);
-    let notification_settings = notification_settings_for(
-        &room.client(),
-        &room
-            .client()
-            .user_id()
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
-    )
-    .await;
-    let is_muted = notification_settings
-        .get_user_defined_room_notification_mode(room.room_id())
-        .await
-        == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute);
 
     ChatRoom {
         id: room_id,
@@ -2689,7 +3293,7 @@ fn get_room_by_id(client: &Client, room_id: &str) -> Result<Room, String> {
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     client
         .get_room(parsed_room_id.as_ref())
-        .ok_or_else(|| format!("Room not found: {room_id}"))
+        .ok_or_else(|| format!("房间不存在: {room_id}"))
 }
 
 async fn remove_dir_all_if_exists(path: &Path) -> Result<bool, String> {
@@ -2780,6 +3384,7 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
+        .request_config(bounded_request_config())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -3017,7 +3622,7 @@ pub async fn login_with_token(
         .ok_or("No client created. Call create_client first.")?;
 
     let parsed_user_id = matrix_sdk::ruma::UserId::parse(&user_id)
-        .map_err(|e| friendly_auth_error(&format!("Invalid user ID: {e}"), "用户 ID 格式无效"))?;
+        .map_err(|e| friendly_auth_error(&format!("无效的用户 ID: {e}"), "用户 ID 格式无效"))?;
     let parsed_device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
 
     let session = MatrixSession {
@@ -3217,7 +3822,6 @@ pub async fn switch_account(user_id: String) -> bool {
         let mut active = ACTIVE_USER.write().await;
         *active = Some(user_id.clone());
         drop(active);
-        stop_sync_task(None, false).await;
         set_subscription_user(Some(user_id.clone())).await;
         clear_verification_session().await;
         clear_timeline_cache().await;
@@ -3255,7 +3859,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
     clear_verification_session().await;
     set_subscription_user(None).await;
     stop_sync_task(None, false).await;
-    clear_timeline_cache().await;
+    clear_timeline_cache_for(&user_id).await;
 
     let entry = {
         let mut clients = CLIENTS.write().await;
@@ -3266,13 +3870,61 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     if client.matrix_auth().logged_in() {
-        if let Err(e) = client.matrix_auth().logout().await {
-            app_log(
-                "warn",
-                "auth",
-                format!("Remote logout failed for {}: {e}", user_id),
-            );
-            warn!("Remote logout failed for {}: {e}", user_id);
+        // Bound the remote logout: the server may be unreachable and the SDK
+        // has no HTTP timeout, which would otherwise freeze account removal
+        // (this runs under the SYNC_LIFECYCLE write lock) indefinitely. A
+        // timeout or failure still proceeds with local cleanup below, so the
+        // account can be logged out locally and retried on the server later.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.matrix_auth().logout(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                // The token may still be valid on the server: remember it so
+                // the next login of this account can retry the remote logout
+                // (see finalize_pending) instead of leaving a ghost session.
+                if let Some(session) = client.matrix_auth().session() {
+                    PENDING_REMOTE_LOGOUTS.write().await.insert(
+                        user_id.clone(),
+                        (
+                            session.tokens.access_token.to_string(),
+                            client.homeserver().to_string(),
+                        ),
+                    );
+                }
+                app_log(
+                    "warn",
+                    "auth",
+                    format!("Remote logout failed for {}: {e}", user_id),
+                );
+                warn!("Remote logout failed for {}: {e}", user_id);
+            }
+            Err(_) => {
+                if let Some(session) = client.matrix_auth().session() {
+                    PENDING_REMOTE_LOGOUTS.write().await.insert(
+                        user_id.clone(),
+                        (
+                            session.tokens.access_token.to_string(),
+                            client.homeserver().to_string(),
+                        ),
+                    );
+                }
+                app_log(
+                    "warn",
+                    "auth",
+                    format!(
+                        "Remote logout timed out for {}, continuing locally",
+                        user_id
+                    ),
+                );
+                warn!(
+                    "Remote logout timed out for {}, continuing locally",
+                    user_id
+                );
+            }
         }
     }
 
@@ -3322,9 +3974,16 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
     let removing_active = ACTIVE_USER.read().await.as_ref() == Some(&user_id);
     if removing_active {
         clear_verification_session().await;
-        clear_timeline_cache().await;
         set_subscription_user(None).await;
     }
+    // Drop the removed account's timelines regardless of whether it is
+    // active: the cache is keyed per account and holds Arc<Timeline>
+    // instances bound to the removed client (whose SQLite store is about
+    // to be deleted) — re-logging into the account later must build fresh
+    // timelines, not reuse dead ones. Scoped to THIS account: a global
+    // clear would also tear down the timelines of the account the user is
+    // currently in.
+    clear_timeline_cache_for(&user_id).await;
     if removing_active {
         stop_sync_task(None, false).await;
     } else {
@@ -3338,13 +3997,58 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     if client.matrix_auth().logged_in() {
-        if let Err(e) = client.matrix_auth().logout().await {
-            app_log(
-                "warn",
-                "auth",
-                format!("Remote logout failed while removing {}: {e}", user_id),
-            );
-            warn!("Remote logout failed while removing {}: {e}", user_id);
+        // Bounded remote logout: see logout() — an unreachable server must
+        // not freeze account removal, which runs under the write lock.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.matrix_auth().logout(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                // The token may still be valid on the server: remember it so
+                // the next login of this account can retry the remote logout
+                // (see finalize_pending) instead of leaving a ghost session.
+                if let Some(session) = client.matrix_auth().session() {
+                    PENDING_REMOTE_LOGOUTS.write().await.insert(
+                        user_id.clone(),
+                        (
+                            session.tokens.access_token.to_string(),
+                            client.homeserver().to_string(),
+                        ),
+                    );
+                }
+                app_log(
+                    "warn",
+                    "auth",
+                    format!("Remote logout failed while removing {}: {e}", user_id),
+                );
+                warn!("Remote logout failed while removing {}: {e}", user_id);
+            }
+            Err(_) => {
+                if let Some(session) = client.matrix_auth().session() {
+                    PENDING_REMOTE_LOGOUTS.write().await.insert(
+                        user_id.clone(),
+                        (
+                            session.tokens.access_token.to_string(),
+                            client.homeserver().to_string(),
+                        ),
+                    );
+                }
+                app_log(
+                    "warn",
+                    "auth",
+                    format!(
+                        "Remote logout timed out while removing {}, continuing locally",
+                        user_id
+                    ),
+                );
+                warn!(
+                    "Remote logout timed out while removing {}, continuing locally",
+                    user_id
+                );
+            }
         }
     }
 
@@ -3439,6 +4143,7 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
+        .request_config(bounded_request_config())
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -3450,7 +4155,7 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
     install_session_token_callback(&client)?;
 
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id).map_err(|e| {
-        let msg = format!("Invalid user ID: {e}");
+        let msg = format!("无效的用户 ID: {e}");
         app_log("error", "auth", msg.clone());
         msg
     })?;
@@ -3560,7 +4265,7 @@ pub async fn list_own_devices() -> Result<Vec<VerificationDevice>, String> {
     let client = get_client().await.ok_or("No active client")?;
     let (user_id, current_device_id) = active_session_meta(&client)?;
     let user_id =
-        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
+        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
 
     // Refresh the identity first so the device list isn't limited to stale local data.
     client
@@ -3595,7 +4300,7 @@ pub async fn start_device_verification(device_id: String) -> Result<(), String> 
         return Err("Cannot verify the current device with itself".into());
     }
     let user_id =
-        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
+        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
     let device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
     let device = client
         .encryption()
@@ -3622,7 +4327,7 @@ pub async fn start_device_verification(device_id: String) -> Result<(), String> 
 pub async fn accept_device_verification() -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+        .map_err(|e| format!("无效的用户 ID: {e}"))?;
     let request = client
         .encryption()
         .get_verification_request(&user_id, &session.flow_id)
@@ -3645,7 +4350,7 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
         return Ok(None);
     };
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+        .map_err(|e| format!("无效的用户 ID: {e}"))?;
 
     let request = client
         .encryption()
@@ -3772,7 +4477,7 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
 pub async fn confirm_device_verification() -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+        .map_err(|e| format!("无效的用户 ID: {e}"))?;
     let sas = client
         .encryption()
         .get_verification(&user_id, &session.flow_id)
@@ -3799,7 +4504,7 @@ pub async fn confirm_device_verification() -> Result<(), String> {
 pub async fn cancel_device_verification(mismatch: bool) -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+        .map_err(|e| format!("无效的用户 ID: {e}"))?;
     if let Some(sas) = client
         .encryption()
         .get_verification(&user_id, &session.flow_id)
@@ -3953,7 +4658,7 @@ pub async fn sync_once() -> Result<(), String> {
             let msg = format!("sync_once: failed for user {}: {e}", user_id);
             app_log("error", "sync", msg.clone());
             set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
-            Err(format!("Sync failed: {e}"))
+            Err(format!("同步失败: {e}"))
         }
         Err(_) => {
             let msg = format!(
@@ -3962,7 +4667,7 @@ pub async fn sync_once() -> Result<(), String> {
             );
             app_log("error", "sync", msg.clone());
             set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
-            Err("Sync timed out after 10 seconds. Check your network connection and homeserver URL.".to_string())
+            Err("同步超时（10 秒），请检查网络连接与服务器地址。".to_string())
         }
     }
 }
@@ -4041,6 +4746,12 @@ fn start_sync_internal(
                 );
                 // Fallback: traditional sync loop
                 let loop_user_id = user_id.clone();
+                // Spawn with a bare `Client` (Deref'd out of the lease): the
+                // lease holds the SYNC_LIFECYCLE read lock, and this loop can
+                // outlive start_sync_internal — holding the guard here would
+                // deadlock every account switch/logout/removal (they take the
+                // write lock) until the loop exits.
+                let loop_client = client.clone();
                 let (start, start_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(async move {
                     if start_rx.await.is_err() {
@@ -4067,7 +4778,7 @@ fn start_sync_internal(
                                     generation,
                                     ConnectionStatus::Updating,
                                 );
-                                match client
+                                match loop_client
                                     .sync_once(matrix_sdk::config::SyncSettings::default())
                                     .await
                                 {
@@ -4103,7 +4814,7 @@ fn start_sync_internal(
                                             .contains(&loop_user_id);
                                         if successful_syncs >= 10
                                             && !degraded
-                                            && !client
+                                            && !loop_client
                                                 .available_sliding_sync_versions()
                                                 .await
                                                 .is_empty()
@@ -4563,6 +5274,15 @@ pub async fn subscribe_typing_for_room(
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
     let mut task = TYPING_TASK.lock().await;
+    // Re-verify after taking the lock: an account switch between the check
+    // above and here would otherwise install the old account's room into the
+    // new session (mirrors subscribe_room_for_receipts).
+    if !subscription_user_matches(
+        SUBSCRIPTION_USER.read().await.as_deref(),
+        account_user_id.as_deref(),
+    ) {
+        return Err("Typing subscription belongs to an inactive account".to_string());
+    }
     if let Some(prev) = task.take() {
         prev.handle.abort();
     }
@@ -4670,7 +5390,7 @@ pub async fn subscribe_room_for_receipts(
     account_user_id: Option<String>,
 ) -> Result<String, String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("Invalid room id: {e}"))?;
+        .map_err(|e| format!("无效的房间 ID: {e}"))?;
     let subscription_user = SUBSCRIPTION_USER.read().await;
     if !subscription_user_matches(subscription_user.as_deref(), account_user_id.as_deref()) {
         return Err("Room subscription belongs to an inactive account".to_string());
@@ -4679,6 +5399,16 @@ pub async fn subscribe_room_for_receipts(
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
     let mut state = ROOM_SUBSCRIPTION.lock().await;
+    // Re-verify after taking the lock: an account switch between the check
+    // above and here resets the subscription state, and registering the old
+    // account's room into the new session would subscribe it to a room it
+    // may not even know.
+    if !subscription_user_matches(
+        SUBSCRIPTION_USER.read().await.as_deref(),
+        account_user_id.as_deref(),
+    ) {
+        return Err("Room subscription belongs to an inactive account".to_string());
+    }
     let first_subscriber = state.add_desired(&room_id, subscription_id.clone());
     if first_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
@@ -4703,7 +5433,7 @@ pub async fn unsubscribe_room_for_receipts(
     subscription_id: String,
 ) -> Result<(), String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("Invalid room id: {e}"))?;
+        .map_err(|e| format!("无效的房间 ID: {e}"))?;
     let mut state = ROOM_SUBSCRIPTION.lock().await;
     let last_subscriber = state.remove_desired(&room_id, &subscription_id);
     if last_subscriber {
@@ -5077,85 +5807,77 @@ pub async fn get_chat_rooms(
     let ignored_user_ids =
         ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
-    let rooms = client.rooms();
-    app_log(
-        "info",
-        "rooms",
-        format!("get_chat_rooms: found {} total rooms", rooms.len()),
-    );
-    let mut result = Vec::new();
-    let mut visible = 0;
+    // Bounded like the other P0 reads: the room scan touches the shared
+    // notification-settings instance while holding the client lease (the
+    // instance itself is a local store read — push rules arrive via sync —
+    // but the whole list build must stay bounded for the lease's sake).
+    run_bounded(async move {
+        let rooms = client.rooms();
+        app_log(
+            "info",
+            "rooms",
+            format!("get_chat_rooms: found {} total rooms", rooms.len()),
+        );
+        let mut result = Vec::new();
+        let mut visible = 0;
 
-    for room in rooms {
-        if !matches!(
-            room.state(),
-            matrix_sdk::RoomState::Joined
-                | matrix_sdk::RoomState::Invited
-                | matrix_sdk::RoomState::Knocked
-        ) {
-            continue;
-        }
-        visible += 1;
-
-        let mut chat_room =
-            room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
-        if !room.is_space() {
-            // `is_direct` covers both joined rooms (m.direct account data)
-            // and invited rooms (the invite event's is_direct flag), so it
-            // is the primary signal. Only fall back to a member-count
-            // heuristic for JOINED rooms whose m.direct entry is absent —
-            // and use members_no_sync (a pure store read): `members()`
-            // would trigger a serial HTTP /members request per room,
-            // stalling the whole room list behind the network. Invited and
-            // knocked rooms never fall back: their cache holds only
-            // stripped state (~1-2 members), so a large group invite would
-            // be misclassified as a DM.
-            let is_dm = if room.state() == matrix_sdk::RoomState::Joined {
-                match room.is_direct().await {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        room.members_no_sync(matrix_sdk::RoomMemberships::JOIN)
-                            .await
-                            .map(|members| members.len() <= 2)
-                            .unwrap_or(false)
-                            && room
-                                .members_no_sync(matrix_sdk::RoomMemberships::INVITE)
-                                .await
-                                .map(|members| members.len() <= 2)
-                                .unwrap_or(true)
-                    }
-                    Err(_) => room
-                        .members_no_sync(matrix_sdk::RoomMemberships::JOIN)
-                        .await
-                        .map(|members| members.len() <= 2)
-                        .unwrap_or(false),
-                }
-            } else {
-                room.is_direct().await.unwrap_or(false)
-            };
-            if is_dm {
-                chat_room.room_type = "dm".to_string();
-            } else if room.state() == matrix_sdk::RoomState::Joined {
-                chat_room.room_type = "group".to_string();
+        for room in rooms {
+            if !matches!(
+                room.state(),
+                matrix_sdk::RoomState::Joined
+                    | matrix_sdk::RoomState::Invited
+                    | matrix_sdk::RoomState::Knocked
+            ) {
+                continue;
             }
+            visible += 1;
+
+            let mut chat_room =
+                room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
+            if !room.is_space() {
+                // `is_direct` covers both joined rooms (m.direct account data)
+                // and invited rooms (the invite event's is_direct flag), so it
+                // is the primary signal. Only fall back to a member-count
+                // heuristic for JOINED rooms whose m.direct entry is absent —
+                // and use members_no_sync (a pure store read): `members()`
+                // would trigger a serial HTTP /members request per room,
+                // stalling the whole room list behind the network. Invited and
+                // knocked rooms never fall back: their cache holds only
+                // stripped state (~1-2 members), so a large group invite would
+                // be misclassified as a DM.
+                let is_dm = if room.state() == matrix_sdk::RoomState::Joined {
+                    match room.is_direct().await {
+                        Ok(true) => true,
+                        Ok(false) | Err(_) => is_dm_by_members(&room).await,
+                    }
+                } else {
+                    room.is_direct().await.unwrap_or(false)
+                };
+                if is_dm {
+                    chat_room.room_type = "dm".to_string();
+                } else if room.state() == matrix_sdk::RoomState::Joined {
+                    chat_room.room_type = "group".to_string();
+                }
+            }
+            result.push(chat_room);
         }
-        result.push(chat_room);
-    }
 
-    app_log(
-        "info",
-        "rooms",
-        format!("get_chat_rooms: {} visible rooms returned", visible),
-    );
-    result.sort_by(|a, b| {
-        let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
-        let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
-        b_time
-            .cmp(&a_time)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+        app_log(
+            "info",
+            "rooms",
+            format!("get_chat_rooms: {} visible rooms returned", visible),
+        );
+        result.sort_by(|a, b| {
+            let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
+            let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
+            b_time
+                .cmp(&a_time)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
 
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }
 
 fn get_last_message_info(room: &matrix_sdk::Room) -> (String, Option<String>, String, String) {
@@ -5525,7 +6247,10 @@ fn unable_to_decrypt_message(
 pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-    sdk_timeline::get_messages(&client, &room).await
+    // Bounded like the other P0 calls: the load holds the client lease
+    // (blocking logout/account switch) and pagination can run several
+    // network attempts.
+    run_bounded(async move { sdk_timeline::get_messages(&client, &room).await }).await
 }
 
 #[frb]
@@ -5533,10 +6258,10 @@ pub async fn get_sticker_packs(room_id: String) -> Result<Vec<StickerPack>, Stri
     let client = get_client().await.ok_or("No client created.")?;
 
     let parsed_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("Invalid room id: {e}"))?;
+        .map_err(|e| format!("无效的房间 ID: {e}"))?;
     let room = client
         .get_room(&parsed_room_id)
-        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
 
     let imported_room_packs = client
         .account()
@@ -5711,7 +6436,7 @@ pub async fn forward_message(
     let source_room = get_room_by_id(&client, &source_room_id)?;
     let target_room = get_room_by_id(&client, &target_room_id)?;
     let event_id =
-        matrix_sdk::ruma::EventId::parse(event_id).map_err(|e| format!("Invalid event id: {e}"))?;
+        matrix_sdk::ruma::EventId::parse(event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
     let timeline_event = source_room
         .event(&event_id, None)
         .await
@@ -6544,9 +7269,9 @@ pub async fn send_sticker(
     let room = client
         .get_room(
             &matrix_sdk::ruma::RoomId::parse(room_id.clone())
-                .map_err(|e| format!("Invalid room id: {e}"))?,
+                .map_err(|e| format!("无效的房间 ID: {e}"))?,
         )
-        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
 
     let content_uri = matrix_sdk::ruma::OwnedMxcUri::try_from(image_url.trim())
         .map_err(|e| format!("Invalid sticker MXC URI: {e}"))?;
@@ -6594,88 +7319,245 @@ pub async fn send_sticker(
 
 /// Create a new direct chat room with a user.
 #[frb]
-pub async fn create_dm(user_id: String) -> Result<String, String> {
+pub async fn create_dm(account_user_id: String, user_id: String) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let invited_user =
-        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
+        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
 
-    for room in client.rooms() {
-        if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
-            continue;
-        }
+    // Serialize per (account, target) pair: two concurrent calls could both
+    // scan before either create lands, each decide "no DM exists" and
+    // create a duplicate room (same read-modify-write discipline as the
+    // other queued writes). The account is part of the key — DM creation is
+    // account-private, unlike `pinned:{room_id}` shared state, so one
+    // account's slow scan must not stall another account's create.
+    // Capture the account's current client instance id: the queued scan may
+    // execute after a logout+relogin replaced the client (deep predecessor
+    // chains), and creating a room under a stale session's token would
+    // leave a duplicate DM the new session cannot see (same discipline as
+    // `set_room_muted`). `account_user_id` is the LOGGED-IN account — the
+    // `user_id` parameter is the DM target, which is not in CLIENTS.
+    let expected_instance_id = CLIENTS
+        .read()
+        .await
+        .get(&account_user_id)
+        .map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
+    let mutation_client = client.clone();
+    let mutation_invited_user = invited_user.clone();
+    run_bounded_mutation(
+        format!("dm:{account_user_id}:{user_id}"),
+        lifecycle_protection,
+        async move {
+            // Fail fast when the account was logged out (its token may have
+            // been revoked server-side while the CLIENTS entry survived) or
+            // its client was replaced while this operation was queued: the
+            // stale session's token may still be valid server-side, but
+            // creating under it would orphan the room from the new session.
+            let mutation_client = mutation_client;
+            if !mutation_client.matrix_auth().logged_in() {
+                return Err("当前账号已登出，请重新登录。".to_string());
+            }
+            let is_current_client = CLIENTS
+                .read()
+                .await
+                .get(&account_user_id)
+                .map(|e| e.instance_id)
+                == expected_instance_id;
+            if !is_current_client {
+                return Err("当前账号已切换，请重试。".to_string());
+            }
+            // The reuse scan below calls `members()` per DM candidate, which can
+            // fetch /members over the network while holding the client lease; the
+            // mutation bound covers the whole scan+create so a dead network
+            // cannot stall it — and with it logout/account switch — for N rooms
+            // x the request budget. On timeout the create fails with a clear,
+            // retryable error. Deliberately NOT degrading to members_no_sync:
+            // that could miss an existing DM whose member list has not synced
+            // yet and silently create a duplicate room.
+            let mut members_read_failed = false;
+            let mut reused_room_id = None;
+            for room in mutation_client.rooms() {
+                if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
+                    continue;
+                }
 
-        if !matches!(room.is_direct().await, Ok(true)) {
-            continue;
-        }
+                let is_direct = matches!(room.is_direct().await, Ok(true));
+                // Mirror the room list's DM classification: when the OTHER
+                // party created the DM, m.direct lives in their account data and
+                // this account's is_direct() is false — skipping such rooms
+                // would create a duplicate DM. A room is a DM candidate when it
+                // is directly marked, or small per the sync summary (≤2 joined);
+                // larger rooms are skipped without the network members() call
+                // (which lazy-loaded rooms would otherwise trigger per
+                // candidate).
+                if !is_direct && room.joined_members_count() > 2 {
+                    continue;
+                }
 
-        let members = match room.members(matrix_sdk::RoomMemberships::JOIN).await {
-            Ok(members) => members,
-            Err(_) => continue,
-        };
+                // The DM shape check mirrors `is_dm_by_members` for rooms NOT
+                // directly marked: with two joined members there must be no
+                // pending invite, or the room is a forming group. Directly
+                // marked rooms are DMs by definition (the room list agrees).
+                let joined_len = room.joined_members_count();
+                if !is_direct {
+                    if joined_len == 0 {
+                        // No sync summary was ever received for this room: the
+                        // member counts are unknown, and the room may be a
+                        // large group (reusing it as a "DM" would be wrong —
+                        // `is_dm_by_members` classifies the same state
+                        // conservatively as a group). Skip until a summary
+                        // arrives; the store members() call below would only
+                        // re-confirm the unknown.
+                        continue;
+                    }
+                    if joined_len == 1 {
+                        if room.invited_members_count() > 1 {
+                            continue;
+                        }
+                    } else if room.invited_members_count() != 0 {
+                        continue;
+                    }
+                }
 
-        if members
-            .iter()
-            .any(|member| member.user_id() == invited_user)
-        {
+                let members = match room
+                    .members(
+                        matrix_sdk::RoomMemberships::JOIN | matrix_sdk::RoomMemberships::INVITE,
+                    )
+                    .await
+                {
+                    Ok(members) => members,
+                    Err(_) => {
+                        // A candidate's membership could not be verified: it may
+                        // be the existing DM with the target. Fail closed (the
+                        // user can retry) instead of silently creating a
+                        // duplicate DM room.
+                        members_read_failed = true;
+                        continue;
+                    }
+                };
+
+                let own_user_id = mutation_client.user_id().map(|id| id.to_string());
+                let is_self_dm = own_user_id.as_deref() == Some(mutation_invited_user.as_str());
+                let matched = if is_self_dm {
+                    // A self-DM is the room that contains ONLY the caller
+                    // (1 joined, no invitees): matching "any room the caller is
+                    // in" would silently navigate into an unrelated
+                    // conversation, while a bare membership exclusion would
+                    // never match anything and create a duplicate on every tap.
+                    joined_len == 1
+                        && room.invited_members_count() == 0
+                        && members.iter().all(|m| m.user_id() == mutation_invited_user)
+                } else {
+                    members.iter().any(|member| {
+                        member.user_id() == mutation_invited_user
+                            && own_user_id.as_deref() != Some(member.user_id().as_str())
+                    })
+                };
+                if matched {
+                    app_log(
+                        "info",
+                        "rooms",
+                        format!(
+                            "Reusing existing DM room {} for {}",
+                            room.room_id(),
+                            user_id
+                        ),
+                    );
+                    reused_room_id = Some(room.room_id().to_string());
+                    break;
+                }
+            }
+            if let Some(room_id) = reused_room_id {
+                return Ok(room_id);
+            }
+            if members_read_failed {
+                return Err("无法确认是否已有私聊，请重试。".to_string());
+            }
+
+            let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+            request.invite = vec![mutation_invited_user];
+            request.is_direct = true;
+
+            let response = mutation_client
+                .create_room(request)
+                .await
+                .map_err(|e| format!("创建房间失败: {e}"))?;
+
             app_log(
                 "info",
                 "rooms",
-                format!(
-                    "Reusing existing DM room {} for {}",
-                    room.room_id(),
-                    user_id
-                ),
+                format!("Created DM room: {}", response.room_id()),
             );
-            return Ok(room.room_id().to_string());
-        }
-    }
-
-    let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
-    request.invite = vec![invited_user];
-    request.is_direct = true;
-
-    let response = client
-        .create_room(request)
-        .await
-        .map_err(|e| format!("Create room failed: {e}"))?;
-
-    app_log(
-        "info",
-        "rooms",
-        format!("Created DM room: {}", response.room_id()),
-    );
-    info!("Created DM room: {}", response.room_id());
-    Ok(response.room_id().to_string())
+            info!("Created DM room: {}", response.room_id());
+            Ok(response.room_id().to_string())
+        },
+    )
+    .await
 }
 
 /// Create a group room with a name and optional topic.
 #[frb]
-pub async fn create_group_room(name: String, topic: Option<String>) -> Result<String, String> {
+pub async fn create_group_room(
+    account_user_id: String,
+    name: String,
+    topic: Option<String>,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
+    // Mirror update_room_details: an empty name would create a nameless
+    // room (the Dart callers already intercept, this is defense in depth).
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("房间名称不能为空。".to_string());
+    }
+    // Mirror update_room_details: trim the topic too (the Dart callers
+    // already pass trimmed values; this is defense in depth).
+    let topic = topic.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
 
-    let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
-    request.name = Some(name);
-    request.topic = topic;
+    // Bounded like the other P0 writes: the create request holds the client
+    // lease.
+    run_bounded(async move {
+        let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+        request.name = Some(name);
+        request.topic = topic;
 
-    let response = client
-        .create_room(request)
-        .await
-        .map_err(|e| format!("Create room failed: {e}"))?;
+        let response = client
+            .create_room(request)
+            .await
+            .map_err(|e| format!("创建房间失败: {e}"))?;
 
-    app_log(
-        "info",
-        "rooms",
-        format!("Created group room: {}", response.room_id()),
-    );
-    info!("Created group room: {}", response.room_id());
-    Ok(response.room_id().to_string())
+        app_log(
+            "info",
+            "rooms",
+            format!("Created group room: {}", response.room_id()),
+        );
+        info!("Created group room: {}", response.room_id());
+        Ok(response.room_id().to_string())
+    })
+    .await
 }
 
 /// Create a space room with a name and optional topic.
 #[frb]
-pub async fn create_space(name: String, topic: Option<String>) -> Result<String, String> {
+pub async fn create_space(
+    account_user_id: String,
+    name: String,
+    topic: Option<String>,
+) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
+    // Mirror update_room_details / create_group_room: an empty name would
+    // create a nameless space (the Dart callers already intercept, this is
+    // defense in depth).
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("空间名称不能为空。".to_string());
+    }
+    // Mirror update_space_details: trim the topic too (the Dart callers
+    // already pass trimmed values; this is defense in depth).
+    let topic = topic.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
 
     let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     request.name = Some(name);
@@ -6685,88 +7567,114 @@ pub async fn create_space(name: String, topic: Option<String>) -> Result<String,
     creation_content.room_type = Some(matrix_sdk::ruma::room::RoomType::Space);
     request.creation_content = Some(
         matrix_sdk::ruma::serde::Raw::new(&creation_content)
-            .map_err(|e| format!("Failed to encode space creation content: {e}"))?,
+            .map_err(|e| format!("空间创建内容编码失败: {e}"))?,
     );
 
-    let response = client
-        .create_room(request)
-        .await
-        .map_err(|e| format!("Create space failed: {e}"))?;
+    // Bounded like the other P0 writes: the create request holds the client
+    // lease.
+    run_bounded(async move {
+        let response = client
+            .create_room(request)
+            .await
+            .map_err(|e| format!("创建空间失败: {e}"))?;
 
-    app_log(
-        "info",
-        "rooms",
-        format!("Created space: {}", response.room_id()),
-    );
-    info!("Created space: {}", response.room_id());
-    Ok(response.room_id().to_string())
+        app_log(
+            "info",
+            "rooms",
+            format!("Created space: {}", response.room_id()),
+        );
+        info!("Created space: {}", response.room_id());
+        Ok(response.room_id().to_string())
+    })
+    .await
 }
 
 /// Join a room or space by room ID or alias.
 #[frb]
-pub async fn join_room(identifier: String) -> Result<String, String> {
+pub async fn join_room(account_user_id: String, identifier: String) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let id_or_alias = matrix_sdk::ruma::RoomOrAliasId::parse(identifier.clone())
-        .map_err(|e| format!("Invalid room or space identifier: {e}"))?;
+        .map_err(|e| format!("无效的房间或空间标识: {e}"))?;
 
-    let room = client
-        .join_room_by_id_or_alias(&id_or_alias, &[])
-        .await
-        .map_err(|e| format!("Join failed: {e}"))?;
-
-    app_log("info", "rooms", format!("Joined room: {}", room.room_id()));
-    info!("Joined room: {}", room.room_id());
+    // Bounded like the other P0 writes: joining is a network operation
+    // holding the client lease.
+    let room_id = run_bounded(async move {
+        let room = client
+            .join_room_by_id_or_alias(&id_or_alias, &[])
+            .await
+            .map_err(|e| format!("加入房间失败: {e}"))?;
+        app_log("info", "rooms", format!("Joined room: {}", room.room_id()));
+        info!("Joined room: {}", room.room_id());
+        Ok(room.room_id().to_string())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
-    Ok(room.room_id().to_string())
+    Ok(room_id)
 }
 
 #[frb]
-pub async fn accept_room_invite(room_id: String) -> Result<(), String> {
+pub async fn accept_room_invite(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
-        return Err(format!("Room is not an invite: {room_id}"));
+        return Err(format!("该房间不是邀请状态: {room_id}"));
     }
-    room.join()
-        .await
-        .map_err(|e| format!("Accept invite failed: {e}"))?;
+    run_bounded(async move {
+        room.join()
+            .await
+            .map_err(|e| format!("接受邀请失败: {e}"))?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
-pub async fn reject_room_invite(room_id: String) -> Result<(), String> {
+pub async fn reject_room_invite(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
-        return Err(format!("Room is not an invite: {room_id}"));
+        return Err(format!("该房间不是邀请状态: {room_id}"));
     }
-    room.leave()
-        .await
-        .map_err(|e| format!("Reject invite failed: {e}"))?;
+    run_bounded(async move {
+        room.leave()
+            .await
+            .map_err(|e| format!("拒绝邀请失败: {e}"))?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
-pub async fn withdraw_room_knock(room_id: String) -> Result<(), String> {
+pub async fn withdraw_room_knock(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Knocked {
-        return Err(format!("Room is not a knock request: {room_id}"));
+        return Err(format!("该房间不是加入请求状态: {room_id}"));
     }
-    room.leave()
-        .await
-        .map_err(|e| format!("Withdraw knock failed: {e}"))?;
+    run_bounded(async move {
+        room.leave()
+            .await
+            .map_err(|e| format!("撤回加入请求失败: {e}"))?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
@@ -6774,21 +7682,69 @@ pub async fn withdraw_room_knock(room_id: String) -> Result<(), String> {
 fn joined_non_space_room(client: &Client, room_id: &str) -> Result<Room, String> {
     let room = get_room_by_id(client, room_id)?;
     if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
-        return Err(format!("Room is not a joined non-space room: {room_id}"));
+        return Err(format!("该房间不是已加入的非空间房间: {room_id}"));
     }
     Ok(room)
 }
 
+/// Member-count heuristic for whether a joined room without an `m.direct`
+/// entry is a 1:1. Shared by the room list classification and unmute (the
+/// latter must install the DM default rule, all-messages, on a real 1:1).
+/// Uses the sync summary counts, which are accurate even while lazy-loaded
+/// members are missing; without a summary the room is classified as a group
+/// (the stored member list would be an unreliable sliding-window subset).
+/// DM iff at most two joined members, with at most one pending invite
+/// alongside a single joined member (a 1:1 the other party has not accepted
+/// yet) and none for an accepted pair — a fresh room with several invitees
+/// is a group.
+async fn is_dm_by_members(room: &Room) -> bool {
+    let summary_joined = room.joined_members_count();
+    if summary_joined > 0 {
+        summary_joined <= 2
+            && (match summary_joined {
+                1 => room.invited_members_count() <= 1,
+                _ => room.invited_members_count() == 0,
+            })
+    } else {
+        // No sync summary was ever received (fresh login before the first
+        // sync cycle, or a store without room summaries). The member list
+        // here is a lazy-loaded sliding-window subset: for a quiet group it
+        // can hold as few as one or two members, so it cannot prove a 1:1.
+        // Classify conservatively as a group — a wrong DM call flips unmute
+        // onto the all-messages default rule for a real group (persistent
+        // server noise), while a wrong group call only delays the correct
+        // label until the first sync summary arrives.
+        false
+    }
+}
+
+/// Guard a user-initiated P0 write against account switches racing between
+/// the Dart-side guard and this call's execution: the operation must run on
+/// the account the caller opened it for, never on whatever account became
+/// active in between.
+fn ensure_account_matches(client: &Client, account_user_id: &str) -> Result<(), String> {
+    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    if active_user_id != account_user_id {
+        return Err("当前账号已切换，请重试。".to_string());
+    }
+    Ok(())
+}
+
 /// Leave a joined non-space room.
 #[frb]
-pub async fn leave_room(room_id: String) -> Result<(), String> {
+pub async fn leave_room(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
-    room.leave()
-        .await
-        .map_err(|error| format!("Leave room failed: {error}"))?;
+    run_bounded(async move {
+        room.leave()
+            .await
+            .map_err(|error| format!("退出房间失败: {error}"))?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
@@ -6821,16 +7777,25 @@ pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
 
 /// Invite a Matrix user to a joined non-space room.
 #[frb]
-pub async fn invite_user_to_room(room_id: String, user_id: String) -> Result<(), String> {
+pub async fn invite_user_to_room(
+    account_user_id: String,
+    room_id: String,
+    user_id: String,
+) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("Invalid user ID: {error}"))?;
-    room.invite_user_by_id(&user_id)
-        .await
-        .map_err(|error| format!("Invite user failed: {error}"))?;
+        .map_err(|error| format!("无效的用户 ID: {error}"))?;
+    run_bounded(async move {
+        room.invite_user_by_id(&user_id)
+            .await
+            .map_err(|error| format!("邀请用户失败: {error}"))?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
@@ -6838,6 +7803,7 @@ pub async fn invite_user_to_room(room_id: String, user_id: String) -> Result<(),
 /// Update a joined non-space room's name and topic.
 #[frb]
 pub async fn update_room_details(
+    account_user_id: String,
     room_id: String,
     name: String,
     update_name: bool,
@@ -6847,46 +7813,52 @@ pub async fn update_room_details(
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let name = name.trim();
-    let (name_event_id, name_error) = if update_name {
-        if name.is_empty() {
-            (None, Some("Room name cannot be empty.".to_string()))
-        } else {
-            match room.set_name(name.to_owned()).await {
-                Ok(response) => (Some(response.event_id.to_string()), None),
-                Err(error) => (None, Some(format!("Failed to update room name: {error}"))),
+    let name = name.trim().to_owned();
+    run_bounded(async move {
+        let (name_event_id, name_error) = if update_name {
+            if name.is_empty() {
+                (None, Some("房间名称不能为空。".to_string()))
+            } else {
+                match room.set_name(name.clone()).await {
+                    Ok(response) => (Some(response.event_id.to_string()), None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
             }
+        } else {
+            (None, None)
+        };
+        let (topic_event_id, topic_error) = if update_topic {
+            let new_topic = topic.unwrap_or_default().trim().to_owned();
+            // Dart already sends update_topic only for an edited value. Do
+            // not compare against room.topic(): the SDK snapshot may still
+            // predate a just-completed write, which would drop a quick
+            // A -> B -> A change.
+            match room.set_room_topic(&new_topic).await {
+                Ok(response) => (Some(response.event_id.to_string()), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        } else {
+            (None, None)
+        };
+        if name_event_id.is_some() || topic_event_id.is_some() {
+            notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
         }
-    } else {
-        (None, None)
-    };
-    let (topic_event_id, topic_error) = if update_topic {
-        let new_topic = topic.unwrap_or_default().trim().to_owned();
-        // Dart already sends update_topic only for an edited value. Do not
-        // compare against room.topic(): the SDK snapshot may still predate a
-        // just-completed write, which would drop a quick A -> B -> A change.
-        match room.set_room_topic(&new_topic).await {
-            Ok(response) => (Some(response.event_id.to_string()), None),
-            Err(error) => (None, Some(format!("Failed to update room topic: {error}"))),
-        }
-    } else {
-        (None, None)
-    };
-    if name_event_id.is_some() || topic_event_id.is_some() {
-        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
-    }
-    Ok(RoomDetailsUpdate {
-        name_event_id,
-        topic_event_id,
-        name_error,
-        topic_error,
+        Ok(RoomDetailsUpdate {
+            name_event_id,
+            topic_event_id,
+            name_error,
+            topic_error,
+        })
     })
+    .await
 }
 
 /// Upload and apply a new avatar for a joined non-space room.
 #[frb]
 pub async fn upload_room_avatar(
+    account_user_id: String,
     room_id: String,
     content_type: String,
     data: Vec<u8>,
@@ -6894,31 +7866,69 @@ pub async fn upload_room_avatar(
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
-    let room = joined_non_space_room(&client, &room_id)?;
+    ensure_account_matches(&client, &account_user_id)?;
+    // Only validates the room exists and is joined; the room used for the
+    // state event is re-fetched under a fresh lease after the upload.
+    joined_non_space_room(&client, &room_id)?;
     let mime: mime::Mime = content_type
         .parse()
-        .map_err(|error| format!("Invalid content type '{content_type}': {error}"))?;
+        .map_err(|error| format!("无效的内容类型 '{content_type}': {error}"))?;
     if mime.type_() != mime::IMAGE {
-        return Err(format!("Expected an image MIME type, got {mime}"));
+        return Err(format!("不是图片格式: {mime}"));
     }
-
-    let upload = client
-        .media()
-        .upload(&mime, data, None)
+    let media = client.media();
+    // The upload can legitimately take minutes (the SDK sizes its own
+    // timeout by the payload, at least 5 minutes per attempt), so release
+    // the client lease for its duration — holding the SYNC_LIFECYCLE read
+    // lock for that long would freeze logout/account switch. A generous
+    // total bound still caps the multi-retry worst case.
+    let upload = {
+        drop(client);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            media.upload(&mime, data, None),
+        )
         .await
-        .map_err(|error| format!("Failed to upload room avatar: {error}"))?;
-    let mut info = matrix_sdk::ruma::events::room::avatar::ImageInfo::new();
-    info.mimetype = Some(mime.to_string());
-    info.blurhash = upload.blurhash;
-    let response = room
-        .set_avatar_url(&upload.content_uri, Some(info))
+        .map_err(|_| "上传超时，请重试。".to_string())?
+        .map_err(|error| format!("上传房间头像失败: {error}"))?
+    };
+    // Re-acquire the lease for the state-event step (short, bounded by
+    // run_bounded) and re-verify the account: the account may have switched
+    // or logged out entirely during the upload. Either way the upload
+    // already landed — say so (the Dart catch passes "已上传" messages
+    // through verbatim).
+    let client = get_client()
         .await
-        .map_err(|error| format!("Failed to update room avatar: {error}"))?;
-    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
-    Ok(RoomAvatarUpdate {
-        avatar_url: upload.content_uri.to_string(),
-        event_id: response.event_id.to_string(),
+        .ok_or_else(|| "头像已上传，但当前账号已登出，无法应用。请重新登录后重试。".to_string())?;
+    ensure_account_matches(&client, &account_user_id)
+        .map_err(|_| "头像已上传，但当前账号已切换，未应用。请重新选择图片以应用。".to_string())?;
+    let room = joined_non_space_room(&client, &room_id).map_err(|_| {
+        // The upload already landed: a room-state change on another device
+        // (left / removed) must not surface as a bare failure that hides
+        // the "已上传" passthrough.
+        "头像已上传，但房间状态已变化（可能已退出该房间），未能应用。".to_string()
+    })?;
+    run_bounded(async move {
+        let mut info = matrix_sdk::ruma::events::room::avatar::ImageInfo::new();
+        info.mimetype = Some(mime.to_string());
+        info.blurhash = upload.blurhash;
+        // The upload already succeeded: a timeout here means the image is
+        // uploaded but not applied — say so (a retry re-applies cheaply,
+        // while "刷新确认" would have nothing to confirm).
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            room.set_avatar_url(&upload.content_uri, Some(info)),
+        )
+        .await
+        .map_err(|_| "头像已上传，但应用失败（请求超时），请重试。".to_string())?
+        .map_err(|error| format!("更新房间头像失败: {error}"))?;
+        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        Ok(RoomAvatarUpdate {
+            avatar_url: upload.content_uri.to_string(),
+            event_id: response.event_id.to_string(),
+        })
     })
+    .await
 }
 
 /// Return whether a room has an explicit mute push rule.
@@ -6926,111 +7936,298 @@ pub async fn upload_room_avatar(
 pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let user_id = client
-        .user_id()
-        .map(|id| id.to_string())
-        .unwrap_or_default();
-    let settings = notification_settings_for(&client, &user_id).await;
-    Ok(settings
-        .get_user_defined_room_notification_mode(room.room_id())
-        .await
-        == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute))
+    // Bounded like the other P0 calls: the notification-settings read holds
+    // the client lease for the call's duration (the settings instance is a
+    // local store read — push rules arrive via sync — but consistency with
+    // the other bounded P0 calls keeps the lease hold bounded).
+    run_bounded(async move {
+        let user_id = client
+            .user_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let settings = notification_settings_for(&client, &user_id, None).await;
+        Ok(settings
+            .get_user_defined_room_notification_mode(room.room_id())
+            .await
+            == Some(matrix_sdk::notification_settings::RoomNotificationMode::Mute))
+    })
+    .await
 }
 
 /// Create or remove an explicit mute push rule for a room.
 #[frb]
-pub async fn set_room_muted(room_id: String, muted: bool) -> Result<(), String> {
+pub async fn set_room_muted(
+    account_user_id: String,
+    room_id: String,
+    muted: bool,
+) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = client.user_id().ok_or("No active user")?.to_string();
+    // Capture the account's current client instance id: the queued write
+    // must fail fast when a logout+relogin replaced the client before it
+    // executes — rebuilding the shared NotificationSettings cache entry
+    // with the stale client would shadow the fresh session's instance.
+    let expected_instance_id = CLIENTS.read().await.get(&user_id).map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
     let mutation_client = client.clone();
-    enqueue_mutation(format!("muted:{user_id}:{room_id}"), async move {
-        // Push-rule updates are read-modify-write server calls; serialize per
-        // room so rapid toggles apply in click order instead of racing. The
-        // shared per-account instance applies its own writes to its internal
-        // ruleset, so a re-toggle right after the previous write cannot
-        // misread the pre-write state from the store and no-op.
-        let settings = notification_settings_for(&mutation_client, &user_id).await;
-        if muted {
-            settings
-                .set_room_notification_mode(
-                    room.room_id(),
-                    matrix_sdk::notification_settings::RoomNotificationMode::Mute,
-                )
-                .await
-                .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
-        } else {
-            // Unknown encryption state (room joined but `m.room.encryption`
-            // not synced yet) must default to encrypted: unmuting with
-            // "not encrypted" would downgrade the rule to all-messages in a
-            // room that is actually encrypted, leaking notification noise
-            // (and hinting the room content to the push gateway).
-            let is_encrypted = !matches!(
-                room.latest_encryption_state().await,
-                Ok(state) if !state.is_encrypted()
-            );
-            let is_one_to_one = room.is_direct().await.unwrap_or(false);
-            settings
-                .unmute_room(
-                    room.room_id(),
-                    matrix_sdk::notification_settings::IsEncrypted::from(is_encrypted),
-                    matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
-                )
-                .await
-                .map_err(|error| format!("Failed to update room notification settings: {error}"))?;
-        }
-        Ok(())
-    })
+    run_bounded_mutation(
+        format!("muted:{user_id}:{room_id}"),
+        lifecycle_protection,
+        async move {
+            // The write may execute long after the caller enqueued it (deep
+            // predecessor chains): if the account was logged out meanwhile, the
+            // client's token is dead — fail fast instead of rebuilding a stale
+            // NotificationSettings instance (keyed by this user_id, it would
+            // shadow a fresh session's settings entry).
+            if !mutation_client.matrix_auth().logged_in() {
+                return Err("当前账号已登出，请重新登录。".to_string());
+            }
+            // `logged_in()` can still pass when the remote logout failed/timed
+            // out server-side (the local session kept its token while the
+            // server revoked it). Rebuilds of the shared cache entry must also
+            // be blocked when this client is no longer the account's CURRENT
+            // one — a logout+relogin replaced it, and the stale instance would
+            // shadow the fresh session's entry until the next logout.
+            let is_current_client =
+                CLIENTS.read().await.get(&user_id).map(|e| e.instance_id) == expected_instance_id;
+            if !is_current_client {
+                return Err("当前账号已切换，请重试。".to_string());
+            }
+            // Push-rule updates are read-modify-write server calls; serialize per
+            // room so rapid toggles apply in click order instead of racing. The
+            // shared per-account instance applies its own writes to its internal
+            // ruleset, so a re-toggle right after the previous write cannot
+            // misread the pre-write state from the store and no-op.
+            let settings = notification_settings_for(
+                &mutation_client,
+                &user_id,
+                // The instance id this closure's guard captured: the cache key
+                // must bind to the client the settings are built from, never a
+                // re-read of the mapping table (a logout+relogin between the
+                // guard and this call must not key the stale handle under the
+                // NEW session's id).
+                expected_instance_id,
+            )
+            .await;
+            if muted {
+                settings
+                    .set_room_notification_mode(
+                        room.room_id(),
+                        matrix_sdk::notification_settings::RoomNotificationMode::Mute,
+                    )
+                    .await
+                    .map_err(|error| format!("更新通知设置失败: {error}"))?;
+            } else {
+                // Unknown encryption state (room joined but `m.room.encryption`
+                // not synced yet) must default to encrypted: unmuting with
+                // "not encrypted" would downgrade the rule to all-messages in a
+                // room that is actually encrypted, leaking notification noise
+                // (and hinting the room content to the push gateway).
+                let is_encrypted = !matches!(
+                    room.latest_encryption_state().await,
+                    Ok(state) if !state.is_encrypted()
+                );
+                // A 1:1 must be classified correctly or unmuting installs the
+                // group default rule (mention-only) on it, silencing ordinary
+                // messages on every device until the user re-mutes. `is_direct()`
+                // only reflects `m.direct` account data (often absent for
+                // invites), so fall back to the same member-count heuristic the
+                // room list uses (shared predicate, see `is_dm_by_members`).
+                let is_one_to_one =
+                    room.is_direct().await.unwrap_or(false) || is_dm_by_members(&room).await;
+                settings
+                    .unmute_room(
+                        room.room_id(),
+                        matrix_sdk::notification_settings::IsEncrypted::from(is_encrypted),
+                        matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
+                    )
+                    .await
+                    .map_err(|error| format!("更新通知设置失败: {error}"))?;
+            }
+            // Broadcast from inside the queued operation: even when the caller
+            // times out (90s bound) and this tail keeps running, the room list
+            // still learns about the change (like set_pinned_message).
+            notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
+            Ok(())
+        },
+    )
     .await?;
-    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
     Ok(())
 }
 
-/// Toggle a message's membership in `m.room.pinned_events`.
+/// Lightweight read of the room's pinned event ids (server read, no event
+/// loading). Used by the message long-press menu to decide whether "置顶" or
+/// "取消置顶" applies; the account guard keeps the target decision on the
+/// account the menu was opened for.
 #[frb]
-pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<bool, String> {
+pub async fn get_pinned_event_ids(
+    account_user_id: String,
+    room_id: String,
+) -> Result<Vec<String>, String> {
+    let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    run_bounded(async move {
+        // Bound the server read more tightly than the client default (the
+        // SDK's RequestConfig already caps a single request at 30s, but
+        // with 3 retries a dead network could still stall the long-press
+        // menu well past the 90s outer bound). On error OR timeout, fall
+        // back to the local store; a stale list still lets the menu
+        // decide pin vs unpin (the write itself re-reads the server
+        // inside the queue).
+        let ids = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            room.load_pinned_events(),
+        )
+        .await
+        {
+            Ok(Ok(ids)) => ids.unwrap_or_default(),
+            Ok(Err(_)) | Err(_) => {
+                // Offline fallback mirroring get_pinned_messages: a stale
+                // local list still lets the menu decide pin vs unpin (the
+                // write itself re-reads the server inside the queue).
+                match room
+                    .get_state_event_static::<
+                        matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
+                    >()
+                    .await
+                {
+                    Ok(Some(raw)) => raw
+                        .deserialize()
+                        .map(|event| match event.as_sync() {
+                            Some(matrix_sdk::ruma::events::SyncStateEvent::Original(
+                                original,
+                            )) => original.content.pinned.clone(),
+                            _ => Vec::new(),
+                        })
+                        .map_err(|error| {
+                            format!("无法解析本地置顶状态，请重试: {error}")
+                        })?,
+                    Ok(None) => Vec::new(),
+                    // A store read failure is not "no pins": treating it as
+                    // empty would decide the wrong menu direction (e.g.
+                    // "置顶" on an already-pinned message, making unpin
+                    // unreachable through the menu). Surface the error and
+                    // let the user retry, like pinned_ids_from_store.
+                    Err(error) => {
+                        return Err(format!("无法读取本地置顶状态，请重试: {error}"));
+                    }
+                }
+            }
+        };
+        Ok(ids.into_iter().map(|id| id.to_string()).collect())
+    })
+    .await
+}
+
+/// Set a message's membership in `m.room.pinned_events` to the requested
+/// state. Idempotent: applying an already-held state is a no-op, so a retry
+/// after a caller-side timeout (the first attempt may still be running
+/// server-side, driven by the queue's background task) cannot flip the pin a
+/// second time — a toggle would, and the UI would then contradict the
+/// server state.
+#[frb]
+pub async fn set_pinned_message(
+    account_user_id: String,
+    room_id: String,
+    event_id: String,
+    pinned: bool,
+) -> Result<bool, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let event_id = matrix_sdk::ruma::EventId::parse(event_id)
-        .map_err(|error| format!("Invalid event ID: {error}"))?;
-    let user_id = client.user_id().ok_or("No active user")?.to_string();
+        .map_err(|error| format!("无效的事件 ID: {error}"))?;
+    // Capture the account's current client instance id: the queued write
+    // may execute after a logout+relogin replaced the client (deep
+    // predecessor chains). Same discipline as `set_room_muted` /
+    // `create_dm` / `set_user_ignored`.
+    let expected_instance_id = CLIENTS
+        .read()
+        .await
+        .get(&account_user_id)
+        .map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
     let pinned_result = Arc::new(AtomicBool::new(false));
     let queued_result = pinned_result.clone();
-    enqueue_mutation(format!("pinned:{user_id}:{room_id}"), async move {
-        // RMW against the authoritative server state: the SDK's in-memory
-        // room state lags our own writes until the sync echo, so rapid
-        // pin/unpin sequences would otherwise overwrite each other.
-        // load_pinned_events is a server read that maps a missing
-        // m.room.pinned_events state (first-ever pin) to an empty list.
-        let mut pinned_ids = room
-            .load_pinned_events()
+    run_bounded_mutation(
+        format!("pinned:{room_id}"),
+        lifecycle_protection,
+        async move {
+            // Fail fast when the account was logged out or its client was
+            // replaced while this write was queued (the pinned list is
+            // room-shared state, but writing under a stale session's token
+            // would mislead with an unrelated error).
+            let mutation_client = room.client();
+            if !mutation_client.matrix_auth().logged_in() {
+                return Err("当前账号已登出，请重新登录。".to_string());
+            }
+            let is_current_client = CLIENTS
+                .read()
+                .await
+                .get(&account_user_id)
+                .map(|e| e.instance_id)
+                == expected_instance_id;
+            if !is_current_client {
+                return Err("当前账号已切换，请重试。".to_string());
+            }
+            // RMW against the authoritative server state: the SDK's in-memory
+            // room state lags our own writes until the sync echo, so rapid
+            // pin/unpin sequences would otherwise overwrite each other.
+            // load_pinned_events is a server read that maps a missing
+            // m.room.pinned_events state (first-ever pin) to an empty list.
+            // The key is room-scoped (not per account): the pinned list is
+            // room-shared state, so two accounts toggling the same room must
+            // serialize or their read-modify-writes would clobber each other.
+            let mut pinned_ids = room
+                .load_pinned_events()
+                .await
+                .map_err(|error| format!("加载置顶状态失败: {error}"))?
+                .unwrap_or_default();
+            let already_pinned = pinned_ids.iter().any(|id| id == &event_id);
+            let changed = if pinned {
+                if !already_pinned {
+                    // Newest pin first (the Matrix convention; the pinned page
+                    // renders in list order).
+                    pinned_ids.insert(0, event_id.to_owned());
+                    true
+                } else {
+                    false
+                }
+            } else if already_pinned {
+                pinned_ids.retain(|id| id != &event_id);
+                true
+            } else {
+                false
+            };
+            if changed {
+                room.send_state_event(
+                matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent::new(
+                    pinned_ids,
+                ),
+            )
             .await
-            .map_err(|error| format!("Failed to load pinned state: {error}"))?
-            .unwrap_or_default();
-        let pinned = if let Some(index) = pinned_ids.iter().position(|id| id == &event_id) {
-            pinned_ids.remove(index);
-            false
-        } else {
-            pinned_ids.push(event_id.to_owned());
-            true
-        };
-        room.send_state_event(
-            matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent::new(
-                pinned_ids,
-            ),
-        )
-        .await
-        .map_err(|error| format!("Failed to update pinned messages: {error}"))?;
-        queued_result.store(pinned, Ordering::Relaxed);
-        Ok(())
-    })
+            .map_err(|error| format!("更新置顶消息失败: {error}"))?;
+                // Broadcast from inside the queued operation: even when the
+                // caller times out (90s bound) and this tail keeps running, the
+                // pinned page still learns about the change.
+                notify_sync_event_for_generation(
+                    generation,
+                    SyncEvent::PinnedMessagesChanged { room_id },
+                );
+            }
+            queued_result.store(pinned, Ordering::Relaxed);
+            Ok(())
+        },
+    )
     .await?;
     let pinned = pinned_result.load(Ordering::Relaxed);
-    notify_sync_event_for_generation(generation, SyncEvent::PinnedMessagesChanged { room_id });
     Ok(pinned)
 }
 
@@ -7039,72 +8236,350 @@ pub async fn toggle_pinned_message(room_id: String, event_id: String) -> Result<
 pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    sdk_timeline::get_pinned_messages(&room).await
+    // The load holds the client lease (SYNC_LIFECYCLE read lock) for its
+    // whole duration, blocking logout/account switch, which need the write
+    // lock. The internal stages are individually bounded (15s list read +
+    // 20s cache wait + 10s pinned-timeline build + 25s focused fetch =
+    // 70s; cache setup steps before them are unbounded, so headroom is
+    // kept generous), and the total bound below exceeds that sum so the
+    // inner stage timeouts (which degrade to partial results) fire before
+    // the outer one (which fails the whole page) even when several expire
+    // in the same tick.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        sdk_timeline::get_pinned_messages(&room),
+    )
+    .await
+    .map_err(|_| "加载置顶消息超时。".to_string())?
 }
 
 /// Explicitly mark all currently loaded messages in a room as read.
+/// Returns whether the marked-unread flag was actually cleared (the auto
+/// path skips the clear when one is already in flight for this room).
 #[frb]
-pub async fn mark_room_as_read(room_id: String) -> Result<(), String> {
+pub async fn mark_room_as_read(
+    account_user_id: String,
+    room_id: String,
+    explicit: bool,
+) -> Result<bool, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = client.user_id().ok_or("No active user")?.to_string();
-    let mutation_key = format!("read:{user_id}:{room_id}");
     let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    // Capture the account's current client instance id: the queued clear
+    // may execute after a logout+relogin replaced the client (deep
+    // predecessor chains). Same discipline as the other queued writes.
+    let expected_instance_id = CLIENTS.read().await.get(&user_id).map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
     let mutation_client = client.clone();
-    enqueue_mutation(mutation_key, async move {
+    // The clear closure below is `move`; the outer function still needs
+    // `user_id` for the queue key, so give the closure its own copy.
+    let clear_user_id = user_id.clone();
+    // The receipts are not a read-modify-write (the Timeline guards against
+    // moving either marker backwards), so they are sent outside the queue —
+    // an explicit read must not starve behind a flood of sync-driven
+    // auto-reads. The marked-unread clear and the unread-override
+    // bookkeeping DO mutate the same account-data event the unread-marker
+    // write uses, so they run on the shared `read:{user}:{room}` key (the
+    // same one mark_room_unread uses) to stay serialized with it.
+    // The receipt step still holds the client lease (initial window
+    // pagination can run several network attempts), so it is bounded — and
+    // it runs CONCURRENTLY with the clear queue below (they touch disjoint
+    // state: receipts vs account data), so the whole call is bounded by the
+    // longer of the two (~90s; ~15s for the auto path, which bounds both
+    // sides like the receipt send), not their sum.
+    let receipt_future = {
+        let receipt_room = room.clone();
+        let receipt_client = mutation_client.clone();
+        run_bounded(async move {
+            sdk_timeline::send_read_receipts(&receipt_client, &receipt_room).await
+        })
+    };
+    let clear_operation = async move {
+        // Fail fast when the account was logged out or its client was
+        // replaced while this clear was queued: writing the account-data
+        // flag under a stale session would either 401 (misleading wording)
+        // or land on a dead session's data (same discipline as the other
+        // queued writes).
+        let mutation_client = room.client();
+        if !mutation_client.matrix_auth().logged_in() {
+            return Err("当前账号已登出，请重新登录。".to_string());
+        }
+        let is_current_client = CLIENTS
+            .read()
+            .await
+            .get(&clear_user_id)
+            .map(|e| e.instance_id)
+            == expected_instance_id;
+        if !is_current_client {
+            return Err("当前账号已切换，请重试。".to_string());
+        }
         let baseline = synced_marked_unread(&room).await;
         let had_pending_unread_override = MARKED_UNREAD_OVERRIDES
             .read()
             .await
             .get(&override_key)
-            .is_some_and(|local| local.desired);
-        sdk_timeline::mark_room_as_read(&mutation_client, &room).await?;
-        // The store-based check inside mark_room_as_read can lag our own
-        // write: `m.marked_unread=true` was set but its echo has not synced
-        // yet, so the store still reads false and the auto-clear skips it.
-        // If we are the account that marked it unread (pending override),
-        // clear the server flag explicitly to honor the read action.
-        if had_pending_unread_override {
-            sdk_timeline::clear_marked_unread(&room).await?;
+            .is_some_and(|local| {
+                // Same TTL semantics as `resolve_marked_unread`: an expired
+                // override no longer proves a pending local write — a
+                // `true` echo arriving after the TTL is a NEW cross-device
+                // mark that must not be suppressed.
+                local.desired && local.created_at.elapsed() <= MARKED_UNREAD_OVERRIDE_TTL
+            });
+        // The store-checked clear below clears the server flag whenever
+        // the room is being viewed (its marked_unread has synced
+        // locally). That check can lag our own write: `marked_unread
+        // = true` was set but its echo has not synced yet, so the store
+        // still reads false and the clear is skipped. An explicit read
+        // action clears the server flag even then — it must win over a
+        // marked-unread state set on any device, including one that has
+        // not echoed here yet — while the auto path only clears for our
+        // own pending override (avoiding a per-message write
+        // amplification).
+        // The store-checked clear covers the flag once its echo has landed;
+        // the outer clear then only needs to fire when the inner one did not
+        // (explicit action against a flag whose echo has not landed here
+        // yet, or our own pending unread override). This avoids double
+        // writes based on the freshly read store state, not a stale sample.
+        let inner_cleared = sdk_timeline::clear_marked_unread_if_set(&room)
+            .await
+            .map_err(|clear_error| {
+                // The receipt ran concurrently (tokio::join!) and may
+                // already have been sent: say so instead of a bare clear
+                // failure — a retry re-sends both idempotently.
+                format!("已读回执可能已发送，但清除未读标记失败: {clear_error}，请重试。")
+            })?;
+        // The explicit branch is deliberately NOT gated on the locally
+        // visible marker (baseline or our own pending override): a `false`
+        // baseline is ambiguous — it can mean the room has no marker, or
+        // that a marker set on another device has not echoed here yet.
+        // Gating would silently defeat the explicit action in that window
+        // (the flag survives and the room re-shows as unread). Writing
+        // `false` when no marker exists is an idempotent no-op, and
+        // explicit actions are rare user-initiated operations, so the
+        // extra write is negligible. Only the auto path is gated, where
+        // per-message write amplification is a real concern.
+        let explicit_clear =
+            (explicit && !inner_cleared) || (had_pending_unread_override && !baseline);
+        if explicit_clear {
+            // A failed clear must still surface as an error (a retry
+            // re-sends both idempotently) rather than promising success
+            // while the server flag survives. The wording is
+            // order-independent: the receipt may or may not have been
+            // sent yet.
+            sdk_timeline::clear_marked_unread(&room)
+                .await
+                .map_err(|clear_error| format!("清除未读标记失败: {clear_error}，请重试。"))?;
         }
-        set_marked_unread_override(override_key, baseline, false).await;
+        // The override suppresses the flag until the clear's echo
+        // arrives. When a clear was just issued (explicit action, or our
+        // own pending unread override) or the store already held the
+        // flag, treat the flag as "was set, now clearing": with
+        // baseline=true the override stays effective while a stale `true`
+        // echo lands (showing read), and is removed once the `false`
+        // echo arrives (showing the cleared store). Without this, a
+        // pending `true` echo — including our own mark-unread write whose
+        // echo has not landed yet — would briefly resurrect the unread
+        // marker. A clean room with no clear intent keeps the actual
+        // baseline.
+        // Note: while the room keeps being viewed (auto-reads renew this
+        // override with a fresh created_at), the suppression is effectively
+        // extended — viewing IS the "handled now" signal, so this is
+        // intended. Auto-reads only run while the room is viewed (they are
+        // gated on the viewer/owner), so the 30s TTL bound starts as soon
+        // as viewing stops, and the override cannot suppress a new
+        // cross-device mark beyond that.
+        let override_baseline = if explicit || had_pending_unread_override || baseline {
+            true
+        } else {
+            baseline
+        };
+        set_marked_unread_override(override_key, override_baseline, false).await;
+        // Broadcast from inside the queued operation (like mute/pin): even
+        // when the caller times out and this tail keeps running, the room
+        // list still learns about the change. Only broadcast when a clear
+        // actually happened: a plain auto-read with no flag set must not
+        // invalidate the room list on every incoming message.
+        if inner_cleared || explicit_clear {
+            notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
+        }
         Ok(())
-    })
-    .await?;
-    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
-    Ok(())
+    };
+    let clear_key = format!("read:{user_id}:{room_id}");
+    // `Ok(true)` = the clear ran (or had nothing to clear); `Ok(false)` =
+    // the auto path skipped enqueueing because a clear for this room is
+    // already in flight (it re-reads the store at execution and covers the
+    // current flag state). The receipt-failure wording must tell the two
+    // apart: "已清除" would be wrong for a skipped clear.
+    let clear_future: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, String>> + Send>,
+    > = if explicit {
+        Box::pin(async move {
+            run_bounded_mutation(clear_key, lifecycle_protection, clear_operation)
+                .await
+                .map(|()| true)
+        })
+    } else {
+        Box::pin(async move {
+            // Auto-reads are background housekeeping that fire on every
+            // message refresh; a backlogged clear queue must not hold the
+            // client lease for the full 90s bound (it blocks logout/account
+            // switch). Bound the auto path like the receipt side (15s): the
+            // queued operation keeps running in its background tail after
+            // the timeout, and the next refresh re-checks the store.
+            // Explicit reads keep the full budget — they are rare and must
+            // win.
+            //
+            // Under a message flood with a failing clear, the queue tail
+            // for this room can chain (each clear waits behind its
+            // predecessor's HTTP retries). A queued clear re-reads the
+            // store at execution and covers the current flag state, so a
+            // duplicate auto-clear adds nothing — skip the enqueue while
+            // one is already in flight (the next refresh re-checks).
+            if let Ok(tails) = MUTATION_TAILS.lock() {
+                if tails.contains_key(&clear_key) {
+                    return Ok(false);
+                }
+            }
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                run_bounded_mutation(clear_key, lifecycle_protection, clear_operation),
+            )
+            .await
+            .unwrap_or_else(|_| Err(MUTATION_TIMEOUT_MESSAGE.to_string()))
+            .map(|()| true)
+        })
+    };
+    let (clear_result, receipt_result) = tokio::join!(clear_future, receipt_future);
+    // `Ok(true)` = the marked-unread clear actually ran (or had nothing to
+    // clear); `Ok(false)` = the auto path skipped it because a clear for
+    // this room is already in flight (it re-reads the store at execution).
+    // Dart uses the flag to decide whether a local unread:false override is
+    // warranted — a skipped clear whose tail later fails must not leave a
+    // stale "已读" override masking the server's marked-unread flag.
+    let cleared = match clear_result {
+        Ok(cleared) => {
+            if cleared {
+                receipt_result.map_err(|error| {
+                    // The marked-unread clear succeeded (or had nothing to
+                    // do); only the receipt send failed. Say so instead of
+                    // claiming the whole action failed — a retry re-sends
+                    // the receipt only.
+                    format!("未读标记已清除，但已读回执发送失败: {error}")
+                })?;
+            } else {
+                // The clear was skipped (one is already in flight and
+                // covers this flag state); only the receipt failed.
+                receipt_result.map_err(|error| {
+                    format!("已读回执发送失败: {error}（未读标记清除已在后台进行）")
+                })?;
+            }
+            cleared
+        }
+        Err(clear_error) => {
+            if receipt_result.is_ok() {
+                // The read receipt (the primary action) reached the server;
+                // only the marked-unread bookkeeping is unsettled. Say so
+                // instead of claiming the whole action failed. A queue-wait
+                // timeout is not a failure: the clear never ran and keeps
+                // running in its background tail, so neither "失败" nor
+                // "请重试" applies.
+                if clear_error == MUTATION_TIMEOUT_MESSAGE {
+                    return Err(
+                        "已读回执已发送；清除未读标记的操作仍在后台执行，请稍后刷新确认。"
+                            .to_string(),
+                    );
+                }
+                return Err(format!(
+                    "已读回执已发送，但清除未读标记失败: {clear_error}，请重试。"
+                ));
+            }
+            // Both sides failed. When the clear side timed out (its
+            // background tail keeps running), the receipt — the primary
+            // action — has definitely failed: a hard receipt failure (e.g.
+            // a rejected token) means the room stays unread on other
+            // devices, so the generic "may have taken effect" line would
+            // be wrong. (The receipt error can never equal
+            // MUTATION_TIMEOUT_MESSAGE — its own bounded call resolves
+            // with its own wording — so no receipt-side "may have been
+            // delivered" branch is needed here.)
+            if clear_error == MUTATION_TIMEOUT_MESSAGE {
+                let receipt_error = receipt_result.unwrap_err();
+                return Err(format!(
+                    "已读回执发送失败: {receipt_error}；清除未读标记的操作仍在后台执行，请稍后刷新确认。"
+                ));
+            }
+            // The receipt (the primary action) failed too: surface both
+            // errors instead of hiding the receipt failure behind the clear.
+            let receipt_error = receipt_result.unwrap_err();
+            return Err(format!(
+                "已读回执发送失败: {receipt_error}；清除未读标记失败: {clear_error}，请重试。"
+            ));
+        }
+    };
+    Ok(cleared)
 }
 
 /// Persist an explicit unread marker for a room in room account data.
 #[frb]
-pub async fn mark_room_unread(room_id: String) -> Result<(), String> {
+pub async fn mark_room_unread(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = client.user_id().ok_or("No active user")?.to_string();
     let mutation_key = format!("read:{user_id}:{room_id}");
     let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
-    enqueue_mutation(mutation_key, async move {
+    // Capture the account's current client instance id: the queued write
+    // shares `read:{user}:{room}` with the clear path and may execute after
+    // a logout+relogin replaced the client (deep predecessor chains). Same
+    // discipline as the clear path and the other queued writes.
+    let expected_instance_id = CLIENTS.read().await.get(&user_id).map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
+    let mutation_client = room.client().clone();
+    let clear_user_id = user_id.clone();
+    run_bounded_mutation(mutation_key, lifecycle_protection, async move {
+        // Fail fast when the account was logged out or its client was
+        // replaced while this write was queued: a stale session must not
+        // apply a late unread marker (and its wording would otherwise
+        // mislead).
+        if !mutation_client.matrix_auth().logged_in() {
+            return Err("当前账号已登出，请重新登录。".to_string());
+        }
+        let is_current_client = CLIENTS
+            .read()
+            .await
+            .get(&clear_user_id)
+            .map(|e| e.instance_id)
+            == expected_instance_id;
+        if !is_current_client {
+            return Err("当前账号已切换，请重试。".to_string());
+        }
         let baseline = synced_marked_unread(&room).await;
         room.set_account_data(MarkedUnreadEventContent::new(true))
             .await
             .map(|_| ())
-            .map_err(|error| format!("Failed to mark room unread: {error}"))?;
+            .map_err(|error| format!("标记房间为未读失败: {error}"))?;
         set_marked_unread_override(override_key, baseline, true).await;
+        // Broadcast from inside the queued operation (like mute/pin/read):
+        // even when the caller times out and this tail keeps running, the
+        // room list still learns about the change.
+        notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
         Ok(())
     })
     .await?;
-    notify_sync_event_for_generation(generation, SyncEvent::RoomListChanged);
     Ok(())
 }
 
 /// The account's ignored-user list, tagged with its source freshness.
 #[frb]
+#[derive(Clone)]
 pub struct IgnoredUsers {
     pub user_ids: Vec<String>,
     /// True when fetched from the server; false when served from the local
@@ -7119,41 +8594,45 @@ pub struct IgnoredUsers {
 pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let account = client.account();
-    // Prefer the server copy, but fall back to the local state store so an
-    // offline client still filters ignored senders after its first sync.
-    let (raw, from_server) = match account
-        .fetch_account_data_static::<IgnoredUserListEventContent>()
-        .await
-    {
-        Ok(raw) => (raw, true),
-        Err(network_error) => (
-            account
-                .account_data::<IgnoredUserListEventContent>()
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to load ignored users: {network_error}; store fallback failed: {error}"
-                    )
-                })?,
-            false,
-        ),
-    };
-    let mut content = raw
-        .map(|raw| raw.deserialize())
-        .transpose()
-        .map_err(|error| format!("Failed to decode ignored users: {error}"))?
-        .unwrap_or_default();
-    if !from_server {
-        merge_current_account_ignored_user_overrides(&client, &mut content).await;
-    }
-    Ok(IgnoredUsers {
-        user_ids: content
-            .ignored_users
-            .into_keys()
-            .map(|user_id| user_id.to_string())
-            .collect(),
-        from_server,
+    // Bounded like the other P0 calls: the server read holds the client
+    // lease (blocking logout/account switch).
+    run_bounded(async move {
+        // Prefer the server copy, but fall back to the local state store so
+        // an offline client still filters ignored senders after its first
+        // sync.
+        let (raw, from_server) = match account
+            .fetch_account_data_static::<IgnoredUserListEventContent>()
+            .await
+        {
+            Ok(raw) => (raw, true),
+            Err(network_error) => (
+                account
+                    .account_data::<IgnoredUserListEventContent>()
+                    .await
+                    .map_err(|error| {
+                        format!("加载忽略用户列表失败: {network_error}；本地缓存读取失败: {error}")
+                    })?,
+                false,
+            ),
+        };
+        let mut content = raw
+            .map(|raw| raw.deserialize())
+            .transpose()
+            .map_err(|error| format!("解析忽略用户列表失败: {error}"))?
+            .unwrap_or_default();
+        if !from_server {
+            merge_current_account_ignored_user_overrides(&client, &mut content).await;
+        }
+        Ok(IgnoredUsers {
+            user_ids: content
+                .ignored_users
+                .into_keys()
+                .map(|user_id| user_id.to_string())
+                .collect(),
+            from_server,
+        })
     })
+    .await
 }
 
 /// Add or remove one user from the account's ignored-user list.
@@ -7170,54 +8649,83 @@ pub async fn set_user_ignored(
     let client = get_client().await.ok_or("No client created.")?;
     let active_user_id = client.user_id().ok_or("No active user")?.to_string();
     if active_user_id != account_user_id {
-        return Err("Active account changed before updating ignored users.".to_string());
+        return Err("当前账号已切换，请重试。".to_string());
     }
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("Invalid user ID: {error}"))?
+        .map_err(|error| format!("无效的用户 ID: {error}"))?
         .to_owned();
+    // Capture the account's current client instance id: the queued write may
+    // execute after a logout+relogin replaced the client (deep predecessor
+    // chains). Same discipline as `set_room_muted` / `create_dm`.
+    let expected_instance_id = CLIENTS
+        .read()
+        .await
+        .get(&account_user_id)
+        .map(|e| e.instance_id);
+    let lifecycle_protection = client.lifecycle_protection();
     let mutation_client = client.clone();
-    enqueue_mutation(format!("ignored:{active_user_id}"), async move {
-        let account = mutation_client.account();
-        let mut content = account
-            .fetch_account_data_static::<IgnoredUserListEventContent>()
-            .await
-            .map_err(|error| format!("Failed to load ignored users: {error}"))?
-            .map(|raw| raw.deserialize())
-            .transpose()
-            .map_err(|error| format!("Failed to decode ignored users: {error}"))?
-            .unwrap_or_default();
-        if ignored {
-            content
+    run_bounded_mutation(
+        format!("ignored:{active_user_id}"),
+        lifecycle_protection,
+        async move {
+            // Fail fast when the account was logged out or its client was
+            // replaced while this write was queued: a stale session must not
+            // apply a late ignored-list edit (and its wording would otherwise
+            // mislead).
+            if !mutation_client.matrix_auth().logged_in() {
+                return Err("当前账号已登出，请重新登录。".to_string());
+            }
+            let is_current_client = CLIENTS
+                .read()
+                .await
+                .get(&account_user_id)
+                .map(|e| e.instance_id)
+                == expected_instance_id;
+            if !is_current_client {
+                return Err("当前账号已切换，请重试。".to_string());
+            }
+            let account = mutation_client.account();
+            let mut content = account
+                .fetch_account_data_static::<IgnoredUserListEventContent>()
+                .await
+                .map_err(|error| format!("加载忽略用户列表失败: {error}"))?
+                .map(|raw| raw.deserialize())
+                .transpose()
+                .map_err(|error| format!("解析忽略用户列表失败: {error}"))?
+                .unwrap_or_default();
+            if ignored {
+                content
+                    .ignored_users
+                    .insert(user_id.clone(), IgnoredUser::new());
+            } else {
+                content.ignored_users.remove(&user_id);
+            }
+            let updated = content
                 .ignored_users
-                .insert(user_id.clone(), IgnoredUser::new());
-        } else {
-            content.ignored_users.remove(&user_id);
-        }
-        let updated = content
-            .ignored_users
-            .keys()
-            .map(|user_id| user_id.to_string())
-            .collect();
-        // Baseline of the local store before the write: the store only
-        // advances on the sync echo, and previews consult it until then.
-        let synced_baseline = mutation_client.is_user_ignored(&user_id).await;
-        let override_key = ignored_user_override_key(&mutation_client, &user_id);
-        account
-            .set_account_data(content)
-            .await
-            .map_err(|error| format!("Failed to update ignored users: {error}"))?;
-        if let Some(key) = override_key {
-            set_ignored_user_override(key, synced_baseline, ignored).await;
-        }
-        // No IgnoredUsersChanged here: the Dart caller write-throughs the
-        // returned list and revalidates itself, and the genuine account-data
-        // echo arrives via the sync event handler. Notifying a local write
-        // through the same event would race the FFI future on a different
-        // channel — if it landed after the write-through, it would demote
-        // the just-confirmed list and bump the generation as if a
-        // cross-device change had happened.
-        Ok(updated)
-    })
+                .keys()
+                .map(|user_id| user_id.to_string())
+                .collect();
+            // Baseline of the local store before the write: the store only
+            // advances on the sync echo, and previews consult it until then.
+            let synced_baseline = mutation_client.is_user_ignored(&user_id).await;
+            let override_key = ignored_user_override_key(&mutation_client, &user_id);
+            account
+                .set_account_data(content)
+                .await
+                .map_err(|error| format!("更新忽略用户列表失败: {error}"))?;
+            if let Some(key) = override_key {
+                set_ignored_user_override(key, synced_baseline, ignored).await;
+            }
+            // No IgnoredUsersChanged here: the Dart caller write-throughs the
+            // returned list and revalidates itself, and the genuine account-data
+            // echo arrives via the sync event handler. Notifying a local write
+            // through the same event would race the FFI future on a different
+            // channel — if it landed after the write-through, it would demote
+            // the just-confirmed list and bump the generation as if a
+            // cross-device change had happened.
+            Ok(updated)
+        },
+    )
     .await
 }
 
@@ -7239,15 +8747,19 @@ pub async fn get_room_knock_requests(room_id: String) -> Result<Vec<KnockRequest
 
     let client = get_client().await.ok_or("No client created.")?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let response = client
-        .send(knock_member_events_request(room.room_id().to_owned()))
-        .await
-        .map_err(|error| format!("Failed to load knock requests: {error}"))?;
+    let request = knock_member_events_request(room.room_id().to_owned());
+    let response = run_bounded(async move {
+        client
+            .send(request)
+            .await
+            .map_err(|error| format!("无法加载加入请求列表: {error}"))
+    })
+    .await?;
     let mut requests = Vec::with_capacity(response.chunk.len());
     for raw in response.chunk {
         let event: RoomMemberEvent = raw
             .deserialize()
-            .map_err(|error| format!("Failed to decode knock request: {error}"))?;
+            .map_err(|error| format!("无法解析加入请求数据: {error}"))?;
         let RoomMemberEvent::Original(event) = event else {
             continue;
         };
@@ -7278,25 +8790,29 @@ mod knock_request_tests {
     }
 }
 
-/// Accept a knock request by inviting the requester to the room.
-#[frb]
-pub async fn approve_room_knock(room_id: String, user_id: String) -> Result<(), String> {
-    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
-
-    let client = get_client().await.ok_or("No client created.")?;
-    let room = joined_non_space_room(&client, &room_id)?;
-    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("Invalid user ID: {error}"))?;
-    room.invite_user_by_id(&user_id)
-        .await
-        .map_err(|error| format!("Failed to approve knock: {error}"))?;
-    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
-    Ok(())
+/// Map a knock pre-verification read failure: a 404 (the member event was
+/// never synced, or was redacted after another admin handled the request)
+/// is the same "state already changed" outcome as a non-knock membership —
+/// the page hides the request and refreshes, so the generic "请重试"
+/// wording would mislead. Other errors fail closed with a retryable
+/// wording.
+fn knock_state_read_failure(error: &matrix_sdk::HttpError) -> String {
+    let text = format!("{error}");
+    // A missing member event surfaces as a 404 with the standard
+    // M_NOT_FOUND error kind; match either marker.
+    if text.contains("M_NOT_FOUND") || text.contains("404") {
+        return "该用户已不再是此房间的加入请求。".to_string();
+    }
+    format!("无法确认加入请求状态，请重试: {error}")
 }
 
-/// Decline a knock request by removing the requester from the room.
+/// Accept a knock request by inviting the requester to the room.
 #[frb]
-pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), String> {
+pub async fn approve_room_knock(
+    account_user_id: String,
+    room_id: String,
+    user_id: String,
+) -> Result<(), String> {
     use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
     use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEventContent};
     use matrix_sdk::ruma::events::StateEventType;
@@ -7304,9 +8820,75 @@ pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), S
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("Invalid user ID: {error}"))?;
+        .map_err(|error| format!("无效的用户 ID: {error}"))?;
+    // Symmetric with reject_room_knock: the knock list can lag the server
+    // (the user withdrew the request, or another admin handled it). Inviting
+    // on stale data would add a member who is no longer knocking, so
+    // re-verify the current membership from the server first. Fail closed
+    // when the state cannot be read.
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomMember,
+        user_id.to_string(),
+    );
+    let client_for_verify = client.clone();
+    run_bounded(async move {
+        let response = client_for_verify
+            .send(request)
+            .await
+            .map_err(|error| knock_state_read_failure(&error))?;
+        // Spec-compliant servers return the bare event content; some return
+        // the full state event instead. Try the content-only form first,
+        // then extract the `content` field. Either way the decode failure
+        // fails closed (no invite/kick on unverifiable state).
+        let raw = response.event_or_content.get();
+        let content: RoomMemberEventContent = match serde_json::from_str(raw) {
+            Ok(content) => content,
+            Err(_) => serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| value.get("content").cloned())
+                .and_then(|value| serde_json::from_value(value).ok())
+                .ok_or_else(|| "无法确认加入请求状态，请重试。".to_string())?,
+        };
+        if content.membership != MembershipState::Knock {
+            return Err("该用户已不再是此房间的加入请求。".to_string());
+        }
+        room.invite_user_by_id(&user_id).await.map_err(|error| {
+            // The membership was verified as knock moments ago, but another
+            // admin may have rejected the request (or the user withdrew it)
+            // in between, turning the invite into a failed action on a
+            // stale request. Tell the user the state may have changed
+            // instead of a bare failure.
+            format!("批准加入请求失败: {error}（该用户可能已被其他管理员处理）")
+        })?;
+        Ok(())
+    })
+    .await?;
+    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+    Ok(())
+}
+
+/// Decline a knock request by removing the requester from the room.
+#[frb]
+pub async fn reject_room_knock(
+    account_user_id: String,
+    room_id: String,
+    user_id: String,
+) -> Result<(), String> {
+    use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+    use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEventContent};
+    use matrix_sdk::ruma::events::StateEventType;
+
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+
+    let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
+    let room = joined_non_space_room(&client, &room_id)?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
+        .map_err(|error| format!("无效的用户 ID: {error}"))?;
     // The knock list can lag the server (another admin may have approved the
     // request, or the user withdrew it): re-verify the current membership
     // from the server before kicking, since `kick_user` would otherwise
@@ -7317,18 +8899,38 @@ pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), S
         StateEventType::RoomMember,
         user_id.to_string(),
     );
-    let response = client
-        .send(request)
-        .await
-        .map_err(|error| format!("Failed to verify knock request: {error}"))?;
-    let content: RoomMemberEventContent = serde_json::from_str(response.event_or_content.get())
-        .map_err(|error| format!("Failed to decode knock requester state: {error}"))?;
-    if content.membership != MembershipState::Knock {
-        return Err("This user is no longer knocking on this room.".to_string());
-    }
-    room.kick_user(&user_id, None)
-        .await
-        .map_err(|error| format!("Failed to reject knock: {error}"))?;
+    let client_for_verify = client.clone();
+    run_bounded(async move {
+        let response = client_for_verify
+            .send(request)
+            .await
+            .map_err(|error| knock_state_read_failure(&error))?;
+        // Spec-compliant servers return the bare event content; some return
+        // the full state event instead. Try the content-only form first,
+        // then extract the `content` field. Either way the decode failure
+        // fails closed (no invite/kick on unverifiable state).
+        let raw = response.event_or_content.get();
+        let content: RoomMemberEventContent = match serde_json::from_str(raw) {
+            Ok(content) => content,
+            Err(_) => serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| value.get("content").cloned())
+                .and_then(|value| serde_json::from_value(value).ok())
+                .ok_or_else(|| "无法确认加入请求状态，请重试。".to_string())?,
+        };
+        if content.membership != MembershipState::Knock {
+            return Err("该用户已不再是此房间的加入请求。".to_string());
+        }
+        room.kick_user(&user_id, None).await.map_err(|error| {
+            // The membership was verified as knock moments ago, but another
+            // admin may have approved it in between, turning the kick into a
+            // failed removal of a joined member. Tell the user the state may
+            // have changed instead of a bare failure.
+            format!("拒绝加入请求失败: {error}（该用户可能已被其他管理员处理）")
+        })?;
+        Ok(())
+    })
+    .await?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
@@ -7337,21 +8939,27 @@ pub async fn reject_room_knock(room_id: String, user_id: String) -> Result<(), S
 pub async fn get_spaces() -> Result<Vec<Space>, String> {
     let client = get_client().await.ok_or("No client created.")?;
 
-    let mut spaces = Vec::new();
-    for room in client.rooms() {
-        if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-            continue;
+    // Bounded like the other P0 reads: the scan (room_to_chat_room per
+    // room, including the notification-settings reads) holds the client
+    // lease for its whole duration.
+    run_bounded(async move {
+        let mut spaces = Vec::new();
+        for room in client.rooms() {
+            if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
+                continue;
+            }
+            let chat_room = room_to_chat_room(&room, None, false).await;
+            spaces.push(Space {
+                id: chat_room.id,
+                name: chat_room.name,
+                avatar_url: chat_room.avatar_url,
+            });
         }
-        let chat_room = room_to_chat_room(&room, None, false).await;
-        spaces.push(Space {
-            id: chat_room.id,
-            name: chat_room.name,
-            avatar_url: chat_room.avatar_url,
-        });
-    }
 
-    spaces.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    Ok(spaces)
+        spaces.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(spaces)
+    })
+    .await
 }
 
 #[frb]
@@ -7359,13 +8967,13 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
     let client = get_client().await.ok_or("No client created.")?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("Invalid space id: {e}"))?;
+        .map_err(|e| format!("无效的空间 ID: {e}"))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
 
     if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-        return Err(format!("Room is not a joined space: {space_id}"));
+        return Err(format!("该空间不是已加入状态: {space_id}"));
     }
 
     let chat_room = room_to_chat_room(&room, None, false).await;
@@ -7392,63 +9000,77 @@ pub async fn get_space_children(
     let ignored_user_ids =
         ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
-    let space_room = client
-        .get_room(
-            &matrix_sdk::ruma::RoomId::parse(space_id.clone())
-                .map_err(|e| format!("Invalid space id: {e}"))?,
-        )
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+    // Bounded like the other P0 reads: the per-child room_to_chat_room
+    // (notification settings, members_no_sync) holds the client lease for
+    // the whole scan.
+    run_bounded(async move {
+        let space_room = client
+            .get_room(
+                &matrix_sdk::ruma::RoomId::parse(space_id.clone())
+                    .map_err(|e| format!("无效的空间 ID: {e}"))?,
+            )
+            .ok_or_else(|| format!("空间不存在: {space_id}"))?;
 
-    let child_events = space_room
-        .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
-        .await
-        .map_err(|e| format!("Failed to load space children: {e}"))?;
+        let child_events = space_room
+            .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
+            .await
+            .map_err(|e| format!("加载空间子房间失败: {e}"))?;
 
-    let mut child_rooms = Vec::new();
-    for raw_child in child_events {
-        let Ok(child_event) = raw_child.deserialize() else {
-            continue;
-        };
-        let child_room_id = match child_event {
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-            ) => event.state_key,
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
-                event.state_key
-            }
-            _ => continue,
-        };
-
-        let Some(child_room) = client.get_room(&child_room_id) else {
-            continue;
-        };
-        if child_room.state() != matrix_sdk::RoomState::Joined {
-            continue;
-        }
-
-        let mut chat_room =
-            room_to_chat_room(&child_room, ignored_user_ids.as_ref(), authoritative).await;
-        if !child_room.is_space() {
-            chat_room.room_type = match child_room.is_direct().await {
-                Ok(true) => "dm".to_string(),
-                _ => "group".to_string(),
+        let mut child_rooms = Vec::new();
+        for raw_child in child_events {
+            let Ok(child_event) = raw_child.deserialize() else {
+                continue;
             };
-        }
-        child_rooms.push(chat_room);
-    }
+            let child_room_id = match child_event {
+                matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
+                    matrix_sdk::ruma::events::SyncStateEvent::Original(event),
+                ) => event.state_key,
+                matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
+                    event.state_key
+                }
+                _ => continue,
+            };
 
-    child_rooms.sort_by(|a, b| {
-        let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
-        let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
-        b_time
-            .cmp(&a_time)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(child_rooms)
+            let Some(child_room) = client.get_room(&child_room_id) else {
+                continue;
+            };
+            if child_room.state() != matrix_sdk::RoomState::Joined {
+                continue;
+            }
+
+            let mut chat_room =
+                room_to_chat_room(&child_room, ignored_user_ids.as_ref(), authoritative).await;
+            if !child_room.is_space() {
+                // Mirror the main chat list's DM classification (m.direct OR
+                // the member-count heuristic): a DM created by the other
+                // party has no m.direct entry here and would otherwise show
+                // as a group inside the space.
+                chat_room.room_type = if matches!(child_room.is_direct().await, Ok(true))
+                    || is_dm_by_members(&child_room).await
+                {
+                    "dm".to_string()
+                } else {
+                    "group".to_string()
+                };
+            }
+            child_rooms.push(chat_room);
+        }
+
+        child_rooms.sort_by(|a, b| {
+            let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
+            let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
+            b_time
+                .cmp(&a_time)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(child_rooms)
+    })
+    .await
 }
 
 #[frb]
 pub async fn update_space_details(
+    account_user_id: String,
     space_id: String,
     name: String,
     topic: Option<String>,
@@ -7456,185 +9078,305 @@ pub async fn update_space_details(
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("Invalid space id: {e}"))?;
+        .map_err(|e| format!("无效的空间 ID: {e}"))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
 
     if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-        return Err(format!("Room is not a joined space: {space_id}"));
+        return Err(format!("该空间不是已加入状态: {space_id}"));
     }
 
-    let trimmed_name = name.trim();
+    let trimmed_name = name.trim().to_string();
     if trimmed_name.is_empty() {
-        return Err("Space name cannot be empty.".to_string());
+        return Err("空间名称不能为空。".to_string());
     }
 
-    room.set_name(trimmed_name.to_string())
-        .await
-        .map_err(|e| format!("Failed to update space name: {e}"))?;
+    // Bounded like the other P0 writes: two sequential state writes hold the
+    // client lease.
+    run_bounded(async move {
+        room.set_name(trimmed_name)
+            .await
+            .map_err(|e| format!("更新空间名称失败: {e}"))?;
+        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
-    let normalized_topic = topic.unwrap_or_default().trim().to_string();
-    room.set_room_topic(&normalized_topic)
-        .await
-        .map_err(|e| format!("Failed to update space topic: {e}"))?;
+        let normalized_topic = topic.unwrap_or_default().trim().to_string();
+        // Write unconditionally: comparing against room.topic() would use
+        // the SDK snapshot, which may still predate a just-completed write
+        // and silently drop a quick A -> B -> A change (same decision as
+        // `update_room_details`). The write is an idempotent state event.
+        room.set_room_topic(&normalized_topic).await.map_err(|e| {
+            // The name write above already landed: say so instead of
+            // reporting a plain whole-action failure.
+            format!("空间名称已更新，但主题更新失败: {e}")
+        })?;
+        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
-    app_log(
-        "info",
-        "rooms",
-        format!("Updated space details: {}", space_id),
-    );
-    info!("Updated space details: {}", space_id);
-    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        app_log(
+            "info",
+            "rooms",
+            format!("Updated space details: {}", space_id),
+        );
+        info!("Updated space details: {}", space_id);
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 /// Add a room to a space, and advertise the reciprocal parent relation.
 #[frb]
-pub async fn add_room_to_space(space_id: String, room_id: String) -> Result<(), String> {
+pub async fn add_room_to_space(
+    account_user_id: String,
+    space_id: String,
+    room_id: String,
+) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("Invalid space id: {e}"))?;
+        .map_err(|e| format!("无效的空间 ID: {e}"))?;
     let child_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("Invalid room id: {e}"))?;
+        .map_err(|e| format!("无效的房间 ID: {e}"))?;
 
     let space_room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
     let child_room = client
         .get_room(&child_room_id)
-        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
 
     let via = vec![client
         .user_id()
         .ok_or("No active user.")?
         .server_name()
         .to_owned()];
+    let current_user_id = client.user_id().ok_or("No active user.")?.to_owned();
 
-    space_room
-        .send_state_event_for_key(
-            &child_room_id,
-            matrix_sdk::ruma::events::space::child::SpaceChildEventContent::new(via.clone()),
-        )
-        .await
-        .map_err(|e| format!("Failed to add room to space: {e}"))?;
+    // Bounded like the other P0 writes: two sequential state writes hold the
+    // client lease.
+    run_bounded(async move {
+        let can_set_parent = match child_room.power_levels().await {
+            Ok(power_levels) => {
+                power_levels.user_can_send_state(&current_user_id, StateEventType::SpaceParent)
+            }
+            Err(error) => {
+                app_log(
+                    "warn",
+                    "rooms",
+                    format!(
+                        "Unable to check child-room power levels; skipping parent link: {error}"
+                    ),
+                );
+                false
+            }
+        };
+        space_room
+            .send_state_event_for_key(
+                &child_room_id,
+                matrix_sdk::ruma::events::space::child::SpaceChildEventContent::new(via.clone()),
+            )
+            .await
+            .map_err(|e| format!("将房间加入空间失败: {e}"))?;
+        notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
-    child_room
-        .send_state_event_for_key(
-            &space_room_id,
-            matrix_sdk::ruma::events::space::parent::SpaceParentEventContent::new(via),
-        )
-        .await
-        .map_err(|e| format!("Failed to set parent space on room: {e}"))?;
+        if can_set_parent {
+            child_room
+                .send_state_event_for_key(
+                    &space_room_id,
+                    matrix_sdk::ruma::events::space::parent::SpaceParentEventContent::new(via),
+                )
+                .await
+                .map_err(|e| {
+                    // The child relation already landed: say so instead of
+                    // reporting a plain whole-action failure (same
+                    // partial-success discipline as update_space_details; a
+                    // retry converges — the child write is done).
+                    format!("已加入空间，但设置空间父级失败: {e}")
+                })?;
+            notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        }
 
-    app_log(
-        "info",
-        "rooms",
-        format!("Added room {} to space {}", room_id, space_id),
-    );
-    info!("Added room {} to space {}", room_id, space_id);
-    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        app_log(
+            "info",
+            "rooms",
+            format!("Added room {} to space {}", room_id, space_id),
+        );
+        info!("Added room {} to space {}", room_id, space_id);
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 #[frb]
-pub async fn remove_room_from_space(space_id: String, room_id: String) -> Result<(), String> {
+pub async fn remove_room_from_space(
+    account_user_id: String,
+    space_id: String,
+    room_id: String,
+) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("Invalid space id: {e}"))?;
+        .map_err(|e| format!("无效的空间 ID: {e}"))?;
     let child_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("Invalid room id: {e}"))?;
+        .map_err(|e| format!("无效的房间 ID: {e}"))?;
 
     let space_room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
     let child_room = client
         .get_room(&child_room_id)
-        .ok_or_else(|| format!("Room not found: {room_id}"))?;
+        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
+    let current_user_id = client.user_id().ok_or("No active user.")?.to_owned();
 
-    let child_events = space_room
-        .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
-        .await
-        .map_err(|e| format!("Failed to load space children: {e}"))?;
-    let space_child_event_id = child_events.into_iter().find_map(|raw_child| {
-        let Ok(child_event) = raw_child.deserialize() else {
-            return None;
-        };
-        match child_event {
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-            ) if event.state_key == child_room_id => Some(event.event_id),
-            _ => None,
-        }
-    });
-
-    let parent_events = child_room
-        .get_state_events_static::<matrix_sdk::ruma::events::space::parent::SpaceParentEventContent>()
-        .await
-        .map_err(|e| format!("Failed to load room parents: {e}"))?;
-    let space_parent_event_id = parent_events.into_iter().find_map(|raw_parent| {
-        let Ok(parent_event) = raw_parent.deserialize() else {
-            return None;
-        };
-        match parent_event {
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-            ) if event.state_key == space_room_id => Some(event.event_id),
-            _ => None,
-        }
-    });
-
-    if let Some(event_id) = space_child_event_id {
-        space_room
-            .redact(&event_id, Some("Removed from space"), None)
+    // Bounded like the other P0 writes: the state reads and writes hold
+    // the client lease.
+    run_bounded(async move {
+        let child_events = space_room
+            .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
             .await
-            .map_err(|e| format!("Failed to remove room from space: {e}"))?;
-    }
+            .map_err(|e| format!("加载空间子房间失败: {e}"))?;
+        let space_child_event_id = child_events.into_iter().find_map(|raw_child| {
+            let Ok(child_event) = raw_child.deserialize() else {
+                return None;
+            };
+            match child_event {
+                matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
+                    matrix_sdk::ruma::events::SyncStateEvent::Original(event),
+                ) if event.state_key == child_room_id => Some(event.event_id),
+                _ => None,
+            }
+        });
 
-    if let Some(event_id) = space_parent_event_id {
-        child_room
-            .redact(&event_id, Some("Removed parent space"), None)
+        let parent_events = child_room
+            .get_state_events_static::<matrix_sdk::ruma::events::space::parent::SpaceParentEventContent>()
             .await
-            .map_err(|e| format!("Failed to remove parent space on room: {e}"))?;
-    }
+            .map_err(|e| format!("加载空间父级失败: {e}"))?;
+        let space_parent_event_id = parent_events.into_iter().find_map(|raw_parent| {
+            let Ok(parent_event) = raw_parent.deserialize() else {
+                return None;
+            };
+            match parent_event {
+                matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
+                    matrix_sdk::ruma::events::SyncStateEvent::Original(event),
+                ) if event.state_key == space_room_id => Some(event.event_id),
+                _ => None,
+            }
+        });
 
-    app_log(
-        "info",
-        "rooms",
-        format!("Removed room {} from space {}", room_id, space_id),
-    );
-    info!("Removed room {} from space {}", room_id, space_id);
-    notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        let can_remove_parent = match child_room.power_levels().await {
+            Ok(power_levels) => {
+                power_levels.user_can_send_state(&current_user_id, StateEventType::SpaceParent)
+            }
+            Err(error) => {
+                app_log(
+                    "warn",
+                    "rooms",
+                    format!(
+                        "Unable to check child-room power levels; skipping parent cleanup: {error}"
+                    ),
+                );
+                false
+            }
+        };
+
+        let relationship_found = space_child_event_id.is_some() || space_parent_event_id.is_some();
+        let mut child_removed = false;
+        if space_child_event_id.is_some() {
+            space_room
+                .send_state_event_raw(
+                    "m.space.child",
+                    child_room_id.as_str(),
+                    serde_json::json!({}),
+                )
+                .await
+                .map_err(|e| format!("将房间移出空间失败: {e}"))?;
+            child_removed = true;
+            notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        }
+
+        if space_parent_event_id.is_some() && can_remove_parent {
+            child_room
+                .send_state_event_raw(
+                    "m.space.parent",
+                    space_room_id.as_str(),
+                    serde_json::json!({}),
+                )
+                .await
+                .map_err(|e| {
+                    // The child side may already be gone: say so instead of
+                    // reporting a plain whole-action failure (same
+                    // partial-success discipline as update_space_details;
+                    // a retry converges — the child link is already empty).
+                    if child_removed {
+                        format!("已从空间移除，但父级关系清理失败: {e}")
+                    } else {
+                        format!("移除空间父级关系失败: {e}")
+                    }
+                })?;
+            notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
+        } else if space_parent_event_id.is_some() {
+            app_log(
+                "warn",
+                "rooms",
+                "Skipping parent cleanup without child-room permission.".to_string(),
+            );
+        }
+
+        if !relationship_found {
+            // Neither direction of the relationship is known locally: the
+            // child/parent events may not have synced here yet (created on
+            // another device, or one-directional). Fail closed like the
+            // knock actions — the UI must not claim "已从空间移除" while
+            // the server relationship survives.
+            return Err("未能找到空间关系，请刷新后重试".to_string());
+        }
+
+        app_log(
+            "info",
+            "rooms",
+            format!("Removed room {} from space {}", room_id, space_id),
+        );
+        info!("Removed room {} from space {}", room_id, space_id);
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 #[frb]
-pub async fn leave_space(space_id: String) -> Result<(), String> {
+pub async fn leave_space(account_user_id: String, space_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
     let client = get_client().await.ok_or("No client created.")?;
+    ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("Invalid space id: {e}"))?;
+        .map_err(|e| format!("无效的空间 ID: {e}"))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("Space not found: {space_id}"))?;
+        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
 
     if !room.is_space() {
-        return Err(format!("Room is not a space: {space_id}"));
+        return Err(format!("该房间不是空间: {space_id}"));
     }
 
-    room.leave()
-        .await
-        .map_err(|e| format!("Failed to leave space: {e}"))?;
+    run_bounded(async move {
+        room.leave()
+            .await
+            .map_err(|e| format!("退出空间失败: {e}"))?;
+        Ok(())
+    })
+    .await?;
 
     app_log("info", "rooms", format!("Left space: {}", space_id));
     info!("Left space: {}", space_id);
@@ -7651,109 +9393,127 @@ pub async fn get_ungrouped_rooms(
     let ignored_user_ids =
         ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
-    let mut grouped_room_ids = std::collections::HashSet::new();
-    for room in client.rooms() {
-        if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-            continue;
-        }
-
-        let child_events = room
-            .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
-            .await
-            .map_err(|e| format!("Failed to load space children: {e}"))?;
-
-        for raw_child in child_events {
-            let Ok(child_event) = raw_child.deserialize() else {
+    // Bounded like the other P0 reads: the double room scan (space children
+    // state reads + per-room room_to_chat_room) holds the client lease for
+    // its whole duration.
+    run_bounded(async move {
+        let mut grouped_room_ids = std::collections::HashSet::new();
+        for room in client.rooms() {
+            if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
                 continue;
-            };
-            let child_room_id = match child_event {
-                matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                    matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-                ) => event.state_key,
-                matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
-                    event.state_key
-                }
-                _ => continue,
-            };
-            grouped_room_ids.insert(child_room_id);
-        }
-    }
+            }
 
-    let mut rooms = Vec::new();
-    for room in client.rooms() {
-        if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
-            continue;
-        }
+            let child_events = room
+                .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
+                .await
+                .map_err(|e| format!("加载空间子房间失败: {e}"))?;
 
-        if matches!(room.is_direct().await, Ok(true)) {
-            continue;
-        }
-
-        if grouped_room_ids.contains(room.room_id()) {
-            continue;
+            for raw_child in child_events {
+                let Ok(child_event) = raw_child.deserialize() else {
+                    continue;
+                };
+                let child_room_id = match child_event {
+                    matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
+                        matrix_sdk::ruma::events::SyncStateEvent::Original(event),
+                    ) => event.state_key,
+                    matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
+                        event.state_key
+                    }
+                    _ => continue,
+                };
+                grouped_room_ids.insert(child_room_id);
+            }
         }
 
-        let mut chat_room =
-            room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
-        chat_room.room_type = "group".to_string();
-        rooms.push(chat_room);
-    }
+        let mut rooms = Vec::new();
+        for room in client.rooms() {
+            if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
+                continue;
+            }
 
-    rooms.sort_by(|a, b| {
-        let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
-        let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
-        b_time
-            .cmp(&a_time)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(rooms)
+            // Exclude DMs with the SAME classification the main chat list
+            // uses (m.direct OR the member-count heuristic): a DM created
+            // by the other party has no m.direct entry here, and would
+            // otherwise show up in both the chat list and this ungrouped
+            // list.
+            if matches!(room.is_direct().await, Ok(true)) || is_dm_by_members(&room).await {
+                continue;
+            }
+
+            if grouped_room_ids.contains(room.room_id()) {
+                continue;
+            }
+
+            let mut chat_room =
+                room_to_chat_room(&room, ignored_user_ids.as_ref(), authoritative).await;
+            chat_room.room_type = "group".to_string();
+            rooms.push(chat_room);
+        }
+
+        rooms.sort_by(|a, b| {
+            let a_time = a.last_message_time.parse::<u64>().unwrap_or_default();
+            let b_time = b.last_message_time.parse::<u64>().unwrap_or_default();
+            b_time
+                .cmp(&a_time)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(rooms)
+    })
+    .await
 }
 
 #[frb]
 pub async fn get_contacts() -> Result<Vec<Contact>, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let my_user_id = client.user_id().map(|user_id| user_id.to_string());
-    let mut contacts_by_id: HashMap<String, Contact> = HashMap::new();
-
-    for room in client.rooms() {
-        if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
-            continue;
-        }
-
-        let members = room
-            .members(matrix_sdk::RoomMemberships::JOIN)
-            .await
-            .map_err(|e| format!("Failed to get contacts from room {}: {e}", room.room_id()))?;
-
-        for member in members {
-            let user_id = member.user_id().to_string();
-            if my_user_id.as_deref() == Some(user_id.as_str()) {
+    // Bounded like the other P0 reads: each room's `members()` call can
+    // fetch /members over the network while holding the client lease, so an
+    // unbounded scan would block logout/account switch for N rooms x the
+    // request budget on a dead network.
+    let contacts_by_id = run_bounded(async move {
+        let mut contacts_by_id: HashMap<String, Contact> = HashMap::new();
+        for room in client.rooms() {
+            if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
                 continue;
             }
 
-            let name = member.name().to_string();
-            let avatar_url = member.avatar_url().map(|u| u.to_string());
-            let contact = contacts_by_id
-                .entry(user_id.clone())
-                .or_insert_with(|| Contact {
-                    id: user_id.clone(),
-                    name: if name == user_id {
-                        user_id.clone()
-                    } else {
-                        name.clone()
-                    },
-                    avatar_url: avatar_url.clone(),
-                    status: user_id.clone(),
-                });
+            let members = room
+                .members(matrix_sdk::RoomMemberships::JOIN)
+                .await
+                .map_err(|e| format!("获取联系人失败: {e}"))?;
 
-            if contact.name == contact.id && name != user_id {
-                contact.name = name;
-            }
-            if contact.avatar_url.is_none() && avatar_url.is_some() {
-                contact.avatar_url = avatar_url;
+            for member in members {
+                let user_id = member.user_id().to_string();
+                if my_user_id.as_deref() == Some(user_id.as_str()) {
+                    continue;
+                }
+
+                let name = member.name().to_string();
+                let avatar_url = member.avatar_url().map(|u| u.to_string());
+                let contact = contacts_by_id
+                    .entry(user_id.clone())
+                    .or_insert_with(|| Contact {
+                        id: user_id.clone(),
+                        name: if name == user_id {
+                            user_id.clone()
+                        } else {
+                            name.clone()
+                        },
+                        avatar_url: avatar_url.clone(),
+                        status: user_id.clone(),
+                    });
+
+                if contact.name == contact.id && name != user_id {
+                    contact.name = name;
+                }
+                if contact.avatar_url.is_none() && avatar_url.is_some() {
+                    contact.avatar_url = avatar_url;
+                }
             }
         }
-    }
+        Ok(contacts_by_id)
+    })
+    .await?;
 
     let mut contacts: Vec<Contact> = contacts_by_id.into_values().collect();
     contacts.sort_by(|a, b| {
@@ -7786,7 +9546,7 @@ pub async fn send_reply(
 
     // Parse the event ID we're replying to
     let event_id = matrix_sdk::ruma::EventId::parse(&reply_to_event_id)
-        .map_err(|e| format!("Invalid event ID: {e}"))?;
+        .map_err(|e| format!("无效的事件 ID: {e}"))?;
 
     let mut reply_content = build_text_content(message)?;
     if let Some(reply_to_user_id) = reply_to_user_id {
@@ -7841,8 +9601,8 @@ pub async fn edit_message(
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
-        .map_err(|e| format!("Invalid event ID: {e}"))?;
+    let parsed_event_id =
+        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
 
     use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
     let previous_mentions = build_mentions(&previous_mentioned_user_ids, previous_mentions_room)?;
@@ -7886,8 +9646,8 @@ pub async fn send_reaction(
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
-        .map_err(|e| format!("Invalid event ID: {e}"))?;
+    let parsed_event_id =
+        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
 
     use matrix_sdk::ruma::events::relation::Annotation;
     let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::from(Annotation::new(
@@ -7923,8 +9683,8 @@ pub async fn redact_message(
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
-        .map_err(|e| format!("Invalid event ID: {e}"))?;
+    let parsed_event_id =
+        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
 
     room.redact(&parsed_event_id, reason.as_deref(), None)
         .await
@@ -7957,39 +9717,44 @@ pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), Str
 pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
+    // Bounded like the other P0 calls: `members()` can issue a network
+    // /members request (lazy-loaded member list) while holding the client
+    // lease.
+    run_bounded(async move {
+        let members = room
+            .members(matrix_sdk::RoomMemberships::JOIN)
+            .await
+            .map_err(|e| format!("获取成员失败: {e}"))?;
 
-    let members = room
-        .members(matrix_sdk::RoomMemberships::JOIN)
-        .await
-        .map_err(|e| format!("Failed to get members: {e}"))?;
+        app_log(
+            "info",
+            "rooms",
+            format!(
+                "get_room_members: {} members in room {}",
+                members.len(),
+                room_id
+            ),
+        );
 
-    app_log(
-        "info",
-        "rooms",
-        format!(
-            "get_room_members: {} members in room {}",
-            members.len(),
-            room_id
-        ),
-    );
-
-    let mut contacts = Vec::new();
-    for member in members {
-        let name = member.name().to_string();
-        let user_id = member.user_id().to_string();
-        let avatar = member.avatar_url().map(|u| u.to_string());
-        contacts.push(Contact {
-            id: user_id.clone(),
-            name: if name == user_id {
-                user_id.clone()
-            } else {
-                name
-            },
-            status: user_id,
-            avatar_url: avatar,
-        });
-    }
-    Ok(contacts)
+        let mut contacts = Vec::new();
+        for member in members {
+            let name = member.name().to_string();
+            let user_id = member.user_id().to_string();
+            let avatar = member.avatar_url().map(|u| u.to_string());
+            contacts.push(Contact {
+                id: user_id.clone(),
+                name: if name == user_id {
+                    user_id.clone()
+                } else {
+                    name
+                },
+                status: user_id,
+                avatar_url: avatar,
+            });
+        }
+        Ok(contacts)
+    })
+    .await
 }
 
 /// Get the avatar URL for a room.
@@ -8025,7 +9790,11 @@ pub async fn get_messages_before(
 ) -> Result<Vec<ChatMessage>, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-    sdk_timeline::get_messages_before(&client, &room, &from_event_id, limit).await
+    // Bounded like the other P0 calls: pagination holds the client lease.
+    run_bounded(async move {
+        sdk_timeline::get_messages_before(&client, &room, &from_event_id, limit).await
+    })
+    .await
 }
 
 #[cfg(test)]

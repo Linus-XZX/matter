@@ -252,6 +252,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _exportingDiagnostics = false;
   bool _exportingLogs = false;
   bool _clearingCache = false;
+  // The account being switched to (if any): shows progress on its tile and
+  // blocks further switches. The Rust-side switch waits for the lifecycle
+  // write lock, which in-flight P0 operations can hold for up to ~90s, so
+  // the tap must give feedback instead of appearing dead.
+  String? _switchingAccountId;
+  // The account being removed (if any): same progress/blocking discipline
+  // for the removal flow.
+  String? _removingAccountId;
 
   @override
   void initState() {
@@ -423,7 +431,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       debugPrint('Failed to load accounts: $e');
       if (mounted) {
         setState(() {
-          _accounts = const [];
+          // Keep previously loaded accounts visible; only flag the error.
           _accountsLoadError = e;
         });
       }
@@ -432,6 +440,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Future<void> _switchAccount(String userId) async {
     final controller = ref.read(accountSwitchControllerProvider);
+    setState(() => _switchingAccountId = userId);
     try {
       await controller.switchTo(userId);
     } catch (e) {
@@ -443,6 +452,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
+    } finally {
+      if (mounted) setState(() => _switchingAccountId = null);
     }
   }
 
@@ -478,7 +489,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
 
     if (confirmed != true) return;
-
+    if (!mounted) return;
+    // The Rust-side removal waits for the lifecycle write lock, which
+    // in-flight P0 operations can hold for up to ~90s; show progress and
+    // block further account actions instead of a frozen-looking UI.
+    setState(() => _removingAccountId = userId);
     try {
       final cleanupError = await accountController.removeAccount(userId);
       await _loadAccounts();
@@ -500,6 +515,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
+    } finally {
+      if (mounted) setState(() => _removingAccountId = null);
     }
   }
 
@@ -597,7 +614,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         ),
                       ],
                     ),
-                  ] else if (_accounts.length > 1) ...[
+                  ],
+                  if (_accounts.length > 1) ...[
                     const SizedBox(height: 20),
                     _buildGroup(
                       title: '账号切换',
@@ -619,8 +637,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   color: AppColors.primary,
                                   size: 20,
                                 )
+                              : _switchingAccountId == account.userId
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
                               : null,
-                          onTap: isActive
+                          onTap: (isActive || _switchingAccountId != null)
                               ? null
                               : () => _switchAccount(account.userId),
                         );
@@ -812,14 +838,27 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 horizontal: 16,
                                 vertical: 10,
                               ),
-                              onTap: () => _removeAccount(account.userId),
+                              onTap:
+                                  (_removingAccountId != null ||
+                                      _switchingAccountId != null)
+                                  ? null
+                                  : () => _removeAccount(account.userId),
                               child: Row(
                                 children: [
-                                  Icon(
-                                    Icons.remove_circle_outline_rounded,
-                                    color: AppColors.onSurfaceVariant,
-                                    size: 18,
-                                  ),
+                                  if (_removingAccountId == account.userId)
+                                    const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  else
+                                    Icon(
+                                      Icons.remove_circle_outline_rounded,
+                                      color: AppColors.onSurfaceVariant,
+                                      size: 18,
+                                    ),
                                   const SizedBox(width: 8),
                                   Text(
                                     '移除 ${_formatUserId(account.userId)}',
@@ -842,17 +881,29 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         horizontal: 16,
                         vertical: 14,
                       ),
-                      onTap: () =>
-                          _removeAccount(activeUserId ?? currentUser.id),
-                      child: const Row(
+                      onTap:
+                          (_removingAccountId != null ||
+                              _switchingAccountId != null)
+                          ? null
+                          : () =>
+                                _removeAccount(activeUserId ?? currentUser.id),
+                      child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
-                            Icons.logout_rounded,
-                            color: AppColors.error,
-                            size: 18,
-                          ),
-                          SizedBox(width: 8),
+                          if (_removingAccountId ==
+                              (activeUserId ?? currentUser.id))
+                            const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          else
+                            const Icon(
+                              Icons.logout_rounded,
+                              color: AppColors.error,
+                              size: 18,
+                            ),
+                          const SizedBox(width: 8),
                           Text(
                             '退出登录',
                             style: TextStyle(

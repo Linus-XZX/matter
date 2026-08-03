@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures_util::{stream, StreamExt};
 use matrix_sdk::{
@@ -39,6 +43,17 @@ pub(super) async fn clear_all() {
     TIMELINES.lock().await.clear();
 }
 
+/// Drop the timelines of ONE account (key prefix `{user_id}\n`), leaving
+/// the other accounts' timelines intact (a removed account's cache must
+/// not tear down the timelines of the account the user is currently in).
+pub(super) async fn clear_for_user(user_id: &str) {
+    let prefix = format!("{user_id}\n");
+    TIMELINES
+        .lock()
+        .await
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
 async fn get_or_create_timeline(client: &Client, room: &Room) -> Result<Arc<Timeline>, String> {
     let key = timeline_key(client, room)?;
     if let Some(timeline) = TIMELINES.lock().await.get(&key).cloned() {
@@ -50,7 +65,7 @@ async fn get_or_create_timeline(client: &Client, room: &Room) -> Result<Arc<Time
             .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)
             .build()
             .await
-            .map_err(|error| format!("Failed to build room timeline: {error}"))?,
+            .map_err(|error| format!("构建房间时间线失败: {error}"))?,
     );
     let mut timelines = TIMELINES.lock().await;
     Ok(timelines
@@ -122,7 +137,7 @@ async fn ensure_initial_window(timeline: &Timeline, target: usize) -> Result<(),
         let hit_start = timeline
             .paginate_backwards(requested)
             .await
-            .map_err(|error| format!("Failed to paginate room timeline: {error}"))?;
+            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
         let updated_count = remote_event_count(&snapshot(timeline).await);
         if hit_start || updated_count <= count {
             return Ok(());
@@ -144,15 +159,40 @@ pub(super) async fn get_messages(client: &Client, room: &Room) -> Result<Vec<Cha
     Ok(messages)
 }
 
-/// Explicitly advance both Matrix read markers to the latest timeline event.
-pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<(), String> {
+/// Send the read receipts for the room's latest timeline position. Not a
+/// read-modify-write (the Timeline guards against moving either marker
+/// backwards), so callers may run it outside the mutation queue.
+pub(super) async fn send_read_receipts(client: &Client, room: &Room) -> Result<(), String> {
     let timeline = get_or_create_timeline(client, room).await?;
-    ensure_initial_window(&timeline, 100).await?;
-    mark_as_read(&timeline, room).await?;
-    // Only clear an explicit `m.marked_unread` when one is actually set.
-    // Auto-reads fire on every incoming message while the chat is open, so
-    // unconditionally writing the flag (and triggering its sync echo +
-    // RoomListChanged refresh) would be a per-message write amplification.
+    // Receipts are background housekeeping: auto-reads fire on every
+    // message refresh while a chat is open. The pagination and receipt
+    // HTTP calls run under the client's request config (~30s x 3 retries
+    // each), which on a dead network would hold the client lease for the
+    // whole 90s outer bound — and concurrent auto-reads would amplify
+    // that, blocking logout/account switch. Bound the whole send at 15s:
+    // on a healthy network it finishes in well under a second (the
+    // window is normally already loaded), and a skipped receipt never
+    // corrupts the marker — the Timeline guards backward moves, and the
+    // next refresh re-sends.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        ensure_initial_window(&timeline, 100).await?;
+        mark_as_read(&timeline, room).await
+    })
+    .await
+    .map_err(|_| "发送已读回执超时。".to_string())?
+}
+
+/// Clear `m.marked_unread` for the room when the local store has it set.
+/// The room is being viewed by the user, so any flag that has synced locally
+/// is cleared regardless of which device set it — being on screen is the
+/// "handled now" signal. The flag is only written when one is actually set:
+/// auto-reads fire on every incoming message while the chat is open, so
+/// unconditionally writing the flag (and triggering its sync echo +
+/// RoomListChanged refresh) would be a per-message write amplification.
+/// Failures propagate: an explicit read action must not report success while
+/// the server flag survives; the auto path merely logs at its caller.
+/// Returns whether a clear was actually issued.
+pub(super) async fn clear_marked_unread_if_set(room: &Room) -> Result<bool, String> {
     let marked_unread = room
         .account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
         .await
@@ -162,48 +202,73 @@ pub(super) async fn mark_room_as_read(client: &Client, room: &Room) -> Result<()
         .is_some_and(|event| event.content.unread);
     if marked_unread {
         clear_marked_unread(room).await?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(())
 }
 
-/// Load every accessible pinned event, supplementing the SDK's bounded cache.
-pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
-    let pinned_ids = match room.load_pinned_events().await {
-        Ok(ids) => ids.unwrap_or_default(),
-        Err(network_error) => {
-            // Offline fallback: the pinned list also lives in the local
-            // state store. It may lag the server (e.g. our own latest toggle
-            // has not echoed yet), but a stale list beats failing the whole
-            // page; the pinned page re-reads after every sync echo.
-            match room
-                .get_state_event_static::<
-                    matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
-                >()
-                .await
-            {
-                Ok(Some(raw)) => raw
-                    .deserialize()
-                    .ok()
-                    .map(|event| match event.as_sync() {
-                        Some(matrix_sdk::ruma::events::SyncStateEvent::Original(
-                            original,
-                        )) => original.content.pinned.clone(),
-                        _ => Vec::new(),
-                    })
-                    .unwrap_or_default(),
-                // `get_state_event_static` is a pure local-store read: `None`
-                // means the synced store definitively has no such state event
-                // (the room was never pinned) — show the empty state rather
-                // than failing the page.
-                Ok(None) => Vec::new(),
-                Err(_) => {
-                    return Err(format!(
-                        "Failed to load pinned messages: {network_error}"
-                    ));
+/// Fallback read of the pinned list from the local state store, used when
+/// the server read fails or times out. The stored list may lag the server
+/// (e.g. our own latest toggle has not echoed yet), but a stale list beats
+/// failing the whole page; the pinned page re-reads after every sync echo.
+async fn pinned_ids_from_store(
+    room: &Room,
+    _source_error: &str,
+) -> Result<Vec<matrix_sdk::ruma::OwnedEventId>, String> {
+    match room
+        .get_state_event_static::<
+            matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
+        >()
+        .await
+    {
+        Ok(Some(raw)) => raw
+            .deserialize()
+            .map(|event| match event.as_sync() {
+                Some(matrix_sdk::ruma::events::SyncStateEvent::Original(original)) => {
+                    original.content.pinned.clone()
                 }
+                _ => Vec::new(),
+            })
+            // A corrupt local state event is not "no pins": treating it as
+            // empty would decide the wrong menu direction. Surface the
+            // error, same as `get_pinned_event_ids`'s store fallback.
+            .map_err(|error| format!("无法解析本地置顶状态，请重试: {error}")),
+        // `get_state_event_static` is a pure local-store read: `None`
+        // means the synced store definitively has no such state event
+        // (the room was never pinned) — show the empty state rather
+        // than failing the page.
+        Ok(None) => Ok(Vec::new()),
+        // The store read itself failed: attribute the error to the STORE,
+        // not to the network read that triggered the fallback (its
+        // `source_error` would mislead — the network may be fine).
+        Err(error) => Err(format!("无法读取本地置顶状态，请重试: {error}")),
+    }
+}
+
+pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>, String> {
+    // Bound the server read more tightly than the client default (the SDK's
+    // RequestConfig already caps a single request at 30s, but with 3
+    // retries a dead network could still stall here) — the whole call
+    // holds the client lease (blocking logout/account switch). On timeout,
+    // fall back to the local store like any other network error.
+    let pinned_ids =
+        match tokio::time::timeout(Duration::from_secs(15), room.load_pinned_events()).await {
+            Ok(Ok(ids)) => ids.unwrap_or_default(),
+            Ok(Err(network_error)) => {
+                // Offline fallback: the pinned list also lives in the local
+                // state store.
+                pinned_ids_from_store(room, &network_error.to_string()).await?
             }
-        }
-    };
+            Err(_) => {
+                super::app_log(
+                    "warn",
+                    "pinned",
+                    "Timed out loading pinned events; falling back to the local store.".to_string(),
+                );
+                pinned_ids_from_store(room, "Timed out loading pinned events.").await?
+            }
+        };
     if pinned_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -223,13 +288,18 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
     let (room_event_cache, _event_cache_drop_handles) = room
         .event_cache()
         .await
-        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
+        .map_err(|error| format!("加载置顶消息失败: {error}"))?;
     let (events, mut updates) = room_event_cache
         .subscribe_to_pinned_events()
         .await
-        .map_err(|error| format!("Failed to load pinned messages: {error}"))?;
+        .map_err(|error| format!("加载置顶消息失败: {error}"))?;
     let mut events: matrix_sdk_ui::eyeball_im::Vector<_> = events.into();
-    let wait_result = tokio::time::timeout(Duration::from_secs(30), async {
+    // Bounded cache wait. Stage budgets: 15s list read + 20s cache wait +
+    // 10s pinned-timeline build + 25s focused fetch = 70s, below the
+    // FFI-level 90s total bound, so the inner stage timeouts (which degrade
+    // to partial results) fire before the outer bound (which fails the
+    // whole page).
+    let wait_result = tokio::time::timeout(Duration::from_secs(20), async {
         let mut saw_network_update = false;
         loop {
             let loaded_ids = loaded_expected_event_ids(
@@ -273,23 +343,33 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         &expected_pinned_ids,
     );
     let mut cache_error = if loaded_count == 0 {
-        Some(match wait_result {
-            Ok(Err(error)) => format!("Failed to load pinned messages: {error}"),
-            Err(_) => "Timed out while loading pinned messages.".to_owned(),
-            Ok(Ok(())) => "Failed to load any pinned messages.".to_owned(),
-        })
+        match wait_result {
+            Ok(Err(error)) => Some(format!("加载置顶消息失败: {error}")),
+            Err(_) => Some("加载置顶消息超时。".to_owned()),
+            // A clean wait with zero loaded events is not itself a failure:
+            // the events may be genuinely gone (a redacted message stays
+            // pinned), and the per-event fetch below decides between
+            // placeholders and transport errors.
+            Ok(Ok(())) => None,
+        }
     } else {
         None
     };
 
     let mut by_id = HashMap::new();
     if loaded_count > 0 {
-        match TimelineBuilder::new(room)
-            .with_focus(TimelineFocus::PinnedEvents)
-            .build()
-            .await
+        // Bound the build: its /event requests have no SDK timeout and the
+        // lease is held; on timeout fall back to the cache_error path so the
+        // outer total bound is not the only safety net.
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            TimelineBuilder::new(room)
+                .with_focus(TimelineFocus::PinnedEvents)
+                .build(),
+        )
+        .await
         {
-            Ok(timeline) => {
+            Ok(Ok(timeline)) => {
                 let items = snapshot(&timeline).await;
                 by_id.extend(
                     convert_snapshot(room, &items)
@@ -298,27 +378,76 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
                         .map(|message| (message.id.clone(), message)),
                 );
             }
-            Err(error) => {
-                let error = format!("Failed to load pinned messages: {error}");
+            Ok(Err(error)) => {
+                let error = format!("加载置顶消息失败: {error}");
                 super::app_log("warn", "pinned", error.clone());
                 cache_error = Some(error);
+            }
+            Err(_) => {
+                let message = "构建置顶时间线超时。".to_owned();
+                super::app_log("warn", "pinned", message.clone());
+                cache_error = Some(message);
             }
         }
     }
 
     let missing_ids = missing_pinned_event_ids(&pinned_ids, &by_id);
-    let fetched = stream::iter(missing_ids)
-        .map(|event_id| {
-            let room = room.clone();
-            async move {
-                let result = load_focused_message(&room, event_id.clone()).await;
-                (event_id, result)
-            }
-        })
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
+    // The focused fetch below deliberately covers ALL pinned ids, not just
+    // the `max_pinned_events_to_load` cache bound: that bound only limits
+    // how many events the cache-wait above expects, while the pinned list
+    // itself is authoritative — older pins beyond the bound must still be
+    // listed, fetched individually when the cache does not hold them.
+    // A slow network may exhaust the 25s budget, degrading those events to
+    // placeholder messages rather than hiding them.
+    // Bound the aggregate focused fetch: each missing event triggers a
+    // TimelineBuilder build whose /context request has no HTTP timeout in
+    // the SDK, and the client lease is held for the whole call — an
+    // unbounded wait here would block account logout/switch indefinitely.
+    // On timeout, degrade to the partially loaded list (placeholder
+    // messages stand in for the missing events).
+    let fetched = match tokio::time::timeout(
+        Duration::from_secs(25),
+        stream::iter(missing_ids)
+            .map(|event_id| {
+                let room = room.clone();
+                async move {
+                    let result = load_focused_message(&room, event_id.clone()).await;
+                    (event_id, result)
+                }
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(_) => {
+            // Surface the aggregate timeout as a focused error: without it,
+            // an all-timed-out load would degrade into "message deleted"
+            // placeholders (or, when nothing loaded at all, a bare
+            // placeholder list) instead of an actionable failure. Events
+            // that were still missing are transport failures, so mark them
+            // as such for the placeholder text.
+            super::app_log(
+                "warn",
+                "pinned",
+                "Timed out fetching pinned events.".to_string(),
+            );
+            let missing = missing_pinned_event_ids(&pinned_ids, &by_id)
+                .into_iter()
+                .map(|event_id| event_id.to_string())
+                .collect::<HashSet<_>>();
+            return complete_pinned_messages(
+                &pinned_ids,
+                &by_id,
+                &missing,
+                Some("加载置顶事件超时。".to_owned()),
+                cache_error,
+            );
+        }
+    };
     let mut focused_error = None;
+    let mut failed_ids = HashSet::new();
     for (event_id, result) in fetched {
         match result {
             Ok(Some(message)) => {
@@ -327,16 +456,13 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
             Ok(None) => {}
             Err(error) => {
                 focused_error.get_or_insert_with(|| error.clone());
-                super::app_log(
-                    "warn",
-                    "pinned",
-                    format!("Failed to load pinned event {event_id}: {error}"),
-                );
+                failed_ids.insert(event_id.to_string());
+                super::app_log("warn", "pinned", format!("加载置顶事件失败: {error}"));
             }
         }
     }
 
-    complete_pinned_messages(&pinned_ids, &by_id, focused_error, cache_error)
+    complete_pinned_messages(&pinned_ids, &by_id, &failed_ids, focused_error, cache_error)
 }
 
 async fn load_focused_message(
@@ -353,7 +479,7 @@ async fn load_focused_message(
         })
         .build()
         .await
-        .map_err(|error| format!("Failed to load event: {error}"))?;
+        .map_err(|error| format!("加载事件失败: {error}"))?;
     Ok(convert_snapshot(room, &snapshot(&timeline).await)
         .await
         .into_iter()
@@ -385,26 +511,55 @@ fn missing_pinned_event_ids(
 fn complete_pinned_messages(
     pinned_ids: &[matrix_sdk::ruma::OwnedEventId],
     by_id: &HashMap<String, ChatMessage>,
+    failed_ids: &HashSet<String>,
     focused_error: Option<String>,
     cache_error: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let missing_count = missing_pinned_event_ids(pinned_ids, by_id).len();
+    // A load where every pinned event failed to fetch is a transport-level
+    // failure (per-event fetch errors only arise from request failures, and
+    // `cache_error` covers a failed cache layer): it must surface as an
+    // error so the page shows the failure with a retry path instead of
+    // masquerading every message as deleted. Individual unavailable events
+    // (redacted or deleted messages stay pinned) carry no focused error and
+    // fall through to placeholders below.
     if !pinned_ids.is_empty() && by_id.is_empty() {
         if let Some(error) = focused_error {
-            return Err(format!("Failed to load pinned messages: {error}"));
+            return Err(format!("加载置顶消息失败: {error}"));
         }
-        return Err(cache_error
-            .unwrap_or_else(|| format!("Failed to load {missing_count} pinned message(s).")));
+        if let Some(error) = cache_error {
+            return Err(format!("加载置顶消息失败: {error}"));
+        }
     }
     Ok(pinned_ids
         .iter()
         .map(|event_id| {
-            by_id
-                .get(event_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| unavailable_pinned_message(event_id))
+            by_id.get(event_id.as_str()).cloned().unwrap_or_else(|| {
+                if failed_ids.contains(event_id.as_str()) {
+                    // Transport-level failure for this event: the
+                    // placeholder must not masquerade as "deleted".
+                    failed_pinned_message(event_id)
+                } else {
+                    unavailable_pinned_message(event_id)
+                }
+            })
         })
         .collect())
+}
+
+fn failed_pinned_message(event_id: &matrix_sdk::ruma::EventId) -> ChatMessage {
+    base_message(
+        event_id.as_str(),
+        "",
+        "系统",
+        "",
+        false,
+        "此置顶消息加载失败，请下拉刷新重试".to_owned(),
+        None,
+        Vec::new(),
+        false,
+        MessageType::Event,
+        None,
+    )
 }
 
 fn unavailable_pinned_message(event_id: &matrix_sdk::ruma::EventId) -> ChatMessage {
@@ -466,14 +621,12 @@ async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
     };
     match (read_error, fully_read_error) {
         (None, None) => Ok(()),
-        (Some(read_error), None) => Err(format!(
-            "Failed to mark room as read: read receipt: {read_error}"
-        )),
-        (None, Some(fully_read_error)) => Err(format!(
-            "Failed to mark room as read: fully-read marker: {fully_read_error}"
-        )),
+        (Some(read_error), None) => Err(format!("标记房间已读失败（已读回执）: {read_error}")),
+        (None, Some(fully_read_error)) => {
+            Err(format!("标记房间已读失败（已读位置）: {fully_read_error}"))
+        }
         (Some(read_error), Some(fully_read_error)) => Err(format!(
-            "Failed to mark room as read: read receipt: {read_error}; fully-read marker: {fully_read_error}"
+            "标记房间已读失败（已读回执: {read_error}；已读位置: {fully_read_error}）"
         )),
     }
 }
@@ -485,7 +638,7 @@ pub(super) async fn clear_marked_unread(room: &Room) -> Result<(), String> {
     room.set_account_data(MarkedUnreadEventContent::new(false))
         .await
         .map(|_| ())
-        .map_err(|error| format!("Failed to clear marked-unread flag: {error}"))
+        .map_err(|error| format!("清除未读标记失败: {error}"))
 }
 
 pub(super) async fn get_messages_before(
@@ -515,21 +668,76 @@ pub(super) async fn get_messages_before(
         let hit_start = timeline
             .paginate_backwards(20u16)
             .await
-            .map_err(|error| format!("Failed to paginate room timeline: {error}"))?;
+            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
         if hit_start {
             break;
+        }
+    }
+    // Still invisible: the window may have SLID past the anchor (new
+    // messages arriving while the caller browsed history push the old end
+    // out). Keep extending — a bounded fallback that hands back the
+    // window's oldest messages would return messages the caller ALREADY
+    // displays (everything newer than its anchor), which it would dedupe
+    // to nothing and end history loading with older messages still
+    // unreachable. 48 more rounds (×20) comfortably spans any realistic
+    // slide; a redacted anchor never turns visible and falls through to
+    // the fallback below.
+    if !anchor_visible {
+        for _ in 0..48 {
+            let hit_start = timeline
+                .paginate_backwards(20u16)
+                .await
+                .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+            let current = convert_snapshot(room, &snapshot(&timeline).await).await;
+            if current.iter().any(|message| message.id == from_event_id) {
+                anchor_visible = true;
+                break;
+            }
+            if hit_start {
+                break;
+            }
         }
     }
 
     let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
     if !anchor_visible {
         // The anchor is deeper than the bounded pagination reached (or it
-        // never existed, e.g. it was redacted). Hand back the tail of the
-        // window instead of an empty page: the caller can still render and
-        // anchor its next request on a message we actually delivered.
-        return Ok(messages[messages.len().saturating_sub(limit)..].to_vec());
+        // never existed, e.g. it was redacted). Hand back the OLDEST end of
+        // the window, not the tail: the tail (the newest messages) is what
+        // the caller already displays, so it would dedupe to nothing and
+        // stall history loading with the anchor stuck below the window.
+        // The oldest messages are genuinely older than the caller's loaded
+        // set (its anchor comes from the disk cache, which it has not
+        // rendered), so it makes progress and re-anchors on the window's
+        // oldest, letting the next request continue backward. (If history
+        // ended — `hit_start` — the window's oldest IS the room's start,
+        // and the caller's dedupe-then-finish is correct.)
+        return Ok(messages[..limit.min(messages.len())].to_vec());
     }
-    let before = messages_before(&messages, from_event_id);
+    let mut before = messages_before(&messages, from_event_id).to_vec();
+    // Fill the page: the caller re-anchors at the page's oldest, so every
+    // returned message must be genuinely older than its anchor. When the
+    // anchor sits at the window's edge (the caller has loaded everything
+    // the window holds), an empty return would end history loading with
+    // older messages still reachable — paginate until the page is full or
+    // history ends instead.
+    for _ in 0..16 {
+        if before.len() >= limit {
+            break;
+        }
+        let hit_start = timeline
+            .paginate_backwards(20u16)
+            .await
+            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+        if hit_start {
+            break;
+        }
+        before = messages_before(
+            &convert_snapshot(room, &snapshot(&timeline).await).await,
+            from_event_id,
+        )
+        .to_vec();
+    }
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }
 
@@ -566,8 +774,17 @@ async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatM
             }
         }
     }
+    // `Room::members()` calls `sync_members()` when the lazy-loaded member
+    // list is not complete, issuing a network /members request. This runs on
+    // every message refresh, so in a large lazy-loaded room each incoming
+    // message would amplify into another /members fetch while holding the
+    // client lease. Read the store only: before the member list is synced,
+    // this returns the lazy-loaded subset (recent participants), which still
+    // covers the senders and receipts in view; the full list arrives via the
+    // user-triggered member load (room management page) or the SDK's own
+    // sync.
     let members = room
-        .members(matrix_sdk::RoomMemberships::JOIN)
+        .members_no_sync(matrix_sdk::RoomMemberships::JOIN)
         .await
         .unwrap_or_default();
 
@@ -1332,7 +1549,7 @@ mod tests {
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn message(id: &str) -> ChatMessage {
         ChatMessage {
@@ -1459,6 +1676,7 @@ mod tests {
         let messages = complete_pinned_messages(
             &pinned_ids,
             &partial,
+            &HashSet::new(),
             Some("event unavailable".to_owned()),
             None,
         )
@@ -1472,19 +1690,84 @@ mod tests {
     }
 
     #[test]
-    fn wholly_unavailable_pinned_results_still_surface_the_load_error() {
+    fn partially_failed_pinned_results_distinguish_transport_failures() {
+        use matrix_sdk::ruma::EventId;
+
+        let first = EventId::parse("$first:example.org").unwrap();
+        let second = EventId::parse("$second:example.org").unwrap();
+        let pinned_ids = vec![first.clone(), second.clone()];
+        let partial = HashMap::from([(first.to_string(), message(first.as_str()))]);
+
+        let messages = complete_pinned_messages(
+            &pinned_ids,
+            &partial,
+            &HashSet::from([second.to_string()]),
+            Some("request failed".to_owned()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "$first:example.org");
+        assert!(messages[0].content.contains("$first"));
+        // A transport failure must not masquerade as "deleted".
+        assert!(messages[1].content.contains("加载失败"));
+        assert!(!messages[1].content.contains("已删除"));
+    }
+
+    #[test]
+    fn wholly_unavailable_pinned_results_without_errors_are_replaced_by_placeholders() {
+        use matrix_sdk::ruma::EventId;
+
+        let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
+        let messages =
+            complete_pinned_messages(&pinned_ids, &HashMap::new(), &HashSet::new(), None, None)
+                .unwrap();
+
+        // Every event was confirmed unavailable (no fetch errors): a
+        // redacted message stays pinned, and the page must not fail
+        // entirely, so placeholders stand in for the missing events.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "$missing:example.org");
+        assert!(matches!(messages[0].msg_type, MessageType::Event));
+        assert_eq!(messages[0].content, "此置顶消息不可用或已被删除");
+    }
+
+    #[test]
+    fn wholly_failed_pinned_fetch_surfaces_the_load_error() {
         use matrix_sdk::ruma::EventId;
 
         let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
         let error = complete_pinned_messages(
             &pinned_ids,
             &HashMap::new(),
-            Some("event unavailable".to_owned()),
+            &HashSet::new(),
+            Some("request failed".to_owned()),
             None,
         )
         .unwrap_err();
 
-        assert!(error.contains("event unavailable"));
+        // Every per-event fetch failed: that is a transport-level failure
+        // (unreachable server, timeout), not "the message is deleted", so it
+        // must surface as an error with a retry path.
+        assert!(error.contains("request failed"));
+    }
+
+    #[test]
+    fn wholly_failed_pinned_cache_surfaces_the_load_error() {
+        use matrix_sdk::ruma::EventId;
+
+        let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
+        let error = complete_pinned_messages(
+            &pinned_ids,
+            &HashMap::new(),
+            &HashSet::new(),
+            None,
+            Some("cache error".to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("cache error"));
     }
 
     #[test]

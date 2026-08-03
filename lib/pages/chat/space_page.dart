@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'action_failure_message.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart';
@@ -12,6 +14,12 @@ import 'space_detail_page.dart';
 
 class SpacePage extends ConsumerWidget {
   const SpacePage({super.key});
+
+  /// Map a failed write's error to the unified timeout wording (same
+  /// discipline as the room management page): a queue-wait timeout means
+  /// the write may still be landing in its background tail.
+  static String _actionFailureMessage(Object error) =>
+      actionFailureMessage(error);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -148,6 +156,12 @@ class SpacePage extends ConsumerWidget {
   }
 
   void _showSpaceActions(BuildContext context) {
+    // The sheet builder below shadows [context] with the sheet's own
+    // context, which is unmounted once the sheet is dismissed. The
+    // create/join dialogs opened from here keep the PAGE context for
+    // their async completion paths (their writes can outlive the sheet's
+    // exit animation — feedback must not vanish with it).
+    final pageContext = context;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -167,7 +181,7 @@ class SpacePage extends ConsumerWidget {
                 subtitle: '创建一个新的组织空间',
                 onTap: () {
                   Navigator.of(context).pop();
-                  _showCreateSpaceDialog(context);
+                  _showCreateSpaceDialog(pageContext);
                 },
               ),
               _ActionTile(
@@ -176,7 +190,7 @@ class SpacePage extends ConsumerWidget {
                 subtitle: '通过空间 ID 或链接加入',
                 onTap: () {
                   Navigator.of(context).pop();
-                  _showJoinSpaceDialog(context);
+                  _showJoinSpaceDialog(pageContext);
                 },
               ),
             ],
@@ -187,142 +201,332 @@ class SpacePage extends ConsumerWidget {
   }
 
   void _showCreateSpaceDialog(BuildContext context) {
+    // Account snapshot captured when the dialog OPENS: a switch while the
+    // dialog is up must not redirect the write to the new account (same
+    // discipline as every other P0 write path).
+    final container = ProviderScope.containerOf(context, listen: false);
+    final dialogAccountUserId = container.read(activeUserIdProvider) ?? '';
     final nameController = TextEditingController();
     final topicController = TextEditingController();
+    var creating = false;
+    String? createError;
+    // (The page-scoped container is captured at the top of this method.)
     showDialog(
       context: context,
       builder: (ctx) => Consumer(
-        builder: (context, ref, _) => AlertDialog(
-          backgroundColor: AppColors.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadii.surface),
-          ),
-          title: const Text(
-            '创建空间',
-            style: TextStyle(color: AppColors.onBackground),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                style: const TextStyle(color: AppColors.onBackground),
-                decoration: const InputDecoration(
-                  hintText: '空间名称',
-                  hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+        builder: (_, ref, _) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadii.surface),
+            ),
+            title: const Text(
+              '创建空间',
+              style: TextStyle(color: AppColors.onBackground),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  style: const TextStyle(color: AppColors.onBackground),
+                  decoration: const InputDecoration(
+                    hintText: '空间名称',
+                    hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: topicController,
+                  style: const TextStyle(color: AppColors.onBackground),
+                  decoration: const InputDecoration(
+                    hintText: '空间说明（可选）',
+                    hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+                  ),
+                ),
+                if (createError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      createError!,
+                      style: const TextStyle(
+                        color: AppColors.error,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: creating ? null : () => Navigator.of(ctx).pop(),
+                child: const Text(
+                  '取消',
+                  style: TextStyle(color: AppColors.onSurfaceVariant),
                 ),
               ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: topicController,
-                style: const TextStyle(color: AppColors.onBackground),
-                decoration: const InputDecoration(
-                  hintText: '空间说明（可选）',
-                  hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
-                ),
+              TextButton(
+                onPressed: creating
+                    ? null
+                    : () async {
+                        // Entry guard (not only the disabled button): the
+                        // rebuild lags a frame, so a second tap on the old
+                        // widget could otherwise create two spaces.
+                        if (creating) return;
+                        final name = nameController.text.trim();
+                        final topic = topicController.text.trim();
+                        if (name.isEmpty) {
+                          // Feedback instead of a silent no-op (same as
+                          // the room management save path).
+                          setDialogState(() => createError = '空间名称不能为空');
+                          return;
+                        }
+                        setDialogState(() {
+                          creating = true;
+                          createError = null;
+                        });
+                        try {
+                          await createSpace(
+                            // Account snapshot captured when the dialog
+                            // OPENED (see below), not read at tap time.
+                            accountUserId: dialogAccountUserId,
+                            name: name,
+                            topic: topic.isEmpty ? null : topic,
+                          );
+                          // The account may have switched while the request
+                          // was in flight: skip ALL local feedback (same
+                          // discipline as the other pages) and close the
+                          // dialog — it would otherwise stay stuck in its
+                          // in-flight state above the new account's page.
+                          if (container.read(activeUserIdProvider) !=
+                              dialogAccountUserId) {
+                            if (ctx.mounted &&
+                                ModalRoute.of(ctx)?.isCurrent == true) {
+                              Navigator.of(ctx).pop();
+                            }
+                            return;
+                          }
+                          container.invalidate(spacesProvider);
+                          container.invalidate(chatRoomsProvider);
+                          if (!context.mounted) return;
+                          // `isCurrent` guards against popping the page when
+                          // the dialog was dismissed during its exit
+                          // transition (mounted stays true through it).
+                          if (ctx.mounted &&
+                              ModalRoute.of(ctx)?.isCurrent == true) {
+                            Navigator.of(ctx).pop();
+                          }
+                          // The dialog may have been dismissed while the
+                          // request was in flight: still report success.
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('空间已创建')),
+                          );
+                        } catch (e) {
+                          if (!context.mounted) return;
+                          // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致），
+                          // 并关闭卡在 in-flight 态的对话框。
+                          if (container.read(activeUserIdProvider) !=
+                              dialogAccountUserId) {
+                            if (ctx.mounted &&
+                                ModalRoute.of(ctx)?.isCurrent == true) {
+                              Navigator.of(ctx).pop();
+                            }
+                            return;
+                          }
+                          if (ctx.mounted) {
+                            setDialogState(() {
+                              creating = false;
+                              // Render the failure inside the dialog: a
+                              // page-level snackbar would sit beneath the
+                              // modal barrier while the dialog stays open.
+                              createError = _actionFailureMessage(e);
+                            });
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(_actionFailureMessage(e))),
+                            );
+                          }
+                        }
+                      },
+                child: creating
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          color: AppColors.secondary,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Text(
+                        '创建',
+                        style: TextStyle(color: AppColors.secondary),
+                      ),
               ),
             ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text(
-                '取消',
-                style: TextStyle(color: AppColors.onSurfaceVariant),
-              ),
-            ),
-            TextButton(
-              onPressed: () async {
-                final name = nameController.text.trim();
-                final topic = topicController.text.trim();
-                if (name.isEmpty) return;
-                try {
-                  await createSpace(
-                    name: name,
-                    topic: topic.isEmpty ? null : topic,
-                  );
-                  ref.invalidate(spacesProvider);
-                  ref.invalidate(chatRoomsProvider);
-                  if (!ctx.mounted || !context.mounted) return;
-                  Navigator.of(ctx).pop();
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(const SnackBar(content: Text('空间已创建')));
-                } catch (e) {
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text('创建失败: $e')));
-                }
-              },
-              child: const Text(
-                '创建',
-                style: TextStyle(color: AppColors.secondary),
-              ),
-            ),
-          ],
         ),
       ),
     );
   }
 
   void _showJoinSpaceDialog(BuildContext context) {
+    // Account snapshot captured when the dialog OPENS: a switch while the
+    // dialog is up must not redirect the write to the new account.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final dialogAccountUserId = container.read(activeUserIdProvider) ?? '';
     final controller = TextEditingController();
+    var joining = false;
+    String? joinError;
+    // (The page-scoped container is captured at the top of this method.)
     showDialog(
       context: context,
       builder: (ctx) => Consumer(
-        builder: (context, ref, _) => AlertDialog(
-          backgroundColor: AppColors.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadii.surface),
-          ),
-          title: const Text(
-            '加入空间',
-            style: TextStyle(color: AppColors.onBackground),
-          ),
-          content: TextField(
-            controller: controller,
-            style: const TextStyle(color: AppColors.onBackground),
-            decoration: const InputDecoration(
-              hintText: '!space_id:server 或 #alias:server',
-              hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+        // `_` for the dialog-scoped context: the async closures below must
+        // use the PAGE context (method parameter) so feedback still lands
+        // after the dialog was dismissed mid-request.
+        builder: (_, ref, _) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadii.surface),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text(
-                '取消',
-                style: TextStyle(color: AppColors.onSurfaceVariant),
+            title: const Text(
+              '加入空间',
+              style: TextStyle(color: AppColors.onBackground),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  style: const TextStyle(color: AppColors.onBackground),
+                  decoration: const InputDecoration(
+                    hintText: '!space_id:server 或 #alias:server',
+                    hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+                  ),
+                ),
+                if (joinError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      joinError!,
+                      style: const TextStyle(
+                        color: AppColors.error,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: joining ? null : () => Navigator.of(ctx).pop(),
+                child: const Text(
+                  '取消',
+                  style: TextStyle(color: AppColors.onSurfaceVariant),
+                ),
               ),
-            ),
-            TextButton(
-              onPressed: () async {
-                final value = controller.text.trim();
-                if (value.isEmpty) return;
-                try {
-                  await joinRoom(identifier: value);
-                  ref.invalidate(spacesProvider);
-                  ref.invalidate(chatRoomsProvider);
-                  ref.invalidate(ungroupedRoomsProvider);
-                  if (!ctx.mounted || !context.mounted) return;
-                  Navigator.of(ctx).pop();
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(const SnackBar(content: Text('已加入空间')));
-                } catch (e) {
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text('加入失败: $e')));
-                }
-              },
-              child: const Text(
-                '加入',
-                style: TextStyle(color: AppColors.secondary),
+              TextButton(
+                onPressed: joining
+                    ? null
+                    : () async {
+                        // Entry guard (not only the disabled button): the
+                        // rebuild lags a frame, so a second tap on the old
+                        // widget could otherwise issue a duplicate join.
+                        if (joining) return;
+                        final value = controller.text.trim();
+                        if (value.isEmpty) {
+                          // Feedback instead of a silent no-op (same
+                          // discipline as the create-space dialog).
+                          setDialogState(() => joinError = '请输入空间 ID 或别名');
+                          return;
+                        }
+                        setDialogState(() {
+                          joining = true;
+                          joinError = null;
+                        });
+                        try {
+                          await joinRoom(
+                            // Account snapshot captured when the dialog
+                            // OPENED (see above), not read at tap time.
+                            accountUserId: dialogAccountUserId,
+                            identifier: value,
+                          );
+                          // The account may have switched while the request
+                          // was in flight: skip ALL local feedback (same
+                          // discipline as the other pages) and close the
+                          // dialog — it would otherwise stay stuck in its
+                          // in-flight state above the new account's page.
+                          if (container.read(activeUserIdProvider) !=
+                              dialogAccountUserId) {
+                            if (ctx.mounted &&
+                                ModalRoute.of(ctx)?.isCurrent == true) {
+                              Navigator.of(ctx).pop();
+                            }
+                            return;
+                          }
+                          // Page-scoped container: the dialog-scoped ref is
+                          // disposed (and would throw) once the dialog was
+                          // dismissed mid-request.
+                          container.invalidate(spacesProvider);
+                          container.invalidate(chatRoomsProvider);
+                          container.invalidate(ungroupedRoomsProvider);
+                          if (!context.mounted) return;
+                          // `isCurrent` guards against popping the page when
+                          // the dialog was dismissed during its exit
+                          // transition (mounted stays true through it).
+                          if (ctx.mounted &&
+                              ModalRoute.of(ctx)?.isCurrent == true) {
+                            Navigator.of(ctx).pop();
+                          }
+                          // The dialog may have been dismissed while the
+                          // request was in flight: still report success.
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已加入空间')),
+                          );
+                        } catch (e) {
+                          if (!context.mounted) return;
+                          // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致），
+                          // 并关闭卡在 in-flight 态的对话框。
+                          if (container.read(activeUserIdProvider) !=
+                              dialogAccountUserId) {
+                            if (ctx.mounted &&
+                                ModalRoute.of(ctx)?.isCurrent == true) {
+                              Navigator.of(ctx).pop();
+                            }
+                            return;
+                          }
+                          if (ctx.mounted) {
+                            setDialogState(() {
+                              joining = false;
+                              // Render the failure inside the dialog: a
+                              // page-level snackbar would sit beneath the
+                              // modal barrier while the dialog stays open.
+                              joinError = _actionFailureMessage(e);
+                            });
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(_actionFailureMessage(e))),
+                            );
+                          }
+                        }
+                      },
+                child: joining
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          color: AppColors.secondary,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Text(
+                        '加入',
+                        style: TextStyle(color: AppColors.secondary),
+                      ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -353,11 +557,7 @@ class _SpaceRoomTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              AppAvatar(
-                fallback: space.name,
-                size: 48,
-                url: space.avatarUrl,
-              ),
+              AppAvatar(fallback: space.name, size: 48, url: space.avatarUrl),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(

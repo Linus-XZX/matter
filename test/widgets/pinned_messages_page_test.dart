@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/pinned_messages_page.dart';
+import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
+import 'package:matter/providers/mutable_state.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 
@@ -14,6 +16,7 @@ class _FakeRustApi implements RustLibApi {
   Future<void> Function(String roomId)? subscribeHandler;
   Future<void> Function(String roomId)? unsubscribeHandler;
   int callCount = 0;
+
   /// Pending unpin toggle calls, in order; completes with the post-write
   /// pinned state when the test resolves them.
   final List<Completer<bool>> pendingToggles = [];
@@ -31,9 +34,11 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<bool> crateApiMatrixTogglePinnedMessage({
+  Future<bool> crateApiMatrixSetPinnedMessage({
+    required String accountUserId,
     required String roomId,
     required String eventId,
+    required bool pinned,
   }) {
     toggleCalls++;
     final completer = Completer<bool>();
@@ -131,6 +136,77 @@ void main() {
 
     expect(find.text('Visible message'), findsOneWidget);
     expect(find.text('Blocked message'), findsNothing);
+  });
+
+  testWidgets('ignored senders keep their pinned row with hidden content', (
+    tester,
+  ) async {
+    api.reset([
+      () async => [
+        _message(r'$blocked', '@blocked:example.org', 'Blocked message'),
+      ],
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith(
+            (ref) async => {'@blocked:example.org'},
+          ),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The row is kept (with hidden content) so the unpin button stays
+    // reachable — filtering it away would strand the pin until the sender
+    // is un-ignored.
+    expect(find.text('来自已忽略用户的消息'), findsOneWidget);
+    expect(find.byTooltip('取消置顶'), findsOneWidget);
+    expect(find.text('Blocked message'), findsNothing);
+  });
+
+  testWidgets('account switch stops reloads and unpins for the old room', (
+    tester,
+  ) async {
+    final accountState = MutableState<String?>('@a:example.org');
+    api.reset([
+      () async => [_message(r'$pin', '@alice:example.org', 'Pinned message')],
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+          activeUserIdProvider.overrideWith(() => accountState),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Pinned message'), findsOneWidget);
+
+    // Switch account: a sync event for the old room must not reload through
+    // the new account's client, and the stale list must be dropped in favor
+    // of a neutral placeholder (never old-account data rendered against the
+    // new account's ignore list).
+    final callsBefore = api.callCount;
+    accountState.value = '@b:example.org';
+    await tester.pump();
+    api.syncEvents.add(
+      const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+    );
+    await tester.pumpAndSettle();
+    expect(api.callCount, callsBefore);
+    expect(find.text('Pinned message'), findsNothing);
+    expect(find.text('账号已切换'), findsOneWidget);
+
+    // Unpinning is unreachable too: the stale list (and its buttons) is gone.
+    expect(find.byTooltip('取消置顶'), findsNothing);
+    expect(api.toggleCalls, 0);
   });
 
   testWidgets('empty state remains pull-to-refreshable', (tester) async {
@@ -410,7 +486,7 @@ void main() {
   ) async {
     api.reset([
       () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
-      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      () async => [],
     ]);
 
     await tester.pumpWidget(
@@ -428,55 +504,55 @@ void main() {
 
     await tester.tap(find.byTooltip('取消置顶'));
     await tester.pump();
-    // A stale local list: the server had already dropped the pin elsewhere,
-    // so the toggle re-pins it. The UI must say what the server decided and
-    // restore the row via the reload.
-    api.pendingToggles.single.complete(true);
+    // Idempotent set semantics: the response is the post-write state, which
+    // under a set request equals the requested value (false).
+    api.pendingToggles.single.complete(false);
     await tester.pumpAndSettle();
 
-    expect(find.text('消息已置顶'), findsOneWidget);
-    expect(find.text('已取消置顶'), findsNothing);
+    expect(find.text('已取消置顶'), findsOneWidget);
+    expect(find.text('消息已置顶'), findsNothing);
     expect(api.callCount, 2);
-    expect(find.text('Pinned'), findsOneWidget);
-  });
-
-  testWidgets('a failed unpin restores the row and reconciles with the server', (
-    tester,
-  ) async {
-    api.reset([
-      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
-    ]);
-    // The reconciling reload after the failure returns the same list (the
-    // server still pins the message).
-    api._responses.add(() async => [
-      _message(r'$pinned', '@alice:example.org', 'Pinned'),
-    ]);
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
-        ],
-        child: const MaterialApp(
-          home: PinnedMessagesPage(roomId: '!room:example.org'),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('取消置顶'));
-    await tester.pump();
     expect(find.text('Pinned'), findsNothing);
-
-    api.pendingToggles.single.completeError(StateError('offline'));
-    await tester.pumpAndSettle();
-
-    // The server never accepted the removal: the row comes back, the error
-    // is surfaced, and the follow-up reload reconciles the local list.
-    expect(find.textContaining('取消置顶失败:'), findsOneWidget);
-    expect(find.text('Pinned'), findsOneWidget);
-    expect(api.callCount, 2);
   });
+
+  testWidgets(
+    'a failed unpin restores the row and reconciles with the server',
+    (tester) async {
+      api.reset([
+        () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      ]);
+      // The reconciling reload after the failure returns the same list (the
+      // server still pins the message).
+      api._responses.add(
+        () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+          ],
+          child: const MaterialApp(
+            home: PinnedMessagesPage(roomId: '!room:example.org'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('取消置顶'));
+      await tester.pump();
+      expect(find.text('Pinned'), findsNothing);
+
+      api.pendingToggles.single.completeError(StateError('offline'));
+      await tester.pumpAndSettle();
+
+      // The server never accepted the removal: the row comes back, the error
+      // is surfaced, and the follow-up reload reconciles the local list.
+      expect(find.textContaining('取消置顶失败:'), findsOneWidget);
+      expect(find.text('Pinned'), findsOneWidget);
+      expect(api.callCount, 2);
+    },
+  );
 
   testWidgets('a failed confirming reload keeps the unpin lock', (
     tester,
@@ -512,55 +588,56 @@ void main() {
     expect(api.callCount, 2);
   });
 
-  testWidgets('a stale confirming reload keeps the unpin lock until the row leaves', (
-    tester,
-  ) async {
-    api.reset([
-      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
-    ]);
-    // The confirming reload returns a stale snapshot that still contains the
-    // message (offline store fallback, or a server read racing the write).
-    api._responses.add(() async => [
-      _message(r'$pinned', '@alice:example.org', 'Pinned'),
-    ]);
-    // The echo-driven reload finally drops the row.
-    api._responses.add(() async => []);
+  testWidgets(
+    'a stale confirming reload keeps the unpin lock until the row leaves',
+    (tester) async {
+      api.reset([
+        () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      ]);
+      // The confirming reload returns a stale snapshot that still contains the
+      // message (offline store fallback, or a server read racing the write).
+      api._responses.add(
+        () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      );
+      // The echo-driven reload finally drops the row.
+      api._responses.add(() async => []);
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
-        ],
-        child: const MaterialApp(
-          home: PinnedMessagesPage(roomId: '!room:example.org'),
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+          ],
+          child: const MaterialApp(
+            home: PinnedMessagesPage(roomId: '!room:example.org'),
+          ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('取消置顶'));
-    await tester.pump();
-    api.pendingToggles.single.complete(false);
-    await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('取消置顶'));
+      await tester.pump();
+      api.pendingToggles.single.complete(false);
+      await tester.pumpAndSettle();
 
-    // The stale snapshot restored the row, but the lock must survive it:
-    // tapping again would re-pin the message.
-    expect(find.text('Pinned'), findsOneWidget);
-    final button = tester.widget<IconButton>(
-      find.widgetWithIcon(IconButton, Icons.push_pin_outlined),
-    );
-    expect(button.onPressed, isNull);
+      // The stale snapshot restored the row, but the lock must survive it:
+      // tapping again would re-pin the message.
+      expect(find.text('Pinned'), findsOneWidget);
+      final button = tester.widget<IconButton>(
+        find.widgetWithIcon(IconButton, Icons.push_pin_outlined),
+      );
+      expect(button.onPressed, isNull);
 
-    // The next reload (sync echo) reflects the removal and releases the lock.
-    api.syncEvents.add(
-      const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
-    );
-    await tester.pumpAndSettle();
+      // The next reload (sync echo) reflects the removal and releases the lock.
+      api.syncEvents.add(
+        const rust.SyncEvent.pinnedMessagesChanged(roomId: '!room:example.org'),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('Pinned'), findsNothing);
-    expect(find.text('暂无置顶消息'), findsOneWidget);
-    expect(api.callCount, 3);
-  });
+      expect(find.text('Pinned'), findsNothing);
+      expect(find.text('暂无置顶消息'), findsOneWidget);
+      expect(api.callCount, 3);
+    },
+  );
 
   testWidgets('an unpin lock expires so a re-pinned row is not stuck', (
     tester,
@@ -570,9 +647,9 @@ void main() {
     ]);
     // The confirming reload returns a stale snapshot that still contains the
     // message (e.g. another device re-pinned it); the row stays, locked.
-    api._responses.add(() async => [
-      _message(r'$pinned', '@alice:example.org', 'Pinned'),
-    ]);
+    api._responses.add(
+      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+    );
 
     await tester.pumpWidget(
       ProviderScope(

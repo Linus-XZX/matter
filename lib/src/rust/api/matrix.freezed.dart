@@ -206,7 +206,7 @@ return ignoredUsersChanged();case _:
 
 class SyncEvent_SyncCompleted extends SyncEvent {
   const SyncEvent_SyncCompleted(): super._();
-
+  
 
 
 
@@ -238,7 +238,7 @@ String toString() {
 
 class SyncEvent_FullRefreshRequired extends SyncEvent {
   const SyncEvent_FullRefreshRequired(): super._();
-
+  
 
 
 
@@ -270,7 +270,7 @@ String toString() {
 
 class SyncEvent_RoomListChanged extends SyncEvent {
   const SyncEvent_RoomListChanged(): super._();
-
+  
 
 
 
@@ -302,7 +302,7 @@ String toString() {
 
 class SyncEvent_MessageSent extends SyncEvent {
   const SyncEvent_MessageSent({required this.roomId}): super._();
-
+  
 
  final  String roomId;
 
@@ -368,7 +368,7 @@ as String,
 
 class SyncEvent_PinnedMessagesChanged extends SyncEvent {
   const SyncEvent_PinnedMessagesChanged({required this.roomId}): super._();
-
+  
 
  final  String roomId;
 
@@ -434,7 +434,7 @@ as String,
 
 class SyncEvent_RoomMembersChanged extends SyncEvent {
   const SyncEvent_RoomMembersChanged({required this.roomId}): super._();
-
+  
 
  final  String roomId;
 
@@ -500,7 +500,7 @@ as String,
 
 class SyncEvent_IgnoredUsersChanged extends SyncEvent {
   const SyncEvent_IgnoredUsersChanged(): super._();
-
+  
 
 
 

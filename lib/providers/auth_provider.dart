@@ -314,8 +314,11 @@ Future<String> loadDisplayName(String userId) async {
 /// Remove a session for a specific user_id.
 Future<void> removeSession(String userId) async {
   final prefs = await SharedPreferences.getInstance();
-  await markSessionRemoved(userId);
-
+  // Drop the metadata before writing the removed marker: the marker makes
+  // loadAllSessions skip the account forever, so if the stored JSON turns
+  // out to be corrupt we must fail before the marker lands, leaving the
+  // account visible (and removable) instead of stranding it in an
+  // unrecoverable state.
   final removedHomeservers = <String>[];
   final raw = prefs.getString(_kSessions);
   final remainingMetadata = <Map<String, dynamic>>[];
@@ -330,8 +333,19 @@ Future<void> removeSession(String userId) async {
         remainingMetadata.add(metadata);
       }
     }
-    await prefs.setString(_kSessions, jsonEncode(remainingMetadata));
+    // A failed write must abort before the removed marker lands: the marker
+    // would hide the account from loadAllSessions forever while its
+    // metadata and token survive (see the ordering note above).
+    final saved = await prefs.setString(
+      _kSessions,
+      jsonEncode(remainingMetadata),
+    );
+    if (!saved) {
+      throw StateError('本地会话元数据写入失败');
+    }
   }
+
+  await markSessionRemoved(userId);
 
   final activeId = prefs.getString(_kActiveUserId);
   if (activeId == userId) {

@@ -41,6 +41,8 @@ class _FakeRustApi implements RustLibApi {
   int setMutedCalls = 0;
   int setIgnoredCalls = 0;
   String? ignoredAccountUserId;
+  String? ignoredUserId;
+  bool? ignoredFlag;
   Completer<void>? pendingMutedUpdate;
   Completer<void>? pendingMutedRead;
   Completer<void>? pendingApproveKnock;
@@ -93,6 +95,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixSetRoomMuted({
+    required String accountUserId,
     required String roomId,
     required bool muted,
   }) {
@@ -124,6 +127,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixInviteUserToRoom({
+    required String accountUserId,
     required String roomId,
     required String userId,
   }) {
@@ -148,11 +152,18 @@ class _FakeRustApi implements RustLibApi {
   }) {
     setIgnoredCalls++;
     ignoredAccountUserId = accountUserId;
-    return pendingSetIgnored?.future ?? Future.value(const []);
+    ignoredUserId = userId;
+    ignoredFlag = ignored;
+    // Reflect the server's post-write list (the fake holds the pre-write
+    // state, so without an explicit completer the caller-visible list is
+    // the current one — never an empty list, which would silently wipe the
+    // persisted snapshot in production-shaped code paths).
+    return pendingSetIgnored?.future ?? Future.value(ignoredUsers);
   }
 
   @override
   Future<rust.RoomDetailsUpdate> crateApiMatrixUpdateRoomDetails({
+    required String accountUserId,
     required String roomId,
     required String name,
     required bool updateName,
@@ -175,6 +186,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixApproveRoomKnock({
+    required String accountUserId,
     required String roomId,
     required String userId,
   }) async {
@@ -184,6 +196,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixRejectRoomKnock({
+    required String accountUserId,
     required String roomId,
     required String userId,
   }) async {
@@ -192,19 +205,30 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiMatrixLeaveRoom({required String roomId}) async {
+  Future<void> crateApiMatrixLeaveRoom({
+    required String accountUserId,
+    required String roomId,
+  }) async {
     leaveCalls++;
     await pendingLeave?.future;
   }
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
     markReadCalls++;
     await pendingMarkRead?.future;
+    return true;
   }
 
   @override
-  Future<void> crateApiMatrixMarkRoomUnread({required String roomId}) async {
+  Future<void> crateApiMatrixMarkRoomUnread({
+    required String accountUserId,
+    required String roomId,
+  }) async {
     markUnreadCalls++;
     await pendingMarkUnread?.future;
   }
@@ -297,7 +321,7 @@ void main() {
 
     expect(find.text('无法加载成员'), findsOneWidget);
     expect(find.text('无法加载加入请求'), findsOneWidget);
-    expect(find.text('无法加载通知设置'), findsOneWidget);
+    expect(find.text('通知设置加载/更新失败，点击重试'), findsOneWidget);
     expect(find.text('无法加载已忽略用户'), findsOneWidget);
     expect(find.text('成员 0'), findsNothing);
     expect(find.text('已忽略用户 (0)'), findsNothing);
@@ -372,6 +396,9 @@ void main() {
     rustApi.syncEvents.add(
       const rust.SyncEvent.roomMembersChanged(roomId: '!room:example.org'),
     );
+    // The event-driven member refresh is throttled (500ms), like the
+    // knock-list refresh; advance past the throttle before settling.
+    await tester.pump(const Duration(milliseconds: 500));
     await tester.pumpAndSettle();
 
     expect(rustApi.membersLoadCalls, 2);
@@ -793,9 +820,10 @@ void main() {
     await tester.pump();
     expect(rustApi.detailsLoadCalls, 2);
 
+    await tester.enterText(find.byType(TextField).first, 'Name during save');
     await tester.tap(find.byTooltip('保存房间信息'));
     await tester.pump();
-    expect(rustApi.updatedName, 'Project room');
+    expect(rustApi.updatedName, 'Name during save');
 
     rustApi.roomName = 'Remote name during save';
     rustApi.roomTopic = 'Remote topic during save';
@@ -810,10 +838,13 @@ void main() {
     await tester.pumpAndSettle();
 
     final fields = find.byType(TextField);
+    // The name the user typed during the save is kept (in-progress edits
+    // are never clobbered by a concurrent refresh)...
     expect(
       tester.widget<TextField>(fields.at(0)).controller!.text,
-      'Remote name during save',
+      'Name during save',
     );
+    // ...while the untouched topic adopts the remote value.
     expect(
       tester.widget<TextField>(fields.at(1)).controller!.text,
       'Remote topic during save',
@@ -1094,6 +1125,122 @@ void main() {
     expect(rustApi.setMutedCalls, 2);
   });
 
+  testWidgets('account switch blocks stale page actions from reaching Rust', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final accountState = MutableState<String?>('@original:example.org');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(() => accountState),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final muteSwitch = find.byType(SwitchListTile);
+    await tester.tap(muteSwitch);
+    await tester.pump();
+    expect(rustApi.setMutedCalls, 1);
+
+    // The page outlives its account (desktop panels, tab stacks): switching
+    // replaces the page content with the neutral placeholder immediately, so
+    // no further action can reach the new account's client.
+    accountState.value = '@other:example.org';
+    await tester.pumpAndSettle();
+    expect(find.text('账号已切换'), findsOneWidget);
+    expect(muteSwitch, findsNothing);
+    expect(rustApi.setMutedCalls, 1);
+  });
+
+  testWidgets('a mid-load account switch shows the placeholder, not a crash', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.pendingDetailsLoad = Completer<void>();
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final accountState = MutableState<String?>('@original:example.org');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(() => accountState),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Switch account while the initial load is still in flight, then let
+    // the load finish: the page must not apply the old account's data (or
+    // crash on the unloaded details), but show the neutral placeholder.
+    accountState.value = '@other:example.org';
+    await tester.pump();
+    rustApi.pendingDetailsLoad!.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('账号已切换'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'a failed reload after switching back shows the error, not the placeholder',
+    (tester) async {
+      rustApi.failSupplementalLoads = false;
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final accountState = MutableState<String?>('@original:example.org');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            _sessionReadyOverride,
+            activeUserIdProvider.overrideWith(() => accountState),
+          ],
+          child: const MaterialApp(
+            home: RoomManagementPage(
+              roomId: '!room:example.org',
+              roomName: 'Project room',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Switch away: placeholder shows.
+      accountState.value = '@other:example.org';
+      await tester.pumpAndSettle();
+      expect(find.text('账号已切换'), findsOneWidget);
+
+      // Switch back while the network is failing: the page must surface the
+      // load error (with its retry entry), not keep the stale placeholder.
+      rustApi.detailsError = StateError('offline');
+      accountState.value = '@original:example.org';
+      await tester.pumpAndSettle();
+
+      expect(find.text('账号已切换'), findsNothing);
+      expect(find.textContaining('加载失败:'), findsOneWidget);
+    },
+  );
+
   testWidgets('marking the current room unread closes its chat view', (
     tester,
   ) async {
@@ -1195,6 +1342,68 @@ void main() {
     expect(
       container.read(roomAutoReadSuppressedProvider('!room:example.org')),
       isFalse,
+    );
+    expect(
+      container.read(roomUnreadOverrideProvider('!room:example.org')),
+      isNull,
+    );
+  });
+
+  testWidgets('a timed-out pending unread action keeps the suppression armed', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    rustApi.pendingMarkUnread = Completer<void>();
+    final container = ProviderContainer(overrides: [_sessionReadyOverride]);
+    addTearDown(container.dispose);
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RoomManagementPage(
+                      roomId: '!room:example.org',
+                      roomName: 'Project room',
+                    ),
+                  ),
+                ),
+                child: const Text('打开房间'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开房间'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('标记为未读'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('标记为未读'));
+    await tester.pump();
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isTrue,
+    );
+
+    // A timeout is not a failure: the queued write's tail may still land,
+    // and a later auto-read must not revoke a marker that did land. The
+    // suppression stays armed (same discipline as the mute timeout marker);
+    // only the optimistic override is dropped.
+    rustApi.pendingMarkUnread!.completeError(StateError('操作超时，请稍后查看最终状态。'));
+    await tester.pump();
+
+    expect(
+      container.read(roomAutoReadSuppressedProvider('!room:example.org')),
+      isTrue,
     );
     expect(
       container.read(roomUnreadOverrideProvider('!room:example.org')),
@@ -1426,10 +1635,7 @@ void main() {
   ) async {
     rustApi.failSupplementalLoads = false;
     rustApi.knockRequests = const [
-      rust.KnockRequest(
-        userId: '@knocker:example.org',
-        displayName: 'Knocker',
-      ),
+      rust.KnockRequest(userId: '@knocker:example.org', displayName: 'Knocker'),
     ];
     await tester.binding.setSurfaceSize(const Size(900, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1499,10 +1705,7 @@ void main() {
     await tester.tap(find.byTooltip('邀请用户'));
     await tester.pumpAndSettle();
 
-    await tester.enterText(
-      find.byType(TextField).last,
-      '@newbie:example.org',
-    );
+    await tester.enterText(find.byType(TextField).last, '@newbie:example.org');
     rustApi.pendingInvite = Completer<void>();
     await tester.tap(find.text('邀请'));
     await tester.pump();
@@ -1511,7 +1714,9 @@ void main() {
     // disabled, so a second tap cannot send a duplicate invite.
     expect(rustApi.inviteCalls, 1);
     expect(
-      tester.widget<TextButton>(find.widgetWithText(TextButton, '邀请')).onPressed,
+      tester
+          .widget<TextButton>(find.widgetWithText(TextButton, '邀请'))
+          .onPressed,
       isNull,
     );
     await tester.tap(find.text('邀请'), warnIfMissed: false);
@@ -1598,10 +1803,7 @@ void main() {
     );
     await tester.tap(find.byTooltip('邀请用户'));
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byType(TextField).last,
-      '@newbie:example.org',
-    );
+    await tester.enterText(find.byType(TextField).last, '@newbie:example.org');
 
     rustApi.pendingInvite = Completer<void>();
     await tester.tap(find.text('邀请'));
@@ -1611,7 +1813,7 @@ void main() {
 
     // The dialog stays open so the user can retry, with the failure visible.
     expect(find.text('邀请用户'), findsOneWidget);
-    expect(find.textContaining('邀请失败:'), findsOneWidget);
+    expect(find.textContaining('操作失败:'), findsOneWidget);
 
     // Let the error snackbar (4s default) expire so the retry result can
     // surface; pump past the default duration.
@@ -1743,8 +1945,71 @@ void main() {
     rustApi.pendingLeave!.completeError(StateError('offline'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('退出失败:'), findsOneWidget);
+    expect(find.textContaining('操作失败:'), findsOneWidget);
     expect(find.byType(RoomManagementPage), findsOneWidget);
+  });
+
+  testWidgets('a leave in flight can be dismissed and still closes the page', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: MaterialApp(
+          home: Builder(
+            builder: (rootContext) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(rootContext).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RoomManagementPage(
+                      roomId: '!room:example.org',
+                      roomName: 'Project room',
+                    ),
+                  ),
+                ),
+                child: const Text('打开管理'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开管理'));
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('退出房间'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('退出房间'));
+    await tester.pumpAndSettle();
+
+    rustApi.pendingLeave = Completer<void>();
+    await tester.tap(find.text('退出'));
+    await tester.pump();
+
+    // While the leave is in flight the dialog stays dismissible (barrier
+    // tap): the write keeps running and the page closes itself on
+    // success, so the user is not locked in for the whole queue bound.
+    await tester.tapAt(const Offset(10, 10));
+    // Let the dialog's pop transition finish (bounded pumps: the in-flight
+    // spinner keeps an indeterminate animation, so pumpAndSettle would
+    // spin forever).
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('退出后将无法继续接收此房间的新消息。'), findsNothing);
+
+    rustApi.pendingLeave!.complete();
+    await tester.pumpAndSettle();
+
+    expect(rustApi.leaveCalls, 1);
+    expect(find.byType(RoomManagementPage), findsNothing);
+    expect(find.text('打开管理'), findsOneWidget);
   });
 
   testWidgets('an in-flight mute toggle wins over a stale refresh read', (
@@ -1778,27 +2043,147 @@ void main() {
     rustApi.pendingMutedUpdate = Completer<void>();
     await tester.tap(find.byType(Switch));
     await tester.pump();
-    expect(
-      tester.widget<Switch>(find.byType(Switch)).value,
-      isFalse,
-    );
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
 
     // The stale read returns the pre-toggle server value (true): it must
-    // not overwrite the optimistic toggle.
+    // not overwrite the optimistic toggle. The write is still in flight
+    // (the switch shows a saving spinner), so a pumpAndSettle would spin
+    // on the indeterminate indicator; pump bounded frames instead.
     rustApi.pendingMutedRead!.complete();
-    await tester.pumpAndSettle();
-    expect(
-      tester.widget<Switch>(find.byType(Switch)).value,
-      isFalse,
-    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
 
     rustApi.pendingMutedUpdate!.complete();
     await tester.pumpAndSettle();
     expect(find.text('已关闭免打扰'), findsOneWidget);
-    expect(
-      tester.widget<Switch>(find.byType(Switch)).value,
-      isFalse,
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+  });
+
+  testWidgets('a timed-out mute write keeps the optimistic value', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
     );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+
+    // A timeout may still land server-side: the switch keeps the optimistic
+    // value and the failure promises a later sync reconciliation.
+    rustApi.pendingMutedUpdate = Completer<void>();
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+    rustApi.pendingMutedUpdate!.completeError(StateError('操作超时，请稍后查看最终状态。'));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+    expect(find.textContaining('若未生效请点击重试同步'), findsOneWidget);
+  });
+
+  testWidgets(
+    'a contradicting sync read after a mute timeout keeps the retry tile',
+    (tester) async {
+      rustApi.failSupplementalLoads = false;
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [_sessionReadyOverride],
+          child: const MaterialApp(
+            home: RoomManagementPage(
+              roomId: '!room:example.org',
+              roomName: 'Project room',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+
+      // A timeout may still land server-side: the switch keeps the
+      // optimistic value and the failure promises a later sync
+      // reconciliation.
+      rustApi.pendingMutedUpdate = Completer<void>();
+      await tester.tap(find.byType(Switch));
+      await tester.pump();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+      rustApi.pendingMutedUpdate!.completeError(StateError('操作超时，请稍后查看最终状态。'));
+      await tester.pumpAndSettle();
+      expect(find.text('通知设置加载/更新失败，点击重试'), findsOneWidget);
+
+      // The write actually failed: the next sync read returns the server's
+      // contradicting value. The switch must not auto-roll back (the queued
+      // write could still land), and the error tile must survive the
+      // successful read — a null `muted.error` must not hide the retry
+      // entry while the write's outcome is still unknown.
+      rustApi.muted = true;
+      rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(find.text('通知设置加载/更新失败，点击重试'), findsOneWidget);
+      expect(find.byTooltip('重试'), findsOneWidget);
+
+      // The manual retry (force-adopt) settles the switch onto the server
+      // value and clears the error display.
+      await tester.tap(find.byTooltip('重试'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(find.text('通知设置加载/更新失败，点击重试'), findsNothing);
+    },
+  );
+
+  testWidgets('a deterministic mute failure rolls the switch back', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+
+    // A deterministic rejection means the server state is unchanged: roll
+    // the switch back and surface the failure.
+    rustApi.pendingMutedUpdate = Completer<void>();
+    await tester.tap(find.byType(Switch));
+    await tester.pump();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+    rustApi.pendingMutedUpdate!.completeError(StateError('Forbidden'));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(find.textContaining('通知设置更新失败:'), findsOneWidget);
+    expect(find.text('通知设置加载/更新失败，点击重试'), findsOneWidget);
   });
 
   testWidgets('a stale failing mute read cannot disable a fresh toggle', (
@@ -1831,25 +2216,132 @@ void main() {
     rustApi.pendingMutedUpdate = Completer<void>();
     await tester.tap(find.byType(Switch));
     await tester.pump();
-    expect(
-      tester.widget<Switch>(find.byType(Switch)).value,
-      isFalse,
-    );
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
 
     // The stale read fails after the toggle started: its error must not
-    // disable the switch the user just toggled successfully.
+    // disable the switch the user just toggled successfully. The write is
+    // still in flight (saving spinner), so pump bounded frames instead of
+    // pumpAndSettle.
     rustApi.failSupplementalLoads = true;
     rustApi.pendingMutedRead!.complete();
-    await tester.pumpAndSettle();
-    expect(
-      tester.widget<Switch>(find.byType(Switch)).value,
-      isFalse,
-    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
     // No error tile, no retry button: the toggle owns the switch state.
     expect(find.text('无法加载通知设置'), findsNothing);
 
     rustApi.pendingMutedUpdate!.complete();
     await tester.pumpAndSettle();
     expect(find.text('已关闭免打扰'), findsOneWidget);
+  });
+
+  testWidgets('unignoring a user sends ignored:false and updates the list', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    rustApi.failSupplementalLoads = false;
+    // Alice is both a member and ignored, so her member tile shows the
+    // unignore button.
+    rustApi.ignoredUsers = const ['@alice:example.org'];
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(
+            () => MutableState<String?>('@carol:example.org'),
+          ),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('已忽略用户 (1)'), findsOneWidget);
+    expect(find.byTooltip('取消忽略'), findsOneWidget);
+
+    // The server has already dropped the target (cross-device unignore);
+    // tapping must send ignored:false for the right user.
+    rustApi.ignoredUsers = const [];
+    await tester.tap(find.byTooltip('取消忽略'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(rustApi.ignoredUserId, '@alice:example.org');
+    expect(rustApi.ignoredFlag, isFalse);
+    expect(find.text('已取消忽略 @alice:example.org'), findsOneWidget);
+    expect(find.text('已忽略用户 (0)'), findsOneWidget);
+  });
+
+  testWidgets('saving without changes skips the RPC and explains why', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(rustApi.updatedName, isNull);
+
+    await tester.tap(find.byTooltip('保存房间信息'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // No RPC fired and the user is told nothing changed.
+    expect(rustApi.updatedName, isNull);
+    expect(rustApi.updatedTopicFlag, isNull);
+    expect(find.text('没有需要保存的修改'), findsOneWidget);
+  });
+
+  testWidgets('a failed members refresh keeps previously loaded members', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('成员 1'), findsOneWidget);
+    expect(find.text('@alice:example.org'), findsOneWidget);
+
+    // A later sync cycle reloads members and fails: the already rendered
+    // list must stay visible with an inline error, not vanish behind an
+    // error tile.
+    rustApi.failSupplementalLoads = true;
+    rustApi.syncEvents.add(
+      const rust.SyncEvent.roomMembersChanged(roomId: '!room:example.org'),
+    );
+    // The event-driven member refresh is throttled (500ms), like the
+    // knock-list refresh; advance past the throttle before settling.
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+
+    expect(find.text('成员 1'), findsNothing); // Title loses the count.
+    expect(find.text('@alice:example.org'), findsOneWidget);
+    expect(find.text('成员刷新失败，显示缓存数据'), findsOneWidget);
   });
 }

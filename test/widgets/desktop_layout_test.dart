@@ -15,8 +15,13 @@ class _FakeRustApi implements RustLibApi {
   int markRoomAsReadCalls = 0;
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
     markRoomAsReadCalls++;
+    return true;
   }
 
   @override
@@ -524,6 +529,9 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    // Receipt writes are skipped without an active account (the Rust guard
+    // would reject an empty id anyway); provide one for the read path.
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
 
     await _pumpApp(tester, container);
     final initialReadCalls = rustApi.markRoomAsReadCalls;

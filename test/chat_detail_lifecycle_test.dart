@@ -23,6 +23,7 @@ class _FakeRustApi implements RustLibApi {
   int subscribeRoomCalls = 0;
   int unsubscribeRoomCalls = 0;
   int markRoomAsReadCalls = 0;
+  bool? lastMarkReadExplicit;
   int getMessagesBeforeCalls = 0;
   final typingSubscriptionAccounts = <String?>[];
   final roomSubscriptionAccounts = <String?>[];
@@ -112,9 +113,19 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
     markRoomAsReadCalls++;
+    lastMarkReadExplicit = explicit;
+    return true;
   }
+
+  @override
+  Stream<rust.TypingNotification> crateApiMatrixWatchTypingNotifications() =>
+      const Stream.empty();
 
   @override
   Future<List<rust.ChatMessage>> crateApiMatrixGetMessagesBefore({
@@ -227,6 +238,7 @@ void main() {
     rustApi.subscribeRoomCalls = 0;
     rustApi.unsubscribeRoomCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
+    rustApi.lastMarkReadExplicit = null;
     rustApi.getMessagesBeforeCalls = 0;
     rustApi.typingSubscriptionAccounts.clear();
     rustApi.roomSubscriptionAccounts.clear();
@@ -270,9 +282,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('the chat header opens the pinned messages page', (
-    tester,
-  ) async {
+  testWidgets('the chat header opens the pinned messages page', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
@@ -482,6 +492,7 @@ void main() {
   ) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
 
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -593,6 +604,7 @@ void main() {
   ) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
 
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -1280,7 +1292,94 @@ void main() {
     await tester.pump();
     expect(failedId, findsNothing);
 
+    // Let the retry polling loop run to completion (~8s budget) so it
+    // leaves no pending timers behind.
     await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('retry polling reconciles the sent bubble via the timeline', (
+    tester,
+  ) async {
+    // Regression: the retry path used to pass the *pending* id to the
+    // polling loop after renaming the message to its `sent:` id, so the
+    // first still-local check always failed and no timeline refresh ever
+    // ran — the sent bubble then lingered until the next sync cycle.
+    const roomId = '!retry-poll:example.org';
+    // Count timeline fetches through a provider override: the polling loop
+    // refreshes via messagesProvider, and without the override it would
+    // short-circuit on the unset session instead of reaching the bridge.
+    var getMessagesCalls = 0;
+    final container = ProviderContainer(
+      overrides: [
+        messagesProvider(roomId).overrideWith((ref) async {
+          getMessagesCalls++;
+          return const <rust.ChatMessage>[];
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'retry poll');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+    rustApi.pendingSend!.completeError(StateError('offline'));
+    await tester.pump();
+    await tester.pump();
+
+    final failedId = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith(
+            'text-bubble:$localOutgoingFailedPrefix',
+          ),
+    );
+    expect(failedId, findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      failedId,
+      100,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.longPress(failedId, warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重试发送'));
+    await tester.pump();
+    await tester.pump();
+
+    // The retry succeeds: the message flips to the sent state. The polling
+    // loop must then poll the timeline (getMessages) instead of bailing out
+    // on the first id mismatch.
+    final readsBeforePoll = getMessagesCalls;
+    rustApi.pendingSend!.complete(r'$retried-poll');
+    await tester.pump();
+    await tester.pump();
+    expect(failedId, findsNothing);
+
+    // Let the polling loop run; it must have refreshed the timeline at
+    // least once.
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    expect(getMessagesCalls, greaterThan(readsBeforePoll));
+
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });
@@ -1357,6 +1456,10 @@ void main() {
     await tester.pump();
     expect(failedId, findsNothing);
 
+    // Let the retry polling loop run to completion (~8s budget) so it
+    // leaves no pending timers behind.
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -1546,6 +1649,31 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+
+  testWidgets('opening a chat reads the room without the explicit clear', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.markRoomAsReadCalls, greaterThan(0));
+    // Opening a room relies on the store-checked inner clear (explicit:false);
+    // the unconditional explicit write is reserved for the explicit
+    // "标记为已读" actions.
+    expect(rustApi.lastMarkReadExplicit, isFalse);
   });
 
   testWidgets('an open chat follows server-side room renames', (tester) async {

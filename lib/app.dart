@@ -214,14 +214,32 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   }
 
   Future<void> _markSelectedRoomAsRead(rust.ChatRoom room) async {
+    // The receipts are written for the account that starts this call.
+    final accountUserId = ref.read(activeUserIdProvider);
+    // No account yet (deep-link before login completed): skip — a write
+    // with an empty account id would be rejected by the Rust guard anyway.
+    if (accountUserId == null) return;
     try {
-      await rust.markRoomAsRead(roomId: room.id);
+      final cleared = await rust.markRoomAsRead(
+        accountUserId: accountUserId,
+        roomId: room.id,
+        // Selecting the room is a viewing action: rely on the store-checked
+        // inner clear, not the unconditional explicit write.
+        explicit: false,
+      );
       if (!mounted ||
           _selectedRoom?.id != room.id ||
+          // The account may have switched mid-flight: the read bookkeeping
+          // must not apply to the new account's session.
+          ref.read(activeUserIdProvider) != accountUserId ||
           ref.read(roomAutoReadSuppressedProvider(room.id))) {
         return;
       }
-      setRoomUnreadOverride(ref, room, unread: false);
+      // Only claim the room is read when the flag was actually cleared (a
+      // skipped clear's tail may still fail).
+      if (cleared) {
+        setRoomUnreadOverride(ref, room, unread: false);
+      }
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
       ref.invalidate(spaceChildrenProvider);
@@ -343,10 +361,22 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         final isDesktop = constraints.maxWidth >= _desktopBreakpoint;
         _syncMobilePageAfterLayoutChange(isDesktop);
         if (isDesktop) {
-          // Only the desktop layout keeps a selected room whose metadata must
-          // follow chatRoomsProvider; watching it on mobile would rebuild the
-          // whole app on every room list refresh for nothing.
-          _syncSelectedRoomFromRooms(ref.watch(chatRoomsProvider));
+          // Only the desktop layout keeps a selected room whose metadata
+          // must follow the room sources; watching them on mobile would
+          // rebuild the whole app on every room list refresh for nothing.
+          if (_desktopRoomSource == _DesktopRoomSource.space) {
+            final spaceId = _selectedDesktopSpace?.id;
+            if (spaceId != null) {
+              // Space children live in spaceChildrenProvider, not
+              // chatRooms: follow that source so a renamed/departed space
+              // child updates the panel snapshot.
+              _syncSelectedRoomFromRooms(
+                ref.watch(spaceChildrenProvider(spaceId)),
+              );
+            }
+          } else {
+            _syncSelectedRoomFromRooms(ref.watch(chatRoomsProvider));
+          }
           return _buildDesktopLayout(context, constraints);
         }
         return _buildMobileLayout();
@@ -382,9 +412,20 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       // The selected room no longer exists (e.g. the user left it from the
       // management page while the desktop panel was open). Clear the stale
       // selection so the panel does not keep showing a departed room.
-      // Space children live in spaceChildrenProvider, not chatRooms, so
-      // their absence here is not a departure.
-      if (_desktopRoomSource == _DesktopRoomSource.space) return;
+      if (_desktopRoomSource == _DesktopRoomSource.space) {
+        // Space children live in spaceChildrenProvider, not chatRooms, so
+        // their absence here is not necessarily a departure — but a room
+        // removed from the space is gone from chatRooms as well: double-
+        // check against the room list before clearing the selection. A
+        // list that is still LOADING must not clear it — "unknown" is not
+        // "departed" (the room may merely have been moved out of the
+        // space, and the room list refetch races the children refetch).
+        final allRooms = ref.read(chatRoomsProvider).asData?.value;
+        if (allRooms == null) return;
+        if (allRooms.any((room) => room.id == selectedRoom.id)) {
+          return;
+        }
+      }
       _selectedRoom = null;
       _clearSelectedRoomDetailsEdits();
       return;
@@ -465,6 +506,19 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   Widget _buildDesktopLayout(BuildContext context, BoxConstraints constraints) {
     final navigationIndex = ref.watch(navigationIndexProvider);
     final selectedRoom = _selectedRoom;
+    // Match the room list's unread display (including the local override
+    // for pending mark-read/unread writes) so the pane subtitle and the
+    // list's red dot never disagree during the echo window.
+    final unreadOverride = selectedRoom == null
+        ? null
+        : ref.watch(roomUnreadOverrideProvider(selectedRoom.id));
+    final syncedHasUnread = selectedRoom == null
+        ? false
+        : selectedRoom.unreadCount > 0 || selectedRoom.isMarkedUnread;
+    final overrideApplies = unreadOverride?.appliesTo(selectedRoom!) ?? false;
+    final hasUnread = overrideApplies
+        ? unreadOverride!.unread
+        : syncedHasUnread;
     final canShowRoomDetails =
         constraints.maxWidth >= _desktopDetailsPaneBreakpoint;
     final showRoomDetails =
@@ -503,8 +557,10 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                 nameEventId: selectedRoom.nameEventId,
                                 avatarEventId: selectedRoom.avatarEventId,
                                 isDm: selectedRoom.roomType == 'dm',
-                                subtitle: selectedRoom.unreadCount > 0
-                                    ? '${selectedRoom.unreadCount} 条未读消息'
+                                subtitle: hasUnread
+                                    ? (selectedRoom.unreadCount > 0
+                                          ? '${selectedRoom.unreadCount} 条未读消息'
+                                          : '已标记未读')
                                     : '在线',
                                 embedded: true,
                                 detailsPanelOpen: showRoomDetails,

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
+import '../chat/action_failure_message.dart';
 import '../chat/chat_detail_page.dart';
 
 class ContactsPage extends ConsumerStatefulWidget {
@@ -184,6 +186,7 @@ class _ContactTile extends ConsumerStatefulWidget {
 
 class _ContactTileState extends ConsumerState<_ContactTile> {
   String? _resolvedAvatarUrl;
+  bool _creatingDm = false;
 
   @override
   void initState() {
@@ -244,32 +247,67 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
               color: AppColors.onSurfaceVariant,
               size: 20,
             ),
-            onPressed: () async {
-              // Create DM with this contact
-              try {
-                final roomId = await createDm(userId: contact.id);
-                if (context.mounted) {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => ChatDetailPage(
-                        roomId: roomId,
-                        roomName: contact.name,
-                        avatarUrl: _resolvedAvatarUrl,
-                      ),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('创建会话失败: $e'),
-                      duration: const Duration(seconds: 2),
-                    ),
-                  );
-                }
-              }
-            },
+            onPressed: _creatingDm
+                ? null
+                : () async {
+                    // Entry guard (not only the disabled button): the
+                    // rebuild lags a frame, so a second tap could otherwise
+                    // issue a duplicate createDm (two concurrent scans would
+                    // both miss the existing DM and create duplicate rooms).
+                    if (_creatingDm) return;
+                    _creatingDm = true;
+                    // Account snapshot: a switch while the request is in
+                    // flight must not redirect the write, and suppresses
+                    // the feedback below (the room would belong to the
+                    // previous account).
+                    final accountUserId = ref.read(activeUserIdProvider) ?? '';
+                    try {
+                      final roomId = await createDm(
+                        accountUserId: accountUserId,
+                        userId: contact.id,
+                      );
+                      // The account may have switched while the request was
+                      // in flight: skip the navigation — the chat page
+                      // would open against a room of the previous account.
+                      // `mounted` first: `ref.read` throws after unmount
+                      // (Riverpod asserts on disposed widgets).
+                      if (!mounted) return;
+                      if (ref.read(activeUserIdProvider) != accountUserId) {
+                        return;
+                      }
+                      if (context.mounted) {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => ChatDetailPage(
+                              roomId: roomId,
+                              roomName: contact.name,
+                              avatarUrl: _resolvedAvatarUrl,
+                            ),
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                      // `mounted` first: `ref.read` throws after unmount.
+                      if (!mounted) return;
+                      if (ref.read(activeUserIdProvider) != accountUserId) {
+                        return;
+                      }
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          // Shared wording: timeout mapping and partial-
+                          // success passthrough come from the single
+                          // `actionFailureMessage` source.
+                          SnackBar(
+                            content: Text(actionFailureMessage(e)),
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    } finally {
+                      if (mounted) _creatingDm = false;
+                    }
+                  },
           ),
         ],
       ),

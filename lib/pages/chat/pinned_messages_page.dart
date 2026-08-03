@@ -8,6 +8,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
+import 'action_failure_message.dart';
 import 'chat_timestamp.dart';
 
 class PinnedMessagesPage extends ConsumerStatefulWidget {
@@ -24,6 +25,11 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   Object? _loadError;
   bool _loading = true;
   bool _reloadTrailing = false;
+
+  /// Set when the account switched while this page was alive: the page then
+  /// shows a neutral placeholder instead of stale data or a bogus error.
+  bool _accountSwitched = false;
+
   /// Message ids whose unpin request is in flight, mapped to the moment the
   /// lock was taken. The server toggle is a read-modify-write: without this
   /// guard a double-tap on the unpin button would first remove the pin and
@@ -34,6 +40,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   final Map<String, DateTime> _pendingUnpinIds = {};
   static const Duration _unpinLockTimeout = Duration(seconds: 30);
   Timer? _unpinLockExpiryTimer;
+
   /// Toggles still awaiting their server response, independent of the lock:
   /// a lock may expire while its toggle is still in flight (very slow
   /// network), and the button must stay disabled either way.
@@ -57,27 +64,83 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         .map((lockedAt) => lockedAt.add(_unpinLockTimeout))
         .reduce((earlier, later) => earlier.isBefore(later) ? earlier : later);
     final delay = nextExpiry.difference(now);
-    _unpinLockExpiryTimer = Timer(
-      delay.isNegative ? Duration.zero : delay,
-      () {
-        if (!mounted) return;
-        setState(() {
-          _pendingUnpinIds.removeWhere(
-            (_, lockedAt) =>
-                !lockedAt.add(_unpinLockTimeout).isAfter(nextExpiry),
-          );
-        });
-        _scheduleUnpinLockExpiry();
-      },
-    );
+    _unpinLockExpiryTimer = Timer(delay.isNegative ? Duration.zero : delay, () {
+      if (!mounted) return;
+      setState(() {
+        _pendingUnpinIds.removeWhere(
+          (_, lockedAt) => !lockedAt.add(_unpinLockTimeout).isAfter(nextExpiry),
+        );
+      });
+      _scheduleUnpinLockExpiry();
+    });
   }
+
   Completer<void>? _reloadCompletion;
   late final StreamSubscription<rust.SyncEvent> _syncSubscription;
-  late final Future<String?> _roomSubscription;
+  Future<String?> _roomSubscription = Future.value(null);
+
+  /// Whether the room subscription is currently active; a failed subscribe
+  /// is re-attempted on the next successful reload. `_subscriptionPending`
+  /// distinguishes "in flight" (no retry yet) from "failed" (retry).
+  bool _subscriptionPending = false;
+  bool _subscriptionActive = false;
+
+  /// Set when an account switch happens while a subscribe may be in flight:
+  /// the Rust side resets the subscription state on switch, so the in-flight
+  /// registration (if any) is gone even if the RPC later reports success.
+  /// The success handler re-subscribes instead of trusting the stale id.
+  bool _subscriptionDirty = false;
+
+  /// The account this page was opened under. The sync event stream is global
+  /// across accounts, so after an account switch it may still fire for the
+  /// old room; reloading then would query the new account's client for a
+  /// room it may not even know.
+  String? _subscribedUserId;
+
+  Future<String?> _subscribeForReceipts() {
+    // A fresh subscribe consumes any switch-dirtiness: only an in-flight
+    // subscribe started before the switch needs the success handler's
+    // re-check (see below).
+    _subscriptionDirty = false;
+    _subscriptionPending = true;
+    return rust
+        .subscribeRoomForReceipts(
+          roomId: widget.roomId,
+          // Use the page's account snapshot, not the live provider: the
+          // async call could otherwise register under a switched account
+          // while the page still identifies with its original one.
+          accountUserId: _subscribedUserId,
+        )
+        .then<String?>((subscriptionId) {
+          _subscriptionPending = false;
+          if (_subscriptionDirty) {
+            // An account switch happened while this subscribe was in
+            // flight: the Rust side may have cleared the registration
+            // (switch resets the subscription state). If the page's
+            // account is active again, re-subscribe now; otherwise the
+            // switch-back handler will.
+            _subscriptionDirty = false;
+            if (mounted &&
+                ref.read(activeUserIdProvider) == _subscribedUserId) {
+              _roomSubscription = _subscribeForReceipts();
+            }
+            return null;
+          }
+          _subscriptionActive = true;
+          return subscriptionId;
+        })
+        .catchError((error) {
+          debugPrint('subscribe pinned room updates failed: $error');
+          _subscriptionPending = false;
+          _subscriptionActive = false;
+          return null;
+        });
+  }
 
   @override
   void initState() {
     super.initState();
+    _subscribedUserId = ref.read(activeUserIdProvider);
     unawaited(_reload());
     _syncSubscription = rust.watchSyncEvents().listen((event) {
       final shouldReload = switch (event) {
@@ -91,16 +154,47 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       }
     });
     // Keep room-level state in Sliding Sync while this page covers the chat.
-    _roomSubscription = rust
-        .subscribeRoomForReceipts(
-          roomId: widget.roomId,
-          accountUserId: ref.read(activeUserIdProvider),
-        )
-        .then<String?>((subscriptionId) => subscriptionId)
-        .catchError((error) {
-          debugPrint('subscribe pinned room updates failed: $error');
-          return null;
+    _roomSubscription = _subscribeForReceipts();
+    // Switching away must drop the old account's data for the neutral
+    // placeholder immediately (not wait for a reload to notice), and
+    // switching back must re-subscribe (the Rust side cleared it) and reload.
+    ref.listenManual(activeUserIdProvider, (_, next) {
+      if (!mounted) return;
+      if (_subscribedUserId == null && next != null) {
+        // Opened before login completed: adopt the first account and load
+        // its data instead of showing the placeholder forever.
+        _subscribedUserId = next;
+        setState(() => _accountSwitched = false);
+        if (!_subscriptionPending) {
+          _roomSubscription = _subscribeForReceipts();
+        }
+        unawaited(_reload());
+        return;
+      }
+      if (next != _subscribedUserId) {
+        // A switch happened while a subscribe may be in flight: mark it so
+        // the success handler re-checks (the Rust side resets the
+        // subscription state on switch, so a "successful" pre-switch
+        // registration is gone).
+        _subscriptionDirty = true;
+        setState(() {
+          _loading = false;
+          _loadError = null;
+          _messages = null;
+          _accountSwitched = true;
+          _pendingUnpinIds.clear();
+          _inflightUnpinIds.clear();
+          _scheduleUnpinLockExpiry();
         });
+      } else {
+        // Skip if a subscription is already in flight: re-subscribing now
+        // would register a second desired entry whose id nothing unsubscribes.
+        if (!_subscriptionPending) {
+          _roomSubscription = _subscribeForReceipts();
+        }
+        unawaited(_reload());
+      }
+    });
   }
 
   @override
@@ -112,6 +206,11 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   }
 
   Future<void> _unsubscribeAfterSubscribe() async {
+    // Runs after dispose via unawaited(), so the page's UI never blocks on
+    // it. Wait for the in-flight subscribe to land (a fast local
+    // registration) so the subscription id is never lost — dropping it
+    // would leave the room in the sliding-sync subscription set until the
+    // next account switch/logout.
     final subscriptionId = await _roomSubscription;
     if (subscriptionId == null) return;
     try {
@@ -147,12 +246,51 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       do {
         _reloadTrailing = false;
         try {
+          if (ref.read(activeUserIdProvider) != _subscribedUserId) {
+            // The page outlived its account: stop loading (and stop the
+            // spinner a `showLoading: true` reload may have started) and
+            // drop stale data in favor of a neutral placeholder — stale
+            // rows rendered with the new account's ignore list would be a
+            // mixed-account view.
+            if (mounted) {
+              setState(() {
+                _loading = false;
+                _loadError = null;
+                _messages = null;
+                _accountSwitched = true;
+                _pendingUnpinIds.clear();
+                _inflightUnpinIds.clear();
+                _scheduleUnpinLockExpiry();
+              });
+            }
+            return;
+          }
           final messages = await rust.getPinnedMessages(roomId: widget.roomId);
+          // The account may have switched while the request was in flight:
+          // the result belongs to whatever account was active on the Rust
+          // side, so re-check before applying it. Never touch the ref after
+          // the page was popped (reading through an unmounted ref throws).
+          if (!mounted) return;
+          if (ref.read(activeUserIdProvider) != _subscribedUserId) {
+            if (mounted) {
+              setState(() {
+                _loading = false;
+                _loadError = null;
+                _messages = null;
+                _accountSwitched = true;
+                _pendingUnpinIds.clear();
+                _inflightUnpinIds.clear();
+                _scheduleUnpinLockExpiry();
+              });
+            }
+            return;
+          }
           if (!mounted) return;
           setState(() {
             _messages = messages;
             _loadError = null;
             _loading = false;
+            _accountSwitched = false;
             // Release only the locks whose message left the list. A reload
             // can serve a stale snapshot (the offline store fallback, or a
             // concurrent toggle still queued on the server), so a row that
@@ -164,12 +302,44 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
             );
             _scheduleUnpinLockExpiry();
           });
+          // Re-attempt a failed room subscription (only after it finished
+          // with an error, never while one is in flight): without it, pinned
+          // changes stop streaming in until the page is rebuilt.
+          if (!_subscriptionPending && !_subscriptionActive) {
+            _roomSubscription = _subscribeForReceipts();
+          }
         } catch (error) {
+          // Same re-check: a mid-flight switch must surface the neutral
+          // placeholder, not a bogus "加载失败" for the wrong account.
+          // Reading through an unmounted ref throws; guard first.
+          if (!mounted) return;
+          if (ref.read(activeUserIdProvider) != _subscribedUserId) {
+            if (mounted) {
+              setState(() {
+                _loading = false;
+                _loadError = null;
+                _messages = null;
+                _accountSwitched = true;
+                _pendingUnpinIds.clear();
+                _inflightUnpinIds.clear();
+                _scheduleUnpinLockExpiry();
+              });
+            }
+            return;
+          }
           if (!mounted) return;
           setState(() {
             _loadError = error;
             _loading = false;
+            // The account is the original one again: a load failure is a
+            // regular error with its retry entry, not "账号已切换".
+            _accountSwitched = false;
           });
+          // The reload failed, but a broken subscription must still heal
+          // (a failed subscribe is retried here just like on success).
+          if (!_subscriptionPending && !_subscriptionActive) {
+            _roomSubscription = _subscribeForReceipts();
+          }
         }
       } while (_reloadTrailing && mounted);
     } finally {
@@ -210,6 +380,14 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       );
     }
     if (_messages == null) {
+      if (_accountSwitched) {
+        return const Center(
+          child: Text(
+            '账号已切换',
+            style: TextStyle(color: AppColors.onSurfaceVariant),
+          ),
+        );
+      }
       return Center(
         child: TextButton.icon(
           onPressed: () {
@@ -239,12 +417,10 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         ),
       );
     }
-    final messages = _messages!
-        .where(
-          (message) =>
-              message.isMe || !ignoredUserIds.contains(message.senderId),
-        )
-        .toList();
+    // Ignored senders' rows are KEPT (with hidden content): the row's
+    // unpin button is the only way to remove a pin the user placed before
+    // ignoring the sender — filtering the row away would strand the pin.
+    final messages = _messages!;
     if (messages.isEmpty) {
       return RefreshIndicator(
         color: AppColors.primary,
@@ -279,7 +455,11 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         itemBuilder: (context, index) {
           if (_loadError != null && index == 0) return _refreshErrorTile();
           final message = messages[index - (_loadError == null ? 0 : 1)];
-          final content = message.content.trim().isEmpty
+          final ignoredSender =
+              !message.isMe && ignoredUserIds.contains(message.senderId);
+          final content = ignoredSender
+              ? '来自已忽略用户的消息'
+              : message.content.trim().isEmpty
               ? (message.filename ?? '媒体消息')
               : message.content;
           return ListTile(
@@ -325,7 +505,8 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
                     color: AppColors.onSurfaceVariant,
                     size: 18,
                   ),
-                  onPressed: _unpinLocked(message.id) ||
+                  onPressed:
+                      _unpinLocked(message.id) ||
                           _inflightUnpinIds.contains(message.id)
                       ? null
                       : () => unawaited(_unpin(message)),
@@ -343,68 +524,99 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       return;
     }
     if (_messages == null) return;
+    if (ref.read(activeUserIdProvider) != _subscribedUserId) return;
     final originalIndex = _messages!.indexWhere((m) => m.id == message.id);
     setState(() {
       _pendingUnpinIds[message.id] = clock.now();
       _inflightUnpinIds.add(message.id);
       _scheduleUnpinLockExpiry();
-      // Drop the row optimistically: the removal was accepted by the server
-      // and keeping the row visible would invite a second tap that re-pins
-      // the message while the confirming reload is still in flight.
+      // Drop the row optimistically (the server confirmation comes with
+      // the reload): keeping the row visible would invite a second tap
+      // that re-pins the message while the write is still in flight. A
+      // failed write restores the row below.
       _messages = List.of(_messages!)..removeWhere((m) => m.id == message.id);
     });
     try {
-      // The toggle returns the message's pinned state *after* the server
-      // write, which is authoritative: a stale list (refreshed elsewhere)
-      // that already dropped the pin flips the message back to pinned, and
-      // reporting that beats claiming "已取消置顶".
-      final pinned = await rust.togglePinnedMessage(
+      // Idempotent set: the request always targets the unpinned state. The
+      // lock stays until a reload confirms the row left the list (see
+      // _runReloads) or times out — a stale reload snapshot must not unlock
+      // it early, and a cross-device re-pin must not lock it forever.
+      await rust.setPinnedMessage(
+        accountUserId: _subscribedUserId ?? '',
         roomId: widget.roomId,
         eventId: message.id,
+        pinned: false,
       );
-      if (!mounted) return;
+      // The account may have switched while the request was in flight: the
+      // write itself was guarded server-side, so just skip the local
+      // bookkeeping (the page shows the switched placeholder anyway).
+      if (!mounted || ref.read(activeUserIdProvider) != _subscribedUserId) {
+        return;
+      }
       setState(() {
         _inflightUnpinIds.remove(message.id);
-        if (pinned) {
-          // The server re-pinned the message (the local list was stale):
-          // release the lock so the reload can restore the row with an
-          // actionable button.
-          _pendingUnpinIds.remove(message.id);
-        }
         _scheduleUnpinLockExpiry();
       });
-      // Otherwise keep the id in _pendingUnpinIds: the button stays locked
-      // until a reload confirms the message left the list (see _runReloads),
-      // or the lock times out — a stale reload snapshot must not unlock it
-      // early, and a cross-device re-pin must not lock it forever.
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pinned ? '消息已置顶' : '已取消置顶'),
-          duration: const Duration(seconds: 1),
-        ),
+        // Long enough to be noticed: the row was optimistically removed, so
+        // there is no on-screen confirmation left (failure paths use 2s).
+        const SnackBar(content: Text('已取消置顶'), duration: Duration(seconds: 2)),
       );
       // Refresh towards the server state: after a removal the row stays
-      // gone; after a re-pin (stale local list) it must come back.
+      // gone.
       unawaited(_reload());
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || ref.read(activeUserIdProvider) != _subscribedUserId) {
+        // The account switched mid-flight: the page shows the placeholder,
+        // so skip the restore, snack bar, and reload entirely.
+        return;
+      }
+      final timedOut = isMutationTimeout(error);
+      if (timedOut) {
+        // A timeout may still land server-side (the queued operation keeps
+        // running in the background). Keep the row removed and the lock
+        // held — restoring it would invite a second tap whose result the
+        // late operation could overwrite — and let the reload settle the
+        // final state.
+        setState(() {
+          _inflightUnpinIds.remove(message.id);
+          _scheduleUnpinLockExpiry();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('操作超时，请稍后下拉刷新确认最终状态'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        unawaited(_reload());
+        return;
+      }
       setState(() {
-        // The server still has the pin (the request failed): restore the
-        // row at its previous position (the list is ordered by the server's
-        // pinned state, so appending at the top would misrepresent it), and
-        // release the lock so the user can retry.
+        // The server still has the pin (the request failed deterministically):
+        // restore the row at its previous position (the list is ordered by
+        // the server's pinned state, so appending at the top would
+        // misrepresent it), and release the lock so the user can retry.
         _pendingUnpinIds.remove(message.id);
         _inflightUnpinIds.remove(message.id);
         _scheduleUnpinLockExpiry();
         if (_messages != null &&
-            !_messages!.any((entry) => entry.id == message.id)) {
+            !_messages!.any((entry) => entry.id == message.id) &&
+            // `originalIndex` comes from this page's own pre-removal list,
+            // so it is always valid here. A concurrent reload may already
+            // have replaced the list (reconciling the server state,
+            // possibly without this pin): restoring the row is then
+            // transient — the reload below re-reads the server and settles
+            // the final list.
+            originalIndex >= 0) {
           final insertAt = originalIndex.clamp(0, _messages!.length);
           _messages = List.of(_messages!)..insert(insertAt, message);
         }
       });
       ScaffoldMessenger.of(context).showSnackBar(
+        // Shared wording: timeout mapping and partial-success passthrough
+        // come from the single `actionFailureMessage` source.
         SnackBar(
-          content: Text('取消置顶失败: $error'),
+          content: Text('取消置顶失败: ${actionFailureMessage(error)}'),
           duration: const Duration(seconds: 2),
         ),
       );

@@ -10,6 +10,7 @@ import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import 'action_failure_message.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
@@ -1310,10 +1311,61 @@ class MessageGroupWidget extends ConsumerWidget {
           }
         },
         onPin: () async {
+          // Local (not yet echoed) messages have no server event id: pinning
+          // them would write a bogus id into m.room.pinned_events, leaving a
+          // permanent "不可用" placeholder in the pinned list.
+          if (!message.id.startsWith(r'$')) {
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                const SnackBar(
+                  // `local_outgoing_sent:` messages are already on the
+                  // server but not yet echoed back as a remote event — the
+                  // local id still has no server meaning, so pinning stays
+                  // blocked, but "尚未发送" would be wrong for them.
+                  content: Text('消息同步中，请稍后置顶'),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            }
+            return;
+          }
+          // The account snapshot is captured once, before any await: the
+          // write below must target the account the menu was opened for. If
+          // the account switched mid-menu, the Rust guard rejects the
+          // stale-account write with a clear message instead of a confusing
+          // "room not joined" error against the new account.
+          final menuAccount = ref.read(activeUserIdProvider) ?? '';
+          // Decide pin vs unpin from the server state: the menu shows the
+          // same entry for both, and an idempotent set must not guess.
+          final List<String> pinnedIds;
           try {
-            final pinned = await togglePinnedMessage(
+            pinnedIds = await getPinnedEventIds(
+              accountUserId: menuAccount,
+              roomId: roomId,
+            );
+          } catch (error) {
+            // The decision read failed: nothing was written, so the
+            // timeout-aware "state may have changed" wording of the write
+            // path would be misleading here. Map the raw error through the
+            // shared wording (timeout mapping, Chinese) — the SDK detail
+            // stays visible but prefixed correctly.
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text('无法获取置顶状态，请重试: ${actionFailureMessage(error)}'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+            return;
+          }
+          try {
+            final target = !pinnedIds.contains(message.id);
+            final pinned = await setPinnedMessage(
+              accountUserId: menuAccount,
               roomId: roomId,
               eventId: message.id,
+              pinned: target,
             );
             if (overlayContext.mounted) {
               ScaffoldMessenger.of(overlayContext).showSnackBar(
@@ -1324,14 +1376,31 @@ class MessageGroupWidget extends ConsumerWidget {
               );
             }
           } catch (error) {
-            if (overlayContext.mounted) {
+            if (!overlayContext.mounted) {
+              return;
+            }
+            final timedOut = isMutationTimeout(error);
+            if (timedOut) {
+              // A timeout may still land server-side: the queued operation
+              // keeps running in the background, and setPinnedMessage
+              // returns the request value, not the final state. Tell the
+              // user to confirm instead of claiming a failed pin.
               ScaffoldMessenger.of(overlayContext).showSnackBar(
-                SnackBar(
-                  content: Text('置顶操作失败: $error'),
-                  duration: const Duration(seconds: 2),
+                const SnackBar(
+                  content: Text('置顶操作超时，状态可能已更新，请刷新确认'),
+                  duration: Duration(seconds: 2),
                 ),
               );
+              return;
             }
+            // Non-timeout failures go through the shared wording (Chinese,
+            // partial-success passthrough) — one source for all pages.
+            ScaffoldMessenger.of(overlayContext).showSnackBar(
+              SnackBar(
+                content: Text(actionFailureMessage(error)),
+                duration: const Duration(seconds: 2),
+              ),
+            );
           }
         },
         onReact: (emoji) =>

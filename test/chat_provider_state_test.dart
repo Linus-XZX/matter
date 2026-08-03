@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -46,6 +47,7 @@ class _FakeRustApi implements RustLibApi {
   Completer<List<String>>? pendingIgnoredUsers;
   int getMessagesCalls = 0;
   int markRoomAsReadCalls = 0;
+  bool? lastMarkReadExplicit;
   int chatRoomsCalls = 0;
   List<String>? chatRoomsIgnoredFilter;
   bool? chatRoomsAuthoritative;
@@ -93,8 +95,14 @@ class _FakeRustApi implements RustLibApi {
       false;
 
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
     markRoomAsReadCalls++;
+    lastMarkReadExplicit = explicit;
+    return true;
   }
 
   @override
@@ -247,6 +255,7 @@ void main() {
     rustApi.pendingIgnoredUsers = null;
     rustApi.getMessagesCalls = 0;
     rustApi.markRoomAsReadCalls = 0;
+    rustApi.lastMarkReadExplicit = null;
     rustApi.chatRooms = const [];
     rustApi.pendingChatRooms = null;
     rustApi.chatRoomsCalls = 0;
@@ -514,9 +523,11 @@ void main() {
     // Once the throttle window elapses, the next sync cycle retries again.
     await tester.pump(const Duration(seconds: 31));
     rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
-    for (var attempt = 0;
-        attempt < 10 && rustApi.ignoredUsersCalls == callsAfterFirstRetry;
-        attempt++) {
+    for (
+      var attempt = 0;
+      attempt < 10 && rustApi.ignoredUsersCalls == callsAfterFirstRetry;
+      attempt++
+    ) {
       await tester.pump();
     }
     expect(rustApi.ignoredUsersCalls, callsAfterFirstRetry + 1);
@@ -551,20 +562,16 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(
-      container.read(typingUsersProvider('!room:example.org')),
-      {'@bob:example.org'},
-    );
+    expect(container.read(typingUsersProvider('!room:example.org')), {
+      '@bob:example.org',
+    });
 
     // Switch account: typing rows are keyed per account, so the previous
     // account's state must not leak into the new account's view (the 5s
     // auto-clear timer died with the old session).
     container.read(activeUserIdProvider.notifier).value = '@carol:example.org';
     await tester.pump();
-    expect(
-      container.read(typingUsersProvider('!room:example.org')),
-      isEmpty,
-    );
+    expect(container.read(typingUsersProvider('!room:example.org')), isEmpty);
 
     typingSubscription.close();
     container.dispose();
@@ -1502,6 +1509,19 @@ void main() {
     expect(rustApi.ungroupedRoomsCalls, 2);
     expect(rustApi.spaceChildrenCalls, 2);
     expect(rustApi.searchRoomsCalls, 2);
+    // Member/knock lists are driven by member-state events, not generic
+    // room-list activity: refetching them per sync burst would fire a
+    // network /members request for every incoming message while the
+    // management page is open.
+    expect(rustApi.knockRequestsCalls, 1);
+    expect(rustApi.membersCalls, 1);
+
+    rustApi.syncEvents.add(
+      const rust.SyncEvent.roomMembersChanged(roomId: '!room:example.org'),
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+
     expect(rustApi.knockRequestsCalls, 2);
     expect(rustApi.membersCalls, 2);
 
@@ -1535,6 +1555,9 @@ void main() {
     container.read(sessionReadyProvider.notifier).value = true;
     container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
     container.read(currentRoomIdProvider.notifier).value = roomId;
+    // Mirror the chat page recording itself as the viewer of this room.
+    container.read(roomViewOwnerProvider(roomId).notifier).value = container
+        .read(activeUserIdProvider);
     await container.read(chatRoomsProvider.future);
     final subscription = container.listen(
       syncStreamProvider,
@@ -1564,6 +1587,10 @@ void main() {
 
     expect(rustApi.getMessagesCalls, 1);
     expect(rustApi.markRoomAsReadCalls, 1);
+    // The sync-driven auto-read passes explicit:false (it must not
+    // unconditionally clear the server flag — the store-checked clear inside
+    // the Rust side handles the "room being viewed" case).
+    expect(rustApi.lastMarkReadExplicit, isFalse);
     expect(rustApi.chatRoomsCalls, 2);
     final unreadOverride = container.read(roomUnreadOverrideProvider(roomId));
     expect(unreadOverride?.unread, isFalse);
@@ -1583,6 +1610,9 @@ void main() {
     container.read(sessionReadyProvider.notifier).value = true;
     container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
     container.read(currentRoomIdProvider.notifier).value = roomId;
+    // Mirror the chat page recording itself as the viewer of this room.
+    container.read(roomViewOwnerProvider(roomId).notifier).value = container
+        .read(activeUserIdProvider);
     container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
         true;
     final subscription = container.listen(
@@ -1613,6 +1643,9 @@ void main() {
     container.read(sessionReadyProvider.notifier).value = true;
     container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
     container.read(currentRoomIdProvider.notifier).value = roomId;
+    // Mirror the chat page recording itself as the viewer of this room.
+    container.read(roomViewOwnerProvider(roomId).notifier).value = container
+        .read(activeUserIdProvider);
     final subscription = container.listen(
       syncStreamProvider,
       (_, _) {},
@@ -1646,6 +1679,9 @@ void main() {
       container.read(activeUserIdProvider.notifier).value =
           '@alice:example.org';
       container.read(currentRoomIdProvider.notifier).value = roomId;
+      // Mirror the chat page recording itself as the viewer of this room.
+      container.read(roomViewOwnerProvider(roomId).notifier).value = container
+          .read(activeUserIdProvider);
       final subscription = container.listen(
         syncStreamProvider,
         (_, _) {},
@@ -1921,6 +1957,217 @@ void main() {
       rememberResolvedMxcUrl(ref, mxc, httpUrl);
 
       expect(ref.read(mxcUrlCacheProvider).values, contains(httpUrl));
+    });
+  });
+
+  group('timed-out unread suppression convergence', () {
+    testWidgets('a failed write is lifted, a landing write is kept', (
+      tester,
+    ) async {
+      var fakeNow = DateTime(2026, 1, 1, 12);
+      await withClock(Clock(() => fakeNow), () async {
+        const roomId = '!room:example.org';
+        final container = ProviderContainer();
+        container.read(sessionReadyProvider.notifier).value = true;
+        container.read(activeUserIdProvider.notifier).value =
+            '@alice:example.org';
+        final syncSubscription = container.listen(
+          syncStreamProvider,
+          (_, _) {},
+          fireImmediately: true,
+        );
+        rustApi.chatRooms = [_room(roomId)];
+
+        // Timed-out mark-unread write with the suppression armed.
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            true;
+
+        // A refresh inside the 250s window keeps the suppression.
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+
+        // Past the window with the write NOT landed (isMarkedUnread false,
+        // room not being viewed): the suppression is lifted.
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
+
+        // A landing write (echo now shows the marker) keeps the suppression
+        // while the room is NOT being viewed.
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            true;
+        rustApi.chatRooms = [
+          rust.ChatRoom(
+            id: roomId,
+            name: 'Room',
+            lastMessage: '',
+            lastMessageTime: '0',
+            lastEventId: '',
+            unreadCount: 0,
+            isMarkedUnread: true,
+            roomType: 'group',
+            isEncrypted: false,
+            isMuted: false,
+            roomState: 'joined',
+          ),
+        ];
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+
+        // A landing write keeps the suppression even while the user IS
+        // viewing the room: the marker was explicitly requested and stays
+        // until the room is opened again (same as the success path, which
+        // closes the room instead).
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(currentRoomIdProvider.notifier).value = roomId;
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+
+        // A viewed room whose write did not land: the suppression stays
+        // armed (a late landing must not be revoked by the auto-read; the
+        // success path behaves the same), and the entry is retained for
+        // re-checks.
+        rustApi.chatRooms = [_room(roomId)];
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            true;
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+
+        // Once the user stops viewing, the retained entry's next due
+        // evaluation drains it (still false).
+        container.read(currentRoomIdProvider.notifier).value = null;
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
+
+        // A marker that lands while the suppression was lifted by an
+        // explicit read action stays lifted: re-arming would block the
+        // auto-read for a marker that the read action is about to remove.
+        container.read(currentRoomIdProvider.notifier).value = roomId;
+        rustApi.chatRooms = [
+          rust.ChatRoom(
+            id: roomId,
+            name: 'Room',
+            lastMessage: '',
+            lastMessageTime: '0',
+            lastEventId: '',
+            unreadCount: 0,
+            isMarkedUnread: true,
+            roomType: 'group',
+            isEncrypted: false,
+            isMuted: false,
+            roomState: 'joined',
+          ),
+        ];
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            false;
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
+
+        // A write that never lands is not protected forever: past the
+        // bounded retention (~750s) the suppression is lifted even while
+        // the user keeps viewing (a viewed room's receipts must not be
+        // frozen indefinitely with no visible recovery).
+        rustApi.chatRooms = [_room(roomId)];
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            true;
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+        fakeNow = fakeNow.add(const Duration(seconds: 300));
+        rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump();
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
+
+        // A NEWER mark-unread write that re-armed the suppression is not
+        // lifted by the OLD registration's expiry: the revision guard keeps
+        // the newer write's protection until it lands or registers itself.
+        rustApi.chatRooms = [_room(roomId)];
+        noteTimedOutUnreadSuppression(
+          roomId,
+          revision: container.read(
+            roomAutoReadSuppressionRevisionProvider(roomId),
+          ),
+        );
+        container
+            .read(roomAutoReadSuppressionRevisionProvider(roomId).notifier)
+            .value++;
+        container.read(roomAutoReadSuppressedProvider(roomId).notifier).value =
+            true;
+        for (var i = 0; i < 3; i++) {
+          fakeNow = fakeNow.add(const Duration(seconds: 300));
+          rustApi.syncEvents.add(const rust.SyncEvent.syncCompleted());
+          await tester.pump(const Duration(milliseconds: 600));
+          await tester.pump();
+        }
+        // Past the old entry's 750s bound, but the revision mismatch means
+        // the expiry must not lift the newer write's suppression.
+        expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+
+        syncSubscription.close();
+        container.dispose();
+        await tester.pump(const Duration(seconds: 1));
+      });
     });
   });
 }

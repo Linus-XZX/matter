@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -187,7 +188,11 @@ final ignoredUserIdsProvider = FutureProvider<Set<String>>((ref) async {
     disposed = true;
     // A cancelled first load may never reach its finally block. Release its
     // namespace slot now, but leave pending work for a live build to drain.
+    // The pending-revalidation set is per-build bookkeeping too: drop the
+    // entry, or a stale one would trigger a spurious revalidation for the
+    // next session's build.
     releaseBuild(drainPending: false);
+    _ignoredListRevalidationPending.remove(namespace);
   });
   final writeThroughs = _ignoredListWriteThroughs.stream.listen((changed) {
     if (changed != namespace || disposed) return;
@@ -393,12 +398,21 @@ Future<void> _refreshIgnoredUserIds(
         // IgnoredUsersChanged) may absorb store additions.
         return;
       }
-      // The store may already hold cross-device additions the persisted
-      // snapshot missed — union conservatively so Dart timelines (which
+      // A confirmed list whose persistence lagged the snapshot (a failed
+      // persist) is still the server-confirmed intent: persist it as-is
+      // rather than unioning the stale store back in — the union could
+      // resurrect a just-un-ignored sender whose echo has not landed.
+      // Without a confirmed list, the store may hold cross-device additions
+      // the snapshot missed — union conservatively so Dart timelines (which
       // filter on this list alone) hide those senders too. Only a
       // server-authoritative result may shrink the list or be confirmed.
-      final merged = {...persisted, ...result.userIds};
-      if (merged.length != persisted.length) {
+      final merged = confirmed != null
+          ? {...confirmed}
+          : {...persisted, ...result.userIds};
+      // Compare by CONTENT, not length: a same-length swap (un-ignore A,
+      // ignore B) must still be persisted, or the stale disk snapshot
+      // would resurrect A on the next startup.
+      if (!setEquals(merged, persisted)) {
         await _enqueueIgnoredListWrite(namespace, version, () async {
           await _persistIgnoredUserIds(namespace, merged);
         });
@@ -497,7 +511,14 @@ Future<void> _enqueueIgnoredListWrite(
 Future<void> _drainIgnoredListWrites(String namespace) async {
   final queue = _ignoredListWriteQueues[namespace]!;
   while (queue.isNotEmpty) {
-    await queue.first();
+    // A throwing write must not stall the drain: its completer already
+    // carried the error to the enqueue side, so swallow it here and move
+    // on (the queue entry is still consumed below).
+    try {
+      await queue.first();
+    } catch (_) {
+      // Error already reported through the completer.
+    }
     queue.removeAt(0);
   }
   // Drop the drained queue entry so per-account state does not accumulate
@@ -605,6 +626,124 @@ RoomAutoReadSuppressionToken setRoomAutoReadSuppressed(
   );
 }
 
+/// Rooms whose mark-unread write timed out: the suppression stays armed
+/// (the queued tail may still land), but a write that ultimately failed
+/// must not leave the auto-read suppressed forever. The sync flow
+/// re-checks these against the room list once 250s have passed — past the
+/// queue bounds (30s + 120s) plus the operation's HTTP retries, a landed
+/// write has been confirmed by its sync echo (`isMarkedUnread == true`
+/// keeps the suppression), a failed one has not (and the suppression is
+/// lifted). Same discipline as the mute 250s convergence read. Value is
+/// `(registeredAt, nextDueAt, suppressionRevision)`: the registration time
+/// is kept across the periodic re-checks so the viewing branch can bound
+/// the total retention, and the suppression revision guards the expiry
+/// branch against lifting a suppression a NEWER write re-armed.
+final _timedOutUnreadSuppressions = <String, (DateTime, DateTime, int)>{};
+
+/// Called by the mark-unread paths when their write times out (the
+/// suppression is intentionally kept armed there). [revision] is the
+/// `roomAutoReadSuppressionRevisionProvider` value at call time: the
+/// expiry branch only lifts the suppression this registration armed.
+void noteTimedOutUnreadSuppression(String roomId, {required int revision}) {
+  final now = clock.now();
+  _timedOutUnreadSuppressions[roomId] = (now, now, revision);
+}
+
+/// Lifts suppressions whose timed-out mark-unread write has definitively
+/// failed. Runs from the debounced room refresh (the sync flow). Uses a
+/// FRESH read: the invalidate-triggered seamless refresh would return the
+/// pre-echo cache, misjudging a late-landing write as failed. [isAlive]
+/// guards the reads after the await: the provider may be torn down (account
+/// switch / logout) while the fetch is in flight, and `read` on an unmounted
+/// ref throws.
+Future<void> _convergeTimedOutUnreadSuppressions(
+  dynamic read, {
+  required bool Function() isAlive,
+}) async {
+  if (!isAlive()) return;
+  if (_timedOutUnreadSuppressions.isEmpty) return;
+  final now = clock.now();
+  final due = _timedOutUnreadSuppressions.entries
+      .where(
+        (entry) =>
+            now.difference(entry.value.$2) >= const Duration(seconds: 250),
+      )
+      .map((entry) => (roomId: entry.key, at: entry.value))
+      .toList();
+  if (due.isEmpty) return;
+  List<rust.ChatRoom> rooms;
+  try {
+    rooms = await read(chatRoomsProvider.future) as List<rust.ChatRoom>;
+  } catch (_) {
+    return; // Load failure: re-check on the next refresh.
+  }
+  if (!isAlive()) return;
+  // Re-read the clock after the await: the reset below must not be
+  // shortened by the fetch duration (the 250s window starts from the
+  // assessment, not from the snapshot).
+  final assessedAt = clock.now();
+  for (final item in due) {
+    final roomId = item.roomId;
+    // A concurrent convergence run or a NEW registration may have replaced
+    // the entry while the fresh read was in flight: only act on the exact
+    // registration that was snapshotted.
+    if (_timedOutUnreadSuppressions[roomId] != item.at) continue;
+    final room = rooms.where((room) => room.id == roomId).firstOrNull;
+    if (room == null) {
+      // The room is gone from the list (left / kicked / removed): the
+      // suppression protects nothing — lift it and drop the entry.
+      _timedOutUnreadSuppressions.remove(roomId);
+      read(roomAutoReadSuppressedProvider(roomId).notifier).value = false;
+      continue;
+    }
+    if (room.isMarkedUnread) {
+      // The write landed. Keep the suppression as it is (armed paths stay
+      // armed until the room is reopened, matching the success path) and
+      // drop the entry — but do NOT re-arm a suppression that was cleared:
+      // an explicit read action (or a room reopen) is the user's latest
+      // intent, and re-arming would block the auto-read for a marker that
+      // action is about to remove.
+      _timedOutUnreadSuppressions.remove(roomId);
+      continue;
+    }
+    if (read(currentRoomIdProvider) == roomId) {
+      // The user is viewing this room and the write has not (yet) landed:
+      // keep the suppression armed — a write that lands later must not be
+      // revoked by the echo-driven auto-read (the user EXPLICITLY asked
+      // for the unread marker, and the success path keeps the suppression
+      // until the room is reopened). The retention is BOUNDED though: past
+      // the queue bounds (30s + 120s) plus the operation's HTTP retries
+      // plus headroom (~750s total), a write that still has not landed is
+      // treated as failed — keeping the suppression would freeze a viewed
+      // room's receipts indefinitely with no visible recovery (unlike
+      // mute, which keeps a retry tile). Reset the entry's clock on each
+      // pass so a late landing is still re-checked every 250s.
+      if (now.difference(item.at.$1) >= const Duration(seconds: 750)) {
+        // Only lift the suppression this registration armed: a NEWER
+        // mark-unread write may have re-armed it (it will manage its own
+        // registration when it times out) — clearing it here would let
+        // the auto-read revoke a marker the newer write is still landing.
+        if (read(roomAutoReadSuppressionRevisionProvider(roomId)) ==
+            item.at.$3) {
+          read(roomAutoReadSuppressedProvider(roomId).notifier).value = false;
+        }
+        _timedOutUnreadSuppressions.remove(roomId);
+        continue;
+      }
+      _timedOutUnreadSuppressions[roomId] = (
+        item.at.$1,
+        assessedAt,
+        item.at.$3,
+      );
+      continue;
+    }
+    // The write failed and the room is not being viewed: lift the
+    // suppression and drop the entry.
+    _timedOutUnreadSuppressions.remove(roomId);
+    read(roomAutoReadSuppressedProvider(roomId).notifier).value = false;
+  }
+}
+
 RoomUnreadOverride? _roomUnreadOverrideFor(
   rust.ChatRoom room, {
   required bool unread,
@@ -644,6 +783,30 @@ void setRoomUnreadOverrideById(
   }
 }
 
+/// Clear a watched unread override once it no longer applies to its room
+/// (the synced snapshot advanced past its baseline). Shared by every room
+/// tile that renders override-aware unread state — the main room list and
+/// the space child list — so a stale override does not linger in memory
+/// when only one of the two ever renders the room. The `identical` re-read
+/// guards against clearing an override a newer action just installed.
+void clearStaleRoomUnreadOverride(
+  WidgetRef ref,
+  BuildContext context,
+  String roomId,
+  RoomUnreadOverride? watchedOverride,
+) {
+  if (watchedOverride == null) return;
+  Future.microtask(() {
+    if (!context.mounted) return;
+    if (identical(
+      ref.read(roomUnreadOverrideProvider(roomId)),
+      watchedOverride,
+    )) {
+      ref.read(roomUnreadOverrideProvider(roomId).notifier).value = null;
+    }
+  });
+}
+
 class _ProviderAccess {
   final T Function<T>(ProviderListenable<T> provider) read;
   final void Function(ProviderOrFamily provider) invalidate;
@@ -667,9 +830,18 @@ void _invalidateSessionCollections(_ProviderAccess ref) {
     ref.invalidate(ignoredUserIdsProvider);
   }
   ref.invalidate(roomKnockRequestsProvider);
+  ref.invalidate(roomMembersProvider);
+  ref.invalidate(spaceDetailsProvider);
   ref.invalidate(roomUnreadOverrideProvider);
   ref.invalidate(roomAutoReadSuppressedProvider);
   ref.invalidate(roomAutoReadSuppressionRevisionProvider);
+  // The view-owner bookkeeping belongs to the previous session's rooms;
+  // a stale owner would keep suppressing auto-reads under the new session
+  // until each room is re-activated.
+  ref.invalidate(roomViewOwnerProvider);
+  // Timed-out mark-unread suppressions belong to the previous session too:
+  // their convergence checks would read the new account's room list.
+  _timedOutUnreadSuppressions.clear();
 }
 
 void invalidateSessionCollections(WidgetRef ref) {
@@ -919,6 +1091,16 @@ final currentRoomIdProvider = NotifierProvider<MutableState<String?>, String?>(
   () => MutableState(null),
 );
 
+/// The account that opened the room view for [roomId], if any. The room id
+/// alone is not account-scoped, so background (sync-driven) auto-reads must
+/// verify the room is being viewed under the *active* account — otherwise a
+/// switch to another account that shares the room would advance its read
+/// receipts without the user ever looking at it.
+final roomViewOwnerProvider =
+    NotifierProvider.family<MutableState<String?>, String?, String>(
+      (_) => MutableState(null),
+    );
+
 final messagesProvider = FutureProvider.family<List<rust.ChatMessage>, String>((
   ref,
   roomId,
@@ -1075,6 +1257,10 @@ List<rust.ChatMessage> reconcileMessageSnapshot(
 Future<void> primeMessageCache(WidgetRef ref, String roomId) async {
   final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
   final allowDiskCache = await _canPersistMessagesForRoom(ref.read, roomId);
+  // The calling widget may have been unmounted while the disk check was in
+  // flight (entering the chat and leaving again): `ref.read` below throws
+  // on a disposed widget.
+  if (!ref.context.mounted) return;
   final owner = ref.read(messageCacheOwnerProvider(roomId));
   if (owner != namespace) {
     ref.read(messageCacheProvider(roomId).notifier).value = const [];
@@ -1090,6 +1276,7 @@ Future<void> primeMessageCache(WidgetRef ref, String roomId) async {
     roomId: roomId,
     allowDiskRead: allowDiskCache,
   );
+  if (!ref.context.mounted) return;
   final current = ref.read(messageCacheProvider(roomId));
   if (current.isEmpty && cached.isNotEmpty) {
     ref.read(messageCacheProvider(roomId).notifier).value = cached;
@@ -1258,7 +1445,7 @@ Future<void> retryFailedLocalMessage(
   // would make the local/remote matcher (which pairs events within a window
   // around the local time) never match a retried send, leaving a permanent
   // duplicate bubble after a delayed retry.
-  var retryTimestamp = DateTime.now().millisecondsSinceEpoch;
+  var retryTimestamp = clock.now().millisecondsSinceEpoch;
   final cached = ref.read(messageCacheProvider(key.roomId));
   for (final cachedMessage in cached) {
     final ts = int.tryParse(cachedMessage.timestamp) ?? 0;
@@ -1321,12 +1508,12 @@ Future<void> retryFailedLocalMessage(
     } else {
       await rust.sendMessage(roomId: key.roomId, message: input);
     }
-    markLocalOutgoingMessageSent(ref, key, pendingId);
+    final sentId = markLocalOutgoingMessageSent(ref, key, pendingId);
     // Poll the timeline a few times so the sent local bubble is replaced by
     // the server echo even when the echo lands just after a refresh (same
     // behavior as a fresh send; a single refresh can leave the "sent" bubble
     // lingering for several seconds).
-    unawaited(reconcileSentLocalMessage(ref, key, pendingId));
+    unawaited(reconcileSentLocalMessage(ref, key, sentId));
   } catch (_) {
     // Restore the failed entry so the bubble keeps its error state. Guard
     // against the page (and its ref) being disposed while the request was
@@ -1358,6 +1545,9 @@ Future<void> reconcileSentLocalMessage(
   ];
   for (final delay in retryDelays) {
     if (delay != Duration.zero) await Future<void>.delayed(delay);
+    // The page (and its ref) may be disposed while the loop is asleep;
+    // reading through a disposed ref throws.
+    if (!ref.context.mounted) return;
     final stillLocal = ref
         .read(localOutgoingMessagesProvider(key))
         .any((message) => message.message.id == localId);
@@ -1372,8 +1562,18 @@ String markLocalOutgoingMessageSent(
   RoomAccountKey key,
   String pendingId,
 ) {
+  return markLocalOutgoingMessageSentInState(
+    ref.read(localOutgoingMessagesProvider(key).notifier),
+    pendingId,
+  );
+}
+
+String markLocalOutgoingMessageSentInState(
+  MutableState<List<LocalOutgoingMessage>> outgoing,
+  String pendingId,
+) {
   final sentId = sentLocalOutgoingId(pendingId);
-  final messages = ref.read(localOutgoingMessagesProvider(key));
+  final messages = outgoing.value;
   final index = messages.indexWhere(
     (message) => message.message.id == pendingId,
   );
@@ -1409,8 +1609,24 @@ String markLocalOutgoingMessageSent(
     ),
     sourceImageUrl: local.sourceImageUrl,
   );
-  ref.read(localOutgoingMessagesProvider(key).notifier).value = next;
+  outgoing.value = next;
   return sentId;
+}
+
+void markLocalOutgoingMessageFailedInState(
+  MutableState<List<LocalOutgoingMessage>> outgoing,
+  String pendingId,
+  LocalOutgoingMessage failed,
+) {
+  final messages = outgoing.value;
+  final index = messages.indexWhere(
+    (message) => message.message.id == pendingId,
+  );
+  if (index == -1) return;
+
+  final next = [...messages];
+  next[index] = failed;
+  outgoing.value = next;
 }
 
 Future<void> refreshMessagesRef(Ref ref, String roomId) async {
@@ -1429,14 +1645,26 @@ Future<void> refreshMessagesRef(Ref ref, String roomId) async {
     ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
     final current = ref.read(messageCacheProvider(roomId));
     final reconciled = reconcileMessageSnapshot(current, latest);
-    if (!identical(reconciled, current)) {
+    // Content-equality check (same discipline as updateMessageCache): the
+    // snapshot is rebuilt on every refresh, so `identical` would be false
+    // even for unchanged content, forcing a full watcher rebuild each sync.
+    var equal = current.length == reconciled.length;
+    if (equal) {
+      for (var i = 0; i < reconciled.length; i++) {
+        if (reconciled[i] != current[i]) {
+          equal = false;
+          break;
+        }
+      }
+    }
+    if (!equal) {
       ref.read(messageCacheProvider(roomId).notifier).value = reconciled;
     }
     unawaited(
       saveCachedMessages(
         namespace: namespace,
         roomId: roomId,
-        messages: reconciled,
+        messages: equal ? current : reconciled,
         persistToDisk: allowDiskCache,
       ),
     );
@@ -1479,8 +1707,15 @@ String _scopedMxcCacheKey(String namespace, String cacheKey) =>
 Future<void> _ensureMxcCacheLoaded(WidgetRef ref) async {
   final namespace = _mxcStorageNamespace(ref);
   if (_loadedMxcCacheUsers.contains(namespace)) return;
+  // Mark as loaded (attempted) BEFORE the await: an unmount race must not
+  // cause a full disk re-read on every later resolve call — the next
+  // complete pass overwrites any partially-loaded state anyway.
+  _loadedMxcCacheUsers.add(namespace);
 
   final prefs = await SharedPreferences.getInstance();
+  // The calling widget may have been unmounted while the disk read was in
+  // flight: `ref.read` below throws on a disposed widget.
+  if (!ref.context.mounted) return;
   final raw = prefs.getString(_mxcStorageKey(namespace));
   if (raw != null && raw.isNotEmpty) {
     try {
@@ -1506,8 +1741,6 @@ Future<void> _ensureMxcCacheLoaded(WidgetRef ref) async {
       debugPrint('Failed to load persisted MXC cache for $namespace: $error');
     }
   }
-
-  _loadedMxcCacheUsers.add(namespace);
 }
 
 Future<void> _persistMxcCacheEntry(
@@ -1586,6 +1819,9 @@ void rememberResolvedMxcUrl(
 Future<String?> resolveMxcUrlAvatar(WidgetRef ref, String? mxcUrl) async {
   if (mxcUrl == null || !mxcUrl.startsWith('mxc://')) return null;
   await _ensureMxcCacheLoaded(ref);
+  // The calling widget may have been unmounted while the cache load was in
+  // flight: `ref.read` below throws on a disposed widget.
+  if (!ref.context.mounted) return null;
   final namespace = _mxcStorageNamespace(ref);
   final rawCacheKey = _mxcCacheKey(mxcUrl, width: 96, height: 96);
   final cacheKey = _scopedMxcCacheKey(namespace, rawCacheKey);
@@ -1596,6 +1832,7 @@ Future<String?> resolveMxcUrlAvatar(WidgetRef ref, String? mxcUrl) async {
   try {
     final httpUrl = await rust.mxcToHttpAvatar(mxcUrl: mxcUrl);
     if (httpUrl == null || httpUrl.isEmpty) return null;
+    if (!ref.context.mounted) return null;
     ref.read(mxcUrlCacheProvider.notifier).value = {
       ...cache,
       cacheKey: httpUrl,
@@ -1615,6 +1852,9 @@ Future<String?> resolveMxcUrl(
 }) async {
   if (mxcUrl == null || !mxcUrl.startsWith('mxc://')) return null;
   await _ensureMxcCacheLoaded(ref);
+  // The calling widget may have been unmounted while the cache load was in
+  // flight: `ref.read` below throws on a disposed widget.
+  if (!ref.context.mounted) return null;
   final namespace = _mxcStorageNamespace(ref);
   final rawCacheKey = _mxcCacheKey(mxcUrl, width: width, height: height);
   final cacheKey = _scopedMxcCacheKey(namespace, rawCacheKey);
@@ -1632,6 +1872,7 @@ Future<String?> resolveMxcUrl(
           )
         : await rust.mxcToHttp(mxcUrl: mxcUrl);
     if (httpUrl == null || httpUrl.isEmpty) return null;
+    if (!ref.context.mounted) return null;
     ref.read(mxcUrlCacheProvider.notifier).value = {
       ...cache,
       cacheKey: httpUrl,
@@ -1733,6 +1974,16 @@ final syncStreamProvider =
       final stream = rust.watchSyncEvents();
       Timer? messageRefreshTimer;
       Timer? roomRefreshTimer;
+      // A `confirmViewedClear` request survives timer cancellations: a
+      // message flush cancels and re-arms the room refresh timer without
+      // the parameter, and the RoomListChanged echo must not lose its
+      // "confirm the viewed room" semantics to that unrelated re-arm.
+      var pendingConfirmViewedClear = false;
+      // Per-room debounce for the member/knock provider invalidates:
+      // member events can burst (catch-up sync, profile updates), and each
+      // invalidate refetches (network /members for knocks and lazy-loaded
+      // member lists) — mirroring the pages' own 500ms throttles.
+      final memberKnockInvalidateTimers = <String, Timer>{};
       final pendingMessageRefreshes = <String>{};
       final pendingReadAfterRefreshes = <String>{};
       var messageRefreshInFlight = false;
@@ -1740,26 +1991,199 @@ final syncStreamProvider =
       var disposed = false;
       late void Function(String roomId, {bool markReadAfterRefresh})
       scheduleMessageRefresh;
+      late Future<void> Function({bool skipCachedShortCircuit})
+      clearViewedMarkedUnread;
+      // Throttle the forced full-list fetch of clearViewedMarkedUnread
+      // while the room-list cache is unknown (deep-link before any watcher
+      // loaded it): without this, every 500ms sync debounce would fetch
+      // the whole room list just to re-check one room.
+      DateTime? lastForcedUnreadCheckAt;
 
-      void refreshRooms() {
+      void refreshRooms({bool refreshMembersAndKnocks = false}) {
         if (disposed || !ref.mounted) return;
         ref.invalidate(chatRoomsProvider);
         ref.invalidate(spacesProvider);
         ref.invalidate(ungroupedRoomsProvider);
         ref.invalidate(spaceChildrenProvider);
         ref.invalidate(searchRoomsProvider);
-        ref.invalidate(roomKnockRequestsProvider);
-        ref.invalidate(roomMembersProvider);
+        if (refreshMembersAndKnocks) {
+          // Member/knock lists are driven by member-state events (see the
+          // RoomMembersChanged case), not by generic sync activity:
+          // refetching them on every sync burst would fire a network
+          // /members request per incoming message while the management or
+          // chat pages are open (their own refresh paths are throttled).
+          // Only a full refresh (sync restart) needs the blanket
+          // invalidation.
+          ref.invalidate(roomKnockRequestsProvider);
+          ref.invalidate(roomMembersProvider);
+        }
       }
 
-      void scheduleRoomRefresh() {
+      void scheduleRoomRefresh({
+        bool refreshMembersAndKnocks = false,
+        // RoomListChanged arrives for an ACTUAL list change (e.g. a
+        // cross-device marked-unread echo): the cached snapshot may still
+        // predate it, so the short-circuits below must not skip the
+        // viewed-room clear — the echo is exactly the "viewer handled it
+        // now" signal.
+        bool confirmViewedClear = false,
+      }) {
         if (disposed || !ref.mounted) return;
+        pendingConfirmViewedClear =
+            pendingConfirmViewedClear || confirmViewedClear;
         roomRefreshTimer?.cancel();
         roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
           roomRefreshTimer = null;
+          // Consume the pending confirm request: the echo that armed it is
+          // exactly the "viewer handled it now" signal, and the short-
+          // circuits below must not skip the viewed-room clear.
+          final confirm = pendingConfirmViewedClear;
+          pendingConfirmViewedClear = false;
+          // Short-circuit the marked-unread check BEFORE invalidating the
+          // room list: once refreshRooms() invalidates, the cached value
+          // reads as loading and the short-circuit inside
+          // clearViewedMarkedUnread never hits — forcing a full room-list
+          // fetch on every message when the list has no watcher mounted.
+          var needsViewedClear = true;
+          if (!confirm) {
+            final viewedRoomId = ref.read(currentRoomIdProvider);
+            if (viewedRoomId != null) {
+              final cachedRooms = ref.read(chatRoomsProvider).asData?.value;
+              if (cachedRooms != null) {
+                rust.ChatRoom? cachedRoom;
+                for (final room in cachedRooms) {
+                  if (room.id == viewedRoomId) {
+                    cachedRoom = room;
+                    break;
+                  }
+                }
+                if (cachedRoom != null && !cachedRoom.isMarkedUnread) {
+                  needsViewedClear = false;
+                }
+              }
+            }
+          }
           refreshRooms();
+          // Timed-out mark-unread writes: lift suppressions whose write
+          // has definitively failed (250s past the queue bounds), so a
+          // viewed room's auto-reads resume.
+          unawaited(
+            _convergeTimedOutUnreadSuppressions(
+              ref.read,
+              isAlive: () => !disposed && ref.mounted,
+            ),
+          );
+          if (needsViewedClear) {
+            // A cross-device marked-unread echo lands as a room-list change
+            // (and every room refresh re-checks). If the currently viewed
+            // room is now marked unread, the viewer is the "handled now"
+            // signal — clear it via the auto-read (store-checked: no write
+            // when unset, so this is a no-op unless the flag actually
+            // arrived).
+            unawaited(clearViewedMarkedUnread(skipCachedShortCircuit: confirm));
+          }
         });
       }
+
+      /// Clear a `m.marked_unread` flag that arrived from another device
+      /// while the user is viewing the room. The room-list refresh above
+      /// runs first, so the read sees the echo; guards mirror the
+      /// message-flush auto-read (owner, suppression, mid-flight takeover).
+      clearViewedMarkedUnread = ({bool skipCachedShortCircuit = false}) async {
+        if (disposed || !ref.mounted) return;
+        final roomId = ref.read(currentRoomIdProvider);
+        if (roomId == null) return;
+        if (ref.read(roomAutoReadSuppressedProvider(roomId))) return;
+        final startAccount = ref.read(activeUserIdProvider);
+        if (startAccount == null ||
+            ref.read(roomViewOwnerProvider(roomId)) != startAccount) {
+          return;
+        }
+        // Short-circuit on the cached room list: normally the echo arrives
+        // via a RoomListChanged event whose handler already invalidated
+        // the list, so a cached `isMarkedUnread == false` means there is
+        // nothing to clear. Forcing `chatRoomsProvider` here on EVERY
+        // message would turn each 500ms-debounced refresh into a full
+        // room-list network request whenever the list is lazy (no watcher
+        // mounted); the worst a stale cache costs is one delayed clear
+        // cycle. A `RoomListChanged`-driven refresh skips this shortcut:
+        // its cached snapshot may still predate the echo that just
+        // arrived, and the whole point of the call is to confirm it.
+        if (!skipCachedShortCircuit) {
+          final cached = ref.read(chatRoomsProvider).asData?.value;
+          if (cached != null) {
+            rust.ChatRoom? cachedRoom;
+            for (final room in cached) {
+              if (room.id == roomId) {
+                cachedRoom = room;
+                break;
+              }
+            }
+            if (cachedRoom != null && !cachedRoom.isMarkedUnread) return;
+            // The viewed room is not in the loaded list at all (removed on
+            // another device / the user was kicked while viewing): there is
+            // nothing to clear — and a full-list refetch here would repeat
+            // on every sync burst for a room that can never appear again.
+            if (cachedRoom == null) return;
+          } else {
+            // Cache unknown (deep-link before any watcher loaded the
+            // list): throttle the forced full-list fetch — one attempt per
+            // 30s is plenty, the list refreshes on its own schedule too.
+            final now = clock.now();
+            if (lastForcedUnreadCheckAt != null &&
+                now.difference(lastForcedUnreadCheckAt!) <
+                    const Duration(seconds: 30)) {
+              return;
+            }
+            lastForcedUnreadCheckAt = now;
+          }
+        }
+        List<rust.ChatRoom> rooms;
+        try {
+          rooms = await ref.read(chatRoomsProvider.future);
+        } catch (_) {
+          // The room list already surfaces the load error.
+          return;
+        }
+        if (disposed || !ref.mounted) return;
+        rust.ChatRoom? unreadRoom;
+        for (final room in rooms) {
+          if (room.id == roomId) {
+            unreadRoom = room;
+            break;
+          }
+        }
+        if (unreadRoom == null || !unreadRoom.isMarkedUnread) return;
+        // Post-await guards: never send the clear for a viewer that took
+        // over the room mid-flight.
+        if (ref.read(currentRoomIdProvider) != roomId ||
+            ref.read(roomViewOwnerProvider(roomId)) != startAccount ||
+            ref.read(roomAutoReadSuppressedProvider(roomId))) {
+          return;
+        }
+        try {
+          final cleared = await rust.markRoomAsRead(
+            accountUserId: startAccount,
+            roomId: roomId,
+            explicit: false,
+          );
+          if (disposed || !ref.mounted) return;
+          if (ref.read(roomViewOwnerProvider(roomId)) != startAccount ||
+              ref.read(roomAutoReadSuppressedProvider(roomId))) {
+            return;
+          }
+          // Only claim the room is read when the flag was actually cleared:
+          // a skipped clear (one already in flight) whose tail later fails
+          // must not leave a stale "已读" override masking the server's
+          // marked-unread flag.
+          if (cleared) {
+            ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
+                _roomUnreadOverrideFor(unreadRoom, unread: false);
+          }
+        } catch (error) {
+          debugPrint('clear viewed marked unread failed: $error');
+        }
+      };
 
       void revalidateIgnoredUsers() {
         // Rust overlays pending confirmed local writes onto its store
@@ -1776,11 +2200,17 @@ final syncStreamProvider =
         );
       }
 
-      void scheduleSyncRefresh() {
-        scheduleRoomRefresh();
+      void scheduleSyncRefresh({
+        bool refreshMembersAndKnocks = false,
+        bool markCurrentRoomRead = false,
+      }) {
+        scheduleRoomRefresh(refreshMembersAndKnocks: refreshMembersAndKnocks);
         final currentRoomId = ref.read(currentRoomIdProvider);
         if (currentRoomId != null) {
-          scheduleMessageRefresh(currentRoomId);
+          scheduleMessageRefresh(
+            currentRoomId,
+            markReadAfterRefresh: markCurrentRoomRead,
+          );
         }
       }
 
@@ -1799,6 +2229,11 @@ final syncStreamProvider =
 
         messageRefreshInFlight = true;
         try {
+          // Fetch the room list at most once per flush and share it: every
+          // read-after-refresh room below needs it for the unread lookup,
+          // and refreshing it per room would fire N identical network
+          // requests when several rooms received messages in the same tick.
+          Future<List<rust.ChatRoom>>? sharedRoomsFetch;
           await Future.wait(
             roomIds.map((roomId) async {
               await refreshMessagesRef(ref, roomId);
@@ -1812,7 +2247,8 @@ final syncStreamProvider =
               roomRefreshTimer?.cancel();
               roomRefreshTimer = null;
               try {
-                final rooms = await ref.refresh(chatRoomsProvider.future);
+                sharedRoomsFetch ??= ref.refresh(chatRoomsProvider.future);
+                final rooms = await sharedRoomsFetch!;
                 for (final room in rooms) {
                   if (room.id == roomId) {
                     unreadRoom = room;
@@ -1825,25 +2261,54 @@ final syncStreamProvider =
                 );
               }
               if (disposed || !ref.mounted) return;
-              if (ref.read(currentRoomIdProvider) != roomId ||
+              // The receipts are written for the account that starts this
+              // flush; require the room's viewer to be that same account
+              // before sending…
+              final startAccount = ref.read(activeUserIdProvider);
+              if (startAccount == null ||
+                  ref.read(currentRoomIdProvider) != roomId ||
+                  // A shared room left open by another account must not
+                  // have its read receipts advanced on this account's
+                  // behalf.
+                  ref.read(roomViewOwnerProvider(roomId)) != startAccount ||
                   ref.read(roomAutoReadSuppressedProvider(roomId))) {
                 scheduleRoomRefresh();
                 return;
               }
-              try {
-                await rust.markRoomAsRead(roomId: roomId);
-                if (disposed ||
-                    !ref.mounted ||
-                    ref.read(roomAutoReadSuppressedProvider(roomId))) {
-                  return;
+              // The auto-read must not block the message refresh flush (a
+              // slow queue could stall every later refresh for up to 90s);
+              // fire it detached, with the unread bookkeeping after it.
+              final roomForRead = unreadRoom;
+              unawaited(() async {
+                try {
+                  final cleared = await rust.markRoomAsRead(
+                    accountUserId: startAccount,
+                    roomId: roomId,
+                    explicit: false,
+                  );
+                  if (disposed ||
+                      !ref.mounted ||
+                      // …and after the await: never apply the read
+                      // bookkeeping to a viewer that took over the room
+                      // mid-flight.
+                      ref.read(roomViewOwnerProvider(roomId)) != startAccount ||
+                      ref.read(roomAutoReadSuppressedProvider(roomId))) {
+                    return;
+                  }
+                  // Only claim the room is read when the flag was actually
+                  // cleared (see clearViewedMarkedUnread).
+                  if (cleared && roomForRead != null) {
+                    ref
+                        .read(roomUnreadOverrideProvider(roomId).notifier)
+                        .value = _roomUnreadOverrideFor(
+                      roomForRead,
+                      unread: false,
+                    );
+                  }
+                } catch (error) {
+                  debugPrint('markRoomAsRead after refresh failed: $error');
                 }
-                if (unreadRoom != null) {
-                  ref.read(roomUnreadOverrideProvider(roomId).notifier).value =
-                      _roomUnreadOverrideFor(unreadRoom, unread: false);
-                }
-              } catch (error) {
-                debugPrint('markRoomAsRead after refresh failed: $error');
-              }
+              }());
               scheduleRoomRefresh();
             }),
           );
@@ -1853,7 +2318,13 @@ final syncStreamProvider =
               (messageRefreshTrailing || pendingMessageRefreshes.isNotEmpty)) {
             messageRefreshTrailing = false;
             for (final roomId in pendingMessageRefreshes.toList()) {
-              scheduleMessageRefresh(roomId);
+              // Carry the read-after flag for rooms that requested it
+              // while this flush was in flight: a MessageSent that arrived
+              // mid-flush must still get its auto-read, not just a refresh.
+              scheduleMessageRefresh(
+                roomId,
+                markReadAfterRefresh: pendingReadAfterRefreshes.remove(roomId),
+              );
             }
           }
         }
@@ -1893,10 +2364,22 @@ final syncStreamProvider =
             // now that the connection has produced a sync cycle.
             _recoverIgnoredListError(ref);
           case rust.SyncEvent_FullRefreshRequired():
-            scheduleSyncRefresh();
+            // A sync restart may have dropped member/knock events: refresh
+            // those lists too. And the event loss means the current room's
+            // newly displayed messages never got their per-message
+            // MessageSent auto-read — send the receipt now (gated by the
+            // usual owner/suppression guards) so the unread badge does not
+            // linger until the next single message.
+            scheduleSyncRefresh(
+              refreshMembersAndKnocks: true,
+              markCurrentRoomRead: true,
+            );
             revalidateIgnoredUsers();
           case rust.SyncEvent_RoomListChanged():
-            scheduleRoomRefresh();
+            // A real room-list change (e.g. a cross-device marked-unread
+            // echo): the viewed-room clear must confirm against the fresh
+            // list even when the cached snapshot predates the echo.
+            scheduleRoomRefresh(confirmViewedClear: true);
           case rust.SyncEvent_MessageSent(:final roomId):
             if (ref.read(currentRoomIdProvider) == roomId) {
               scheduleMessageRefresh(roomId, markReadAfterRefresh: true);
@@ -1904,7 +2387,23 @@ final syncStreamProvider =
             scheduleRoomRefresh();
           case rust.SyncEvent_PinnedMessagesChanged():
             break;
-          case rust.SyncEvent_RoomMembersChanged():
+          case rust.SyncEvent_RoomMembersChanged(:final roomId):
+            // Member state changed: refresh this room's member and knock
+            // lists (each provider refetches only when watched — the chat
+            // page for members, the management page for knocks). Debounced
+            // per room (like the pages' own throttles): member events can
+            // burst, and each invalidate would otherwise fire a network
+            // /members request.
+            memberKnockInvalidateTimers[roomId]?.cancel();
+            memberKnockInvalidateTimers[roomId] = Timer(
+              const Duration(milliseconds: 500),
+              () {
+                memberKnockInvalidateTimers.remove(roomId);
+                if (disposed || !ref.mounted) return;
+                ref.invalidate(roomMembersProvider(roomId));
+                ref.invalidate(roomKnockRequestsProvider(roomId));
+              },
+            );
             scheduleRoomRefresh();
           case rust.SyncEvent_IgnoredUsersChanged():
             revalidateIgnoredUsers();
@@ -1916,6 +2415,10 @@ final syncStreamProvider =
         statusTimer.cancel();
         messageRefreshTimer?.cancel();
         roomRefreshTimer?.cancel();
+        for (final timer in memberKnockInvalidateTimers.values) {
+          timer.cancel();
+        }
+        memberKnockInvalidateTimers.clear();
         pendingReadAfterRefreshes.clear();
         subscription.cancel();
       });
@@ -1935,12 +2438,10 @@ final syncStreamProvider =
 /// alone would leak one account's "is typing" rows into another account's
 /// view. Auto-disposed: the value only lives while [typingUsersProvider] is
 /// watching it, so a stale entry can never survive into a later session.
-final typingUsersStateProvider =
-    NotifierProvider.autoDispose.family<
-      MutableState<Set<String>>,
-      Set<String>,
-      String
-    >((_) => MutableState({}));
+final typingUsersStateProvider = NotifierProvider.autoDispose
+    .family<MutableState<Set<String>>, Set<String>, String>(
+      (_) => MutableState({}),
+    );
 
 /// The set of user ids currently typing in [roomId] under the active
 /// account. Rebuilds when the account changes and switches to the new
@@ -1971,11 +2472,12 @@ final typingStreamProvider =
         ref.read(typingUsersStateProvider(stateKey).notifier).value = event
             .userIds
             .toSet();
-        // (Re)arm the auto-clear timer for this room.
-        _typingTimers[roomId]?.cancel();
-        _typingTimers[roomId] = Timer(const Duration(seconds: 5), () {
+        // (Re)arm the auto-clear timer for this room+account (the state is
+        // keyed per account, so the timer key must match it).
+        _typingTimers[stateKey]?.cancel();
+        _typingTimers[stateKey] = Timer(const Duration(seconds: 5), () {
           ref.read(typingUsersStateProvider(stateKey).notifier).value = {};
-          _typingTimers.remove(roomId);
+          _typingTimers.remove(stateKey);
         });
       });
 

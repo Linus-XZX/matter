@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'action_failure_message.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart';
@@ -71,16 +72,10 @@ class ChatListItem extends ConsumerWidget {
     final unreadAccent = room.isMuted
         ? AppColors.onSurfaceVariant
         : AppColors.primary;
+    // Same stale-override cleanup as the main room list: only a no-longer-
+    // applicable override is dropped.
     if (unreadOverride != null && !overrideApplies) {
-      Future.microtask(() {
-        if (!context.mounted) return;
-        if (identical(
-          ref.read(roomUnreadOverrideProvider(room.id)),
-          unreadOverride,
-        )) {
-          ref.read(roomUnreadOverrideProvider(room.id).notifier).value = null;
-        }
-      });
+      clearStaleRoomUnreadOverride(ref, context, room.id, unreadOverride);
     }
 
     return InkWell(
@@ -108,9 +103,17 @@ class ChatListItem extends ConsumerWidget {
                     nameEventId: room.nameEventId,
                     avatarEventId: room.avatarEventId,
                     isDm: room.roomType == 'dm',
-                    subtitle: room.unreadCount > 0
-                        ? '${room.unreadCount} 条未读消息'
-                        : '在线',
+                    subtitle: hasUnread
+                        ? (room.unreadCount > 0
+                              ? '${room.unreadCount} 条未读消息'
+                              : '已标记未读')
+                        : switch (room.roomState) {
+                            // "在线" is meaningless for pending rooms: the
+                            // preview above already explains the state.
+                            'invited' => '已邀请',
+                            'knocked' => '待批准',
+                            _ => '在线',
+                          },
                   ),
           ),
         );
@@ -287,67 +290,126 @@ class ChatListItem extends ConsumerWidget {
     WidgetRef ref,
     ChatRoom room,
   ) {
-    showModalBottomSheet<void>(
+    // Capture the account when the sheet OPENS: the actions must write as
+    // the account the sheet was opened under (same snapshot discipline as
+    // every other P0 write path), not as whatever account is active when
+    // the user taps an item.
+    final sheetAccountUserId = ref.read(activeUserIdProvider) ?? '';
+    BuildContext? sheetContextRef;
+    final sheetRoute = showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (sheetContext) => Padding(
-        padding: const EdgeInsets.all(12),
-        child: Material(
-          // A Material host (not a bare decorated container) so the sheet's
-          // ListTiles can paint their ink splashes and backgrounds.
-          color: AppColors.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadii.surface),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  leading: const Icon(
-                    Icons.done_all_rounded,
-                    color: AppColors.primary,
-                  ),
-                  title: const Text(
-                    '标记为已读',
-                    style: TextStyle(color: AppColors.onBackground),
-                  ),
-                  onTap: () => _runRoomListAction(
-                    context,
-                    sheetContext,
-                    ref,
-                    room,
-                    markRoomAsRead,
-                    false,
-                    '已标记为已读',
-                  ),
+      builder: (sheetContext) {
+        sheetContextRef = sheetContext;
+        String? savingAction; // 'read' | 'unread'
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) => Padding(
+            padding: const EdgeInsets.all(12),
+            child: Material(
+              // A Material host (not a bare decorated container) so the
+              // sheet's ListTiles can paint their ink splashes and
+              // backgrounds.
+              color: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadii.surface),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListTile(
+                      leading: const Icon(
+                        Icons.done_all_rounded,
+                        color: AppColors.primary,
+                      ),
+                      title: const Text(
+                        '标记为已读',
+                        style: TextStyle(color: AppColors.onBackground),
+                      ),
+                      trailing: savingAction == 'read'
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : null,
+                      enabled: savingAction == null,
+                      onTap: () => _runRoomListAction(
+                        context,
+                        sheetContext,
+                        ref,
+                        room,
+                        ({required String roomId}) => markRoomAsRead(
+                          accountUserId: sheetAccountUserId,
+                          roomId: roomId,
+                          explicit: true,
+                        ),
+                        false,
+                        '已标记为已读',
+                        onStart: () =>
+                            setSheetState(() => savingAction = 'read'),
+                      ),
+                    ),
+                    ListTile(
+                      leading: const Icon(
+                        Icons.mark_unread_chat_alt_rounded,
+                        color: AppColors.primary,
+                      ),
+                      title: const Text(
+                        '标记为未读',
+                        style: TextStyle(color: AppColors.onBackground),
+                      ),
+                      trailing: savingAction == 'unread'
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : null,
+                      enabled: savingAction == null,
+                      onTap: () => _runRoomListAction(
+                        context,
+                        sheetContext,
+                        ref,
+                        room,
+                        ({required String roomId}) => markRoomUnread(
+                          accountUserId: sheetAccountUserId,
+                          roomId: roomId,
+                        ),
+                        true,
+                        '已标记为未读',
+                        onStart: () =>
+                            setSheetState(() => savingAction = 'unread'),
+                      ),
+                    ),
+                  ],
                 ),
-                ListTile(
-                  leading: const Icon(
-                    Icons.mark_unread_chat_alt_rounded,
-                    color: AppColors.primary,
-                  ),
-                  title: const Text(
-                    '标记为未读',
-                    style: TextStyle(color: AppColors.onBackground),
-                  ),
-                  onTap: () => _runRoomListAction(
-                    context,
-                    sheetContext,
-                    ref,
-                    room,
-                    markRoomUnread,
-                    true,
-                    '已标记为未读',
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
+    // An account switch dismisses the sheet (same discipline as the
+    // management and space pages): its actions write under the account the
+    // sheet opened with, and a switch mid-flight would leave it hovering
+    // over the new account's list. The subscription lives only as long as
+    // the sheet route.
+    late final ProviderSubscription<String?> switchSub;
+    switchSub = ref.listenManual(activeUserIdProvider, (_, next) {
+      if (next == sheetAccountUserId) return;
+      final sheet = sheetContextRef;
+      // `isCurrent` guard: another modal (e.g. the device-verification
+      // dialog) may sit above the sheet — popping then would dismiss that
+      // dialog instead of the sheet.
+      if (sheet != null &&
+          sheet.mounted &&
+          ModalRoute.of(sheet)?.isCurrent == true) {
+        Navigator.of(sheet).pop();
+      }
+    });
+    sheetRoute.whenComplete(switchSub.close);
   }
 
   Future<void> _runRoomListAction(
@@ -357,84 +419,205 @@ class ChatListItem extends ConsumerWidget {
     ChatRoom room,
     Future<void> Function({required String roomId}) action,
     bool markedUnread,
-    String successMessage,
-  ) async {
+    String successMessage, {
+    VoidCallback? onStart,
+  }) async {
+    // The write can wait behind the mutation queue for up to ~90s; the
+    // sheet shows a spinner and disables both rows meanwhile (see
+    // _showRoomListActions).
+    onStart?.call();
     // `mounted` stays true while the sheet is in its exit animation, but
     // popping then would pop the route *below* the sheet; `isCurrent` turns
     // false as soon as the pop starts.
     bool sheetCanPop() =>
-        sheetContext.mounted &&
-        ModalRoute.of(sheetContext)?.isCurrent == true;
+        sheetContext.mounted && ModalRoute.of(sheetContext)?.isCurrent == true;
     final suppression = roomAutoReadSuppressedProvider(room.id);
     final suppressionNotifier = ref.read(suppression.notifier);
     final previousSuppression = suppressionNotifier.value;
+    // Captured up front (not via ref.read in the catch): the catch's
+    // bookkeeping must survive the page being unmounted mid-request, and
+    // ref.read throws on a disposed widget.
+    final unreadOverrideNotifier = ref.read(
+      roomUnreadOverrideProvider(room.id).notifier,
+    );
+    final previousUnreadOverride = unreadOverrideNotifier.value;
     final suppressionToken = setRoomAutoReadSuppressed(
       ref,
       room.id,
       suppressed: markedUnread,
     );
+    // Optimistic local unread marker (same as the management page): the
+    // queued write can take tens of seconds — the room must show the
+    // pending state immediately, not after the server round-trip.
+    if (markedUnread) {
+      setRoomUnreadOverride(ref, room, unread: true);
+    }
     try {
       await action(roomId: room.id);
-      if (!context.mounted || !suppressionToken.isCurrent) {
+      // The server write succeeded regardless of the token: close the
+      // sheet and report it. A stale token only means a newer actor owns
+      // the suppression/override bookkeeping, which must not be touched
+      // (its changes converge via the sync echo) — but it must also not
+      // leave the sheet stuck in its loading state. Pop first (the sheet
+      // may still be up even if the list item was unmounted meanwhile).
+      if (sheetContext.mounted &&
+          ModalRoute.of(sheetContext)?.isCurrent == true) {
+        Navigator.of(sheetContext).pop();
+      }
+      // The list item may have been unmounted while the request was in
+      // flight (room removed from the list / page popped): skip the rest —
+      // `ref` calls throw on a disposed widget, and the sync echo settles
+      // the server state.
+      if (!context.mounted) return;
+      if (suppressionToken.isCurrent) {
+        setRoomUnreadOverride(ref, room, unread: markedUnread);
+        ref.invalidate(chatRoomsProvider);
+        ref.invalidate(ungroupedRoomsProvider);
+        ref.invalidate(spaceChildrenProvider);
+        ref.invalidate(searchRoomsProvider);
+      }
+      // The account may have switched while the request was in flight (the
+      // write itself was guarded server-side under the account the sheet
+      // opened with): skip ALL feedback — a success snackbar about the
+      // previous account's action would mislead under the new account
+      // (same discipline as the management page).
+      if (ref.read(activeUserIdProvider) != suppressionToken.accountId) {
         return;
       }
-      setRoomUnreadOverride(ref, room, unread: markedUnread);
-      ref.invalidate(chatRoomsProvider);
-      ref.invalidate(ungroupedRoomsProvider);
-      ref.invalidate(spaceChildrenProvider);
-      ref.invalidate(searchRoomsProvider);
-      // The user may have dismissed the sheet while the request was in
-      // flight: skip the pop in that case, but always surface the result.
-      if (sheetCanPop()) Navigator.of(sheetContext).pop();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
     } catch (error) {
-      if (!suppressionToken.isCurrent) return;
-      suppressionNotifier.value = previousSuppression;
-      if (!context.mounted) return;
-      // Close the sheet first: the modal bottom sheet sits above the
-      // Scaffold that shows the snackbar, so leaving it open would hide the
-      // failure message for its whole duration.
+      // Restore the suppression (and the optimistic marker) only while this
+      // action still owns them.
+      if (suppressionToken.isCurrent) {
+        if (markedUnread) {
+          // A timeout is not a failure: the queued write's tail may still
+          // land (same discipline as the mute timeout marker). Keep the
+          // suppression armed so a later auto-read cannot revoke a marker
+          // that did land; drop only the optimistic marker (its TTL covers
+          // a real failure). A confirmed failure restores everything.
+          unreadOverrideNotifier.value = previousUnreadOverride;
+          if (!isMutationTimeout(error)) {
+            suppressionNotifier.value = previousSuppression;
+            // Restoring a STALE-armed suppression (a previous write's
+            // timeout left it true) must still be converged: the old entry
+            // may already be gone (its revision no longer matches after
+            // this write bumped it) — register afresh so the sync flow can
+            // still lift the suppression once this write definitively
+            // failed.
+            if (previousSuppression) {
+              noteTimedOutUnreadSuppression(
+                room.id,
+                revision: suppressionToken.value,
+              );
+            }
+          } else {
+            // The suppression stays armed: register the room so the sync
+            // flow converges it if the write ultimately failed (same
+            // discipline as the mute 250s convergence read). The token's
+            // revision is captured when the write armed the suppression —
+            // read before the await, so this works even if the page was
+            // disposed.
+            noteTimedOutUnreadSuppression(
+              room.id,
+              revision: suppressionToken.value,
+            );
+          }
+        } else {
+          // Un-marking restores the previous suppression freely: nothing
+          // can be revoked by a timed-out read here. A STALE-armed
+          // restoration (a previous mark-unread timeout left it true) must
+          // still be converged: the old entry's revision no longer matches
+          // after this write bumped it, so register afresh (same
+          // discipline as the mark-unread branch).
+          suppressionNotifier.value = previousSuppression;
+          if (previousSuppression) {
+            noteTimedOutUnreadSuppression(
+              room.id,
+              revision: suppressionToken.value,
+            );
+          }
+        }
+      }
+      // Close the sheet first (same order as the success path): the sheet
+      // is an independent route and may still be up even when the list
+      // item was unmounted (room removed from the list) — leaving it would
+      // strand its spinner with no feedback at all.
       if (sheetCanPop()) Navigator.of(sheetContext).pop();
+      if (!context.mounted) return;
+      // The account may have switched while the request was in flight (the
+      // write was then rejected deterministically server-side): skip the
+      // failure snackbar — it would describe the previous account's action
+      // under the new account (same discipline as the success path and the
+      // management page).
+      if (ref.read(activeUserIdProvider) != suppressionToken.accountId) {
+        return;
+      }
+      // Shared wording: timeout mapping and partial-success passthrough
+      // come from the single `actionFailureMessage` source.
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('操作失败: $error')));
+      ).showSnackBar(SnackBar(content: Text(actionFailureMessage(error))));
     }
   }
 }
 
-class _PendingRoomActions extends ConsumerWidget {
+class _PendingRoomActions extends ConsumerStatefulWidget {
   final ChatRoom room;
 
   const _PendingRoomActions({required this.room});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_PendingRoomActions> createState() =>
+      _PendingRoomActionsState();
+}
+
+class _PendingRoomActionsState extends ConsumerState<_PendingRoomActions> {
+  /// In-flight guard for the accept/reject/withdraw buttons: a second tap
+  /// before the first request resolves would double-fire the invite
+  /// mutation (the second is then rejected server-side, misreporting a
+  /// successful action as a failure).
+  bool _pendingAction = false;
+
+  ChatRoom get room => widget.room;
+
+  @override
+  Widget build(BuildContext context) {
     if (room.roomState == 'invited') {
       return Row(
         children: [
           _ActionButton(
             icon: Icons.check_rounded,
             label: '接受',
-            onPressed: () => _runAction(
-              context,
-              ref,
-              () => acceptRoomInvite(roomId: room.id),
-              successMessage: '已接受邀请',
-            ),
+            onPressed: _pendingAction
+                ? null
+                : () => _runAction(
+                    context,
+                    ref,
+                    () => acceptRoomInvite(
+                      accountUserId: ref.read(activeUserIdProvider) ?? '',
+                      roomId: room.id,
+                    ),
+                    successMessage: '已接受邀请',
+                  ),
           ),
           const SizedBox(width: 8),
           _ActionButton(
             icon: Icons.close_rounded,
             label: '拒绝',
             destructive: true,
-            onPressed: () => _runAction(
-              context,
-              ref,
-              () => rejectRoomInvite(roomId: room.id),
-              successMessage: '已拒绝邀请',
-            ),
+            onPressed: _pendingAction
+                ? null
+                : () => _runAction(
+                    context,
+                    ref,
+                    () => rejectRoomInvite(
+                      accountUserId: ref.read(activeUserIdProvider) ?? '',
+                      roomId: room.id,
+                    ),
+                    successMessage: '已拒绝邀请',
+                  ),
           ),
         ],
       );
@@ -445,12 +628,17 @@ class _PendingRoomActions extends ConsumerWidget {
           icon: Icons.undo_rounded,
           label: '撤回',
           destructive: true,
-          onPressed: () => _runAction(
-            context,
-            ref,
-            () => withdrawRoomKnock(roomId: room.id),
-            successMessage: '已撤回请求',
-          ),
+          onPressed: _pendingAction
+              ? null
+              : () => _runAction(
+                  context,
+                  ref,
+                  () => withdrawRoomKnock(
+                    accountUserId: ref.read(activeUserIdProvider) ?? '',
+                    roomId: room.id,
+                  ),
+                  successMessage: '已撤回请求',
+                ),
         ),
       ],
     );
@@ -462,19 +650,33 @@ class _PendingRoomActions extends ConsumerWidget {
     Future<void> Function() action, {
     required String successMessage,
   }) async {
+    // Entry guard (not only the disabled button): the rebuild lags a frame.
+    if (_pendingAction) return;
+    _pendingAction = true;
+    // 账号快照：请求期间切换账号时，下面的刷新与反馈全部跳过。
+    final accountUserId = ref.read(activeUserIdProvider) ?? '';
     try {
       await action();
+      // 账号可能在请求期间切换：跳过刷新与成功反馈（与失败路径一致）。
+      // `mounted` first: `ref.read` throws after unmount.
+      if (!context.mounted) return;
+      if (ref.read(activeUserIdProvider) != accountUserId) return;
       ref.invalidate(chatRoomsProvider);
       ref.invalidate(ungroupedRoomsProvider);
-      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
     } catch (error) {
       if (!context.mounted) return;
+      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+      if (ref.read(activeUserIdProvider) != accountUserId) return;
+      // Shared wording: timeout mapping and partial-success passthrough
+      // come from the single `actionFailureMessage` source.
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('操作失败: $error')));
+      ).showSnackBar(SnackBar(content: Text(actionFailureMessage(error))));
+    } finally {
+      if (mounted) _pendingAction = false;
     }
   }
 }
@@ -483,7 +685,7 @@ class _ActionButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool destructive;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   const _ActionButton({
     required this.icon,

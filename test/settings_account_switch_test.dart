@@ -73,19 +73,19 @@ class _FakeRustApi implements RustLibApi {
   Future<List<rust.AccountInfo>> crateApiMatrixListAccounts() async {
     if (listAccountsError case final error?) throw error;
     return [
-    if (!removedAccounts.contains('@alice:example.org'))
-      const rust.AccountInfo(
-        userId: '@alice:example.org',
-        deviceId: 'ALICE',
-        homeserverUrl: 'https://alice.example.org',
-      ),
-    if (!removedAccounts.contains('@bob:example.org'))
-      const rust.AccountInfo(
-        userId: '@bob:example.org',
-        deviceId: 'BOB',
-        homeserverUrl: 'https://bob.example.org',
-      ),
-  ];
+      if (!removedAccounts.contains('@alice:example.org'))
+        const rust.AccountInfo(
+          userId: '@alice:example.org',
+          deviceId: 'ALICE',
+          homeserverUrl: 'https://alice.example.org',
+        ),
+      if (!removedAccounts.contains('@bob:example.org'))
+        const rust.AccountInfo(
+          userId: '@bob:example.org',
+          deviceId: 'BOB',
+          homeserverUrl: 'https://bob.example.org',
+        ),
+    ];
   }
 
   @override
@@ -344,7 +344,13 @@ void main() {
       await tester.tap(find.text('退出登录'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('确定'));
-      await tester.pumpAndSettle();
+      // The removal flow's local file cleanup performs real IO that cannot
+      // complete under the fake test clock, so the removal spinner never
+      // clears; pump bounded frames (the assertions below cover the
+      // Rust-side effects and the provider state) instead of pumpAndSettle,
+      // which would time out waiting for the spinner.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
 
       expect(rustApi.switchCalls, ['@bob:example.org']);
       expect(rustApi.startSyncAccounts, ['@bob:example.org']);

@@ -12,11 +12,24 @@ class _FakeRustApi implements RustLibApi {
   String? lastToggleEventId;
   bool toggleResult = false;
   Object? toggleError;
+  int pinnedIdsCalls = 0;
+  List<String> pinnedIds = const [];
 
   @override
-  Future<bool> crateApiMatrixTogglePinnedMessage({
+  Future<List<String>> crateApiMatrixGetPinnedEventIds({
+    required String accountUserId,
+    required String roomId,
+  }) async {
+    pinnedIdsCalls++;
+    return pinnedIds;
+  }
+
+  @override
+  Future<bool> crateApiMatrixSetPinnedMessage({
+    required String accountUserId,
     required String roomId,
     required String eventId,
+    required bool pinned,
   }) async {
     togglePinnedCalls++;
     lastToggleRoomId = roomId;
@@ -105,9 +118,7 @@ void main() {
     expect(find.text('置顶/取消置顶'), findsOneWidget);
   });
 
-  testWidgets('pinning from the message menu calls the toggle', (
-    tester,
-  ) async {
+  testWidgets('pinning from the message menu calls the toggle', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final message = _message(id: r'$pin-action', isMe: false);
@@ -133,6 +144,35 @@ void main() {
     expect(find.text('消息已置顶'), findsOneWidget);
   });
 
+  testWidgets('the message menu unpins an already-pinned message', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-action', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = null;
+    api.toggleResult = false;
+    api.pinnedIds = [r'$pin-action'];
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-action')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    // The server state decides the target: pinned -> unpin, reported as such.
+    expect(api.togglePinnedCalls, 1);
+    expect(api.lastToggleEventId, r'$pin-action');
+    expect(find.text('已取消置顶'), findsOneWidget);
+    expect(find.text('消息已置顶'), findsNothing);
+  });
+
   testWidgets('a failed pin action surfaces the error', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
@@ -152,7 +192,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(api.togglePinnedCalls, 1);
-    expect(find.textContaining('置顶操作失败:'), findsOneWidget);
+    // Non-timeout failures go through the shared actionFailureMessage
+    // wording.
+    expect(find.textContaining('操作失败:'), findsOneWidget);
   });
 
   testWidgets('left swipe past threshold starts a reply to another user', (

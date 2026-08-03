@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:matter/features/markdown/markdown_source_store.dart';
 import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
@@ -15,9 +16,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeRustApi implements RustLibApi {
   @override
-  Future<void> crateApiMatrixMarkRoomAsRead({required String roomId}) async {}
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
+    return true;
+  }
 
   Completer<String>? pendingSend;
+  Completer<bool>? pendingEncryptionCheck;
 
   @override
   Future<String> crateApiMatrixSendMessage({
@@ -25,6 +33,11 @@ class _FakeRustApi implements RustLibApi {
     required rust.FormattedMessageInput message,
   }) {
     return (pendingSend ??= Completer<String>()).future;
+  }
+
+  @override
+  Future<bool> crateApiMatrixIsRoomEncrypted({required String roomId}) {
+    return pendingEncryptionCheck?.future ?? Future.value(false);
   }
 
   @override
@@ -49,6 +62,7 @@ void main() {
   tearDownAll(RustLib.dispose);
   setUp(() {
     rustApi.pendingSend = null;
+    rustApi.pendingEncryptionCheck = null;
     SharedPreferences.setMockInitialValues({});
   });
 
@@ -136,7 +150,46 @@ void main() {
 
     await tester.pumpWidget(_home(container));
     rustApi.pendingSend!.complete(r'$sent');
+    await tester.pumpAndSettle();
+
+    final outgoing = container.read(
+      localOutgoingMessagesProvider((
+        roomId: roomId,
+        userId: '@alice:example.org',
+      )),
+    );
+    expect(outgoing.single.message.id, startsWith(localOutgoingSentPrefix));
+  });
+
+  testWidgets('failed send after unmount marks the local message failed', (
+    tester,
+  ) async {
+    const roomId = '!failed-after-unmount:example.org';
+    const key = (roomId: roomId, userId: '@alice:example.org');
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    await tester.enterText(find.byType(TextField), 'will fail');
     await tester.pump();
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+
+    expect(
+      container.read(localOutgoingMessagesProvider(key)).single.message.id,
+      startsWith(localOutgoingPendingPrefix),
+    );
+
+    await tester.pumpWidget(_home(container));
+    rustApi.pendingSend!.completeError(StateError('offline'));
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(localOutgoingMessagesProvider(key)).single.message.id,
+      startsWith(localOutgoingFailedPrefix),
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Enter sends a message from an Android hardware keyboard', (
@@ -159,8 +212,48 @@ void main() {
 
       await tester.pumpWidget(_home(container));
       rustApi.pendingSend!.complete(r'$sent');
-      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(
+        await const MarkdownSourceStore().load(
+          userId: '@alice:example.org',
+          roomId: roomId,
+          eventId: r'$sent',
+          body: 'send with Enter',
+          formattedBody: null,
+          allowPersistence: true,
+        ),
+        'send with Enter',
+      );
     });
+  });
+
+  testWidgets('edit prefill completion is ignored after unmount', (
+    tester,
+  ) async {
+    const roomId = '!edit-unmount:example.org';
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    rustApi.pendingEncryptionCheck = Completer<bool>();
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    container
+            .read(
+              editingMessageProvider((
+                roomId: roomId,
+                userId: '@alice:example.org',
+              )).notifier,
+            )
+            .value =
+        _messageToEdit();
+    await tester.pump();
+
+    await tester.pumpWidget(_home(container));
+    rustApi.pendingEncryptionCheck!.complete(false);
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Shift+Enter does not send from an Android hardware keyboard', (
