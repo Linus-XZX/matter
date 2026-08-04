@@ -531,6 +531,55 @@ void main() {
     expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsWhileCovered));
   });
 
+  testWidgets('a popup suspends reads without rebuilding room subscriptions', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          navigatorObservers: [chatRouteObserver],
+          home: const ChatDetailPage(
+            roomId: '!room:example.org',
+            roomName: 'Room',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final typingSubscriptions = rustApi.subscribeTypingCalls;
+    final receiptSubscriptions = rustApi.subscribeRoomCalls;
+
+    final context = tester.element(find.byType(ChatDetailPage));
+    unawaited(
+      showDialog<void>(
+        context: context,
+        builder: (_) => const AlertDialog(content: Text('popup')),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+    expect(container.read(roomViewOwnerProvider('!room:example.org')), isNull);
+    expect(rustApi.unsubscribeTypingCalls, 0);
+    expect(rustApi.unsubscribeRoomCalls, 0);
+
+    Navigator.of(tester.element(find.text('popup'))).pop();
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(roomViewOwnerProvider('!room:example.org')),
+      '@alice:example.org',
+    );
+    expect(rustApi.subscribeTypingCalls, typingSubscriptions);
+    expect(rustApi.subscribeRoomCalls, receiptSubscriptions);
+  });
+
   testWidgets('returning to a chat preserves pending unread suppression', (
     tester,
   ) async {
@@ -634,6 +683,45 @@ void main() {
     await tester.pumpAndSettle();
     expect(container.read(currentRoomIdProvider), '!room:example.org');
     expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsBeforeBackground));
+  });
+
+  testWidgets('transient inactive state keeps room subscriptions alive', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final typingSubscriptions = rustApi.subscribeTypingCalls;
+    final receiptSubscriptions = rustApi.subscribeRoomCalls;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+
+    expect(container.read(currentRoomIdProvider), '!room:example.org');
+    expect(container.read(roomViewOwnerProvider('!room:example.org')), isNull);
+    expect(rustApi.unsubscribeTypingCalls, 0);
+    expect(rustApi.unsubscribeRoomCalls, 0);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(roomViewOwnerProvider('!room:example.org')),
+      '@alice:example.org',
+    );
+    expect(rustApi.subscribeTypingCalls, typingSubscriptions);
+    expect(rustApi.subscribeRoomCalls, receiptSubscriptions);
   });
 
   testWidgets('resume waits for pending room unsubscriptions', (tester) async {
@@ -1105,24 +1193,29 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('stops automatic older-message retries after a failure', (
+  testWidgets('re-arms older-message loading after leaving a failed edge', (
     tester,
   ) async {
     const roomId = '!older-failure:example.org';
+    await tester.binding.setSurfaceSize(const Size(800, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     rustApi.messagesBeforeError = StateError('offline');
     final container = ProviderContainer(
       overrides: [
-        ignoredUserIdsProvider.overrideWith(
-          (ref) async => const {'@alice:example.org'},
-        ),
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
         roomMembersProvider(roomId).overrideWith((ref) async => const []),
       ],
     );
     addTearDown(container.dispose);
     await container.read(roomMembersProvider(roomId).future);
-    container.read(messageCacheProvider(roomId).notifier).value = [
-      _message(r'$ignored-anchor'),
-    ];
+    container.read(messageCacheProvider(roomId).notifier).value = List.generate(
+      120,
+      (index) => _ownMessage(
+        '\$cached-$index',
+        content: 'cached $index',
+        timestamp: '$index',
+      ),
+    );
     container.read(messageCacheOwnerProvider(roomId).notifier).value =
         'anonymous';
     container.read(messageCachePrimedProvider(roomId).notifier).value = true;
@@ -1139,21 +1232,37 @@ void main() {
       await tester.pump();
     }
 
+    final scrollView = tester.widget<CustomScrollView>(
+      find.byType(CustomScrollView),
+    );
+    final scrollController = scrollView.controller!;
+    scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+
     expect(rustApi.getMessagesBeforeCalls, 1);
     expect(find.textContaining('加载更早消息失败'), findsOneWidget);
-    expect(find.text('重试加载更早消息'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(rustApi.getMessagesBeforeCalls, 1);
 
     rustApi.messagesBeforeError = null;
     rustApi.messagesBefore = [
-      _ownMessage(r'$manual-retry', content: 'recovered', timestamp: '0'),
+      _ownMessage(r'$automatic-retry', content: 'recovered', timestamp: '0'),
     ];
-    await tester.tap(find.text('重试加载更早消息'));
+    scrollController.jumpTo(scrollController.position.minScrollExtent);
     await tester.pump();
-    await tester.pump();
+    unawaited(
+      scrollController.animateTo(
+        scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.linear,
+      ),
+    );
+    await tester.pumpAndSettle();
 
     expect(rustApi.getMessagesBeforeCalls, greaterThanOrEqualTo(2));
     expect(
-      find.byKey(const ValueKey(r'text-bubble:$manual-retry')),
+      find.byKey(const ValueKey(r'text-bubble:$automatic-retry')),
       findsOneWidget,
     );
 

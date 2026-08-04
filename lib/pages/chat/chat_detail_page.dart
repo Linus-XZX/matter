@@ -28,7 +28,30 @@ import 'room_metadata_patch.dart';
 import 'room_state_edit_tracker.dart';
 import 'send_flight.dart';
 
-final chatRouteObserver = RouteObserver<ModalRoute<dynamic>>();
+final chatRouteObserver = _ChatRouteObserver();
+
+class _ChatRouteObserver extends RouteObserver<ModalRoute<dynamic>> {
+  final _coveringRoutes = <ModalRoute<dynamic>, Route<dynamic>>{};
+
+  bool isCoveredByPopup(ModalRoute<dynamic>? route) =>
+      route != null && _coveringRoutes[route] is PopupRoute<dynamic>;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute case final ModalRoute<dynamic> previousModalRoute) {
+      _coveringRoutes[previousModalRoute] = route;
+    }
+    super.didPush(route, previousRoute);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute case final ModalRoute<dynamic> previousModalRoute) {
+      _coveringRoutes.remove(previousModalRoute);
+    }
+    super.didPop(route, previousRoute);
+  }
+}
 
 class ChatDetailPage extends ConsumerStatefulWidget {
   final String roomId;
@@ -85,6 +108,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   Future<void> _subscriptionLifecycle = Future.value();
   bool _subscriptionsDesired = false;
+  bool _viewSuspended = false;
 
   /// The account the subscriptions were (last) opened under; used to detect
   /// an account switch-back that must re-subscribe.
@@ -124,6 +148,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   bool _hasMoreMessages = true;
   bool _olderLoadArmed = true;
   bool _automaticOlderLoadBlocked = false;
+  bool _olderLoadBlockedByError = false;
   // Set when the auto-pagination block was decided while the ignore list
   // was still unknown (first load with no snapshot): "no visible messages"
   // computed without the filter must not block the room forever. The build
@@ -346,30 +371,41 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   void didPopNext() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && (_route?.isCurrent ?? false)) {
-        _activateRoom();
+        if (_viewSuspended) {
+          _resumeSuspendedRoom();
+        } else {
+          _activateRoom();
+        }
       }
     });
   }
 
   @override
   void didPushNext() {
-    // Another route (room management, pinned messages, …) covers this chat:
-    // it is no longer the visible room, so incoming messages must not be
-    // auto-marked as read until didPopNext reactivates it.
-    _deactivateRoom();
+    if (chatRouteObserver.isCoveredByPopup(_route)) {
+      _suspendRoomView();
+    } else {
+      // A full page replaces this chat, so tear down its room subscriptions.
+      _deactivateRoom();
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
-        // Reactivate only if the room is currently inactive; the page may be
-        // covered by another route or no longer current.
-        if (mounted && _currentRoomIdNotifier.value != widget.roomId) {
-          _activateRoom();
+        if (mounted) {
+          if (_viewSuspended) {
+            _resumeSuspendedRoom();
+          } else if (_currentRoomIdNotifier.value != widget.roomId) {
+            _activateRoom();
+          }
         }
-      case AppLifecycleState.inactive ||
-          AppLifecycleState.paused ||
+      case AppLifecycleState.inactive:
+        // Transient focus loss (notification shade, system prompt) pauses
+        // read ownership without rebuilding the room subscriptions.
+        _suspendRoomView();
+      case AppLifecycleState.paused ||
           AppLifecycleState.hidden ||
           AppLifecycleState.detached:
         // While the app is not visible the room must not be treated as
@@ -379,10 +415,35 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     }
   }
 
+  void _suspendRoomView() {
+    if (_currentRoomIdNotifier.value != widget.roomId) return;
+    _roomViewOwnerState.value = null;
+    _viewSuspended = true;
+  }
+
+  void _resumeSuspendedRoom() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    if (!(_route?.isCurrent ?? ModalRoute.of(context)?.isCurrent ?? false)) {
+      return;
+    }
+    final activeAccount = ref.read(activeUserIdProvider);
+    if (_subscriptionsAccount != null &&
+        activeAccount != _subscriptionsAccount) {
+      return;
+    }
+    _viewSuspended = false;
+    _roomViewOwnerState.value = activeAccount;
+    if (!ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
+      unawaited(_markRoomReadAndRefreshList());
+    }
+  }
+
   void _deactivateRoom() {
+    _viewSuspended = false;
     if (_currentRoomIdNotifier.value == widget.roomId) {
       _currentRoomIdNotifier.value = null;
-      ref.read(roomViewOwnerProvider(widget.roomId).notifier).value = null;
+      _roomViewOwnerState.value = null;
     }
     _setSubscriptionsDesired(false);
   }
@@ -411,9 +472,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       return;
     }
     _currentRoomIdNotifier.value = widget.roomId;
+    _viewSuspended = false;
     _activationId = ++_activationCounter;
-    ref.read(roomViewOwnerProvider(widget.roomId).notifier).value =
-        activeAccount;
+    _roomViewOwnerState.value = activeAccount;
     if (resetAutoReadSuppression) {
       setRoomAutoReadSuppressed(ref, widget.roomId, suppressed: false);
     }
@@ -652,6 +713,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       // page. The manual retry entry and the ignore-list arrival re-arm
       // it instead.
       _olderLoadArmed = true;
+      if (_olderLoadBlockedByError) {
+        _olderLoadBlockedByError = false;
+        _automaticOlderLoadBlocked = false;
+      }
     }
 
     if (_olderLoadArmed &&
@@ -874,6 +939,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         // Stop automatic back-pagination once a page yields nothing visible;
         // an empty timeline then shows the manual retry affordance instead of
         // looping through the whole room history.
+        _olderLoadBlockedByError = false;
         _automaticOlderLoadBlocked = !producedVisibleMessages;
         // A decision made without the filter (ignore list still unknown)
         // must not stick: remember it so the build re-arms auto-pagination
@@ -900,6 +966,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       setState(() {
         _isLoadingOlder = false;
         _olderLoadArmed = false;
+        _olderLoadBlockedByError = true;
         _automaticOlderLoadBlocked = true;
       });
       ScaffoldMessenger.of(
@@ -910,6 +977,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   void _retryOlderMessages() {
     setState(() {
+      _olderLoadBlockedByError = false;
       _automaticOlderLoadBlocked = false;
       _olderLoadArmed = true;
     });

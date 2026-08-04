@@ -1979,6 +1979,7 @@ final syncStreamProvider =
       // the parameter, and the RoomListChanged echo must not lose its
       // "confirm the viewed room" semantics to that unrelated re-arm.
       var pendingConfirmViewedClear = false;
+      var pendingRefreshMembersAndKnocks = false;
       // Per-room debounce for the member/knock provider invalidates:
       // member events can burst (catch-up sync, profile updates), and each
       // invalidate refetches (network /members for knocks and lazy-loaded
@@ -2031,6 +2032,8 @@ final syncStreamProvider =
         if (disposed || !ref.mounted) return;
         pendingConfirmViewedClear =
             pendingConfirmViewedClear || confirmViewedClear;
+        pendingRefreshMembersAndKnocks =
+            pendingRefreshMembersAndKnocks || refreshMembersAndKnocks;
         roomRefreshTimer?.cancel();
         roomRefreshTimer = Timer(const Duration(milliseconds: 500), () {
           roomRefreshTimer = null;
@@ -2039,6 +2042,8 @@ final syncStreamProvider =
           // circuits below must not skip the viewed-room clear.
           final confirm = pendingConfirmViewedClear;
           pendingConfirmViewedClear = false;
+          final refreshMembers = pendingRefreshMembersAndKnocks;
+          pendingRefreshMembersAndKnocks = false;
           // Short-circuit the marked-unread check BEFORE invalidating the
           // room list: once refreshRooms() invalidates, the cached value
           // reads as loading and the short-circuit inside
@@ -2063,7 +2068,7 @@ final syncStreamProvider =
               }
             }
           }
-          refreshRooms();
+          refreshRooms(refreshMembersAndKnocks: refreshMembers);
           // Timed-out mark-unread writes: lift suppressions whose write
           // has definitively failed (250s past the queue bounds), so a
           // viewed room's auto-reads resume.

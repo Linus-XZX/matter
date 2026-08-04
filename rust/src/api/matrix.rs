@@ -479,6 +479,9 @@ fn bounded_request_config() -> RequestConfig {
         .retry_limit(3)
 }
 
+const MEDIA_DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const MEDIA_SEND_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Drop per-account runtime state whenever a client is removed or replaced
 /// (logout, account removal, or login replacing an existing client), so a
 /// later session never reuses state bound to the old client or sync position.
@@ -3217,6 +3220,14 @@ fn try_extract_uiaa(err: &matrix_sdk::Error) -> Option<AuthResult> {
     None
 }
 
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 fn try_parse_uiaa_from_string(err_str: &str) -> Option<AuthResult> {
     let json_start = err_str
         .find("[401]")
@@ -3265,7 +3276,7 @@ fn try_parse_uiaa_from_string(err_str: &str) -> Option<AuthResult> {
     } else {
         warn!(
             "UIAA JSON found but no session: {}",
-            &err_str[..err_str.len().min(500)]
+            truncate_utf8(err_str, 500)
         );
         None
     }
@@ -3448,7 +3459,7 @@ pub async fn register_get_uiaa_session(
             let err_str = format!("{err}");
             info!(
                 "register_get_uiaa_session error: {}",
-                &err_str[..err_str.len().min(300)]
+                truncate_utf8(&err_str, 300)
             );
 
             if let Some(result) = try_extract_uiaa(&err) {
@@ -3526,7 +3537,7 @@ pub async fn register_complete_uiaa(
             let err_str = format!("{err}");
             info!(
                 "register_complete_uiaa error: {}",
-                &err_str[..err_str.len().min(300)]
+                truncate_utf8(&err_str, 300)
             );
 
             if let Some(result) = try_extract_uiaa(&err) {
@@ -5595,8 +5606,8 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
     let server = matrix_sdk::ruma::ServerName::parse(&server_name).ok()?;
     let request = MediaDownloadRequest::new(media_id, server);
 
-    match client.send(request).await {
-        Ok(response) => {
+    match tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, client.send(request)).await {
+        Ok(Ok(response)) => {
             app_log(
                 "info",
                 "media",
@@ -5608,11 +5619,19 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
             );
             Some(response.file)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             app_log(
                 "error",
                 "media",
                 format!("download_media_bytes failed: {e}"),
+            );
+            None
+        }
+        Err(_) => {
+            app_log(
+                "error",
+                "media",
+                format!("download_media_bytes timed out for {mxc_url}"),
             );
             None
         }
@@ -5731,30 +5750,34 @@ pub async fn download_media_source_bytes(
         .matrix_auth()
         .session()
         .ok_or("No authenticated session.")?;
-    let response = client
-        .http_client()
-        .get(url)
-        .bearer_auth(session.tokens.access_token)
-        .send()
-        .await
-        .map_err(|e| format!("Media download failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Media download failed: {e}"))?;
-    ensure_media_content_length(response.content_length(), limit)?;
+    let content = tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
+        let response = client
+            .http_client()
+            .get(url)
+            .bearer_auth(session.tokens.access_token)
+            .send()
+            .await
+            .map_err(|e| format!("Media download failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Media download failed: {e}"))?;
+        ensure_media_content_length(response.content_length(), limit)?;
 
-    let mut encrypted = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Media download failed: {e}"))?;
-        append_media_chunk(&mut encrypted, &chunk, limit)?;
-    }
-
-    let content = match source {
-        matrix_sdk::ruma::events::room::MediaSource::Encrypted(file) => {
-            decrypt_media_bytes(encrypted, *file, limit)?
+        let mut encrypted = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Media download failed: {e}"))?;
+            append_media_chunk(&mut encrypted, &chunk, limit)?;
         }
-        matrix_sdk::ruma::events::room::MediaSource::Plain(_) => encrypted,
-    };
+
+        match source {
+            matrix_sdk::ruma::events::room::MediaSource::Encrypted(file) => {
+                decrypt_media_bytes(encrypted, *file, limit)
+            }
+            matrix_sdk::ruma::events::room::MediaSource::Plain(_) => Ok(encrypted),
+        }
+    })
+    .await
+    .map_err(|_| "Media download timed out. Please retry.".to_string())??;
     app_log(
         "info",
         "media",
@@ -6650,9 +6673,13 @@ pub async fn send_image_message(
 
     // send_attachment encrypts both the event and media bytes when the room is
     // encrypted, and keeps the normal plain-media flow for unencrypted rooms.
-    room.send_attachment(filename, &mime_type, image_data, config)
-        .await
-        .map_err(|e| format!("Send image message failed: {e}"))?;
+    tokio::time::timeout(
+        MEDIA_SEND_TOTAL_TIMEOUT,
+        room.send_attachment(filename, &mime_type, image_data, config),
+    )
+    .await
+    .map_err(|_| "Send image message timed out. Please retry.".to_string())?
+    .map_err(|e| format!("Send image message failed: {e}"))?;
 
     app_log(
         "info",
@@ -6704,30 +6731,35 @@ pub async fn send_file_message(
     use matrix_sdk::ruma::events::room::MediaSource;
     use std::io::Cursor;
 
-    let source = if room
-        .latest_encryption_state()
-        .await
-        .map_err(|error| format!("Check room encryption failed: {error}"))?
-        .is_encrypted()
-    {
-        let mut reader = Cursor::new(file_data.as_slice());
-        let encrypted_file = client
-            .upload_encrypted_file(&mut reader)
+    tokio::time::timeout(MEDIA_SEND_TOTAL_TIMEOUT, async move {
+        let source = if room
+            .latest_encryption_state()
             .await
-            .map_err(|error| format!("Encrypted file upload failed: {error}"))?;
-        MediaSource::Encrypted(Box::new(encrypted_file))
-    } else {
-        let upload = client
-            .media()
-            .upload(&mime_type, file_data, None)
+            .map_err(|error| format!("Check room encryption failed: {error}"))?
+            .is_encrypted()
+        {
+            let mut reader = Cursor::new(file_data.as_slice());
+            let encrypted_file = client
+                .upload_encrypted_file(&mut reader)
+                .await
+                .map_err(|error| format!("Encrypted file upload failed: {error}"))?;
+            MediaSource::Encrypted(Box::new(encrypted_file))
+        } else {
+            let upload = client
+                .media()
+                .upload(&mime_type, file_data, None)
+                .await
+                .map_err(|error| format!("File upload failed: {error}"))?;
+            MediaSource::Plain(upload.content_uri)
+        };
+        let content = file_message_content(filename, &mime_type, file_size, source);
+        room.send(content)
             .await
-            .map_err(|error| format!("File upload failed: {error}"))?;
-        MediaSource::Plain(upload.content_uri)
-    };
-    let content = file_message_content(filename, &mime_type, file_size, source);
-    room.send(content)
-        .await
-        .map_err(|e| format!("Send file message failed: {e}"))?;
+            .map_err(|e| format!("Send file message failed: {e}"))?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "Send file message timed out. Please retry.".to_string())??;
 
     app_log("info", "rooms", format!("File message sent to {}", room_id));
     info!("File message sent to {}", room_id);
@@ -6792,9 +6824,13 @@ pub async fn send_video_message(
     };
     let config = AttachmentConfig::new().info(AttachmentInfo::Video(info));
 
-    room.send_attachment(&filename, &mime_type, video_data, config)
-        .await
-        .map_err(|e| format!("Send video message failed: {e}"))?;
+    tokio::time::timeout(
+        MEDIA_SEND_TOTAL_TIMEOUT,
+        room.send_attachment(&filename, &mime_type, video_data, config),
+    )
+    .await
+    .map_err(|_| "Send video message timed out. Please retry.".to_string())?
+    .map_err(|e| format!("Send video message failed: {e}"))?;
 
     app_log(
         "info",
@@ -9801,6 +9837,7 @@ pub async fn get_messages_before(
 mod media_download_tests {
     use super::{
         append_media_chunk, ensure_media_content_length, media_download_limit, media_download_url,
+        truncate_utf8,
     };
     use matrix_sdk::Client;
 
@@ -9821,6 +9858,13 @@ mod media_download_tests {
         assert_eq!(content, [1, 2, 3]);
         assert!(append_media_chunk(&mut content, &[4], 4).is_ok());
         assert_eq!(content, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn log_truncation_preserves_utf8_boundaries() {
+        let value = format!("{}界", "a".repeat(299));
+        assert_eq!(truncate_utf8(&value, 300), "a".repeat(299));
+        assert_eq!(truncate_utf8("中文", 500), "中文");
     }
 
     #[tokio::test]

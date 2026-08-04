@@ -1516,14 +1516,21 @@ void main() {
     expect(rustApi.knockRequestsCalls, 1);
     expect(rustApi.membersCalls, 1);
 
+    rustApi.syncEvents.add(const rust.SyncEvent.fullRefreshRequired());
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+
+    expect(rustApi.knockRequestsCalls, 2);
+    expect(rustApi.membersCalls, 2);
+
     rustApi.syncEvents.add(
       const rust.SyncEvent.roomMembersChanged(roomId: '!room:example.org'),
     );
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pump();
 
-    expect(rustApi.knockRequestsCalls, 2);
-    expect(rustApi.membersCalls, 2);
+    expect(rustApi.knockRequestsCalls, 3);
+    expect(rustApi.membersCalls, 3);
 
     for (final subscription in subscriptions) {
       subscription.close();

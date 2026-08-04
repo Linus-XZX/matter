@@ -132,7 +132,7 @@ class AccountSwitchController {
         userId: userId,
         displayName: targetDisplayName,
         homeserver: targetSession.homeserverUrl,
-        persistActiveUser: true,
+        persistActiveUser: false,
         refreshStoredSessions: true,
       );
       await bootstrapActiveSessionSyncFromRef(
@@ -141,6 +141,7 @@ class AccountSwitchController {
         startSyncLabel: 'startSync after switch failed',
         requireSyncLoop: true,
       );
+      await saveActiveUserId(userId);
       restoreSessionGate = true;
     } catch (error, stackTrace) {
       if (switchedClient &&
@@ -155,7 +156,7 @@ class AccountSwitchController {
             userId: activeId,
             displayName: previousDisplayName,
             homeserver: previousSession.homeserverUrl,
-            persistActiveUser: true,
+            persistActiveUser: false,
             refreshStoredSessions: true,
           );
           await bootstrapActiveSessionSyncFromRef(
@@ -164,8 +165,11 @@ class AccountSwitchController {
             startSyncLabel: 'startSync after switch rollback failed',
             requireSyncLoop: true,
           );
+          await saveActiveUserId(activeId);
           restoreSessionGate = true;
         } catch (rollbackError) {
+          clearActiveSessionStateFromRef(_ref, markSessionReady: true);
+          restoreSessionGate = true;
           throw StateError('账号切换失败：$error；回滚失败：$rollbackError');
         }
       } else {

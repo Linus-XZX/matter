@@ -301,9 +301,16 @@ void main() {
     ]);
   });
 
-  test('a failed rollback keeps the session gate closed', () async {
+  test('a failed rollback clears the mismatched active session', () async {
     final container = createContainer();
     addTearDown(container.dispose);
+    container.read(isLoggedInProvider.notifier).value = true;
+    container.read(currentUserProvider.notifier).value = const CurrentUser(
+      id: '@alice:example.org',
+      displayName: 'Alice',
+      homeserver: 'https://alice.example.org',
+    );
+    container.read(currentAccessTokenProvider.notifier).value = 'alice-token';
     rustApi.failNextBobAccessToken = true;
     rustApi.failNextAliceSwitch = true;
 
@@ -315,8 +322,12 @@ void main() {
     );
 
     expect(rustApi.activeUserId, '@bob:example.org');
-    expect(container.read(activeUserIdProvider), '@alice:example.org');
-    expect(container.read(sessionReadyProvider), isFalse);
+    expect(container.read(activeUserIdProvider), isNull);
+    expect(container.read(currentUserProvider), isNull);
+    expect(container.read(currentAccessTokenProvider), isNull);
+    expect(container.read(isLoggedInProvider), isFalse);
+    expect(container.read(sessionReadyProvider), isTrue);
+    expect(await loadActiveUserId(), '@alice:example.org');
   });
 
   testWidgets(
