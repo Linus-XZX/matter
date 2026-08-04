@@ -1295,6 +1295,10 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                           // depend on the dialog still being up.
                           _invalidateRoom();
                           _showSnackBar('邀请已发送');
+                          // Fire the member refetch detached, like the knock
+                          // approval path: the invitee must appear without
+                          // waiting for the server join event.
+                          unawaited(_retryMembers());
                         } catch (error) {
                           if (!mounted) {
                             // The page is gone: close the dialog so it is

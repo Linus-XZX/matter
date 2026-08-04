@@ -1347,8 +1347,9 @@ class MessageGroupWidget extends ConsumerWidget {
             // The decision read failed: nothing was written, so the
             // timeout-aware "state may have changed" wording of the write
             // path would be misleading here. Map the raw error through the
-            // shared wording (timeout mapping, Chinese) — the SDK detail
-            // stays visible but prefixed correctly.
+            // shared wording (Chinese) — reads never raise the
+            // mutation-timeout wording, so this stays a plain failure with
+            // the SDK detail prefixed correctly.
             if (overlayContext.mounted) {
               ScaffoldMessenger.of(overlayContext).showSnackBar(
                 SnackBar(

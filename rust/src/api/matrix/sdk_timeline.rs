@@ -39,10 +39,6 @@ fn timeline_key(client: &Client, room: &Room) -> Result<String, String> {
     Ok(format!("{}\n{}", user_id, room.room_id()))
 }
 
-pub(super) async fn clear_all() {
-    TIMELINES.lock().await.clear();
-}
-
 /// Drop the timelines of ONE account (key prefix `{user_id}\n`), leaving
 /// the other accounts' timelines intact (a removed account's cache must
 /// not tear down the timelines of the account the user is currently in).
@@ -193,13 +189,20 @@ pub(super) async fn send_read_receipts(client: &Client, room: &Room) -> Result<(
 /// the server flag survives; the auto path merely logs at its caller.
 /// Returns whether a clear was actually issued.
 pub(super) async fn clear_marked_unread_if_set(room: &Room) -> Result<bool, String> {
-    let marked_unread = room
+    let raw = room
         .account_data_static::<matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent>()
         .await
-        .ok()
-        .flatten()
-        .and_then(|raw| raw.deserialize().ok())
-        .is_some_and(|event| event.content.unread);
+        .map_err(|error| format!("读取未读标记失败: {error}"))?;
+    let marked_unread = match raw {
+        Some(raw) => {
+            raw.deserialize()
+                .map_err(|error| format!("解析未读标记失败: {error}"))?
+                .content
+                .unread
+        }
+        // No `m.marked_unread` account-data event: the flag is not set.
+        None => false,
+    };
     if marked_unread {
         clear_marked_unread(room).await?;
         Ok(true)
@@ -212,10 +215,7 @@ pub(super) async fn clear_marked_unread_if_set(room: &Room) -> Result<bool, Stri
 /// the server read fails or times out. The stored list may lag the server
 /// (e.g. our own latest toggle has not echoed yet), but a stale list beats
 /// failing the whole page; the pinned page re-reads after every sync echo.
-async fn pinned_ids_from_store(
-    room: &Room,
-    _source_error: &str,
-) -> Result<Vec<matrix_sdk::ruma::OwnedEventId>, String> {
+async fn pinned_ids_from_store(room: &Room) -> Result<Vec<matrix_sdk::ruma::OwnedEventId>, String> {
     match room
         .get_state_event_static::<
             matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
@@ -255,10 +255,10 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
     let pinned_ids =
         match tokio::time::timeout(Duration::from_secs(15), room.load_pinned_events()).await {
             Ok(Ok(ids)) => ids.unwrap_or_default(),
-            Ok(Err(network_error)) => {
+            Ok(Err(_)) => {
                 // Offline fallback: the pinned list also lives in the local
                 // state store.
-                pinned_ids_from_store(room, &network_error.to_string()).await?
+                pinned_ids_from_store(room).await?
             }
             Err(_) => {
                 super::app_log(
@@ -266,7 +266,7 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
                     "pinned",
                     "Timed out loading pinned events; falling back to the local store.".to_string(),
                 );
-                pinned_ids_from_store(room, "Timed out loading pinned events.").await?
+                pinned_ids_from_store(room).await?
             }
         };
     if pinned_ids.is_empty() {
@@ -298,8 +298,10 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
     // 10s pinned-timeline build + 25s focused fetch = 70s, below the
     // FFI-level 90s total bound, so the inner stage timeouts (which degrade
     // to partial results) fire before the outer bound (which fails the
-    // whole page).
-    let wait_result = tokio::time::timeout(Duration::from_secs(20), async {
+    // whole page). A cache error or timeout never fails the page by itself:
+    // the focused per-event fetch below decides between placeholders and
+    // transport errors, so the wait result is not surfaced.
+    let _ = tokio::time::timeout(Duration::from_secs(20), async {
         let mut saw_network_update = false;
         loop {
             let loaded_ids = loaded_expected_event_ids(
@@ -342,25 +344,13 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         events.iter().filter_map(|event| event.event_id()),
         &expected_pinned_ids,
     );
-    let mut cache_error = if loaded_count == 0 {
-        match wait_result {
-            Ok(Err(error)) => Some(format!("加载置顶消息失败: {error}")),
-            Err(_) => Some("加载置顶消息超时。".to_owned()),
-            // A clean wait with zero loaded events is not itself a failure:
-            // the events may be genuinely gone (a redacted message stays
-            // pinned), and the per-event fetch below decides between
-            // placeholders and transport errors.
-            Ok(Ok(())) => None,
-        }
-    } else {
-        None
-    };
 
     let mut by_id = HashMap::new();
     if loaded_count > 0 {
         // Bound the build: its /event requests have no SDK timeout and the
-        // lease is held; on timeout fall back to the cache_error path so the
-        // outer total bound is not the only safety net.
+        // lease is held; on failure or timeout the events it would have
+        // provided are left to the focused fetch below, so the outer total
+        // bound stays the last safety net.
         match tokio::time::timeout(
             Duration::from_secs(10),
             TimelineBuilder::new(room)
@@ -379,14 +369,10 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
                 );
             }
             Ok(Err(error)) => {
-                let error = format!("加载置顶消息失败: {error}");
-                super::app_log("warn", "pinned", error.clone());
-                cache_error = Some(error);
+                super::app_log("warn", "pinned", format!("加载置顶消息失败: {error}"));
             }
             Err(_) => {
-                let message = "构建置顶时间线超时。".to_owned();
-                super::app_log("warn", "pinned", message.clone());
-                cache_error = Some(message);
+                super::app_log("warn", "pinned", "构建置顶时间线超时。".to_owned());
             }
         }
     }
@@ -442,7 +428,6 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
                 &by_id,
                 &missing,
                 Some("加载置顶事件超时。".to_owned()),
-                cache_error,
             );
         }
     };
@@ -462,7 +447,7 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         }
     }
 
-    complete_pinned_messages(&pinned_ids, &by_id, &failed_ids, focused_error, cache_error)
+    complete_pinned_messages(&pinned_ids, &by_id, &failed_ids, focused_error)
 }
 
 async fn load_focused_message(
@@ -513,13 +498,15 @@ fn complete_pinned_messages(
     by_id: &HashMap<String, ChatMessage>,
     failed_ids: &HashSet<String>,
     focused_error: Option<String>,
-    _cache_error: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
     // A load where every pinned event failed to fetch is a transport-level
-    // failure when the focused fetch itself reports an error. A preceding
-    // cache timeout is not enough to fail the page: if every focused lookup
-    // then returns Ok(None), the events are genuinely unavailable and must
-    // use placeholders instead.
+    // failure when the focused fetch itself reports an error: an unreachable
+    // server must surface as a retryable error, not as "deleted" placeholders.
+    // When every focused lookup returns Ok(None) with no error, the events
+    // are genuinely unavailable (a redacted message stays pinned) and
+    // placeholders stand in for them — earlier cache-side failures are not
+    // surfaced here, the focused fetch is the authoritative availability
+    // signal.
     if !pinned_ids.is_empty() && by_id.is_empty() {
         if let Some(error) = focused_error {
             return Err(format!("加载置顶消息失败: {error}"));
@@ -575,7 +562,7 @@ fn unavailable_pinned_message(event_id: &matrix_sdk::ruma::EventId) -> ChatMessa
 
 async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
     // The Timeline guards against moving either marker backwards.
-    let read_error = match timeline.mark_as_read(ReceiptType::Read).await {
+    match timeline.mark_as_read(ReceiptType::Read).await {
         Ok(sent) => {
             if sent {
                 super::app_log(
@@ -584,7 +571,7 @@ async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
                     format!("Sent explicit read receipt for room {}", room.room_id()),
                 );
             }
-            None
+            Ok(())
         }
         Err(error) => {
             let error = error.to_string();
@@ -596,34 +583,25 @@ async fn mark_as_read(timeline: &Timeline, room: &Room) -> Result<(), String> {
                     room.room_id()
                 ),
             );
-            Some(error)
+            Err(format!("标记房间已读失败（已读回执）: {error}"))
         }
-    };
-    let fully_read_error = match timeline.mark_as_read(ReceiptType::FullyRead).await {
-        Ok(_) => None,
-        Err(error) => {
-            let error = error.to_string();
-            super::app_log(
-                "warn",
-                "receipts",
-                format!(
-                    "Failed to update fully-read marker for room {}: {error}",
-                    room.room_id()
-                ),
-            );
-            Some(error)
-        }
-    };
-    match (read_error, fully_read_error) {
-        (None, None) => Ok(()),
-        (Some(read_error), None) => Err(format!("标记房间已读失败（已读回执）: {read_error}")),
-        (None, Some(fully_read_error)) => {
-            Err(format!("标记房间已读失败（已读位置）: {fully_read_error}"))
-        }
-        (Some(read_error), Some(fully_read_error)) => Err(format!(
-            "标记房间已读失败（已读回执: {read_error}；已读位置: {fully_read_error}）"
-        )),
+    }?;
+    // The fully-read marker is best-effort: the read receipt above carries
+    // the user-visible read state, and a failed marker update must not turn
+    // a successful read into an error — the auto-read path fires on every
+    // message refresh while the room is open, so an error here would repeat
+    // on every refresh for a marker the user never sees. Log and move on.
+    if let Err(error) = timeline.mark_as_read(ReceiptType::FullyRead).await {
+        super::app_log(
+            "warn",
+            "receipts",
+            format!(
+                "Failed to update fully-read marker for room {}: {error}",
+                room.room_id()
+            ),
+        );
     }
+    Ok(())
 }
 
 /// Drop the explicit `m.marked_unread` flag for an explicit read action.
@@ -645,6 +623,16 @@ pub(super) async fn get_messages_before(
     let timeline = get_or_create_timeline(client, room).await?;
     let limit = limit.min(u16::MAX as u32) as usize;
     if limit == 0 {
+        return Ok(Vec::new());
+    }
+    // A local (unsent) message ID — `local_outgoing_pending:` / `sent:` /
+    // `failed:` — can never match a timeline event, and the focused fallback
+    // below would reject it as an invalid event ID. The pre-Timeline code
+    // returned an empty page for an unknown local anchor, ending history
+    // loading gracefully; the caller re-anchors from the returned messages,
+    // so an empty page is the correct end here too — and it skips the
+    // pointless pagination rounds that would run before the fallback.
+    if matrix_sdk::ruma::EventId::parse(from_event_id).is_err() {
         return Ok(Vec::new());
     }
 
@@ -1679,7 +1667,6 @@ mod tests {
             &partial,
             &HashSet::new(),
             Some("event unavailable".to_owned()),
-            None,
         )
         .unwrap();
 
@@ -1704,7 +1691,6 @@ mod tests {
             &partial,
             &HashSet::from([second.to_string()]),
             Some("request failed".to_owned()),
-            None,
         )
         .unwrap();
 
@@ -1722,8 +1708,7 @@ mod tests {
 
         let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
         let messages =
-            complete_pinned_messages(&pinned_ids, &HashMap::new(), &HashSet::new(), None, None)
-                .unwrap();
+            complete_pinned_messages(&pinned_ids, &HashMap::new(), &HashSet::new(), None).unwrap();
 
         // Every event was confirmed unavailable (no fetch errors): a
         // redacted message stays pinned, and the page must not fail
@@ -1744,7 +1729,6 @@ mod tests {
             &HashMap::new(),
             &HashSet::new(),
             Some("request failed".to_owned()),
-            None,
         )
         .unwrap_err();
 
@@ -1752,24 +1736,6 @@ mod tests {
         // (unreachable server, timeout), not "the message is deleted", so it
         // must surface as an error with a retry path.
         assert!(error.contains("request failed"));
-    }
-
-    #[test]
-    fn unavailable_pins_use_placeholders_after_a_cache_error() {
-        use matrix_sdk::ruma::EventId;
-
-        let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
-        let messages = complete_pinned_messages(
-            &pinned_ids,
-            &HashMap::new(),
-            &HashSet::new(),
-            None,
-            Some("cache error".to_owned()),
-        )
-        .unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, "此置顶消息不可用或已被删除");
     }
 
     #[test]

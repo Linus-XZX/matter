@@ -87,6 +87,8 @@ String _refreshTokenKey(String userId) =>
 String _removedSessionKey(String userId) =>
     'matrix_session_removed_${base64Url.encode(utf8.encode(userId))}';
 
+const _removedSessionKeyPrefix = 'matrix_session_removed_';
+
 /// All saved sessions (for multi-account).
 final sessionsProvider =
     NotifierProvider<
@@ -179,7 +181,7 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
       try {
         final e = item as Map<String, dynamic>;
         userId = e['user_id'] as String;
-        if (prefs.getBool(_removedSessionKey(userId)) == true) {
+        if (prefs.containsKey(_removedSessionKey(userId))) {
           continue;
         }
         var accessToken = await _secureStorage.read(key: _tokenKey(userId));
@@ -315,38 +317,59 @@ Future<String> loadDisplayName(String userId) async {
 /// Remove a session for a specific user_id.
 Future<void> removeSession(String userId) async {
   final prefs = await SharedPreferences.getInstance();
-  // Drop the metadata before writing the removed marker: the marker makes
-  // loadAllSessions skip the account forever, so if the stored JSON turns
-  // out to be corrupt we must fail before the marker lands, leaving the
-  // account visible (and removable) instead of stranding it in an
-  // unrecoverable state.
-  final removedHomeservers = <String>[];
+  // Every caller persists the removed marker before invoking this (the
+  // settings flow marks first, and the startup retry only runs for
+  // already-marked accounts), so loadAllSessions hides the account no
+  // matter what happens below. The removal must therefore never abort on
+  // unreadable metadata JSON: a decode failure falls through with an empty
+  // metadata list instead of throwing. Homeservers are collected here and
+  // from the marker itself, and the marker is upgraded with the merged list
+  // before the metadata is dropped, so a crash anywhere below can still
+  // retry the media-cache cleanup once the metadata is gone.
+  final removedHomeservers = <String>{..._removedHomeservers(prefs, userId)};
   final raw = prefs.getString(_kSessions);
   final remainingMetadata = <Map<String, dynamic>>[];
   if (raw != null) {
-    final list = jsonDecode(raw) as List<dynamic>;
-    for (final item in list) {
-      final metadata = Map<String, dynamic>.from(item as Map);
-      if (metadata['user_id'] == userId) {
-        final homeserver = metadata['homeserver_url'];
-        if (homeserver is String) removedHomeservers.add(homeserver);
-      } else {
-        remainingMetadata.add(metadata);
+    var metadataDecoded = true;
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      for (final item in list) {
+        final metadata = Map<String, dynamic>.from(item as Map);
+        if (metadata['user_id'] == userId) {
+          final homeserver = metadata['homeserver_url'];
+          if (homeserver is String) removedHomeservers.add(homeserver);
+        } else {
+          remainingMetadata.add(metadata);
+        }
+      }
+    } catch (error) {
+      // Corrupt metadata JSON: aborting would strand the removal forever
+      // (the marker is already persisted), so treat the metadata as
+      // unreadable and keep going with the marker's recorded homeservers.
+      metadataDecoded = false;
+      debugPrint(
+        'Failed to decode session metadata during removal of $userId: $error',
+      );
+    }
+    // Upgrade the marker with the merged homeserver list before dropping
+    // the metadata, so a crash (or a failed write) anywhere below still
+    // leaves a retryable trail once the metadata is gone.
+    await markSessionRemoved(userId, homeservers: removedHomeservers.toList());
+    if (metadataDecoded) {
+      // A failed write aborts with the metadata intact, so the next retry
+      // can still collect homeservers from it; the marker upgrade above
+      // has already landed either way.
+      final saved = await prefs.setString(
+        _kSessions,
+        jsonEncode(remainingMetadata),
+      );
+      if (!saved) {
+        throw StateError('本地会话元数据写入失败');
       }
     }
-    // A failed write must abort before the removed marker lands: the marker
-    // would hide the account from loadAllSessions forever while its
-    // metadata and token survive (see the ordering note above).
-    final saved = await prefs.setString(
-      _kSessions,
-      jsonEncode(remainingMetadata),
-    );
-    if (!saved) {
-      throw StateError('本地会话元数据写入失败');
-    }
+  } else {
+    await markSessionRemoved(userId, homeservers: removedHomeservers.toList());
   }
-
-  await markSessionRemoved(userId);
 
   final activeId = prefs.getString(_kActiveUserId);
   if (activeId == userId) {
@@ -354,7 +377,7 @@ Future<void> removeSession(String userId) async {
     for (final metadata in remainingMetadata) {
       final candidate = metadata['user_id'];
       if (candidate is String &&
-          prefs.getBool(_removedSessionKey(candidate)) != true) {
+          !prefs.containsKey(_removedSessionKey(candidate))) {
         // Skip accounts whose secure token is gone; loadAllSessions would
         // skip them too, and activating one would strand the app at the
         // login page after the next restart.
@@ -388,9 +411,41 @@ Future<void> removeSession(String userId) async {
   await prefs.setString(_kSessionDisplayNames, jsonEncode(namesMap));
 }
 
-Future<void> markSessionRemoved(String userId) async {
+/// Homeservers recorded in an account's removal marker, so media-cache
+/// cleanup can be retried after a crash even once the account's metadata
+/// is gone from [_kSessions]. Legacy markers (a bare `true` boolean) and
+/// malformed markers yield an empty list.
+List<String> _removedHomeservers(SharedPreferences prefs, String userId) {
+  final value = prefs.get(_removedSessionKey(userId));
+  if (value is! String) return const [];
+  try {
+    final decoded = jsonDecode(value);
+    if (decoded is Map<String, dynamic>) {
+      final homeservers = decoded['homeservers'];
+      if (homeservers is List) {
+        return homeservers.whereType<String>().toList();
+      }
+    }
+  } catch (error) {
+    debugPrint('Failed to decode removal marker for $userId: $error');
+  }
+  return const [];
+}
+
+/// Persist a tombstone for a session being removed.
+///
+/// The marker value is JSON so it also records the account's homeservers,
+/// which scope the authenticated media cache; a retry reads them back via
+/// [_removedHomeservers] once the metadata is gone.
+Future<void> markSessionRemoved(
+  String userId, {
+  List<String> homeservers = const [],
+}) async {
   final prefs = await SharedPreferences.getInstance();
-  final persisted = await prefs.setBool(_removedSessionKey(userId), true);
+  final persisted = await prefs.setString(
+    _removedSessionKey(userId),
+    jsonEncode({'homeservers': homeservers}),
+  );
   if (!persisted) {
     throw StateError('无法持久化账号删除状态');
   }
@@ -401,6 +456,55 @@ Future<void> unmarkSessionRemoved(String userId) async {
   final removed = await prefs.remove(_removedSessionKey(userId));
   if (!removed && prefs.containsKey(_removedSessionKey(userId))) {
     throw StateError('无法撤销账号删除状态');
+  }
+}
+
+/// Finish local cleanup for removals interrupted by a previous app exit.
+///
+/// Removal markers remain as tombstones until the account is explicitly
+/// added again, so every startup can retry any cleanup step that failed.
+Future<void> completePendingSessionRemovals({required String dataDir}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final userIds = <String>[];
+  for (final key in prefs.getKeys()) {
+    if (!key.startsWith(_removedSessionKeyPrefix) || !prefs.containsKey(key)) {
+      continue;
+    }
+    try {
+      userIds.add(
+        utf8.decode(
+          base64Url.decode(key.substring(_removedSessionKeyPrefix.length)),
+        ),
+      );
+    } catch (error) {
+      debugPrint('Failed to decode account removal marker $key: $error');
+    }
+  }
+
+  for (final userId in userIds) {
+    var localCleanupSucceeded = false;
+    var sdkCleanupSucceeded = false;
+    try {
+      await removeSession(userId);
+      localCleanupSucceeded = true;
+    } catch (error) {
+      debugPrint('Failed to finish local session cleanup for $userId: $error');
+    }
+    try {
+      await rust.cleanupRemovedAccountStore(userId: userId, dataDir: dataDir);
+      sdkCleanupSucceeded = true;
+    } catch (error) {
+      debugPrint('Failed to finish SDK store cleanup for $userId: $error');
+    }
+    if (localCleanupSucceeded && sdkCleanupSucceeded) {
+      try {
+        await unmarkSessionRemoved(userId);
+      } catch (error) {
+        debugPrint(
+          'Failed to finish account removal transaction for $userId: $error',
+        );
+      }
+    }
   }
 }
 
@@ -428,7 +532,7 @@ Future<void> clearAllSessions() async {
     await prefs.remove(key);
   }
   for (final key in prefs.getKeys().where(
-    (key) => key.startsWith('matrix_session_removed_'),
+    (key) => key.startsWith(_removedSessionKeyPrefix),
   )) {
     await prefs.remove(key);
   }

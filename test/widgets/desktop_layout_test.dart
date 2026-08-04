@@ -472,6 +472,106 @@ void main() {
     );
   });
 
+  testWidgets(
+    'a desktop panel edit is not rolled back by the stale sync echo',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      var rooms = [
+        _room(
+          id: '!room:example.org',
+          name: 'Name A',
+          roomType: 'dm',
+          nameEventId: r'$name-a0',
+        ),
+      ];
+      final container = ProviderContainer(
+        overrides: [
+          chatRoomsProvider.overrideWith((ref) async => rooms),
+          spacesProvider.overrideWith((ref) async => const []),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await _pumpApp(tester, container);
+      await tester.tap(find.byTooltip('显示详情'));
+      await tester.pump();
+
+      // The edit originates from the details panel — the desktop entry point.
+      // It must arm the ChatDetailPage tracker, not just the app-level one,
+      // or the stale pre-write sync echo would roll back the optimistic name.
+      tester
+          .widget<DesktopRoomDetailsPanel>(find.byType(DesktopRoomDetailsPanel))
+          .onRoomDetailsChanged!(
+        const RoomNamePatch(
+          roomId: '!room:example.org',
+          name: 'Name B',
+          nameEventId: r'$name-b',
+        ),
+      );
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(ChatDetailPage),
+          matching: find.text('Name B'),
+        ),
+        findsOneWidget,
+        reason: 'header shows the optimistic name before the echo',
+      );
+
+      // The write has not landed yet: sync still carries the old value.
+      rooms = [
+        _room(
+          id: '!room:example.org',
+          name: 'Name A',
+          roomType: 'dm',
+          nameEventId: r'$name-a0',
+        ),
+      ];
+      container.invalidate(chatRoomsProvider);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byType(ChatDetailPage),
+          matching: find.text('Name A'),
+        ),
+        findsNothing,
+        reason: 'the stale echo must not roll back the optimistic header',
+      );
+      expect(
+        find.descendant(
+          of: find.byType(ChatDetailPage),
+          matching: find.text('Name B'),
+        ),
+        findsOneWidget,
+      );
+
+      // The eventual echo lands and is accepted.
+      rooms = [
+        _room(
+          id: '!room:example.org',
+          name: 'Name B',
+          roomType: 'dm',
+          nameEventId: r'$name-b',
+        ),
+      ];
+      container.invalidate(chatRoomsProvider);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(ChatDetailPage),
+          matching: find.text('Name B'),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('syncs remote room metadata into the selected desktop room', (
     tester,
   ) async {

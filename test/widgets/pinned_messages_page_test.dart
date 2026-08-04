@@ -554,6 +554,109 @@ void main() {
     },
   );
 
+  testWidgets('a timed-out unpin restores the row and releases the lock', (
+    tester,
+  ) async {
+    api.reset([
+      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+    ]);
+    // The reconciling reload after the timeout returns the same list (the
+    // server still pins the message — the write never landed).
+    api._responses.add(
+      () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+        ],
+        child: const MaterialApp(
+          home: PinnedMessagesPage(roomId: '!room:example.org'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('取消置顶'));
+    await tester.pump();
+    expect(find.text('Pinned'), findsNothing);
+
+    api.pendingToggles.single.completeError(StateError('操作超时，请稍后查看最终状态。'));
+    await tester.pumpAndSettle();
+
+    // The row is back with its unpin button actionable: a retry repeats
+    // the same idempotent set, so it cannot re-pin even if the timed-out
+    // write is still landing server-side.
+    expect(find.textContaining('取消置顶超时'), findsOneWidget);
+    expect(find.text('Pinned'), findsOneWidget);
+    final button = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.push_pin_outlined),
+    );
+    expect(button.onPressed, isNotNull);
+    expect(api.callCount, 2);
+  });
+
+  testWidgets(
+    'a timed-out unpin stays retryable when the confirming reload fails',
+    (tester) async {
+      api.reset([
+        () async => [_message(r'$pinned', '@alice:example.org', 'Pinned')],
+      ]);
+      // The reconciling reload after the timeout fails (offline): the
+      // restored row must survive it with its button enabled, not be
+      // stranded invisible until a manual refresh.
+      api._responses.add(() async => throw Exception('offline'));
+      // The retried write lands and its confirming reload settles the
+      // empty list.
+      api._responses.add(() async => []);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ignoredUserIdsProvider.overrideWith((ref) async => <String>{}),
+          ],
+          child: const MaterialApp(
+            home: PinnedMessagesPage(roomId: '!room:example.org'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('取消置顶'));
+      await tester.pump();
+      api.pendingToggles.single.completeError(StateError('操作超时，请稍后查看最终状态。'));
+      await tester.pumpAndSettle();
+
+      // The row is back and actionable despite the failed reload.
+      expect(find.textContaining('取消置顶超时'), findsOneWidget);
+      expect(find.text('Pinned'), findsOneWidget);
+      expect(find.text('刷新失败，当前显示上次结果'), findsOneWidget);
+      var button = tester.widget<IconButton>(
+        find.widgetWithIcon(IconButton, Icons.push_pin_outlined),
+      );
+      expect(button.onPressed, isNotNull);
+
+      // Retry from the restored row: a second (idempotent) unpin write.
+      await tester.tap(find.byTooltip('取消置顶'));
+      await tester.pump();
+      expect(api.toggleCalls, 2);
+      expect(find.text('Pinned'), findsNothing);
+
+      // Let the timeout snackbar finish its 2s display so the success
+      // snackbar below is not queued behind it.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      api.pendingToggles.last.complete(false);
+      await tester.pumpAndSettle();
+
+      expect(find.text('已取消置顶'), findsOneWidget);
+      expect(find.text('暂无置顶消息'), findsOneWidget);
+      expect(api.callCount, 3);
+    },
+  );
+
   testWidgets('a failed confirming reload keeps the unpin lock', (
     tester,
   ) async {

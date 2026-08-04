@@ -14,6 +14,7 @@ class _FakeRustApi implements RustLibApi {
   Object? toggleError;
   int pinnedIdsCalls = 0;
   List<String> pinnedIds = const [];
+  Object? pinnedIdsError;
 
   @override
   Future<List<String>> crateApiMatrixGetPinnedEventIds({
@@ -21,6 +22,7 @@ class _FakeRustApi implements RustLibApi {
     required String roomId,
   }) async {
     pinnedIdsCalls++;
+    if (pinnedIdsError case final error?) throw error;
     return pinnedIds;
   }
 
@@ -171,6 +173,31 @@ void main() {
     expect(api.lastToggleEventId, r'$pin-action');
     expect(find.text('已取消置顶'), findsOneWidget);
     expect(find.text('消息已置顶'), findsNothing);
+  });
+
+  testWidgets('a failed authoritative pin read does not write stale intent', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-read-fail', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.pinnedIdsError = StateError('authoritative read failed');
+    addTearDown(() => api.pinnedIdsError = null);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-read-fail')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 0);
+    expect(find.textContaining('无法获取置顶状态，请重试'), findsOneWidget);
   });
 
   testWidgets('a failed pin action surfaces the error', (tester) async {

@@ -1878,6 +1878,42 @@ void main() {
     expect(find.text('邀请已发送'), findsOneWidget);
   });
 
+  testWidgets('invite success refreshes room members', (tester) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [_sessionReadyOverride],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(rustApi.membersLoadCalls, 1);
+
+    await tester.scrollUntilVisible(
+      find.byTooltip('邀请用户'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byTooltip('邀请用户'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, '@newbie:example.org');
+    await tester.tap(find.text('邀请'));
+    await tester.pumpAndSettle();
+
+    expect(rustApi.inviteCalls, 1);
+    // The invitee must appear without waiting for the server join event:
+    // the success path refetches members like the knock approval path.
+    expect(rustApi.membersLoadCalls, 2);
+  });
+
   testWidgets('leaving a room confirms, calls leave, and closes the page', (
     tester,
   ) async {

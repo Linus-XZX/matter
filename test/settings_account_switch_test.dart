@@ -373,6 +373,58 @@ void main() {
     },
   );
 
+  testWidgets(
+    'switch tiles stay disabled while an account removal is in flight',
+    (tester) async {
+      tester.view.physicalSize = const Size(800, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final container = createContainer();
+      addTearDown(container.dispose);
+      container.read(currentUserProvider.notifier).value = const CurrentUser(
+        id: '@alice:example.org',
+        displayName: 'Alice',
+        homeserver: 'https://alice.example.org',
+      );
+      rustApi.removeBarrier = Completer<void>();
+      rustApi.removeStarted = Completer<void>();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: SettingsPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Start removing the non-active account and keep the Rust call in
+      // flight so `_removingAccountId` stays set.
+      await tester.tap(find.text('移除 bob (example.org)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await rustApi.removeStarted!.future;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The removal flow can switch accounts internally (`_removeAccount`
+      // does before deleting the active one), so the switch tiles must be
+      // disabled like the remove buttons: a tap on the account being
+      // removed would queue a switch to a session that is about to be
+      // deleted.
+      final switchTile = find.widgetWithText(InkWell, 'bob (example.org)');
+      expect(tester.widget<InkWell>(switchTile).onTap, isNull);
+      await tester.tap(switchTile);
+      await tester.pump();
+      expect(rustApi.switchCalls, isEmpty);
+
+      rustApi.removeBarrier!.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(rustApi.switchCalls, isEmpty);
+    },
+  );
+
   testWidgets('account list load failure shows a retryable error tile', (
     tester,
   ) async {
@@ -436,6 +488,13 @@ void main() {
       expect(container.read(activeUserIdProvider), isNull);
       expect(container.read(sessionReadyProvider), isTrue);
       expect(await loadAllSessions(), isEmpty);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.containsKey(
+          'matrix_session_removed_${base64Url.encode(utf8.encode('@alice:example.org'))}',
+        ),
+        isFalse,
+      );
     },
   );
 
@@ -455,6 +514,13 @@ void main() {
     expect(container.read(activeUserIdProvider), isNull);
     expect(container.read(isLoggedInProvider), isFalse);
     expect(await loadAllSessions(), isEmpty);
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+      prefs.containsKey(
+        'matrix_session_removed_${base64Url.encode(utf8.encode('@alice:example.org'))}',
+      ),
+      isTrue,
+    );
   });
 
   test(

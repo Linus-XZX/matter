@@ -66,10 +66,20 @@ class AccountSwitchController {
     String? cleanupWarning,
   ) async {
     var warning = cleanupWarning;
+    var localCleanupSucceeded = false;
     try {
       await _ref.read(accountSessionRemoverProvider)(userId);
+      localCleanupSucceeded = true;
     } catch (error) {
       warning = _appendCleanupWarning(warning, error);
+    }
+
+    if (localCleanupSucceeded && cleanupWarning == null) {
+      try {
+        await unmarkSessionRemoved(userId);
+      } catch (error) {
+        warning = _appendCleanupWarning(warning, error);
+      }
     }
 
     final current = _ref
@@ -231,6 +241,10 @@ class AccountSwitchController {
         clearActiveSessionStateFromRef(_ref, markSessionReady: true);
       }
     } else {
+      // Same ignore-list hygiene as the switch path (`_switchTo`): dropping
+      // this account's in-memory state stops a draining queued write from
+      // re-persisting the snapshot that is being deleted.
+      resetIgnoredListAccountState(userId);
       final result = await _runWithPersistedRemovalIntent(
         userId,
         () => rust.removeAccount(userId: userId),
@@ -650,7 +664,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   ),
                                 )
                               : null,
-                          onTap: (isActive || _switchingAccountId != null)
+                          // Removal internally switches accounts (see
+                          // `_removeAccount`); during that window a switch
+                          // tile must stay disabled like the remove buttons,
+                          // or a queued tap can target the account being
+                          // deleted.
+                          onTap:
+                              (isActive ||
+                                  _switchingAccountId != null ||
+                                  _removingAccountId != null)
                               ? null
                               : () => _switchAccount(account.userId),
                         );

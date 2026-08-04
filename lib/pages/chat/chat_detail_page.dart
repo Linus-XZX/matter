@@ -98,6 +98,14 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final VoidCallback? onRoomLeft;
   final ValueChanged<RoomMetadataPatch>? onRoomDetailsChanged;
 
+  /// Lets an external owner (the desktop details panel is a sibling of this
+  /// page in the desktop layout) route room-details edits through this
+  /// page's [_roomNameEdit]/[_roomAvatarEdit] trackers, so edits made
+  /// outside this page get the same sync-echo rollback protection as edits
+  /// made from the room management page inside it.
+  final void Function(ValueChanged<RoomMetadataPatch>)?
+  onRegisterRoomDetailsHandler;
+
   const ChatDetailPage({
     super.key,
     required this.roomId,
@@ -112,6 +120,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     this.onToggleDetailsPanel,
     this.onRoomLeft,
     this.onRoomDetailsChanged,
+    this.onRegisterRoomDetailsHandler,
   });
 
   @override
@@ -258,6 +267,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   @override
   void initState() {
     super.initState();
+    widget.onRegisterRoomDetailsHandler?.call(_handleRoomDetailsChanged);
     WidgetsBinding.instance.addObserver(this);
     _roomName = widget.roomName;
     _avatarUrl = widget.avatarUrl;

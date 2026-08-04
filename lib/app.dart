@@ -44,6 +44,17 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   final _selectedRoomNameEdit = RoomStateEditTracker();
   final _selectedRoomAvatarEdit = RoomStateEditTracker();
 
+  /// The selected ChatDetailPage's room-details handler, registered via its
+  /// `onRegisterRoomDetailsHandler` prop. Desktop details-panel edits are
+  /// routed through it so they go through the page's sync-echo trackers.
+  ValueChanged<RoomMetadataPatch>? _desktopRoomDetailsHandler;
+
+  void _registerDesktopRoomDetailsHandler(
+    ValueChanged<RoomMetadataPatch> handler,
+  ) {
+    _desktopRoomDetailsHandler = handler;
+  }
+
   static const double _desktopBreakpoint = 840;
   static const double _desktopDetailsPaneBreakpoint = 1024;
 
@@ -583,6 +594,8 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                 onRoomLeft: _clearSelectedRoom,
                                 onRoomDetailsChanged:
                                     _updateSelectedRoomDetails,
+                                onRegisterRoomDetailsHandler:
+                                    _registerDesktopRoomDetailsHandler,
                               ),
                       ),
                       if (showRoomDetails) ...[
@@ -594,7 +607,11 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                             roomName: selectedRoom.name,
                             avatarUrl: selectedRoom.avatarUrl,
                             onRoomLeft: _clearSelectedRoom,
-                            onRoomDetailsChanged: _updateSelectedRoomDetails,
+                            // Route through the selected page's handler so
+                            // the edit arms its sync-echo tracker (the page
+                            // then forwards to _updateSelectedRoomDetails).
+                            onRoomDetailsChanged: (patch) =>
+                                _desktopRoomDetailsHandler?.call(patch),
                           ),
                         ),
                       ],

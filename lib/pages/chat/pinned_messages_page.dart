@@ -31,12 +31,14 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   bool _accountSwitched = false;
 
   /// Message ids whose unpin request is in flight, mapped to the moment the
-  /// lock was taken. The server toggle is a read-modify-write: without this
-  /// guard a double-tap on the unpin button would first remove the pin and
-  /// then re-add it (the second toggle runs against the already-unpinned
-  /// server state). Locks expire after [_unpinLockTimeout] so a message that
-  /// gets re-pinned on another device (or a row that never leaves a stale
-  /// list) cannot disable its button forever.
+  /// lock was taken. setPinnedMessage is an idempotent set (re-applying an
+  /// already-held state is a server-side no-op), so a repeated unpin cannot
+  /// re-pin — the lock exists to keep the button disabled while a write may
+  /// still be queued (a stale reload can re-show the row before the removal
+  /// is confirmed) and to avoid duplicate concurrent writes. Locks expire
+  /// after [_unpinLockTimeout] so a message that gets re-pinned on another
+  /// device (or a row that never leaves a stale list) cannot disable its
+  /// button forever.
   final Map<String, DateTime> _pendingUnpinIds = {};
   static const Duration _unpinLockTimeout = Duration(seconds: 30);
   Timer? _unpinLockExpiryTimer;
@@ -49,11 +51,9 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   bool _unpinLocked(String messageId) {
     final lockedAt = _pendingUnpinIds[messageId];
     if (lockedAt == null) return false;
-    if (clock.now().difference(lockedAt) >= _unpinLockTimeout) {
-      _pendingUnpinIds.remove(messageId);
-      return false;
-    }
-    return true;
+    // Expired entries are removed only by the expiry timer
+    // (_scheduleUnpinLockExpiry), never here: build must stay pure.
+    return clock.now().difference(lockedAt) < _unpinLockTimeout;
   }
 
   void _scheduleUnpinLockExpiry() {
@@ -572,30 +572,17 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         return;
       }
       final timedOut = isMutationTimeout(error);
-      if (timedOut) {
-        // A timeout may still land server-side (the queued operation keeps
-        // running in the background). Keep the row removed and the lock
-        // held — restoring it would invite a second tap whose result the
-        // late operation could overwrite — and let the reload settle the
-        // final state.
-        setState(() {
-          _inflightUnpinIds.remove(message.id);
-          _scheduleUnpinLockExpiry();
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('操作超时，请稍后下拉刷新确认最终状态'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-        unawaited(_reload());
-        return;
-      }
       setState(() {
-        // The server still has the pin (the request failed deterministically):
-        // restore the row at its previous position (the list is ordered by
-        // the server's pinned state, so appending at the top would
-        // misrepresent it), and release the lock so the user can retry.
+        // The server still has the pin (the request failed
+        // deterministically) or its state is unknown (a timeout — the
+        // write may still be landing server-side): either way, restore the
+        // row at its previous position (the list is ordered by the
+        // server's pinned state, so appending at the top would
+        // misrepresent it) and release the lock so the user can retry. The
+        // retry is safe even while a timed-out write is still queued:
+        // setPinnedMessage is an idempotent set, so the repeated
+        // pinned:false write is a no-op once the pin is gone — the late
+        // operation cannot flip it back.
         _pendingUnpinIds.remove(message.id);
         _inflightUnpinIds.remove(message.id);
         _scheduleUnpinLockExpiry();
@@ -613,10 +600,19 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         }
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        // Shared wording: timeout mapping and partial-success passthrough
-        // come from the single `actionFailureMessage` source.
+        // A timeout may still land server-side, so its wording advises a
+        // refresh to confirm and points at the restored row's button for a
+        // retry — that advice must not go through the failure prefix (the
+        // bare timeout line already suggests "刷新确认", conflicting with
+        // the retry hint in the same sentence). Plain failures share the
+        // single `actionFailureMessage` mapping (timeout-worded errors map
+        // to the "操作超时" line, partial-success passthrough stays intact).
         SnackBar(
-          content: Text('取消置顶失败: ${actionFailureMessage(error)}'),
+          content: Text(
+            timedOut
+                ? '取消置顶超时，请稍后刷新确认；若未生效请重试'
+                : '取消置顶失败: ${actionFailureMessage(error)}',
+          ),
           duration: const Duration(seconds: 2),
         ),
       );

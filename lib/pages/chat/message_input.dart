@@ -211,7 +211,11 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   // The sequence number ties the in-flight flag to the LATEST call: an
   // older call completing (e.g. a slow `true` resolving after the `false`
   // that superseded it) must not reopen the gate while the newer call is
-  // still on the wire.
+  // still on the wire. It also drives the stop-direction correction in
+  // whenComplete: the stale `true` may have reached the remote AFTER the
+  // `false` that superseded it (out-of-order on a flaky network), reviving
+  // "正在输入" with no keep-alive left to fix it — a corrective stop goes
+  // out once the stale call finishes.
   int _typingNoticeSeq = 0;
   bool _typingNoticeInFlight = false;
 
@@ -226,6 +230,16 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         .whenComplete(() {
           if (seq == _typingNoticeSeq) {
             _typingNoticeInFlight = false;
+          } else if (typing && !_isTyping) {
+            // Stop-direction correction: this stale `true` is no longer the
+            // latest notice (a stop `false` superseded it), but the remote
+            // may still receive it AFTER that `false` on a flaky network —
+            // reviving "正在输入" with no keep-alive left (the timer was
+            // cancelled on stop). Re-send the stop so the remote ends
+            // stopped. Skipped while the user is typing again: the newer
+            // start/keep-alive `true` already superseded this one and will
+            // land; an extra stop would only hide the indicator.
+            _sendTypingNotice(false);
           }
         })
         .catchError((e) {

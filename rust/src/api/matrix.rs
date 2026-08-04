@@ -352,8 +352,28 @@ type LifecycleProtection = Arc<tokio::sync::RwLockReadGuard<'static, ()>>;
 /// "failed, retry".
 const MUTATION_TIMEOUT_MESSAGE: &str = "操作超时，请稍后查看最终状态。";
 
+/// Error surfaced when a mutation key's queue is already at its depth
+/// limit: the operation was rejected outright instead of chaining. Distinct
+/// from MUTATION_TIMEOUT_MESSAGE ("still running in the background") so the
+/// Dart side can tell the two apart.
+const MUTATION_QUEUE_FULL_MESSAGE: &str = "操作排队已满，请稍后重试。";
+
+/// Maximum operations chained on a single mutation key (1 running + 2
+/// queued). Every chained operation holds a share of the SYNC_LIFECYCLE
+/// read lease from enqueue until completion, so an unbounded chain under a
+/// bad server (user retries stacking up) would stall logout/account switch
+/// — which need the write lock — for minutes. New enqueues are rejected
+/// instead of extending the chain beyond this bound.
+const MUTATION_QUEUE_MAX_DEPTH: usize = 3;
+
 struct MutationTail {
     id: u64,
+    /// Chain depth when this tail was enqueued: 1 for the running
+    /// operation, +1 per queued successor. Stays monotonic along the chain
+    /// (a completing predecessor does not decrement it), so it is an upper
+    /// bound on the remaining chain length — exactly what the depth limit
+    /// needs to reject a new enqueue.
+    depth: usize,
     future: MutationFuture,
 }
 
@@ -543,7 +563,23 @@ where
         let mut tails = MUTATION_TAILS
             .lock()
             .map_err(|_| "操作队列不可用，请重试。".to_string())?;
-        let previous = tails.get(&key).map(|tail| tail.future.clone());
+        let previous = tails
+            .get(&key)
+            .map(|tail| (tail.future.clone(), tail.depth));
+        // Bound the chain length (see MUTATION_QUEUE_MAX_DEPTH): each
+        // chained operation holds a share of the SYNC_LIFECYCLE read lease
+        // from enqueue until completion, so an unbounded chain would let a
+        // bad server + user retries stall logout/account switch for minutes.
+        // Reject the excess instead of extending the chain past
+        // 1 running + 2 queued.
+        if previous
+            .as_ref()
+            .is_some_and(|(_, depth)| *depth >= MUTATION_QUEUE_MAX_DEPTH)
+        {
+            return Err(MUTATION_QUEUE_FULL_MESSAGE.to_string());
+        }
+        let depth = previous.as_ref().map_or(1, |(_, depth)| depth + 1);
+        let previous = previous.map(|(future, _)| future);
         let future = std::panic::AssertUnwindSafe(async move {
             if let Some(previous) = previous {
                 // The SDK's HTTP timeout (see bounded_request_config) bounds
@@ -647,6 +683,7 @@ where
             key.clone(),
             MutationTail {
                 id,
+                depth,
                 future: tail_future.clone(),
             },
         );
@@ -944,7 +981,8 @@ mod mutation_queue_tests {
         clear_account_runtime_state, enqueue_mutation, merge_ignored_user_overrides,
         reconcile_ignored_user_overrides_inner, reconcile_marked_unread_override,
         resolve_ignored_user, resolve_marked_unread, run_bounded_mutation, IgnoredUserOverride,
-        MarkedUnreadOverride, MUTATION_WAIT_TIMEOUT_SECS,
+        MarkedUnreadOverride, MUTATION_QUEUE_FULL_MESSAGE, MUTATION_TAILS,
+        MUTATION_WAIT_TIMEOUT_SECS,
     };
     use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
     use std::sync::atomic::Ordering;
@@ -1190,6 +1228,67 @@ mod mutation_queue_tests {
         my_task.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
         assert_eq!(*order.lock().unwrap(), [2]);
+    }
+
+    #[tokio::test]
+    async fn overlong_queue_chains_are_rejected() {
+        let key = format!("test-depth:{}", std::process::id());
+        let (release_first, wait_for_release) = oneshot::channel();
+        let (first_started, wait_for_first) = oneshot::channel();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            enqueue_mutation(first_key, async move {
+                let _ = first_started.send(());
+                let _ = wait_for_release.await;
+                Ok(())
+            })
+            .await
+        });
+
+        wait_for_first.await.unwrap();
+
+        // Fill the queue up to the depth limit (1 running + 2 queued).
+        let second_key = key.clone();
+        let second =
+            tokio::spawn(async move { enqueue_mutation(second_key, async move { Ok(()) }).await });
+        let third_key = key.clone();
+        let third =
+            tokio::spawn(async move { enqueue_mutation(third_key, async move { Ok(()) }).await });
+
+        // Wait until both successors have actually chained (tail depth 3).
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let depth = MUTATION_TAILS
+                    .lock()
+                    .map(|tails| tails.get(&key).map_or(0, |tail| tail.depth))
+                    .unwrap_or(0);
+                if depth >= 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successors should chain onto the running mutation");
+
+        // A fourth operation for the same key is rejected outright instead
+        // of extending the chain: every chained operation holds a share of
+        // the SYNC_LIFECYCLE read lease, so an unbounded chain would stall
+        // logout/account switch behind a backlog.
+        let fourth_key = key.clone();
+        let fourth =
+            tokio::spawn(async move { enqueue_mutation(fourth_key, async move { Ok(()) }).await });
+        assert_eq!(
+            fourth.await.unwrap().unwrap_err(),
+            MUTATION_QUEUE_FULL_MESSAGE.to_string()
+        );
+
+        // The queue still drains in order once the running mutation
+        // finishes; the rejected fourth operation never ran.
+        let _ = release_first.send(());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        third.await.unwrap().unwrap();
     }
 
     #[test]
@@ -1459,13 +1558,11 @@ pub fn watch_session_token_updates(sink: crate::frb_generated::StreamSink<Sessio
     });
 }
 
-async fn clear_timeline_cache() {
-    sdk_timeline::clear_all().await;
-}
-
-/// Drop only the removed/logged-out account's timelines: a global clear
-/// would tear down the timelines of every other active account (the one
-/// the user is currently in included), forcing an avoidable rebuild.
+/// Drop only the removed/logged-out/left account's timelines: a global
+/// clear would tear down the timelines of every other active account (the
+/// one the user is currently in included), forcing an avoidable rebuild.
+/// The cache is keyed per account and holds Arc<Timeline> instances bound
+/// to that account's client.
 async fn clear_timeline_cache_for(user_id: &str) {
     sdk_timeline::clear_for_user(user_id).await;
 }
@@ -1481,8 +1578,11 @@ static PENDING_REMOTE_LOGOUTS: Lazy<RwLock<HashMap<String, (String, String)>>> =
 /// Fire-and-forget retry of a pending remote logout for [user_id] using the
 /// freshly logged-in client's HTTP transport (the new session is up either
 /// way). A cross-homeserver re-login cannot invalidate the old token — the
-/// retry is skipped unless the homeserver matches; a 401 response means the
-/// token was already revoked server-side, so the pending entry is dropped.
+/// retry is skipped unless the homeserver matches. Only a 2xx response
+/// settles the pending entry: the stored access token may have expired by
+/// the time the retry runs (refresh tokens are enabled), so a 401 means
+/// "this token is rejected", not "the session is gone" — the entry stays
+/// for a later login of the same account to retry again.
 async fn retry_pending_remote_logout(user_id: &str, client: &Client) {
     let (token, homeserver) = match PENDING_REMOTE_LOGOUTS.read().await.get(user_id) {
         Some(entry) => entry.clone(),
@@ -1513,11 +1613,27 @@ async fn retry_pending_remote_logout(user_id: &str, client: &Client) {
             Ok(result) => match result {
                 Ok(response) => {
                     let status = response.status().as_u16();
-                    // 401: the token was already revoked server-side — the
-                    // ghost session is gone. 2xx: the retry itself revoked it.
-                    // Either way the pending entry is settled; drop it.
-                    if status == 401 || (200..300).contains(&status) {
+                    if remote_logout_retry_settles(status) {
+                        // 2xx: the retry itself revoked the old token — the
+                        // ghost session is gone; settle the pending entry.
                         PENDING_REMOTE_LOGOUTS.write().await.remove(&user_id);
+                        None
+                    } else if status == 401 {
+                        // With refresh tokens enabled the access token
+                        // expires on its own, so by the time the retry runs
+                        // the stored token is usually expired even though
+                        // the server-side session is still valid. A 401
+                        // therefore does NOT prove the session was revoked:
+                        // dropping the entry here would strand a live ghost
+                        // session with no further retry. Keep it so the
+                        // next login of this account tries again.
+                        app_log(
+                            "warn",
+                            "auth",
+                            format!(
+                                "Retried remote logout for {user_id} rejected (401); keeping the pending entry for a later retry."
+                            ),
+                        );
                         None
                     } else {
                         Some(response.error_for_status())
@@ -1534,6 +1650,34 @@ async fn retry_pending_remote_logout(user_id: &str, client: &Client) {
             );
         }
     });
+}
+
+/// Whether a retried remote logout response settles the pending entry
+/// (removes it): only a 2xx proves the session was revoked server-side. A
+/// 401 is ambiguous when refresh tokens are enabled (the stored access
+/// token may simply have expired) and must keep the entry for a later
+/// retry.
+fn remote_logout_retry_settles(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+#[cfg(test)]
+mod remote_logout_retry_tests {
+    use super::remote_logout_retry_settles;
+
+    #[test]
+    fn only_success_retries_settle_the_pending_entry() {
+        // 2xx: the retry itself revoked the old session — settle.
+        assert!(remote_logout_retry_settles(200));
+        assert!(remote_logout_retry_settles(204));
+        // 401: with refresh tokens enabled the stored access token can
+        // expire on its own, so the session may still be alive — the entry
+        // must survive for a later retry.
+        assert!(!remote_logout_retry_settles(401));
+        // Other server errors keep the entry too.
+        assert!(!remote_logout_retry_settles(500));
+        assert!(!remote_logout_retry_settles(429));
+    }
 }
 
 // ── Multi-account store ──────────────────────────────────────────────
@@ -2294,6 +2438,49 @@ async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), S
         .map_err(|error| format!("Failed to delete SDK store for {user_id}: {error}"))
 }
 
+/// Retry SDK-store cleanup for an account whose persisted removal transaction
+/// was interrupted. Called during startup before any sessions are restored.
+#[frb]
+pub async fn cleanup_removed_account_store(
+    user_id: String,
+    data_dir: String,
+) -> Result<(), String> {
+    delete_account_sdk_store(&data_dir, &user_id).await
+}
+
+#[cfg(test)]
+mod account_store_cleanup_tests {
+    use super::{build_sdk_data_dir, cleanup_removed_account_store};
+
+    #[tokio::test]
+    async fn removed_account_store_cleanup_is_idempotent() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "matter-removed-account-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let user_id = "@removed:example.org";
+        let sdk_dir = build_sdk_data_dir(data_dir.to_str().unwrap(), Some(user_id));
+        tokio::fs::create_dir_all(&sdk_dir).await.unwrap();
+        tokio::fs::write(sdk_dir.join("store.db"), b"stale credentials")
+            .await
+            .unwrap();
+
+        cleanup_removed_account_store(user_id.to_string(), data_dir.to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        assert!(!sdk_dir.exists());
+
+        cleanup_removed_account_store(user_id.to_string(), data_dir.to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let _ = tokio::fs::remove_dir_all(data_dir).await;
+    }
+}
+
 struct ClientLease {
     client: Client,
     lifecycle: LifecycleProtection,
@@ -2369,6 +2556,15 @@ async fn finalize_pending() -> Result<String, String> {
     );
     info!("finalize_pending: starting for user {}", user_id);
     if CLIENTS.read().await.contains_key(&user_id) {
+        // This pending login will never be used — the account is already
+        // signed in. Clear PENDING and drop the freshly built client so its
+        // session is not retained as an orphan (it holds a valid token; the
+        // server-side session expires on its own token lifetime).
+        {
+            let mut pending = PENDING.write().await;
+            *pending = None;
+        }
+        drop(pending_client);
         return Err("This account is already signed in.".to_string());
     }
 
@@ -3903,12 +4099,20 @@ pub async fn switch_account(user_id: String) -> bool {
         drop(clients);
         set_subscription_user(None).await;
         stop_sync_task(None, false).await;
-        let mut active = ACTIVE_USER.write().await;
-        *active = Some(user_id.clone());
-        drop(active);
+        let previous_user = {
+            let mut active = ACTIVE_USER.write().await;
+            let previous = active.clone();
+            *active = Some(user_id.clone());
+            previous
+        };
         set_subscription_user(Some(user_id.clone())).await;
         clear_verification_session().await;
-        clear_timeline_cache().await;
+        // Drop only the previously active account's timelines: a global
+        // clear would also tear down the timelines of the account being
+        // switched to (the one the user is currently in), forcing an
+        // avoidable rebuild. With no previously active account, fall back
+        // to the target's own cache to keep the old defensive clear.
+        clear_timeline_cache_for(previous_user.as_deref().unwrap_or(&user_id)).await;
         app_log("info", "auth", format!("Switched to account: {}", user_id));
         info!("Switched to account: {}", user_id);
         true
@@ -8359,10 +8563,10 @@ pub async fn set_room_muted(
     Ok(())
 }
 
-/// Lightweight read of the room's pinned event ids (server read, no event
+/// Lightweight authoritative read of the room's pinned event ids (no event
 /// loading). Used by the message long-press menu to decide whether "置顶" or
-/// "取消置顶" applies; the account guard keeps the target decision on the
-/// account the menu was opened for.
+/// "取消置顶" applies; failures must be retried instead of falling back to a
+/// local state-store snapshot that may lag the server in either direction.
 #[frb]
 pub async fn get_pinned_event_ids(
     account_user_id: String,
@@ -8375,50 +8579,15 @@ pub async fn get_pinned_event_ids(
         // Bound the server read more tightly than the client default (the
         // SDK's RequestConfig already caps a single request at 30s, but
         // with 3 retries a dead network could still stall the long-press
-        // menu well past the 90s outer bound). On error OR timeout, fall
-        // back to the local store; a stale list still lets the menu
-        // decide pin vs unpin (the write itself re-reads the server
-        // inside the queue).
-        let ids = match tokio::time::timeout(
+        // menu well past the 90s outer bound).
+        let ids = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             room.load_pinned_events(),
         )
         .await
-        {
-            Ok(Ok(ids)) => ids.unwrap_or_default(),
-            Ok(Err(_)) | Err(_) => {
-                // Offline fallback mirroring get_pinned_messages: a stale
-                // local list still lets the menu decide pin vs unpin (the
-                // write itself re-reads the server inside the queue).
-                match room
-                    .get_state_event_static::<
-                        matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent,
-                    >()
-                    .await
-                {
-                    Ok(Some(raw)) => raw
-                        .deserialize()
-                        .map(|event| match event.as_sync() {
-                            Some(matrix_sdk::ruma::events::SyncStateEvent::Original(
-                                original,
-                            )) => original.content.pinned.clone(),
-                            _ => Vec::new(),
-                        })
-                        .map_err(|error| {
-                            format!("无法解析本地置顶状态，请重试: {error}")
-                        })?,
-                    Ok(None) => Vec::new(),
-                    // A store read failure is not "no pins": treating it as
-                    // empty would decide the wrong menu direction (e.g.
-                    // "置顶" on an already-pinned message, making unpin
-                    // unreachable through the menu). Surface the error and
-                    // let the user retry, like pinned_ids_from_store.
-                    Err(error) => {
-                        return Err(format!("无法读取本地置顶状态，请重试: {error}"));
-                    }
-                }
-            }
-        };
+        .map_err(|_| "加载置顶状态超时，请重试".to_string())?
+        .map_err(|error| format!("加载置顶状态失败，请重试: {error}"))?
+        .unwrap_or_default();
         Ok(ids.into_iter().map(|id| id.to_string()).collect())
     })
     .await
@@ -8662,7 +8831,9 @@ pub async fn mark_room_as_read(
         // `false` when no marker exists is an idempotent no-op, and
         // explicit actions are rare user-initiated operations, so the
         // extra write is negligible. Only the auto path is gated, where
-        // per-message write amplification is a real concern.
+        // per-message write amplification is a real concern. This gating
+        // applies to the clear WRITE; the suppression override below is
+        // gated separately (only created when the flag was actually set).
         let explicit_clear =
             (explicit && !inner_cleared) || (had_pending_unread_override && !baseline);
         if explicit_clear {
@@ -8684,8 +8855,18 @@ pub async fn mark_room_as_read(
         // echo arrives (showing the cleared store). Without this, a
         // pending `true` echo — including our own mark-unread write whose
         // echo has not landed yet — would briefly resurrect the unread
-        // marker. A clean room with no clear intent keeps the actual
-        // baseline.
+        // marker. A clean room with no clear intent gets no override.
+        // The override is created ONLY when the flag was actually set
+        // (visible baseline, or our own pending mark-unread write) — NOT
+        // for an explicit read of a room that locally shows no marker: a
+        // `{baseline:true, desired:false}` override suppresses any *new*
+        // cross-device mark for the whole 30s TTL, swallowing an unread
+        // flag the user never handled here. The clear itself is still
+        // written unconditionally (an explicit read must win over an
+        // un-echoed remote mark), but without an override the stale
+        // `true` echo can briefly flash the room unread until the `false`
+        // echo lands — that flicker is the accepted price for not hiding a
+        // fresh remote mark.
         // Note: while the room keeps being viewed (auto-reads renew this
         // override with a fresh created_at), the suppression is effectively
         // extended — viewing IS the "handled now" signal, so this is
@@ -8693,12 +8874,10 @@ pub async fn mark_room_as_read(
         // gated on the viewer/owner), so the 30s TTL bound starts as soon
         // as viewing stops, and the override cannot suppress a new
         // cross-device mark beyond that.
-        let override_baseline = if explicit || had_pending_unread_override || baseline {
-            true
-        } else {
-            baseline
-        };
-        set_marked_unread_override(override_key, override_baseline, false).await;
+        let override_baseline = had_pending_unread_override || baseline;
+        if override_baseline {
+            set_marked_unread_override(override_key, override_baseline, false).await;
+        }
         // Broadcast from inside the queued operation (like mute/pin): even
         // when the caller times out and this tail keeps running, the room
         // list still learns about the change. Only broadcast when a clear

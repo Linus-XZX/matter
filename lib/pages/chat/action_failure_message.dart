@@ -1,7 +1,8 @@
-/// The app's own deterministic mutation-timeout wordings: the Rust-side
+/// The app's own deterministic mutation-timeout wording: the Rust-side
 /// `MUTATION_TIMEOUT_MESSAGE`. This is the only error where a failed write
-/// may still be landing in its background tail. [`isMutationTimeout`]
-/// matches exactly this wording because it gates
+/// may still be landing in its background tail. [`isMutationTimeout`] and
+/// the `actionFailureMessage` timeout line both match exactly this wording
+/// because it gates
 /// behavior (keeping a suppression or optimistic marker armed): third-party
 /// error text that merely contains "timeout" (reqwest / matrix-sdk English
 /// wording, server response bodies) is a confirmed failure with no tail.
@@ -12,9 +13,9 @@ const _mutationTimeoutWording = '操作超时，请稍后查看最终状态。';
 /// background tail. Shared by the pages that keep their optimistic
 /// marker/suppression armed on a timeout but restore it on a confirmed
 /// failure (mute, unread). Do NOT widen this to a loose "timeout"
-/// substring match: that is fine for wording only (see
-/// [actionFailureMessage]) but would misclassify confirmed third-party
-/// failures as "may still land".
+/// substring match: [actionFailureMessage] gates its timeout line on the
+/// same exact wording, and a loose match here would misclassify confirmed
+/// third-party failures as "may still land".
 bool isMutationTimeout(Object error) {
   final message = '$error';
   return message.contains(_mutationTimeoutWording);
@@ -53,12 +54,13 @@ String actionFailureMessage(Object error) {
       message.contains('仍在后台执行')) {
     return message;
   }
-  // Wording-only wide matching is fine here (a misjudged word costs
-  // nothing behaviorally); keep the deterministic app wordings and the
-  // third-party English forms both mapped to the timeout line.
-  final timedOut =
-      message.contains('超时') ||
-      message.toLowerCase().contains('timed out') ||
-      message.toLowerCase().contains('timeout');
-  return timedOut ? '操作超时，请稍后刷新确认最终状态' : '操作失败: $error';
+  // Only the app's own deterministic mutation-timeout wording maps to the
+  // timeout line — same source as [isMutationTimeout], one constant keeps
+  // the two in sync. Third-party text that merely contains "timeout"
+  // (reqwest / matrix-sdk English wording, server response bodies) is a
+  // confirmed failure with no background tail: mapping it to the timeout
+  // line would imply "may have landed" and nudge the user to resend,
+  // contradicting [isMutationTimeout].
+  final timedOut = message.contains(_mutationTimeoutWording);
+  return timedOut ? _mutationTimeoutWording : '操作失败: $error';
 }
