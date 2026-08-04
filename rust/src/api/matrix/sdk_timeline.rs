@@ -654,15 +654,19 @@ pub(super) async fn get_messages_before(
     // otherwise the first page would silently return nothing and the caller
     // would stop paginating, cutting off all older history.
     let mut anchor_visible = false;
-    for _ in 0..16 {
+    for _ in 0..4 {
         if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
             anchor_visible = true;
             break;
         }
         let hit_start = timeline
-            .paginate_backwards(20u16)
+            .paginate_backwards(100u16)
             .await
             .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+        if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
+            anchor_visible = true;
+            break;
+        }
         if hit_start {
             break;
         }
@@ -671,9 +675,9 @@ pub(super) async fn get_messages_before(
     // messages arriving while the caller browsed history push the old end
     // out). Keep extending before falling back to a focused context request.
     if !anchor_visible {
-        for _ in 0..48 {
+        for _ in 0..9 {
             let hit_start = timeline
-                .paginate_backwards(20u16)
+                .paginate_backwards(100u16)
                 .await
                 .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
             if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
@@ -703,21 +707,21 @@ pub(super) async fn get_messages_before(
     // the window holds), an empty return would end history loading with
     // older messages still reachable — paginate until the page is full or
     // history ends instead.
-    for _ in 0..16 {
+    for _ in 0..4 {
         if before.len() >= limit {
             break;
         }
         let hit_start = timeline
-            .paginate_backwards(20u16)
+            .paginate_backwards(100u16)
             .await
             .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
-        if hit_start {
-            break;
-        }
         let items = snapshot(&timeline).await;
         let position = raw_event_position(&items, from_event_id)
             .ok_or_else(|| "分页锚点已离开当前时间线窗口，请重试。".to_owned())?;
         before = convert_snapshot(room, &items[..position]).await;
+        if hit_start {
+            break;
+        }
     }
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }

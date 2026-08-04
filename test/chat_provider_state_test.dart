@@ -56,9 +56,11 @@ class _FakeRustApi implements RustLibApi {
   int searchRoomsCalls = 0;
   int knockRequestsCalls = 0;
   int membersCalls = 0;
+  int contactsCalls = 0;
   Completer<List<rust.ChatMessage>>? pendingMessages;
   Completer<List<rust.ChatRoom>>? pendingChatRooms;
   List<rust.ChatRoom> chatRooms = const [];
+  List<rust.Contact> contacts = const [];
 
   @override
   rust.ConnectionStatus crateApiMatrixGetConnectionStatus() {
@@ -159,6 +161,12 @@ class _FakeRustApi implements RustLibApi {
   }) async {
     membersCalls++;
     return const [];
+  }
+
+  @override
+  Future<List<rust.Contact>> crateApiMatrixGetContacts() async {
+    contactsCalls++;
+    return contacts;
   }
 
   @override
@@ -266,6 +274,8 @@ void main() {
     rustApi.searchRoomsCalls = 0;
     rustApi.knockRequestsCalls = 0;
     rustApi.membersCalls = 0;
+    rustApi.contactsCalls = 0;
+    rustApi.contacts = const [];
     rustApi.pendingMessages = null;
   });
 
@@ -384,6 +394,69 @@ void main() {
       expect(ref.read(roomUnreadOverrideProvider(roomId)), isNull);
       expect(ref.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
     });
+  });
+
+  testWidgets('contacts exclude ignored users', (tester) async {
+    rustApi.ignoredUsers = const ['@ignored:example.org'];
+    rustApi.contacts = const [
+      rust.Contact(
+        id: '@ignored:example.org',
+        name: 'Ignored',
+        status: 'offline',
+      ),
+      rust.Contact(
+        id: '@visible:example.org',
+        name: 'Visible',
+        status: 'online',
+      ),
+    ];
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    final contacts = await container.read(contactsProvider.future);
+
+    expect(contacts.map((contact) => contact.id), ['@visible:example.org']);
+    expect(rustApi.contactsCalls, 1);
+  });
+
+  testWidgets('contacts restore unignored users', (tester) async {
+    rustApi.ignoredUsers = const ['@ignored:example.org'];
+    rustApi.contacts = const [
+      rust.Contact(
+        id: '@ignored:example.org',
+        name: 'Ignored',
+        status: 'offline',
+      ),
+      rust.Contact(
+        id: '@visible:example.org',
+        name: 'Visible',
+        status: 'online',
+      ),
+    ];
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    var contacts = await container.read(contactsProvider.future);
+    expect(contacts.map((contact) => contact.id), ['@visible:example.org']);
+
+    // Unignore via the confirmed write-through path the management page uses.
+    await persistIgnoredUserList('@alice:example.org', const {});
+    rustApi.ignoredUsers = const [];
+    container.invalidate(ignoredUserIdsProvider);
+    await tester.pump();
+
+    contacts = await container.read(contactsProvider.future);
+    expect(contacts.map((contact) => contact.id), [
+      '@ignored:example.org',
+      '@visible:example.org',
+    ]);
+
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
   });
 
   testWidgets('refreshes ignored users only for their sync event', (
@@ -753,6 +826,50 @@ void main() {
       '@b:example.org',
     });
 
+    container.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('a stale GET after a confirmed PUT cannot roll it back', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'ignored_users_v1_@alice:example.org': const ['@a:example.org'],
+    });
+    rustApi.ignoredUsers = const ['@a:example.org'];
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+    });
+    await tester.pump();
+
+    await persistIgnoredUserList('@alice:example.org', const {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    // The GET begins after the PUT, so it captures the same local version,
+    // but the homeserver still returns its pre-PUT account-data snapshot.
+    rustApi.ignoredUsers = const ['@a:example.org'];
+    container.invalidate(ignoredUserIdsProvider);
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(await container.read(ignoredUserIdsProvider.future), {
+      '@a:example.org',
+      '@b:example.org',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList('ignored_users_v1_@alice:example.org'), [
+      '@a:example.org',
+      '@b:example.org',
+    ]);
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });
@@ -1591,6 +1708,9 @@ void main() {
     rustApi.syncEvents.add(const rust.SyncEvent.messageSent(roomId: roomId));
     await tester.pump(const Duration(milliseconds: 150));
     await tester.pump();
+    // The direct room-list fetch used by auto-read consumes the pending
+    // debounced chat-list refresh rather than issuing the same request again.
+    await tester.pump(const Duration(milliseconds: 500));
 
     expect(rustApi.getMessagesCalls, 1);
     expect(rustApi.markRoomAsReadCalls, 1);

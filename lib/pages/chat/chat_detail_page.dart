@@ -134,8 +134,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   final _scrollViewportKey = GlobalKey();
   late final MutableState<String?> _currentRoomIdNotifier;
 
-  /// Cached in initState: `ref` must not be read inside `dispose()`.
-  late final MutableState<String?> _roomViewOwnerState;
+  /// Latest live notifier, retained only for the deferred dispose cleanup.
+  /// Normal writes re-read the family because session invalidation disposes
+  /// its previous notifier while this page can remain mounted.
+  MutableState<String?>? _roomViewOwnerStateForDispose;
 
   Future<void> _subscriptionLifecycle = Future.value();
   bool _subscriptionsDesired = false;
@@ -262,12 +264,6 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _nameEventId = widget.nameEventId;
     _avatarEventId = widget.avatarEventId;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
-    // Cached for dispose(): reading through `ref` there is unsafe (the
-    // element is being unmounted).
-    _roomViewOwnerState = ref.read(
-      roomViewOwnerProvider(widget.roomId).notifier,
-    );
-
     final roomAccountKey = activeRoomAccountKey(ref, widget.roomId);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -312,14 +308,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         // auto-read or subscription runs under the new account.
         if (_currentRoomIdNotifier.value == widget.roomId) {
           _currentRoomIdNotifier.value = null;
-          _roomViewOwnerState.value = null;
+          _setRoomViewOwner(null);
         }
         _setSubscriptionsDesired(false);
       } else {
         // Logged out entirely: same teardown as switching away.
         if (_currentRoomIdNotifier.value == widget.roomId) {
           _currentRoomIdNotifier.value = null;
-          _roomViewOwnerState.value = null;
+          _setRoomViewOwner(null);
         }
         _setSubscriptionsDesired(false);
       }
@@ -448,8 +444,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   void _suspendRoomView() {
     if (_currentRoomIdNotifier.value != widget.roomId) return;
-    _roomViewOwnerState.value = null;
+    _setRoomViewOwner(null);
     _viewSuspended = true;
+  }
+
+  void _setRoomViewOwner(String? accountUserId) {
+    final state = ref.read(roomViewOwnerProvider(widget.roomId).notifier);
+    state.value = accountUserId;
+    _roomViewOwnerStateForDispose = state;
   }
 
   void _resumeSuspendedRoom() {
@@ -464,7 +466,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       return;
     }
     _viewSuspended = false;
-    _roomViewOwnerState.value = activeAccount;
+    _activationId = ++_activationCounter;
+    _setRoomViewOwner(activeAccount);
     if (!ref.read(roomAutoReadSuppressedProvider(widget.roomId))) {
       unawaited(_markRoomReadAndRefreshList());
     }
@@ -474,7 +477,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _viewSuspended = false;
     if (_currentRoomIdNotifier.value == widget.roomId) {
       _currentRoomIdNotifier.value = null;
-      _roomViewOwnerState.value = null;
+      _setRoomViewOwner(null);
     }
     _setSubscriptionsDesired(false);
   }
@@ -505,7 +508,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _currentRoomIdNotifier.value = widget.roomId;
     _viewSuspended = false;
     _activationId = ++_activationCounter;
-    _roomViewOwnerState.value = activeAccount;
+    _setRoomViewOwner(activeAccount);
     if (resetAutoReadSuppression) {
       setRoomAutoReadSuppressed(ref, widget.roomId, suppressed: false);
     }
@@ -669,7 +672,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     chatRouteObserver.unsubscribe(this);
     final currentRoomIdNotifier = _currentRoomIdNotifier;
     final roomId = widget.roomId;
-    final roomViewOwnerState = _roomViewOwnerState;
+    final roomViewOwnerState = _roomViewOwnerStateForDispose;
     // Riverpod forbids touching providers during dispose; defer both the
     // active-room and the view-owner clears to a microtask (the same batch
     // the sync stream observes, so an auto-read cannot slip in between).
@@ -681,8 +684,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         currentRoomIdNotifier.value = null;
         // The cached notifier may already be released if its container was
         // torn down; guard before touching it.
-        if (roomViewOwnerState.mounted) {
-          roomViewOwnerState.value = null;
+        if (roomViewOwnerState case final state? when state.mounted) {
+          state.value = null;
         }
       }
     });

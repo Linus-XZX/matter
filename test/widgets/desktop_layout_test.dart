@@ -545,6 +545,34 @@ void main() {
     expect(rustApi.markRoomAsReadCalls, initialReadCalls + 1);
   });
 
+  testWidgets('reselecting an already-read desktop room is a no-op', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final room = _room(
+      id: '!room:example.org',
+      name: 'Project room',
+      roomType: 'dm',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith((ref) async => [room]),
+        spacesProvider.overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await _pumpApp(tester, container);
+    final initialReadCalls = rustApi.markRoomAsReadCalls;
+
+    await tester.tap(find.text('Project room').first);
+    await tester.pump();
+
+    expect(rustApi.markRoomAsReadCalls, initialReadCalls);
+  });
+
   testWidgets('selects a room from the new account after switching accounts', (
     tester,
   ) async {

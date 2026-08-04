@@ -282,6 +282,40 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('switching away and back restores live room view ownership', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(container.read(roomViewOwnerProvider(roomId)), '@alice:example.org');
+    final readCallsBeforeSwitch = rustApi.markRoomAsReadCalls;
+
+    container.invalidate(roomViewOwnerProvider);
+    container.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+    await tester.pump();
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(container.read(roomViewOwnerProvider(roomId)), '@alice:example.org');
+    expect(rustApi.markRoomAsReadCalls, greaterThan(readCallsBeforeSwitch));
+    expect(rustApi.typingSubscriptionAccounts.last, '@alice:example.org');
+    expect(rustApi.roomSubscriptionAccounts.last, '@alice:example.org');
+  });
+
   testWidgets('the chat header opens the pinned messages page', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);

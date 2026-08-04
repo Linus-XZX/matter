@@ -205,7 +205,17 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       if (selectedRoom != refreshedRoom) {
         setState(() => _selectedRoom = refreshedRoom);
       }
-      setRoomAutoReadSuppressed(ref, room.id, suppressed: false);
+      final autoReadSuppressed = ref.read(
+        roomAutoReadSuppressedProvider(room.id),
+      );
+      if (!autoReadSuppressed &&
+          refreshedRoom.unreadCount == 0 &&
+          !refreshedRoom.isMarkedUnread) {
+        return;
+      }
+      if (autoReadSuppressed) {
+        setRoomAutoReadSuppressed(ref, room.id, suppressed: false);
+      }
       unawaited(_markSelectedRoomAsRead(refreshedRoom));
       return;
     }

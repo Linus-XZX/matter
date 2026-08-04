@@ -253,6 +253,11 @@ void main() {
   });
 
   setUp(() {
+    // Ignore-list reconciliation state is process-wide in production and is
+    // reset by session transitions. These tests create fresh provider
+    // containers for the same account, so mirror that boundary explicitly.
+    resetIgnoredListAccountState('@carol:example.org');
+    resetIgnoredListAccountState('@confirmed-management:example.org');
     rustApi.failSupplementalLoads = true;
     rustApi.pendingDetailsUpdate = null;
     rustApi.pendingDetailsLoad = null;

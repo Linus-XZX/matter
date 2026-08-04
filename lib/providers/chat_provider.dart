@@ -70,8 +70,11 @@ final spaceChildrenProvider =
 
 final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return [];
+  final ignoredUserIds = await ref.watch(ignoredUserIdsProvider.future);
   final contacts = await rust.getContacts();
-  return contacts;
+  return contacts
+      .where((contact) => !ignoredUserIds.contains(contact.id))
+      .toList();
 });
 
 /// Server-backed ignore list. Chat timelines filter these senders immediately,
@@ -355,6 +358,7 @@ Future<void> persistIgnoredUserList(String namespace, Set<String> ids) async {
   // authoritative from this point (the server has accepted the change), and
   // a later IgnoredUsersChanged demotes it again until revalidated.
   _confirmedIgnoredLists[namespace] = Set.unmodifiable(ids);
+  _pendingIgnoredWriteThroughLists[namespace] = Set.unmodifiable(ids);
   _authoritativeIgnoredStoreVersions.remove(namespace);
   // Bump synchronously so any refresh whose fetch started earlier is
   // recognized as stale when it completes. The queued write itself must
@@ -381,6 +385,16 @@ Future<void> _refreshIgnoredUserIds(
     final result = await rust.getIgnoredUsers();
     if (!_ignoredListSessionIsCurrent(ref, namespace)) return;
     final fresh = result.userIds.toSet();
+    final pendingWriteThrough = _pendingIgnoredWriteThroughLists[namespace];
+    if (result.fromServer && pendingWriteThrough != null) {
+      if (!setEquals(fresh, pendingWriteThrough)) {
+        // Some homeservers can briefly serve the pre-PUT account data from
+        // a GET after accepting the write. Keep the confirmed write-through
+        // until either a GET observes it or the sync echo demotes it.
+        return;
+      }
+      _pendingIgnoredWriteThroughLists.remove(namespace);
+    }
     final syncedStoreIsAuthoritative =
         _authoritativeIgnoredStoreVersions[namespace] == version;
     if (!result.fromServer && !syncedStoreIsAuthoritative) {
@@ -460,6 +474,11 @@ final _ignoredListWriteQueues = <String, List<Future<void> Function()>>{};
 /// equal to this value may override the lagging SDK store in Rust; anything
 /// else is only merged with the store.
 final _confirmedIgnoredLists = <String, Set<String>>{};
+
+/// Confirmed writes not yet observed by a server GET or sync echo. A direct
+/// GET can lag an accepted account-data PUT without crossing a local version
+/// boundary, so its stale response must not roll the write-through back.
+final _pendingIgnoredWriteThroughLists = <String, Set<String>>{};
 
 /// Store snapshots read after a sync event are complete account-data state,
 /// even when the direct server request used by `getIgnoredUsers` failed.
@@ -853,6 +872,7 @@ void invalidateSessionCollections(WidgetRef ref) {
 /// must never mark the persisted snapshot authoritative for a new session.
 void resetIgnoredListAccountState(String namespace) {
   _confirmedIgnoredLists.remove(namespace);
+  _pendingIgnoredWriteThroughLists.remove(namespace);
   _authoritativeIgnoredStoreVersions.remove(namespace);
   _ignoredListWriteVersions[namespace] = _ignoredListVersion(namespace) + 1;
   // A fresh session starts with a clean recovery throttle: the record is a
@@ -2032,6 +2052,7 @@ final syncStreamProvider =
       // the parameter, and the RoomListChanged echo must not lose its
       // "confirm the viewed room" semantics to that unrelated re-arm.
       var pendingConfirmViewedClear = false;
+      var pendingRefreshChatRooms = false;
       var pendingRefreshMembersAndKnocks = false;
       // Per-room debounce for the member/knock provider invalidates:
       // member events can burst (catch-up sync, profile updates), and each
@@ -2053,9 +2074,12 @@ final syncStreamProvider =
       // the whole room list just to re-check one room.
       DateTime? lastForcedUnreadCheckAt;
 
-      void refreshRooms({bool refreshMembersAndKnocks = false}) {
+      void refreshRooms({
+        bool refreshChatRooms = true,
+        bool refreshMembersAndKnocks = false,
+      }) {
         if (disposed || !ref.mounted) return;
-        ref.invalidate(chatRoomsProvider);
+        if (refreshChatRooms) ref.invalidate(chatRoomsProvider);
         ref.invalidate(spacesProvider);
         ref.invalidate(ungroupedRoomsProvider);
         ref.invalidate(spaceChildrenProvider);
@@ -2074,6 +2098,7 @@ final syncStreamProvider =
       }
 
       void scheduleRoomRefresh({
+        bool refreshChatRooms = true,
         bool refreshMembersAndKnocks = false,
         // RoomListChanged arrives for an ACTUAL list change (e.g. a
         // cross-device marked-unread echo): the cached snapshot may still
@@ -2085,6 +2110,7 @@ final syncStreamProvider =
         if (disposed || !ref.mounted) return;
         pendingConfirmViewedClear =
             pendingConfirmViewedClear || confirmViewedClear;
+        pendingRefreshChatRooms = pendingRefreshChatRooms || refreshChatRooms;
         pendingRefreshMembersAndKnocks =
             pendingRefreshMembersAndKnocks || refreshMembersAndKnocks;
         roomRefreshTimer?.cancel();
@@ -2095,6 +2121,8 @@ final syncStreamProvider =
           // circuits below must not skip the viewed-room clear.
           final confirm = pendingConfirmViewedClear;
           pendingConfirmViewedClear = false;
+          final refreshChatRooms = pendingRefreshChatRooms;
+          pendingRefreshChatRooms = false;
           final refreshMembers = pendingRefreshMembersAndKnocks;
           pendingRefreshMembersAndKnocks = false;
           // Short-circuit the marked-unread check BEFORE invalidating the
@@ -2121,7 +2149,10 @@ final syncStreamProvider =
               }
             }
           }
-          refreshRooms(refreshMembersAndKnocks: refreshMembers);
+          refreshRooms(
+            refreshChatRooms: refreshChatRooms,
+            refreshMembersAndKnocks: refreshMembers,
+          );
           // Timed-out mark-unread writes: lift suppressions whose write
           // has definitively failed (250s past the queue bounds), so a
           // viewed room's auto-reads resume.
@@ -2249,6 +2280,7 @@ final syncStreamProvider =
         // compensation can safely treat that effective snapshot as complete.
         final namespace = ref.read(activeUserIdProvider) ?? '';
         _confirmedIgnoredLists.remove(namespace);
+        _pendingIgnoredWriteThroughLists.remove(namespace);
         final version = _ignoredListVersion(namespace) + 1;
         _ignoredListWriteVersions[namespace] = version;
         _authoritativeIgnoredStoreVersions[namespace] = version;
@@ -2304,9 +2336,15 @@ final syncStreamProvider =
               rust.ChatRoom? unreadRoom;
               roomRefreshTimer?.cancel();
               roomRefreshTimer = null;
+              // The direct refresh below replaces every chat-list refresh
+              // queued before it. A new event arriving while it is in flight
+              // can set this flag again and will still get a trailing fetch.
+              pendingRefreshChatRooms = false;
+              var refreshedRoomList = false;
               try {
                 sharedRoomsFetch ??= ref.refresh(chatRoomsProvider.future);
                 final rooms = await sharedRoomsFetch!;
+                refreshedRoomList = true;
                 for (final room in rooms) {
                   if (room.id == roomId) {
                     unreadRoom = room;
@@ -2330,7 +2368,7 @@ final syncStreamProvider =
                   // behalf.
                   ref.read(roomViewOwnerProvider(roomId)) != startAccount ||
                   ref.read(roomAutoReadSuppressedProvider(roomId))) {
-                scheduleRoomRefresh();
+                scheduleRoomRefresh(refreshChatRooms: !refreshedRoomList);
                 return;
               }
               // The auto-read must not block the message refresh flush (a
@@ -2367,7 +2405,7 @@ final syncStreamProvider =
                   debugPrint('markRoomAsRead after refresh failed: $error');
                 }
               }());
-              scheduleRoomRefresh();
+              scheduleRoomRefresh(refreshChatRooms: !refreshedRoomList);
             }),
           );
         } finally {

@@ -418,11 +418,13 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         unawaited(refreshMessages(ref, widget.roomId));
       }
     } catch (e) {
-      if (localId != null) {
+      if (localId != null &&
+          localOutgoing != null &&
+          failedLocalMessage != null) {
         markLocalOutgoingMessageFailedInState(
-          localOutgoing!,
+          localOutgoing,
           localId,
-          failedLocalMessage!,
+          failedLocalMessage,
         );
       }
       if (mounted) {

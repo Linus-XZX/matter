@@ -6,11 +6,7 @@ class CascadeTitle extends StatefulWidget {
   final String text;
   final TextStyle style;
 
-  const CascadeTitle({
-    super.key,
-    required this.text,
-    required this.style,
-  });
+  const CascadeTitle({super.key, required this.text, required this.style});
 
   @override
   State<CascadeTitle> createState() => _CascadeTitleState();
@@ -37,20 +33,24 @@ class _CascadeTitleState extends State<CascadeTitle>
     );
 
     // Old text: fade out + slide up
-    _oldOpacity = Tween(begin: 1.0, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
-    );
-    _oldSlideY = Tween(begin: 0.0, end: -6.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
-    );
+    _oldOpacity = Tween(
+      begin: 1.0,
+      end: 0.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
+    _oldSlideY = Tween(
+      begin: 0.0,
+      end: -6.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
 
     // New text: fade in + slide up from below
-    _newOpacity = Tween(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
-    _newSlideY = Tween(begin: 6.0, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
+    _newOpacity = Tween(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+    _newSlideY = Tween(
+      begin: 6.0,
+      end: 0.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
   }
 
   @override
@@ -79,7 +79,12 @@ class _CascadeTitleState extends State<CascadeTitle>
   @override
   Widget build(BuildContext context) {
     if (!_isTransitioning) {
-      return Text(widget.text, style: widget.style, maxLines: 1, overflow: TextOverflow.ellipsis);
+      return Text(
+        widget.text,
+        style: widget.style,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
     }
 
     return AnimatedBuilder(
@@ -92,14 +97,24 @@ class _CascadeTitleState extends State<CascadeTitle>
               opacity: _oldOpacity.value,
               child: Transform.translate(
                 offset: Offset(0, _oldSlideY.value),
-                child: Text(_oldText, style: widget.style, maxLines: 1, overflow: TextOverflow.ellipsis),
+                child: Text(
+                  _oldText,
+                  style: widget.style,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
             Opacity(
               opacity: _newOpacity.value,
               child: Transform.translate(
                 offset: Offset(0, _newSlideY.value),
-                child: Text(widget.text, style: widget.style, maxLines: 1, overflow: TextOverflow.ellipsis),
+                child: Text(
+                  widget.text,
+                  style: widget.style,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
           ],

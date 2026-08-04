@@ -5049,12 +5049,6 @@ async fn try_start_sliding_sync(
         SYNC_EVENT_GENERATION
             .scope(generation, async move {
                 app_log("info", "sync", "Sliding Sync loop started".to_string());
-                // Consecutive stream/rebuild failures above this threshold
-                // degrade to the traditional sync loop instead of retrying
-                // forever: a server that advertises MSC3575 but fails every
-                // request (or a proxy mangling the endpoint) must not pin the
-                // app to an unusable sync path for the whole session.
-                const DEGRADE_AFTER_FAILURES: u32 = 5;
                 let mut consecutive_failures: u32 = 0;
                 'rebuild: loop {
                     if !sync_generation_is_active(generation, &user_id).await {
@@ -5114,6 +5108,7 @@ async fn try_start_sliding_sync(
 
                     let stream = sliding_sync.sync();
                     futures_util::pin_mut!(stream);
+                    let mut received_update = false;
                     while let Some(update) = stream.next().await {
                         if !sync_generation_is_active(generation, &user_id).await {
                             clear_published_sync(generation).await;
@@ -5121,6 +5116,7 @@ async fn try_start_sliding_sync(
                         }
                         match update {
                             Ok(summary) => {
+                                received_update = true;
                                 app_log(
                                     "info",
                                     "sync",
@@ -5178,6 +5174,12 @@ async fn try_start_sliding_sync(
                     // instance is no longer live, so clear the handle before the
                     // retry delay to avoid routing room subscriptions to it.
                     clear_published_sync(generation).await;
+                    consecutive_failures =
+                        failures_after_stream_end(consecutive_failures, received_update);
+                    if consecutive_failures >= DEGRADE_AFTER_FAILURES {
+                        degrade_to_traditional_sync(generation, &user_id).await;
+                        break;
+                    }
                     interruptible_retry_sleep(
                         generation,
                         &user_id,
@@ -5217,13 +5219,36 @@ async fn degrade_to_traditional_sync(generation: u64, user_id: &str) {
     });
 }
 
+// Consecutive stream/rebuild failures above this threshold
+// degrade to the traditional sync loop instead of retrying
+// forever: a server that advertises MSC3575 but fails every
+// request (or a proxy mangling the endpoint) must not pin the
+// app to an unusable sync path for the whole session.
+const DEGRADE_AFTER_FAILURES: u32 = 5;
+
+/// Failure accounting for a Sliding Sync stream that ended on its own
+/// (the server closed the connection without an error). A round that
+/// delivered at least one update counts as a success — the Ok branch
+/// already reset the counter — while a stream that ended without any
+/// update counts as a failure, like the Err branch.
+fn failures_after_stream_end(consecutive_failures: u32, received_update: bool) -> u32 {
+    if received_update {
+        consecutive_failures
+    } else {
+        consecutive_failures + 1
+    }
+}
+
 fn lagged_sync_event() -> SyncEvent {
     SyncEvent::FullRefreshRequired
 }
 
 #[cfg(test)]
 mod sync_event_tests {
-    use super::{lagged_sync_event, SyncEvent, SYNC_EVENT_GENERATION};
+    use super::{
+        failures_after_stream_end, lagged_sync_event, SyncEvent, DEGRADE_AFTER_FAILURES,
+        SYNC_EVENT_GENERATION,
+    };
 
     #[test]
     fn lagged_receivers_request_a_full_refresh() {
@@ -5231,6 +5256,25 @@ mod sync_event_tests {
             lagged_sync_event(),
             SyncEvent::FullRefreshRequired
         ));
+    }
+
+    #[test]
+    fn stream_end_without_updates_accumulates_failures_until_degrade() {
+        let mut consecutive_failures = 0;
+        for expected in 1..=DEGRADE_AFTER_FAILURES {
+            consecutive_failures = failures_after_stream_end(consecutive_failures, false);
+            assert_eq!(consecutive_failures, expected);
+        }
+        // After DEGRADE_AFTER_FAILURES dataless stream ends, the loop's
+        // degrade check fires and hands over to traditional sync.
+        assert!(consecutive_failures >= DEGRADE_AFTER_FAILURES);
+    }
+
+    #[test]
+    fn stream_end_after_updates_keeps_the_reset_counter() {
+        // The Ok(summary) branch already reset the counter this round, so a
+        // stream that delivered updates and then ended is not a failure.
+        assert_eq!(failures_after_stream_end(0, true), 0);
     }
 
     #[tokio::test]
@@ -9247,6 +9291,105 @@ pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String>
     })
 }
 
+/// Extract the child room ID from an `m.space.child` state event. Events
+/// without any `via` server cannot be joined reliably, so per the spec they
+/// do not count as space children — this is the single predicate both
+/// `get_space_children` and `get_ungrouped_rooms` use to decide that.
+fn space_child_room_id(
+    child_event: matrix_sdk::deserialized_responses::SyncOrStrippedState<
+        matrix_sdk::ruma::events::space::child::SpaceChildEventContent,
+    >,
+) -> Option<matrix_sdk::ruma::OwnedRoomId> {
+    match child_event {
+        matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
+            matrix_sdk::ruma::events::SyncStateEvent::Original(event),
+        ) if !event.content.via.is_empty() => Some(event.state_key),
+        matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event)
+            if event
+                .content
+                .via
+                .as_ref()
+                .is_some_and(|via| !via.is_empty()) =>
+        {
+            Some(event.state_key)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod space_child_tests {
+    use matrix_sdk::{
+        deserialized_responses::SyncOrStrippedState,
+        ruma::events::space::child::SpaceChildEventContent,
+    };
+
+    use super::space_child_room_id;
+
+    fn sync_child_event(content: serde_json::Value) -> SyncOrStrippedState<SpaceChildEventContent> {
+        SyncOrStrippedState::Sync(
+            serde_json::from_value(serde_json::json!({
+                "type": "m.space.child",
+                "state_key": "!child:example.org",
+                "sender": "@admin:example.org",
+                "event_id": "$event:example.org",
+                "origin_server_ts": 1,
+                "content": content,
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn stripped_child_event(
+        content: serde_json::Value,
+    ) -> SyncOrStrippedState<SpaceChildEventContent> {
+        SyncOrStrippedState::Stripped(
+            serde_json::from_value(serde_json::json!({
+                "type": "m.space.child",
+                "state_key": "!child:example.org",
+                "sender": "@admin:example.org",
+                "content": content,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn child_with_via_is_grouped() {
+        let expected = matrix_sdk::ruma::RoomId::parse("!child:example.org").unwrap();
+        assert_eq!(
+            space_child_room_id(sync_child_event(
+                serde_json::json!({ "via": ["example.org"] })
+            )),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            space_child_room_id(stripped_child_event(
+                serde_json::json!({ "via": ["example.org"] })
+            )),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn child_without_via_stays_ungrouped() {
+        // Empty or missing via: the room must NOT be treated as grouped, so it
+        // remains visible in get_ungrouped_rooms (and out of get_space_children).
+        assert_eq!(
+            space_child_room_id(sync_child_event(serde_json::json!({ "via": [] }))),
+            None
+        );
+        assert_eq!(
+            space_child_room_id(stripped_child_event(serde_json::json!({ "via": [] }))),
+            None
+        );
+        assert_eq!(
+            space_child_room_id(stripped_child_event(serde_json::json!({}))),
+            None
+        );
+    }
+}
+
 #[frb]
 pub async fn get_space_children(
     space_id: String,
@@ -9278,20 +9421,8 @@ pub async fn get_space_children(
             let Ok(child_event) = raw_child.deserialize() else {
                 continue;
             };
-            let child_room_id = match child_event {
-                matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                    matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-                ) if !event.content.via.is_empty() => event.state_key,
-                matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event)
-                    if event
-                        .content
-                        .via
-                        .as_ref()
-                        .is_some_and(|via| !via.is_empty()) =>
-                {
-                    event.state_key
-                }
-                _ => continue,
+            let Some(child_room_id) = space_child_room_id(child_event) else {
+                continue;
             };
 
             let Some(child_room) = client.get_room(&child_room_id) else {
@@ -9675,16 +9806,12 @@ pub async fn get_ungrouped_rooms(
                 let Ok(child_event) = raw_child.deserialize() else {
                     continue;
                 };
-                let child_room_id = match child_event {
-                    matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                        matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-                    ) => event.state_key,
-                    matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
-                        event.state_key
-                    }
-                    _ => continue,
-                };
-                grouped_room_ids.insert(child_room_id);
+                // Same predicate as get_space_children: a child event without
+                // any `via` server doesn't group the room, so the room stays
+                // visible in this ungrouped list.
+                if let Some(child_room_id) = space_child_room_id(child_event) {
+                    grouped_room_ids.insert(child_room_id);
+                }
             }
         }
 

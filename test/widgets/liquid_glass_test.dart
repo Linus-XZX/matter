@@ -4,12 +4,12 @@ import 'package:matter/widgets/liquid_glass.dart';
 
 void main() {
   group('LiquidGlassContainer', () {
-    testWidgets('renders its child inside a clipped backdrop blur', (tester) async {
+    testWidgets('renders its child inside a clipped backdrop blur', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         const MaterialApp(
-          home: Scaffold(
-            body: LiquidGlassContainer(child: Text('Glass')),
-          ),
+          home: Scaffold(body: LiquidGlassContainer(child: Text('Glass'))),
         ),
       );
 
