@@ -652,7 +652,7 @@ class _PendingRoomActionsState extends ConsumerState<_PendingRoomActions> {
   }) async {
     // Entry guard (not only the disabled button): the rebuild lags a frame.
     if (_pendingAction) return;
-    _pendingAction = true;
+    setState(() => _pendingAction = true);
     // 账号快照：请求期间切换账号时，下面的刷新与反馈全部跳过。
     final accountUserId = ref.read(activeUserIdProvider) ?? '';
     try {
@@ -676,7 +676,7 @@ class _PendingRoomActionsState extends ConsumerState<_PendingRoomActions> {
         context,
       ).showSnackBar(SnackBar(content: Text(actionFailureMessage(error))));
     } finally {
-      if (mounted) _pendingAction = false;
+      if (mounted) setState(() => _pendingAction = false);
     }
   }
 }

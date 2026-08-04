@@ -1,20 +1,11 @@
 /// The app's own deterministic mutation-timeout wordings: the Rust-side
-/// `MUTATION_TIMEOUT_MESSAGE` and the other bounded calls. These are the
-/// ONLY errors where a failed write may still be landing in its background
-/// tail. [`isMutationTimeout`] matches exactly these because it gates
+/// `MUTATION_TIMEOUT_MESSAGE`. This is the only error where a failed write
+/// may still be landing in its background tail. [`isMutationTimeout`]
+/// matches exactly this wording because it gates
 /// behavior (keeping a suppression or optimistic marker armed): third-party
 /// error text that merely contains "timeout" (reqwest / matrix-sdk English
 /// wording, server response bodies) is a confirmed failure with no tail.
-const List<String> _timeoutWordings = [
-  '操作超时，请稍后查看最终状态。',
-  '操作超时，请重试。',
-  '连接超时，请检查网络或服务器地址',
-  '同步超时（10 秒），请检查网络连接与服务器地址。',
-  '上传超时，请重试。',
-  '加载置顶消息超时。',
-  '加载置顶事件超时。',
-  '发送已读回执超时。',
-];
+const _mutationTimeoutWording = '操作超时，请稍后查看最终状态。';
 
 /// Whether [error] is one of the app's own deterministic mutation
 /// timeouts — the only case where the write may still be landing in its
@@ -26,7 +17,7 @@ const List<String> _timeoutWordings = [
 /// failures as "may still land".
 bool isMutationTimeout(Object error) {
   final message = '$error';
-  return _timeoutWordings.any(message.contains);
+  return message.contains(_mutationTimeoutWording);
 }
 
 /// Map a failed write's error to the unified wording (timeout vs plain

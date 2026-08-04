@@ -16,21 +16,27 @@ rust.ChatMessage _message({
   String? content,
   rust.MessageType msgType = rust.MessageType.text,
   String? imageUrl,
+  List<String> mentionedUserIds = const [],
+  List<String> editHistory = const [],
+  List<rust.Reaction> reactions = const [],
+  List<rust.MessageReader> readers = const [],
+  rust.PollInfo? poll,
 }) => rust.ChatMessage(
   id: id,
   senderId: '@alice:example.org',
   senderName: 'Alice',
   content: content ?? id,
-  mentionedUserIds: const [],
+  mentionedUserIds: mentionedUserIds,
   mentionsRoom: false,
   timestamp: timestamp,
   isMe: false,
   msgType: msgType,
   imageUrl: imageUrl,
+  poll: poll,
   isEdited: false,
-  editHistory: const [],
-  reactions: const [],
-  readers: const [],
+  editHistory: editHistory,
+  reactions: reactions,
+  readers: readers,
   totalMembers: 2,
 );
 
@@ -38,8 +44,10 @@ LocalOutgoingMessage _local({
   required String id,
   String timestamp = '100',
   rust.MessageType msgType = rust.MessageType.text,
+  String? replyToUserId,
 }) => LocalOutgoingMessage(
   message: _message(id: id, timestamp: timestamp, msgType: msgType),
+  replyToUserId: replyToUserId,
 );
 
 Future<WidgetRef> _captureRef(WidgetTester tester) async {
@@ -202,6 +210,30 @@ void main() {
       expect(result.map((m) => m.id), [r'$old', r'$new']);
       expect(result.first.content, 'decrypted');
     });
+
+    test('content equality compares generated list fields by value', () {
+      rust.ChatMessage build(List<String> senders) => _message(
+        id: r'$event',
+        timestamp: '100',
+        mentionedUserIds: List.of(['@bob:example.org']),
+        editHistory: List.of(['old body']),
+        reactions: [
+          rust.Reaction(key: '+1', senders: senders, myEventId: r'$reaction'),
+        ],
+        readers: const [
+          rust.MessageReader(userId: '@bob:example.org', displayName: 'Bob'),
+        ],
+      );
+
+      final current = build(List.of(['@bob:example.org']));
+      final equivalent = build(List.of(['@bob:example.org']));
+      final changed = build(List.of(['@carol:example.org']));
+
+      expect(chatMessageContentEquals(current, equivalent), isTrue);
+      expect(chatMessageContentEquals(current, changed), isFalse);
+      final cached = [current];
+      expect(mergeMessageSnapshotAdditions(cached, [equivalent]), same(cached));
+    });
   });
 
   group('local outgoing message state', () {
@@ -274,6 +306,26 @@ void main() {
           .read(localOutgoingMessagesProvider(_roomAccountKey))
           .map((m) => m.message.id);
       expect(ids, [sentId]);
+    });
+
+    testWidgets('mark sent preserves reply sender metadata', (tester) async {
+      final ref = await _captureRef(tester);
+      const pendingId = '${localOutgoingPendingPrefix}reply';
+
+      upsertLocalOutgoingMessage(
+        ref,
+        _roomAccountKey,
+        _local(id: pendingId, replyToUserId: '@original-sender:example.org'),
+      );
+      markLocalOutgoingMessageSent(ref, _roomAccountKey, pendingId);
+
+      expect(
+        ref
+            .read(localOutgoingMessagesProvider(_roomAccountKey))
+            .single
+            .replyToUserId,
+        '@original-sender:example.org',
+      );
     });
 
     testWidgets('mark sent is a no-op when the pending message is gone', (

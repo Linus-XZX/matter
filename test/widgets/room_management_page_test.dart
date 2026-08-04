@@ -1164,6 +1164,49 @@ void main() {
     expect(rustApi.setMutedCalls, 1);
   });
 
+  testWidgets('switching away and back preserves unsaved room edits', (
+    tester,
+  ) async {
+    rustApi.failSupplementalLoads = false;
+    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final accountState = MutableState<String?>('@original:example.org');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          _sessionReadyOverride,
+          activeUserIdProvider.overrideWith(() => accountState),
+        ],
+        child: const MaterialApp(
+          home: RoomManagementPage(
+            roomId: '!room:example.org',
+            roomName: 'Project room',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), 'Unsaved room name');
+    await tester.enterText(fields.at(1), 'Unsaved topic');
+
+    accountState.value = '@other:example.org';
+    await tester.pumpAndSettle();
+    accountState.value = '@original:example.org';
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<TextField>(fields.at(0)).controller!.text,
+      'Unsaved room name',
+    );
+    expect(
+      tester.widget<TextField>(fields.at(1)).controller!.text,
+      'Unsaved topic',
+    );
+  });
+
   testWidgets('a mid-load account switch shows the placeholder, not a crash', (
     tester,
   ) async {

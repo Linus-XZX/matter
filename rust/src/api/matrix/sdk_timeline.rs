@@ -513,20 +513,15 @@ fn complete_pinned_messages(
     by_id: &HashMap<String, ChatMessage>,
     failed_ids: &HashSet<String>,
     focused_error: Option<String>,
-    cache_error: Option<String>,
+    _cache_error: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
     // A load where every pinned event failed to fetch is a transport-level
-    // failure (per-event fetch errors only arise from request failures, and
-    // `cache_error` covers a failed cache layer): it must surface as an
-    // error so the page shows the failure with a retry path instead of
-    // masquerading every message as deleted. Individual unavailable events
-    // (redacted or deleted messages stay pinned) carry no focused error and
-    // fall through to placeholders below.
+    // failure when the focused fetch itself reports an error. A preceding
+    // cache timeout is not enough to fail the page: if every focused lookup
+    // then returns Ok(None), the events are genuinely unavailable and must
+    // use placeholders instead.
     if !pinned_ids.is_empty() && by_id.is_empty() {
         if let Some(error) = focused_error {
-            return Err(format!("加载置顶消息失败: {error}"));
-        }
-        if let Some(error) = cache_error {
             return Err(format!("加载置顶消息失败: {error}"));
         }
     }
@@ -660,8 +655,7 @@ pub(super) async fn get_messages_before(
     // would stop paginating, cutting off all older history.
     let mut anchor_visible = false;
     for _ in 0..16 {
-        let current = convert_snapshot(room, &snapshot(&timeline).await).await;
-        if current.iter().any(|message| message.id == from_event_id) {
+        if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
             anchor_visible = true;
             break;
         }
@@ -675,21 +669,14 @@ pub(super) async fn get_messages_before(
     }
     // Still invisible: the window may have SLID past the anchor (new
     // messages arriving while the caller browsed history push the old end
-    // out). Keep extending — a bounded fallback that hands back the
-    // window's oldest messages would return messages the caller ALREADY
-    // displays (everything newer than its anchor), which it would dedupe
-    // to nothing and end history loading with older messages still
-    // unreachable. 48 more rounds (×20) comfortably spans any realistic
-    // slide; a redacted anchor never turns visible and falls through to
-    // the fallback below.
+    // out). Keep extending before falling back to a focused context request.
     if !anchor_visible {
         for _ in 0..48 {
             let hit_start = timeline
                 .paginate_backwards(20u16)
                 .await
                 .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
-            let current = convert_snapshot(room, &snapshot(&timeline).await).await;
-            if current.iter().any(|message| message.id == from_event_id) {
+            if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
                 anchor_visible = true;
                 break;
             }
@@ -699,22 +686,17 @@ pub(super) async fn get_messages_before(
         }
     }
 
-    let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
     if !anchor_visible {
-        // The anchor is deeper than the bounded pagination reached (or it
-        // never existed, e.g. it was redacted). Hand back the OLDEST end of
-        // the window, not the tail: the tail (the newest messages) is what
-        // the caller already displays, so it would dedupe to nothing and
-        // stall history loading with the anchor stuck below the window.
-        // The oldest messages are genuinely older than the caller's loaded
-        // set (its anchor comes from the disk cache, which it has not
-        // rendered), so it makes progress and re-anchors on the window's
-        // oldest, letting the next request continue backward. (If history
-        // ended — `hit_start` — the window's oldest IS the room's start,
-        // and the caller's dedupe-then-finish is correct.)
-        return Ok(messages[..limit.min(messages.len())].to_vec());
+        // Never guess from the live window here: all of it may be newer than
+        // the caller's anchor, so Dart would dedupe the result and conclude
+        // that history ended. A focused request gives us an actual slice
+        // around a deep or filtered anchor.
+        return focused_messages_before(room, from_event_id, limit).await;
     }
-    let mut before = messages_before(&messages, from_event_id).to_vec();
+    let items = snapshot(&timeline).await;
+    let position = raw_event_position(&items, from_event_id)
+        .ok_or_else(|| "分页锚点已离开当前时间线窗口，请重试。".to_owned())?;
+    let mut before = convert_snapshot(room, &items[..position]).await;
     // Fill the page: the caller re-anchors at the page's oldest, so every
     // returned message must be genuinely older than its anchor. When the
     // anchor sits at the window's edge (the caller has loaded everything
@@ -732,21 +714,49 @@ pub(super) async fn get_messages_before(
         if hit_start {
             break;
         }
-        before = messages_before(
-            &convert_snapshot(room, &snapshot(&timeline).await).await,
-            from_event_id,
-        )
-        .to_vec();
+        let items = snapshot(&timeline).await;
+        let position = raw_event_position(&items, from_event_id)
+            .ok_or_else(|| "分页锚点已离开当前时间线窗口，请重试。".to_owned())?;
+        before = convert_snapshot(room, &items[..position]).await;
     }
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }
 
-fn messages_before<'a>(messages: &'a [ChatMessage], event_id: &str) -> &'a [ChatMessage] {
-    messages
-        .iter()
-        .position(|message| message.id == event_id)
-        .map(|position| &messages[..position])
-        .unwrap_or_default()
+fn raw_event_position(items: &[Arc<TimelineItem>], event_id: &str) -> Option<usize> {
+    items.iter().position(|item| {
+        item.as_event()
+            .and_then(EventTimelineItem::event_id)
+            .is_some_and(|candidate| candidate.as_str() == event_id)
+    })
+}
+
+async fn focused_messages_before(
+    room: &Room,
+    from_event_id: &str,
+    limit: usize,
+) -> Result<Vec<ChatMessage>, String> {
+    let target = matrix_sdk::ruma::EventId::parse(from_event_id)
+        .map_err(|error| format!("无效的分页事件 ID: {error}"))?;
+    let timeline = tokio::time::timeout(
+        Duration::from_secs(25),
+        TimelineBuilder::new(room)
+            .with_focus(TimelineFocus::Event {
+                target,
+                num_context_events: limit.clamp(20, u16::MAX as usize) as u16,
+                thread_mode: TimelineEventFocusThreadMode::Automatic {
+                    hide_threaded_events: false,
+                },
+            })
+            .build(),
+    )
+    .await
+    .map_err(|_| "加载分页锚点超时，请重试。".to_owned())?
+    .map_err(|error| format!("加载分页锚点失败: {error}"))?;
+    let items = snapshot(&timeline).await;
+    let position = raw_event_position(&items, from_event_id)
+        .ok_or_else(|| "分页锚点不可用，请重试。".to_owned())?;
+    let before = convert_snapshot(room, &items[..position]).await;
+    Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }
 
 async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatMessage> {
@@ -1542,10 +1552,9 @@ fn state_event_label(item: &EventTimelineItem) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_pinned_messages, loaded_expected_event_count, messages_before,
-        missing_pinned_event_ids, newest_receipt_position, ordered_pinned_messages,
-        pinned_events_ready, reader_ids_for_position, record_latest_receipt_position,
-        resolve_receipt_position,
+        complete_pinned_messages, loaded_expected_event_count, missing_pinned_event_ids,
+        newest_receipt_position, ordered_pinned_messages, pinned_events_ready,
+        reader_ids_for_position, record_latest_receipt_position, resolve_receipt_position,
     };
     use crate::api::matrix::uint_to_i32;
     use crate::api::matrix::{ChatMessage, MessageType};
@@ -1580,18 +1589,6 @@ mod tests {
             readers: Vec::new(),
             total_members: 2,
         }
-    }
-
-    #[test]
-    fn slices_messages_before_the_requested_boundary() {
-        let messages = vec![message("$a"), message("$b"), message("$c")];
-        assert_eq!(
-            messages_before(&messages, "$c")
-                .iter()
-                .map(|message| message.id.as_str())
-                .collect::<Vec<_>>(),
-            ["$a", "$b"]
-        );
     }
 
     #[test]
@@ -1754,20 +1751,21 @@ mod tests {
     }
 
     #[test]
-    fn wholly_failed_pinned_cache_surfaces_the_load_error() {
+    fn unavailable_pins_use_placeholders_after_a_cache_error() {
         use matrix_sdk::ruma::EventId;
 
         let pinned_ids = vec![EventId::parse("$missing:example.org").unwrap()];
-        let error = complete_pinned_messages(
+        let messages = complete_pinned_messages(
             &pinned_ids,
             &HashMap::new(),
             &HashSet::new(),
             None,
             Some("cache error".to_owned()),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.contains("cache error"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "此置顶消息不可用或已被删除");
     }
 
     #[test]

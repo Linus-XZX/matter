@@ -481,6 +481,7 @@ fn bounded_request_config() -> RequestConfig {
 
 const MEDIA_DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const MEDIA_SEND_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const MEDIA_EVENT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Drop per-account runtime state whenever a client is removed or replaced
 /// (logout, account removal, or login replacing an existing client), so a
@@ -1498,26 +1499,32 @@ async fn retry_pending_remote_logout(user_id: &str, client: &Client) {
         // not produce a double slash (some servers 404 on those).
         let base = client.homeserver().to_string();
         let url = format!("{}/_matrix/client/v3/logout", base.trim_end_matches('/'));
-        let outcome = match client
-            .http_client()
-            .post(url)
-            .bearer_auth(token)
-            .send()
-            .await
+        let request = client.http_client().post(url).bearer_auth(token).send();
+        let outcome = match tokio::time::timeout(std::time::Duration::from_secs(15), request).await
         {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                // 401: the token was already revoked server-side — the
-                // ghost session is gone. 2xx: the retry itself revoked it.
-                // Either way the pending entry is settled; drop it.
-                if status == 401 || (200..300).contains(&status) {
-                    PENDING_REMOTE_LOGOUTS.write().await.remove(&user_id);
-                    None
-                } else {
-                    Some(response.error_for_status())
-                }
+            Err(_) => {
+                app_log(
+                    "warn",
+                    "auth",
+                    format!("Retried remote logout timed out for {user_id}"),
+                );
+                return;
             }
-            Err(error) => Some(Err(error)),
+            Ok(result) => match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    // 401: the token was already revoked server-side — the
+                    // ghost session is gone. 2xx: the retry itself revoked it.
+                    // Either way the pending entry is settled; drop it.
+                    if status == 401 || (200..300).contains(&status) {
+                        PENDING_REMOTE_LOGOUTS.write().await.remove(&user_id);
+                        None
+                    } else {
+                        Some(response.error_for_status())
+                    }
+                }
+                Err(error) => Some(Err(error)),
+            },
         };
         if let Some(Err(error)) = outcome {
             app_log(
@@ -1580,6 +1587,26 @@ async fn set_subscription_user(user_id: Option<String>) {
 
 fn subscription_user_matches(active: Option<&str>, requested: Option<&str>) -> bool {
     requested.is_none_or(|requested| active == Some(requested))
+}
+
+async fn lock_subscription_state<'a, T>(
+    subscription_user: &'a RwLock<Option<String>>,
+    state: &'a Mutex<T>,
+    account_user_id: Option<&str>,
+    inactive_error: &'static str,
+) -> Result<
+    (
+        tokio::sync::RwLockReadGuard<'a, Option<String>>,
+        tokio::sync::MutexGuard<'a, T>,
+    ),
+    String,
+> {
+    let subscription_user = subscription_user.read().await;
+    if !subscription_user_matches(subscription_user.as_deref(), account_user_id) {
+        return Err(inactive_error.to_string());
+    }
+    let state = state.lock().await;
+    Ok((subscription_user, state))
 }
 
 struct SyncTask {
@@ -1692,9 +1719,12 @@ fn receipt_extension_for_subscribed_rooms(
 #[cfg(test)]
 mod room_subscription_tests {
     use super::{
-        receipt_extension_for_subscribed_rooms, subscription_user_matches, RoomSubscriptionState,
+        lock_subscription_state, receipt_extension_for_subscribed_rooms, subscription_user_matches,
+        RoomSubscriptionState,
     };
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, RwLock};
 
     fn state() -> RoomSubscriptionState {
         RoomSubscriptionState {
@@ -1785,6 +1815,49 @@ mod room_subscription_tests {
 
         state.clear_active_for_generation(2);
         assert_eq!(state.active_generation, None);
+    }
+
+    #[tokio::test]
+    async fn queued_account_writer_does_not_deadlock_subscription_registration() {
+        let user = Arc::new(RwLock::new(Some("@alice:example.org".to_string())));
+        let state = Arc::new(Mutex::new(()));
+        let held_state = state.lock().await;
+
+        let registration = {
+            let user = user.clone();
+            let state = state.clone();
+            tokio::spawn(async move {
+                let guards =
+                    lock_subscription_state(&user, &state, Some("@alice:example.org"), "inactive")
+                        .await
+                        .unwrap();
+                drop(guards);
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Ok(guard) = user.try_write() {
+                drop(guard);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registration must acquire the subscription-user read lock");
+
+        let writer = {
+            let user = user.clone();
+            tokio::spawn(async move {
+                *user.write().await = Some("@bob:example.org".to_string());
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(held_state);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            registration.await.unwrap();
+            writer.await.unwrap();
+        })
+        .await
+        .expect("subscription registration and queued writer must complete");
     }
 }
 
@@ -5277,23 +5350,16 @@ pub async fn subscribe_typing_for_room(
 ) -> Result<String, String> {
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-    let subscription_user = SUBSCRIPTION_USER.read().await;
-    if !subscription_user_matches(subscription_user.as_deref(), account_user_id.as_deref()) {
-        return Err("Typing subscription belongs to an inactive account".to_string());
-    }
     let subscription_id = NEXT_TYPING_SUBSCRIPTION_ID
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
-    let mut task = TYPING_TASK.lock().await;
-    // Re-verify after taking the lock: an account switch between the check
-    // above and here would otherwise install the old account's room into the
-    // new session (mirrors subscribe_room_for_receipts).
-    if !subscription_user_matches(
-        SUBSCRIPTION_USER.read().await.as_deref(),
+    let (_subscription_user, mut task) = lock_subscription_state(
+        &SUBSCRIPTION_USER,
+        &TYPING_TASK,
         account_user_id.as_deref(),
-    ) {
-        return Err("Typing subscription belongs to an inactive account".to_string());
-    }
+        "Typing subscription belongs to an inactive account",
+    )
+    .await?;
     if let Some(prev) = task.take() {
         prev.handle.abort();
     }
@@ -5402,24 +5468,16 @@ pub async fn subscribe_room_for_receipts(
 ) -> Result<String, String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
         .map_err(|e| format!("无效的房间 ID: {e}"))?;
-    let subscription_user = SUBSCRIPTION_USER.read().await;
-    if !subscription_user_matches(subscription_user.as_deref(), account_user_id.as_deref()) {
-        return Err("Room subscription belongs to an inactive account".to_string());
-    }
     let subscription_id = NEXT_ROOM_SUBSCRIPTION_ID
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
-    let mut state = ROOM_SUBSCRIPTION.lock().await;
-    // Re-verify after taking the lock: an account switch between the check
-    // above and here resets the subscription state, and registering the old
-    // account's room into the new session would subscribe it to a room it
-    // may not even know.
-    if !subscription_user_matches(
-        SUBSCRIPTION_USER.read().await.as_deref(),
+    let (_subscription_user, mut state) = lock_subscription_state(
+        &SUBSCRIPTION_USER,
+        &ROOM_SUBSCRIPTION,
         account_user_id.as_deref(),
-    ) {
-        return Err("Room subscription belongs to an inactive account".to_string());
-    }
+        "Room subscription belongs to an inactive account",
+    )
+    .await?;
     let first_subscriber = state.add_desired(&room_id, subscription_id.clone());
     if first_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
@@ -5583,41 +5641,79 @@ pub async fn mxc_to_http_full(mxc_url: String) -> Option<String> {
 
 /// Download media content as raw bytes using the Matrix SDK's HTTP client.
 /// This is more reliable than constructing URLs and loading from Flutter.
+#[derive(Clone, Debug)]
+struct MediaClientIdentity {
+    user_id: String,
+    instance_id: u64,
+}
+
+async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, String> {
+    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let instance_id = CLIENTS
+        .read()
+        .await
+        .get(&user_id)
+        .map(|entry| entry.instance_id)
+        .ok_or("Active account is no longer available")?;
+    Ok(MediaClientIdentity {
+        user_id,
+        instance_id,
+    })
+}
+
+async fn reacquire_media_client(identity: &MediaClientIdentity) -> Result<ClientLease, String> {
+    let client = get_client()
+        .await
+        .ok_or("Media transfer completed, but the account is logged out.")?;
+    ensure_account_matches(&client, &identity.user_id)
+        .map_err(|_| "Media transfer completed, but the active account changed.".to_string())?;
+    let current_instance_id = CLIENTS
+        .read()
+        .await
+        .get(&identity.user_id)
+        .map(|entry| entry.instance_id);
+    if current_instance_id != Some(identity.instance_id) {
+        return Err("Media transfer completed, but the account session changed.".to_string());
+    }
+    Ok(client)
+}
+
 #[frb]
 pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
     let client = get_client().await?;
-    let url = url::Url::parse(&mxc_url).ok()?;
-    if url.scheme() != "mxc" {
-        return None;
-    }
-    // Keep the port (e.g. media.example:8448): self-hosted media servers on
-    // non-default ports would otherwise resolve to a different host.
-    let mut server_name = url.host_str()?.to_string();
-    if let Some(port) = url.port() {
-        server_name.push(':');
-        server_name.push_str(&port.to_string());
-    }
-    let media_id = url.path().trim_start_matches('/').to_string();
-    if server_name.is_empty() || media_id.is_empty() {
-        return None;
-    }
+    let source = matrix_sdk::ruma::events::room::MediaSource::Plain(
+        matrix_sdk::ruma::OwnedMxcUri::try_from(mxc_url.as_str()).ok()?,
+    );
+    let url = media_download_url(&client, &source).ok()?;
+    let identity = media_client_identity(&client).await.ok()?;
+    let session = client.matrix_auth().session()?;
+    let http_client = client.http_client().clone();
+    drop(client);
 
-    use matrix_sdk::ruma::api::client::authenticated_media::get_content::v1::Request as MediaDownloadRequest;
-    let server = matrix_sdk::ruma::ServerName::parse(&server_name).ok()?;
-    let request = MediaDownloadRequest::new(media_id, server);
-
-    match tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, client.send(request)).await {
+    match tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
+        http_client
+            .get(url)
+            .bearer_auth(session.tokens.access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await
+    })
+    .await
+    {
         Ok(Ok(response)) => {
+            reacquire_media_client(&identity).await.ok()?;
             app_log(
                 "info",
                 "media",
                 format!(
                     "download_media_bytes: {} bytes for {}",
-                    response.file.len(),
+                    response.len(),
                     mxc_url
                 ),
             );
-            Some(response.file)
+            Some(response.to_vec())
         }
         Ok(Err(e)) => {
             app_log(
@@ -5690,12 +5786,12 @@ fn media_download_url(
     }
 
     let mut url = client.homeserver();
-    url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
     let mut segments = url
         .path_segments_mut()
         .map_err(|_| "Homeserver URL cannot contain path segments.".to_string())?;
+    segments.pop_if_empty();
     segments.extend([
         "_matrix",
         "client",
@@ -5746,13 +5842,15 @@ pub async fn download_media_source_bytes(
             .map_err(|e| format!("Invalid media source: {e}"))?;
     let limit = media_download_limit(max_size_bytes)?;
     let url = media_download_url(&client, &source)?;
+    let identity = media_client_identity(&client).await?;
     let session = client
         .matrix_auth()
         .session()
         .ok_or("No authenticated session.")?;
+    let http_client = client.http_client().clone();
+    drop(client);
     let content = tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
-        let response = client
-            .http_client()
+        let response = http_client
             .get(url)
             .bearer_auth(session.tokens.access_token)
             .send()
@@ -5778,6 +5876,7 @@ pub async fn download_media_source_bytes(
     })
     .await
     .map_err(|_| "Media download timed out. Please retry.".to_string())??;
+    reacquire_media_client(&identity).await?;
     app_log(
         "info",
         "media",
@@ -6628,6 +6727,83 @@ fn file_message_content(
     ))
 }
 
+async fn upload_media_source(
+    client: Client,
+    encrypted: bool,
+    mime_type: mime::Mime,
+    data: Vec<u8>,
+) -> Result<matrix_sdk::ruma::events::room::MediaSource, String> {
+    use matrix_sdk::ruma::events::room::MediaSource;
+
+    tokio::time::timeout(MEDIA_SEND_TOTAL_TIMEOUT, async move {
+        if encrypted {
+            let mut reader = Cursor::new(data.as_slice());
+            let encrypted_file = client
+                .upload_encrypted_file(&mut reader)
+                .await
+                .map_err(|error| format!("Encrypted media upload failed: {error}"))?;
+            Ok(MediaSource::Encrypted(Box::new(encrypted_file)))
+        } else {
+            let upload = client
+                .media()
+                .upload(&mime_type, data, None)
+                .await
+                .map_err(|error| format!("Media upload failed: {error}"))?;
+            Ok(MediaSource::Plain(upload.content_uri))
+        }
+    })
+    .await
+    .map_err(|_| "Media upload timed out. Please retry.".to_string())?
+}
+
+fn image_message_content(
+    filename: String,
+    mime_type: &mime::Mime,
+    size: Option<matrix_sdk::ruma::UInt>,
+    width: Option<matrix_sdk::ruma::UInt>,
+    height: Option<matrix_sdk::ruma::UInt>,
+    source: matrix_sdk::ruma::events::room::MediaSource,
+) -> matrix_sdk::ruma::events::room::message::RoomMessageEventContent {
+    use matrix_sdk::ruma::events::room::{
+        message::{ImageMessageEventContent, MessageType, RoomMessageEventContent},
+        ImageInfo,
+    };
+
+    let mut info = ImageInfo::new();
+    info.mimetype = Some(mime_type.to_string());
+    info.size = size;
+    info.width = width;
+    info.height = height;
+    RoomMessageEventContent::new(MessageType::Image(
+        ImageMessageEventContent::new(filename, source).info(Box::new(info)),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn video_message_content(
+    filename: String,
+    mime_type: &mime::Mime,
+    size: Option<matrix_sdk::ruma::UInt>,
+    width: Option<matrix_sdk::ruma::UInt>,
+    height: Option<matrix_sdk::ruma::UInt>,
+    duration: Option<matrix_sdk::ruma::time::Duration>,
+    source: matrix_sdk::ruma::events::room::MediaSource,
+) -> matrix_sdk::ruma::events::room::message::RoomMessageEventContent {
+    use matrix_sdk::ruma::events::room::message::{
+        MessageType, RoomMessageEventContent, VideoInfo, VideoMessageEventContent,
+    };
+
+    let mut info = VideoInfo::new();
+    info.mimetype = Some(mime_type.to_string());
+    info.size = size;
+    info.width = width;
+    info.height = height;
+    info.duration = duration;
+    RoomMessageEventContent::new(MessageType::Video(
+        VideoMessageEventContent::new(filename, source).info(Box::new(info)),
+    ))
+}
+
 /// Send an image message to a room.
 /// `image_data` is the raw bytes of the image file.
 /// `filename` is the original file name (e.g. "photo.jpg").
@@ -6640,11 +6816,18 @@ pub async fn send_image_message(
     width: Option<i32>,
     height: Option<i32>,
 ) -> Result<(), String> {
-    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
-
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
     let mime_type = image_mime_type(&filename, mime_type)?;
+    let identity = media_client_identity(&client).await?;
+    let encrypted = room
+        .latest_encryption_state()
+        .await
+        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .is_encrypted();
+    let upload_client = client.client.clone();
+    drop(room);
+    drop(client);
 
     app_log(
         "info",
@@ -6657,29 +6840,33 @@ pub async fn send_image_message(
         ),
     );
 
-    use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo};
-
-    let image_info = BaseImageInfo {
-        width: width
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
-        height: height
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
-        size: matrix_sdk::ruma::UInt::new(image_data.len() as u64),
-        ..Default::default()
-    };
-    let config = AttachmentConfig::new().info(AttachmentInfo::Image(image_info));
-
-    // send_attachment encrypts both the event and media bytes when the room is
-    // encrypted, and keeps the normal plain-media flow for unencrypted rooms.
-    tokio::time::timeout(
-        MEDIA_SEND_TOTAL_TIMEOUT,
-        room.send_attachment(filename, &mime_type, image_data, config),
-    )
-    .await
-    .map_err(|_| "Send image message timed out. Please retry.".to_string())?
-    .map_err(|e| format!("Send image message failed: {e}"))?;
+    let image_size = matrix_sdk::ruma::UInt::new(image_data.len() as u64);
+    let image_width = width
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64));
+    let image_height = height
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64));
+    let source =
+        upload_media_source(upload_client, encrypted, mime_type.clone(), image_data).await?;
+    let client = reacquire_media_client(&identity)
+        .await
+        .map_err(|error| format!("Image uploaded, but the message was not sent: {error}"))?;
+    let room = get_room_by_id(&client, &room_id)
+        .map_err(|error| format!("Image uploaded, but the room is unavailable: {error}"))?;
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+    let content = image_message_content(
+        filename,
+        &mime_type,
+        image_size,
+        image_width,
+        image_height,
+        source,
+    );
+    tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
+        .await
+        .map_err(|_| "Image uploaded, but sending the message timed out.".to_string())?
+        .map_err(|e| format!("Send image message failed: {e}"))?;
 
     app_log(
         "info",
@@ -6706,16 +6893,22 @@ pub async fn send_file_message(
     mime_type: Option<String>,
     size: Option<i32>,
 ) -> Result<(), String> {
-    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
-
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-
     let mime_type = parse_supplied_mime_type(mime_type)?.unwrap_or(mime::APPLICATION_OCTET_STREAM);
     let file_size = size
         .filter(|value| *value > 0)
         .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
         .or_else(|| matrix_sdk::ruma::UInt::new(file_data.len() as u64));
+    let identity = media_client_identity(&client).await?;
+    let encrypted = room
+        .latest_encryption_state()
+        .await
+        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .is_encrypted();
+    let upload_client = client.client.clone();
+    drop(room);
+    drop(client);
 
     app_log(
         "info",
@@ -6728,38 +6921,19 @@ pub async fn send_file_message(
         ),
     );
 
-    use matrix_sdk::ruma::events::room::MediaSource;
-    use std::io::Cursor;
-
-    tokio::time::timeout(MEDIA_SEND_TOTAL_TIMEOUT, async move {
-        let source = if room
-            .latest_encryption_state()
-            .await
-            .map_err(|error| format!("Check room encryption failed: {error}"))?
-            .is_encrypted()
-        {
-            let mut reader = Cursor::new(file_data.as_slice());
-            let encrypted_file = client
-                .upload_encrypted_file(&mut reader)
-                .await
-                .map_err(|error| format!("Encrypted file upload failed: {error}"))?;
-            MediaSource::Encrypted(Box::new(encrypted_file))
-        } else {
-            let upload = client
-                .media()
-                .upload(&mime_type, file_data, None)
-                .await
-                .map_err(|error| format!("File upload failed: {error}"))?;
-            MediaSource::Plain(upload.content_uri)
-        };
-        let content = file_message_content(filename, &mime_type, file_size, source);
-        room.send(content)
-            .await
-            .map_err(|e| format!("Send file message failed: {e}"))?;
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|_| "Send file message timed out. Please retry.".to_string())??;
+    let source =
+        upload_media_source(upload_client, encrypted, mime_type.clone(), file_data).await?;
+    let client = reacquire_media_client(&identity)
+        .await
+        .map_err(|error| format!("File uploaded, but the message was not sent: {error}"))?;
+    let room = get_room_by_id(&client, &room_id)
+        .map_err(|error| format!("File uploaded, but the room is unavailable: {error}"))?;
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+    let content = file_message_content(filename, &mime_type, file_size, source);
+    tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
+        .await
+        .map_err(|_| "File uploaded, but sending the message timed out.".to_string())?
+        .map_err(|e| format!("Send file message failed: {e}"))?;
 
     app_log("info", "rooms", format!("File message sent to {}", room_id));
     info!("File message sent to {}", room_id);
@@ -6786,12 +6960,18 @@ pub async fn send_video_message(
     duration_ms: Option<i32>,
     size: Option<i32>,
 ) -> Result<(), String> {
-    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
-
     let client = get_client().await.ok_or("No client created.")?;
     let room = get_room_by_id(&client, &room_id)?;
-
     let mime_type = video_mime_type(&filename, mime_type)?;
+    let identity = media_client_identity(&client).await?;
+    let encrypted = room
+        .latest_encryption_state()
+        .await
+        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .is_encrypted();
+    let upload_client = client.client.clone();
+    drop(room);
+    drop(client);
 
     app_log(
         "info",
@@ -6804,33 +6984,40 @@ pub async fn send_video_message(
         ),
     );
 
-    use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseVideoInfo};
-
-    let info = BaseVideoInfo {
-        width: width
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
-        height: height
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64)),
-        duration: duration_ms
-            .filter(|value| *value > 0)
-            .map(|value| matrix_sdk::ruma::time::Duration::from_millis(value as u64)),
-        size: size
-            .filter(|value| *value > 0)
-            .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
-            .or_else(|| matrix_sdk::ruma::UInt::new(video_data.len() as u64)),
-        ..Default::default()
-    };
-    let config = AttachmentConfig::new().info(AttachmentInfo::Video(info));
-
-    tokio::time::timeout(
-        MEDIA_SEND_TOTAL_TIMEOUT,
-        room.send_attachment(&filename, &mime_type, video_data, config),
-    )
-    .await
-    .map_err(|_| "Send video message timed out. Please retry.".to_string())?
-    .map_err(|e| format!("Send video message failed: {e}"))?;
+    let video_width = width
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64));
+    let video_height = height
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64));
+    let video_duration = duration_ms
+        .filter(|value| *value > 0)
+        .map(|value| matrix_sdk::ruma::time::Duration::from_millis(value as u64));
+    let video_size = size
+        .filter(|value| *value > 0)
+        .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64))
+        .or_else(|| matrix_sdk::ruma::UInt::new(video_data.len() as u64));
+    let source =
+        upload_media_source(upload_client, encrypted, mime_type.clone(), video_data).await?;
+    let client = reacquire_media_client(&identity)
+        .await
+        .map_err(|error| format!("Video uploaded, but the message was not sent: {error}"))?;
+    let room = get_room_by_id(&client, &room_id)
+        .map_err(|error| format!("Video uploaded, but the room is unavailable: {error}"))?;
+    let generation = SYNC_GENERATION.load(Ordering::SeqCst);
+    let content = video_message_content(
+        filename,
+        &mime_type,
+        video_size,
+        video_width,
+        video_height,
+        video_duration,
+        source,
+    );
+    tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
+        .await
+        .map_err(|_| "Video uploaded, but sending the message timed out.".to_string())?
+        .map_err(|e| format!("Send video message failed: {e}"))?;
 
     app_log(
         "info",
@@ -7108,9 +7295,9 @@ pub async fn end_poll(room_id: String, poll_start_event_id: String) -> Result<()
 #[cfg(test)]
 mod attachment_message_tests {
     use super::{
-        file_message_content, image_mime_type, location_message_content, poll_start_content,
-        poll_start_for_forward, room_message_preview, unstable_poll_preview,
-        validate_poll_answer_ids, video_mime_type,
+        file_message_content, image_message_content, image_mime_type, location_message_content,
+        poll_start_content, poll_start_for_forward, room_message_preview, unstable_poll_preview,
+        validate_poll_answer_ids, video_message_content, video_mime_type,
     };
     use matrix_sdk::ruma::{
         events::{
@@ -7164,6 +7351,39 @@ mod attachment_message_tests {
         assert_eq!(json["url"], "mxc://example.org/media");
         assert_eq!(json["info"]["mimetype"], "audio/mpeg");
         assert_eq!(json["info"]["size"], 3);
+    }
+
+    #[test]
+    fn manually_built_image_and_video_content_preserves_attachment_metadata() {
+        let image = image_message_content(
+            "photo.jpg".to_owned(),
+            &"image/jpeg".parse().unwrap(),
+            UInt::new(12),
+            UInt::new(640),
+            UInt::new(480),
+            MediaSource::Plain(mxc_uri()),
+        );
+        let image_json = serde_json::to_value(image).unwrap();
+        assert_eq!(image_json["msgtype"], "m.image");
+        assert_eq!(image_json["url"], "mxc://example.org/media");
+        assert_eq!(image_json["info"]["mimetype"], "image/jpeg");
+        assert_eq!(image_json["info"]["w"], 640);
+        assert_eq!(image_json["info"]["h"], 480);
+
+        let video = video_message_content(
+            "clip.mp4".to_owned(),
+            &"video/mp4".parse().unwrap(),
+            UInt::new(34),
+            UInt::new(1920),
+            UInt::new(1080),
+            Some(std::time::Duration::from_millis(1500)),
+            MediaSource::Plain(mxc_uri()),
+        );
+        let video_json = serde_json::to_value(video).unwrap();
+        assert_eq!(video_json["msgtype"], "m.video");
+        assert_eq!(video_json["url"], "mxc://example.org/media");
+        assert_eq!(video_json["info"]["mimetype"], "video/mp4");
+        assert_eq!(video_json["info"]["duration"], 1500);
     }
 
     #[test]
@@ -8229,9 +8449,10 @@ pub async fn set_pinned_message(
             let already_pinned = pinned_ids.iter().any(|id| id == &event_id);
             let changed = if pinned {
                 if !already_pinned {
-                    // Newest pin first (the Matrix convention; the pinned page
-                    // renders in list order).
-                    pinned_ids.insert(0, event_id.to_owned());
+                    // Matrix clients append newly pinned events. The pinned
+                    // timeline also reads the bounded cache from the tail,
+                    // so preserving that order keeps the newest 128 cached.
+                    pinned_ids.push(event_id.to_owned());
                     true
                 } else {
                     false
@@ -9060,8 +9281,14 @@ pub async fn get_space_children(
             let child_room_id = match child_event {
                 matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
                     matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-                ) => event.state_key,
-                matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event) => {
+                ) if !event.content.via.is_empty() => event.state_key,
+                matrix_sdk::deserialized_responses::SyncOrStrippedState::Stripped(event)
+                    if event
+                        .content
+                        .via
+                        .as_ref()
+                        .is_some_and(|via| !via.is_empty()) =>
+                {
                     event.state_key
                 }
                 _ => continue,
@@ -9880,6 +10107,21 @@ mod media_download_tests {
         assert_eq!(
             url.as_str(),
             "https://matrix.example/_matrix/client/v1/media/download/media.example:8448/media-id"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_download_url_preserves_the_homeserver_path_prefix() {
+        let client = Client::new(url::Url::parse("https://example.org/matrix/").unwrap())
+            .await
+            .unwrap();
+        let source = serde_json::from_str(r#"{"url":"mxc://media.example/media-id"}"#).unwrap();
+
+        let url = media_download_url(&client, &source).unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://example.org/matrix/_matrix/client/v1/media/download/media.example/media-id"
         );
     }
 }

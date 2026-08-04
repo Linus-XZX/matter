@@ -46,10 +46,41 @@ class _ChatRouteObserver extends RouteObserver<ModalRoute<dynamic>> {
 
   @override
   void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (previousRoute case final ModalRoute<dynamic> previousModalRoute) {
-      _coveringRoutes.remove(previousModalRoute);
-    }
+    _forgetRoute(route);
     super.didPop(route, previousRoute);
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _forgetRoute(route);
+    super.didRemove(route, previousRoute);
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    if (oldRoute != null) {
+      final coveringRoute = _coveringRoutes.remove(oldRoute);
+      if (newRoute case final ModalRoute<dynamic> newModalRoute) {
+        if (coveringRoute != null) {
+          _coveringRoutes[newModalRoute] = coveringRoute;
+        }
+      }
+      for (final entry in _coveringRoutes.entries.toList()) {
+        if (identical(entry.value, oldRoute)) {
+          if (newRoute == null) {
+            _coveringRoutes.remove(entry.key);
+          } else {
+            _coveringRoutes[entry.key] = newRoute;
+          }
+        }
+      }
+    }
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+  }
+
+  void _forgetRoute(Route<dynamic> route) {
+    _coveringRoutes.remove(route);
+    _coveringRoutes.removeWhere((_, covering) => identical(covering, route));
   }
 }
 
@@ -313,7 +344,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   }
 
   void _handleRoomDetailsChanged(RoomMetadataPatch patch) {
-    if (patch.roomId != widget.roomId) return;
+    if (!mounted || patch.roomId != widget.roomId) return;
     setState(() {
       switch (patch) {
         case RoomNamePatch():

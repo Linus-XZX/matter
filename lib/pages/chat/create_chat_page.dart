@@ -141,7 +141,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
     // Account snapshot captured when the dialog OPENS: a switch while the
     // dialog is up must not redirect the write to the new account.
     final dialogAccountUserId = ref.read(activeUserIdProvider) ?? '';
-    final roomIdController = TextEditingController();
+    var roomIdentifier = '';
     var joining = false;
     String? joinError;
     showDialog(
@@ -160,7 +160,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
-                controller: roomIdController,
+                onChanged: (value) => roomIdentifier = value,
                 style: const TextStyle(color: AppColors.onBackground),
                 decoration: const InputDecoration(
                   hintText: '!room_id:matrix.akass.cn',
@@ -199,7 +199,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                       // rebuild lags a frame, so a second tap on the old
                       // widget could otherwise issue a duplicate join.
                       if (joining) return;
-                      final value = roomIdController.text.trim();
+                      final value = roomIdentifier.trim();
                       if (value.isEmpty) {
                         // Feedback instead of a silent no-op (same
                         // discipline as the create-group dialog).
@@ -407,7 +407,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                 title: '创建群组',
                 subtitle: '创建一个新的群聊房间',
                 onTap: () {
-                  final nameController = TextEditingController();
+                  var groupName = '';
                   String? groupNameError;
                   showDialog(
                     context: context,
@@ -425,7 +425,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             TextField(
-                              controller: nameController,
+                              onChanged: (value) => groupName = value,
                               style: const TextStyle(
                                 color: AppColors.onBackground,
                               ),
@@ -466,7 +466,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                           ),
                           TextButton(
                             onPressed: () {
-                              final name = nameController.text.trim();
+                              final name = groupName.trim();
                               if (name.isEmpty) {
                                 // Feedback instead of silently closing the
                                 // dialog (same discipline as the space

@@ -206,8 +206,8 @@ class SpacePage extends ConsumerWidget {
     // discipline as every other P0 write path).
     final container = ProviderScope.containerOf(context, listen: false);
     final dialogAccountUserId = container.read(activeUserIdProvider) ?? '';
-    final nameController = TextEditingController();
-    final topicController = TextEditingController();
+    var spaceName = '';
+    var spaceTopic = '';
     var creating = false;
     String? createError;
     // (The page-scoped container is captured at the top of this method.)
@@ -228,7 +228,7 @@ class SpacePage extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
-                  controller: nameController,
+                  onChanged: (value) => spaceName = value,
                   style: const TextStyle(color: AppColors.onBackground),
                   decoration: const InputDecoration(
                     hintText: '空间名称',
@@ -237,7 +237,7 @@ class SpacePage extends ConsumerWidget {
                 ),
                 const SizedBox(height: 10),
                 TextField(
-                  controller: topicController,
+                  onChanged: (value) => spaceTopic = value,
                   style: const TextStyle(color: AppColors.onBackground),
                   decoration: const InputDecoration(
                     hintText: '空间说明（可选）',
@@ -273,8 +273,8 @@ class SpacePage extends ConsumerWidget {
                         // rebuild lags a frame, so a second tap on the old
                         // widget could otherwise create two spaces.
                         if (creating) return;
-                        final name = nameController.text.trim();
-                        final topic = topicController.text.trim();
+                        final name = spaceName.trim();
+                        final topic = spaceTopic.trim();
                         if (name.isEmpty) {
                           // Feedback instead of a silent no-op (same as
                           // the room management save path).
@@ -374,7 +374,7 @@ class SpacePage extends ConsumerWidget {
     // dialog is up must not redirect the write to the new account.
     final container = ProviderScope.containerOf(context, listen: false);
     final dialogAccountUserId = container.read(activeUserIdProvider) ?? '';
-    final controller = TextEditingController();
+    var spaceIdentifier = '';
     var joining = false;
     String? joinError;
     // (The page-scoped container is captured at the top of this method.)
@@ -398,7 +398,7 @@ class SpacePage extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
-                  controller: controller,
+                  onChanged: (value) => spaceIdentifier = value,
                   style: const TextStyle(color: AppColors.onBackground),
                   decoration: const InputDecoration(
                     hintText: '!space_id:server 或 #alias:server',
@@ -434,7 +434,7 @@ class SpacePage extends ConsumerWidget {
                         // rebuild lags a frame, so a second tap on the old
                         // widget could otherwise issue a duplicate join.
                         if (joining) return;
-                        final value = controller.text.trim();
+                        final value = spaceIdentifier.trim();
                         if (value.isEmpty) {
                           // Feedback instead of a silent no-op (same
                           // discipline as the create-space dialog).

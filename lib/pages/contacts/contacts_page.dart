@@ -255,7 +255,7 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
                     // issue a duplicate createDm (two concurrent scans would
                     // both miss the existing DM and create duplicate rooms).
                     if (_creatingDm) return;
-                    _creatingDm = true;
+                    setState(() => _creatingDm = true);
                     // Account snapshot: a switch while the request is in
                     // flight must not redirect the write, and suppresses
                     // the feedback below (the room would belong to the
@@ -305,7 +305,7 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
                         );
                       }
                     } finally {
-                      if (mounted) _creatingDm = false;
+                      if (mounted) setState(() => _creatingDm = false);
                     }
                   },
           ),

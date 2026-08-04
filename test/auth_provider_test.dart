@@ -239,6 +239,10 @@ void main() {
         deviceId: 'DEVICE_A',
         displayName: 'Alice',
       );
+      final seededPrefs = await SharedPreferences.getInstance();
+      await seededPrefs.setStringList('ignored_users_v1_@alice:example.org', [
+        '@blocked:example.org',
+      ]);
 
       await removeSession('@alice:example.org');
 
@@ -260,6 +264,10 @@ void main() {
             'matrix_refresh_token_${base64Url.encode(utf8.encode('@alice:example.org'))}',
       );
       expect(refreshToken, isNull);
+      expect(
+        prefs.getStringList('ignored_users_v1_@alice:example.org'),
+        isNull,
+      );
     });
 
     test('removeSession switches active user when another exists', () async {
@@ -356,6 +364,10 @@ void main() {
         formattedBody: null,
         persist: true,
       );
+      final seededPrefs = await SharedPreferences.getInstance();
+      await seededPrefs.setStringList('ignored_users_v1_@alice:example.org', [
+        '@blocked:example.org',
+      ]);
 
       await clearAllSessions();
 
@@ -363,6 +375,10 @@ void main() {
       expect(prefs.getString('multi_sessions'), isNull);
       expect(prefs.getString('session_display_names'), isNull);
       expect(prefs.getString('active_user_id'), isNull);
+      expect(
+        prefs.getStringList('ignored_users_v1_@alice:example.org'),
+        isNull,
+      );
 
       final secure = FlutterSecureStorage();
       final all = await secure.readAll();

@@ -477,7 +477,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         return;
       }
       setState(() {
-        _details = roomDetails;
+        _mergeRemoteDetails(roomDetails);
         // A member refresh that finished after this load's read started
         // owns the member display: skip the load's older snapshot/error so
         // it cannot overwrite fresher refresh data.
@@ -537,18 +537,6 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         if (members.value case final value?) {
           // Same freshness guard as `_membersLoadError` above.
           if (_membersWriteSeq == membersWriteSeq) _members = value;
-        }
-        // A save that started after this load began owns the form fields:
-        // don't clobber the user's in-progress edit with the pre-save
-        // server values (the save's own completion applies the fresh ones;
-        // `_mergeRemoteDetails`' edit guard then keeps the controller in
-        // sync). `_details` itself is still replaced — it is the snapshot
-        // the edit guards compare against.
-        if (!_saving) {
-          _nameController.text = roomDetails.hasExplicitName
-              ? roomDetails.name
-              : '';
-          _topicController.text = roomDetails.topic ?? '';
         }
         _loading = false;
         _accountSwitched = false;
@@ -1216,7 +1204,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
 
   void _showInviteDialog() {
     if (!_accountActive()) return;
-    final controller = TextEditingController();
+    var invitedUserId = '';
     var inviting = false;
     String? inviteError;
     showDialog<void>(
@@ -1240,7 +1228,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
-                  controller: controller,
+                  onChanged: (value) => invitedUserId = value,
                   autofocus: true,
                   style: const TextStyle(color: AppColors.onBackground),
                   decoration: const InputDecoration(
@@ -1276,7 +1264,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                         // rebuild lags a frame, so a second tap on the old
                         // widget could otherwise issue a duplicate invite.
                         if (inviting) return;
-                        final userId = controller.text.trim();
+                        final userId = invitedUserId.trim();
                         if (userId.isEmpty) return;
                         setDialogState(() {
                           inviting = true;

@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../features/markdown/markdown_source_store.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'authenticated_media_cache.dart';
+import 'ignored_users_persistence.dart';
 import 'message_cache_persistence.dart';
 import 'mutable_state.dart';
 
@@ -373,6 +374,7 @@ Future<void> removeSession(String userId) async {
   await _secureStorage.delete(key: _tokenKey(userId));
   await _secureStorage.delete(key: _refreshTokenKey(userId));
   await clearCachedMessagesForNamespace(userId);
+  await prefs.remove(ignoredUsersCacheKey(userId));
   await const MarkdownSourceStore().clearForUser(userId);
   for (final homeserver in removedHomeservers) {
     await clearAuthenticatedMediaCacheForSession(
@@ -420,6 +422,11 @@ Future<void> clearAllSessions() async {
   await prefs.remove(_kSessions);
   await prefs.remove(_kSessionDisplayNames);
   await prefs.remove(_kActiveUserId);
+  for (final key in prefs.getKeys().where(
+    (key) => key.startsWith('${ignoredUsersCachePrefix}_'),
+  )) {
+    await prefs.remove(key);
+  }
   for (final key in prefs.getKeys().where(
     (key) => key.startsWith('matrix_session_removed_'),
   )) {

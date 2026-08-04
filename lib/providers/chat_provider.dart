@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'auth_provider.dart';
 import 'connection_provider.dart';
+import 'ignored_users_persistence.dart';
 import 'message_cache_persistence.dart';
 import 'message_ordering.dart';
 import 'mutable_state.dart';
@@ -274,8 +275,6 @@ Future<Set<String>> _loadIgnoredUserIds(Ref ref, String namespace) async {
   return latest ?? fresh;
 }
 
-const _kIgnoredUsersCachePrefix = 'ignored_users_v1';
-
 /// The ignore list used to filter room-list previews, with its freshness.
 /// Room collections watch it, so a write-through change re-filters previews
 /// immediately (and an offline restart still filters via the persisted
@@ -308,9 +307,7 @@ Future<({Set<String>? ids, bool authoritative})> _previewIgnoreFilter(
 Future<Set<String>?> _loadPersistedIgnoredUserIds(String namespace) async {
   try {
     final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getStringList(
-      '${_kIgnoredUsersCachePrefix}_$namespace',
-    );
+    final stored = prefs.getStringList(ignoredUsersCacheKey(namespace));
     return stored?.toSet();
   } catch (error) {
     debugPrint('loadPersistedIgnoredUserIds failed: $error');
@@ -322,7 +319,7 @@ Future<void> _persistIgnoredUserIds(String namespace, Set<String> ids) async {
   try {
     final prefs = await SharedPreferences.getInstance();
     final written = await prefs.setStringList(
-      '${_kIgnoredUsersCachePrefix}_$namespace',
+      ignoredUsersCacheKey(namespace),
       ids.toList()..sort(),
     );
     if (!written) {
@@ -1173,6 +1170,63 @@ rust.ChatMessage chooseMessageForSameEvent(
   return incoming;
 }
 
+bool _reactionContentEquals(rust.Reaction a, rust.Reaction b) {
+  return a.key == b.key &&
+      a.myEventId == b.myEventId &&
+      listEquals(a.senders, b.senders);
+}
+
+bool _reactionsContentEqual(List<rust.Reaction> a, List<rust.Reaction> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!_reactionContentEquals(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+bool _pollContentEquals(rust.PollInfo? a, rust.PollInfo? b) {
+  if (identical(a, b)) return true;
+  if (a == null || b == null) return false;
+  return a.question == b.question &&
+      a.disclosed == b.disclosed &&
+      a.maxSelections == b.maxSelections &&
+      a.totalVoters == b.totalVoters &&
+      a.ended == b.ended &&
+      listEquals(a.answers, b.answers) &&
+      listEquals(a.myAnswerIds, b.myAnswerIds) &&
+      listEquals(a.results, b.results);
+}
+
+bool chatMessageContentEquals(rust.ChatMessage a, rust.ChatMessage b) {
+  return identical(a, b) ||
+      (a.id == b.id &&
+          a.senderId == b.senderId &&
+          a.senderName == b.senderName &&
+          a.content == b.content &&
+          a.formattedBody == b.formattedBody &&
+          a.caption == b.caption &&
+          a.captionFormattedBody == b.captionFormattedBody &&
+          listEquals(a.mentionedUserIds, b.mentionedUserIds) &&
+          a.mentionsRoom == b.mentionsRoom &&
+          a.timestamp == b.timestamp &&
+          a.isMe == b.isMe &&
+          a.msgType == b.msgType &&
+          a.imageUrl == b.imageUrl &&
+          a.mediaSourceJson == b.mediaSourceJson &&
+          a.imageWidth == b.imageWidth &&
+          a.imageHeight == b.imageHeight &&
+          a.filename == b.filename &&
+          a.fileSize == b.fileSize &&
+          a.geoUri == b.geoUri &&
+          _pollContentEquals(a.poll, b.poll) &&
+          a.inReplyTo == b.inReplyTo &&
+          a.isEdited == b.isEdited &&
+          listEquals(a.editHistory, b.editHistory) &&
+          _reactionsContentEqual(a.reactions, b.reactions) &&
+          listEquals(a.readers, b.readers) &&
+          a.totalMembers == b.totalMembers);
+}
+
 List<rust.ChatMessage> mergeMessageSnapshotAdditions(
   List<rust.ChatMessage> current,
   List<rust.ChatMessage> incoming,
@@ -1190,7 +1244,7 @@ List<rust.ChatMessage> mergeMessageSnapshotAdditions(
       continue;
     }
     final selected = chooseMessageForSameEvent(existing, message);
-    if (selected != existing) {
+    if (!chatMessageContentEquals(selected, existing)) {
       byId[message.id] = selected;
       changed = true;
     }
@@ -1209,7 +1263,7 @@ List<rust.ChatMessage> updateMessageCache(
   if (current.length == reconciled.length) {
     var same = true;
     for (var i = 0; i < reconciled.length; i++) {
-      if (reconciled[i] != current[i]) {
+      if (!chatMessageContentEquals(reconciled[i], current[i])) {
         same = false;
         break;
       }
@@ -1608,6 +1662,7 @@ String markLocalOutgoingMessageSentInState(
       totalMembers: message.totalMembers,
     ),
     sourceImageUrl: local.sourceImageUrl,
+    replyToUserId: local.replyToUserId,
   );
   outgoing.value = next;
   return sentId;
@@ -1651,7 +1706,7 @@ Future<void> refreshMessagesRef(Ref ref, String roomId) async {
     var equal = current.length == reconciled.length;
     if (equal) {
       for (var i = 0; i < reconciled.length; i++) {
-        if (reconciled[i] != current[i]) {
+        if (!chatMessageContentEquals(reconciled[i], current[i])) {
           equal = false;
           break;
         }
@@ -1707,15 +1762,13 @@ String _scopedMxcCacheKey(String namespace, String cacheKey) =>
 Future<void> _ensureMxcCacheLoaded(WidgetRef ref) async {
   final namespace = _mxcStorageNamespace(ref);
   if (_loadedMxcCacheUsers.contains(namespace)) return;
-  // Mark as loaded (attempted) BEFORE the await: an unmount race must not
-  // cause a full disk re-read on every later resolve call — the next
-  // complete pass overwrites any partially-loaded state anyway.
-  _loadedMxcCacheUsers.add(namespace);
 
   final prefs = await SharedPreferences.getInstance();
   // The calling widget may have been unmounted while the disk read was in
   // flight: `ref.read` below throws on a disposed widget.
   if (!ref.context.mounted) return;
+  if (_loadedMxcCacheUsers.contains(namespace)) return;
+  _loadedMxcCacheUsers.add(namespace);
   final raw = prefs.getString(_mxcStorageKey(namespace));
   if (raw != null && raw.isNotEmpty) {
     try {
