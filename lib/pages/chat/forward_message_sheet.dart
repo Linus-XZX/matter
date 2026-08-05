@@ -184,8 +184,17 @@ class _ForwardMessageSheetState extends ConsumerState<ForwardMessageSheet> {
         targetRoomId: room.id,
         message: widget.message,
       );
+      // `mounted` first: `ref.invalidate` throws once the sheet was
+      // dismissed while the send was in flight (Riverpod asserts on
+      // disposed widgets).
+      if (!mounted) return;
       ref.invalidate(chatRoomsProvider);
-      if (mounted) Navigator.of(context).pop(room);
+      // `isCurrent` guard: the sheet may be in its exit animation (the
+      // user dismissed it while the send was in flight) — popping then
+      // would pop the chat page below it.
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        Navigator.of(context).pop(room);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _sendingRoomId = null);

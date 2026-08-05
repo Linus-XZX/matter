@@ -8,9 +8,7 @@ void main() {
     testWidgets('renders its child', (tester) async {
       await tester.pumpWidget(
         const MaterialApp(
-          home: Scaffold(
-            body: AppCard(child: Text('Hello')),
-          ),
+          home: Scaffold(body: AppCard(child: Text('Hello'))),
         ),
       );
 

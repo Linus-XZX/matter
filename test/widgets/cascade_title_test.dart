@@ -8,10 +8,7 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
-            body: CascadeTitle(
-              text: 'Home',
-              style: TextStyle(fontSize: 20),
-            ),
+            body: CascadeTitle(text: 'Home', style: TextStyle(fontSize: 20)),
           ),
         ),
       );
@@ -23,10 +20,7 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
-            body: CascadeTitle(
-              text: 'Home',
-              style: TextStyle(fontSize: 20),
-            ),
+            body: CascadeTitle(text: 'Home', style: TextStyle(fontSize: 20)),
           ),
         ),
       );
@@ -48,7 +42,10 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(
-        find.descendant(of: find.byType(CascadeTitle), matching: find.text('Home')),
+        find.descendant(
+          of: find.byType(CascadeTitle),
+          matching: find.text('Home'),
+        ),
         findsNothing,
       );
       expect(find.text('Settings'), findsOneWidget);
@@ -58,10 +55,7 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
-            body: CascadeTitle(
-              text: 'Home',
-              style: TextStyle(fontSize: 20),
-            ),
+            body: CascadeTitle(text: 'Home', style: TextStyle(fontSize: 20)),
           ),
         ),
       );
@@ -69,10 +63,7 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
-            body: CascadeTitle(
-              text: 'Home',
-              style: TextStyle(fontSize: 20),
-            ),
+            body: CascadeTitle(text: 'Home', style: TextStyle(fontSize: 20)),
           ),
         ),
       );
@@ -80,7 +71,10 @@ void main() {
 
       expect(find.text('Home'), findsOneWidget);
       expect(
-        find.descendant(of: find.byType(CascadeTitle), matching: find.byType(AnimatedBuilder)),
+        find.descendant(
+          of: find.byType(CascadeTitle),
+          matching: find.byType(AnimatedBuilder),
+        ),
         findsNothing,
       );
     });

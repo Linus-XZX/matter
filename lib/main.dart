@@ -25,6 +25,12 @@ Future<void> main() async {
   var hasSessions = false;
   try {
     await migrateLegacySession();
+    try {
+      final dataDir = (await getApplicationSupportDirectory()).path;
+      await completePendingSessionRemovals(dataDir: dataDir);
+    } catch (e) {
+      debugPrint('Pending account cleanup failed: $e');
+    }
     hasSessions = (await loadAllSessions()).isNotEmpty;
   } catch (e) {
     debugPrint('Bootstrap check failed: $e');

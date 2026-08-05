@@ -10,6 +10,7 @@ import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import 'action_failure_message.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
@@ -24,7 +25,6 @@ import 'message_insert_animation.dart';
 import 'message_text.dart';
 import 'poll_message_bubble.dart';
 import 'video_message_bubble.dart';
-import 'message_input.dart';
 import 'send_flight.dart';
 
 class MessageGroup {
@@ -410,7 +410,13 @@ class MessageGroupWidget extends ConsumerWidget {
 
     final messageRow = GestureDetector(
       onLongPress: isLocalOutgoing
-          ? null
+          ? (isLocalFailed
+                ? () => _showFailedMessageMenu(
+                    bubbleContext ?? context,
+                    ref,
+                    message,
+                  )
+                : null)
           : () => _showContextMenu(bubbleContext ?? context, ref, message),
       behavior: HitTestBehavior.opaque,
       child: Padding(
@@ -1273,7 +1279,14 @@ class MessageGroupWidget extends ConsumerWidget {
           }
         },
         onEdit: () {
-          ref.read(editingMessageProvider(roomId).notifier).value = message;
+          ref
+                  .read(
+                    editingMessageProvider(
+                      activeRoomAccountKey(ref, roomId),
+                    ).notifier,
+                  )
+                  .value =
+              message;
         },
         onRecall: () async {
           try {
@@ -1297,6 +1310,100 @@ class MessageGroupWidget extends ConsumerWidget {
             }
           }
         },
+        onPin: () async {
+          // Local (not yet echoed) messages have no server event id: pinning
+          // them would write a bogus id into m.room.pinned_events, leaving a
+          // permanent "不可用" placeholder in the pinned list.
+          if (!message.id.startsWith(r'$')) {
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                const SnackBar(
+                  // `local_outgoing_sent:` messages are already on the
+                  // server but not yet echoed back as a remote event — the
+                  // local id still has no server meaning, so pinning stays
+                  // blocked, but "尚未发送" would be wrong for them.
+                  content: Text('消息同步中，请稍后置顶'),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            }
+            return;
+          }
+          // The account snapshot is captured once, before any await: the
+          // write below must target the account the menu was opened for. If
+          // the account switched mid-menu, the Rust guard rejects the
+          // stale-account write with a clear message instead of a confusing
+          // "room not joined" error against the new account.
+          final menuAccount = ref.read(activeUserIdProvider) ?? '';
+          // Decide pin vs unpin from the server state: the menu shows the
+          // same entry for both, and an idempotent set must not guess.
+          final List<String> pinnedIds;
+          try {
+            pinnedIds = await getPinnedEventIds(
+              accountUserId: menuAccount,
+              roomId: roomId,
+            );
+          } catch (error) {
+            // The decision read failed: nothing was written, so the
+            // timeout-aware "state may have changed" wording of the write
+            // path would be misleading here. Map the raw error through the
+            // shared wording (Chinese) — reads never raise the
+            // mutation-timeout wording, so this stays a plain failure with
+            // the SDK detail prefixed correctly.
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text('无法获取置顶状态，请重试: ${actionFailureMessage(error)}'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+            return;
+          }
+          try {
+            final target = !pinnedIds.contains(message.id);
+            final pinned = await setPinnedMessage(
+              accountUserId: menuAccount,
+              roomId: roomId,
+              eventId: message.id,
+              pinned: target,
+            );
+            if (overlayContext.mounted) {
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                SnackBar(
+                  content: Text(pinned ? '消息已置顶' : '已取消置顶'),
+                  duration: const Duration(seconds: 1),
+                ),
+              );
+            }
+          } catch (error) {
+            if (!overlayContext.mounted) {
+              return;
+            }
+            final timedOut = isMutationTimeout(error);
+            if (timedOut) {
+              // A timeout may still land server-side: the queued operation
+              // keeps running in the background, and setPinnedMessage
+              // returns the request value, not the final state. Tell the
+              // user to confirm instead of claiming a failed pin.
+              ScaffoldMessenger.of(overlayContext).showSnackBar(
+                const SnackBar(
+                  content: Text('置顶操作超时，状态可能已更新，请刷新确认'),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+              return;
+            }
+            // Non-timeout failures go through the shared wording (Chinese,
+            // partial-success passthrough) — one source for all pages.
+            ScaffoldMessenger.of(overlayContext).showSnackBar(
+              SnackBar(
+                content: Text(actionFailureMessage(error)),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        },
         onReact: (emoji) =>
             _sendReactionAndRefresh(overlayContext, ref, message.id, emoji),
         onShowFullEmojiPicker: () =>
@@ -1309,9 +1416,80 @@ class MessageGroupWidget extends ConsumerWidget {
   }
 
   void _startReply(WidgetRef ref, ChatMessage message) {
-    ref.read(editingMessageProvider(roomId).notifier).value = null;
-    ref.read(replyingToProvider(roomId).notifier).value = message;
+    final roomAccountKey = activeRoomAccountKey(ref, roomId);
+    ref.read(editingMessageProvider(roomAccountKey).notifier).value = null;
+    ref.read(replyingToProvider(roomAccountKey).notifier).value = message;
     onReplyRequested?.call();
+  }
+
+  /// Menu for a failed local outgoing message: retry the send or drop the
+  /// message. Failed sends are otherwise a dead end — no long-press menu,
+  /// no retry, no delete — so the user can only retype the message.
+  void _showFailedMessageMenu(
+    BuildContext context,
+    WidgetRef ref,
+    ChatMessage message,
+  ) {
+    final roomAccountKey = activeRoomAccountKey(ref, roomId);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.refresh_rounded),
+              title: const Text('重试发送'),
+              subtitle: message.msgType == MessageType.text
+                  ? null
+                  : const Text('仅文本消息支持重试'),
+              enabled: message.msgType == MessageType.text,
+              onTap: () async {
+                Navigator.of(sheetContext).pop();
+                try {
+                  await retryFailedLocalMessage(
+                    ref,
+                    roomAccountKey,
+                    message.id,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已重新发送'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  }
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('重试失败: $error'),
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.delete_outline_rounded,
+                color: AppColors.error,
+              ),
+              title: const Text(
+                '删除消息',
+                style: TextStyle(color: AppColors.error),
+              ),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                removeLocalOutgoingMessage(ref, roomAccountKey, message.id);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -1630,6 +1808,7 @@ class _FloatingMessageMenu extends StatefulWidget {
   final VoidCallback onForward;
   final VoidCallback onEdit;
   final VoidCallback onRecall;
+  final VoidCallback onPin;
   final void Function(String emoji) onReact;
   final VoidCallback onShowFullEmojiPicker;
 
@@ -1643,6 +1822,7 @@ class _FloatingMessageMenu extends StatefulWidget {
     required this.onForward,
     required this.onEdit,
     required this.onRecall,
+    required this.onPin,
     required this.onReact,
     required this.onShowFullEmojiPicker,
   });
@@ -1784,6 +1964,12 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
                 icon: Icons.forward_rounded,
                 label: '转发',
                 onTap: () => _select(widget.onForward),
+              ),
+            if (!isEvent && !isLocalOutgoingMessage(msg.id))
+              _IconTextAction(
+                icon: Icons.push_pin_outlined,
+                label: '置顶/取消置顶',
+                onTap: () => _select(widget.onPin),
               ),
             if (widget.isMe && isText)
               _IconTextAction(

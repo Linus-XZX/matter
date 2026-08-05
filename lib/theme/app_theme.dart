@@ -30,11 +30,11 @@ class AppColors {
 }
 
 class AppRadii {
-  static const double tag = 10;      // 角标、小图标背景
-  static const double button = 14;   // 按钮、Space 内层标签
-  static const double content = 18;  // 头像、消息气泡
-  static const double surface = 22;  // 搜索框、输入框、卡片、Space 外层
-  static const double nav = 28;      // 底部导航
+  static const double tag = 10; // 角标、小图标背景
+  static const double button = 14; // 按钮、Space 内层标签
+  static const double content = 18; // 头像、消息气泡
+  static const double surface = 22; // 搜索框、输入框、卡片、Space 外层
+  static const double nav = 28; // 底部导航
 }
 
 class AppTheme {
@@ -95,7 +95,10 @@ class AppTheme {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: AppColors.surfaceVariant,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 12,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadii.surface),
           borderSide: BorderSide.none,

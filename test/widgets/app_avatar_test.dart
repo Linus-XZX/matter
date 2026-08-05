@@ -5,13 +5,13 @@ import 'package:matter/widgets/app_avatar.dart';
 
 void main() {
   group('AppAvatar', () {
-    testWidgets('shows a single-letter initial for one-word names', (tester) async {
+    testWidgets('shows a single-letter initial for one-word names', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         const ProviderScope(
           child: MaterialApp(
-            home: Scaffold(
-              body: AppAvatar(fallback: 'Alice'),
-            ),
+            home: Scaffold(body: AppAvatar(fallback: 'Alice')),
           ),
         ),
       );
@@ -20,13 +20,13 @@ void main() {
       expect(find.text('A'), findsOneWidget);
     });
 
-    testWidgets('shows two-letter initials for multi-word names', (tester) async {
+    testWidgets('shows two-letter initials for multi-word names', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         const ProviderScope(
           child: MaterialApp(
-            home: Scaffold(
-              body: AppAvatar(fallback: 'Alice Smith'),
-            ),
+            home: Scaffold(body: AppAvatar(fallback: 'Alice Smith')),
           ),
         ),
       );
@@ -53,9 +53,7 @@ void main() {
       await tester.pumpWidget(
         const ProviderScope(
           child: MaterialApp(
-            home: Scaffold(
-              body: AppAvatar(fallback: ''),
-            ),
+            home: Scaffold(body: AppAvatar(fallback: '')),
           ),
         ),
       );
@@ -68,9 +66,7 @@ void main() {
       await tester.pumpWidget(
         const ProviderScope(
           child: MaterialApp(
-            home: Scaffold(
-              body: AppAvatar(fallback: 'A', size: 64),
-            ),
+            home: Scaffold(body: AppAvatar(fallback: 'A', size: 64)),
           ),
         ),
       );

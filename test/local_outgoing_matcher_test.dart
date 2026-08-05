@@ -258,4 +258,34 @@ void main() {
       expect(result.localIds, isEmpty);
     },
   );
+
+  test(
+    'never matches a failed message: its echo belongs to a later successful resend',
+    () {
+      // The user sent "hi" (failed), then typed "hi" again (pending). Only
+      // one echo arrives — for the successful resend. The failed entry must
+      // not consume it: it never produced a remote event, and eating the
+      // echo would leave the successful send's bubble unreconciled forever.
+      final consumed = <String>{};
+      final failed = _local(
+        id: 'local_outgoing_failed:1',
+        timestamp: '1000',
+        content: 'hi',
+      );
+      final resent = _local(
+        id: 'local_outgoing_pending:2',
+        timestamp: '2000',
+        content: 'hi',
+      );
+      final echo = _remote(id: 'r1', timestamp: '2100', content: 'hi');
+      final result = matchLocalOutgoingMessages(
+        [echo],
+        [failed, resent],
+        consumed,
+      );
+      expect(result.localIds, {'local_outgoing_pending:2'});
+      expect(result.remoteToLocalFlightId, {'r1': '2'});
+      expect(consumed, {'r1'});
+    },
+  );
 }
