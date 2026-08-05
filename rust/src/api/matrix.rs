@@ -552,7 +552,40 @@ fn notify_sync_event(event: SyncEvent) {
 /// this so they do not wait the real 30s.
 static MUTATION_WAIT_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(30);
 
+/// Hard total bound on a queued operation's EXECUTION inside the background
+/// tail (seconds). The caller-side 90s of `run_bounded_mutation` only bounds
+/// the caller; the tail keeps running the operation afterwards, and a
+/// multi-request operation (e.g. the DM reuse scan in `create_dm`, one
+/// `members()` call per candidate room, each bounded only by the ~93s HTTP
+/// budget) could otherwise hold its SYNC_LIFECYCLE read share — and the
+/// queue slot successors wait on — for many minutes, stalling logout and
+/// account switch. On expiry the operation future is dropped (releasing the
+/// lease), the tail completes with an error, and the cleanup hook frees the
+/// queue entry. Atomic so tests can shorten it (see mutation_queue_tests).
+static MUTATION_EXECUTION_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(300);
+
+// Used by the mutation-queue tests; production callers go through
+// `run_bounded_mutation` / `run_bounded_mutation_undroppable`, which pick
+// the drop behavior explicitly.
+#[cfg(test)]
 async fn enqueue_mutation<F, T>(key: String, operation: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    enqueue_mutation_inner(key, operation, true).await
+}
+
+/// `drop_on_execution_timeout`: see MUTATION_EXECUTION_TIMEOUT_SECS.
+/// Operations whose server-side effect is neither idempotent nor verifiable
+/// on retry (currently only `create_dm`) pass false: dropping their tail
+/// mid-flight can orphan server-side state the client never learns about,
+/// so they bound their duration internally instead of being dropped.
+async fn enqueue_mutation_inner<F, T>(
+    key: String,
+    operation: F,
+    drop_on_execution_timeout: bool,
+) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>> + Send + 'static,
     T: Clone + Send + Sync + 'static,
@@ -641,11 +674,41 @@ where
                         // never ran) — so run it once the predecessor is
                         // done, exactly like the 120s branch.
                         let _ = previous.await;
-                        return operation.await;
                     }
                 }
             }
-            operation.await
+            // The execution itself is hard-bounded: the caller-side 90s of
+            // `run_bounded_mutation` does not constrain this background tail,
+            // so without a total bound a multi-request operation (N rooms x
+            // the ~93s HTTP budget) could pin the queue — and its share of
+            // the SYNC_LIFECYCLE read lease — for many minutes. On expiry the
+            // operation future is dropped: the lease is released, the tail
+            // completes with an error, and the cleanup hook frees the queue
+            // entry so successors are not stuck behind a dead operation.
+            // Non-idempotent operations opt out: dropping their tail
+            // mid-flight can orphan server-side state the client never
+            // learns about (a created DM room whose response was lost —
+            // the retry's reuse scan cannot see it until sync delivers it),
+            // so they bound their duration internally instead.
+            if !drop_on_execution_timeout {
+                return operation.await;
+            }
+            let execution_timeout = std::time::Duration::from_secs(
+                MUTATION_EXECUTION_TIMEOUT_SECS.load(Ordering::Relaxed),
+            );
+            match tokio::time::timeout(execution_timeout, operation).await {
+                Ok(result) => result,
+                Err(_) => {
+                    app_log(
+                        "warn",
+                        "mutation",
+                        format!(
+                            "Mutation for key {log_key} exceeded the total execution bound; dropping it to release the queue."
+                        ),
+                    );
+                    Err("操作超时，请重试。".to_string())
+                }
+            }
         })
         // A panicking predecessor (or operation) would otherwise unwind
         // through this future, skipping the tail cleanup below and leaving a
@@ -714,6 +777,38 @@ where
     F: Future<Output = Result<T, String>> + Send + 'static,
     T: Clone + Send + Sync + 'static,
 {
+    run_bounded_mutation_inner(key, lifecycle_protection, operation, true).await
+}
+
+/// Variant of [`run_bounded_mutation`] for operations whose server-side
+/// effect is neither idempotent nor verifiable on retry (currently only
+/// `create_dm`): the tail must NOT be dropped on the execution timeout —
+/// a dropped create can orphan a room whose response never arrived, and
+/// the retry's reuse scan cannot see it until sync delivers it (a duplicate
+/// DM). The operation must bound its own duration instead (create_dm caps
+/// its reuse scan; each request is bounded by bounded_request_config).
+async fn run_bounded_mutation_undroppable<F, T>(
+    key: String,
+    lifecycle_protection: LifecycleProtection,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    run_bounded_mutation_inner(key, lifecycle_protection, operation, false).await
+}
+
+async fn run_bounded_mutation_inner<F, T>(
+    key: String,
+    lifecycle_protection: LifecycleProtection,
+    operation: F,
+    drop_on_execution_timeout: bool,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Clone + Send + Sync + 'static,
+{
     // Move a share of the caller's lifecycle lease into the queued operation
     // itself. When the caller times out, the spawned tail can keep using its
     // Client/Room safely while logout or account removal waits for this share.
@@ -723,7 +818,7 @@ where
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(90),
-        enqueue_mutation(key, protected_operation),
+        enqueue_mutation_inner(key, protected_operation, drop_on_execution_timeout),
     )
     .await
     .map_err(|_| MUTATION_TIMEOUT_MESSAGE.to_string())?
@@ -981,8 +1076,8 @@ mod mutation_queue_tests {
         clear_account_runtime_state, enqueue_mutation, merge_ignored_user_overrides,
         reconcile_ignored_user_overrides_inner, reconcile_marked_unread_override,
         resolve_ignored_user, resolve_marked_unread, run_bounded_mutation, IgnoredUserOverride,
-        MarkedUnreadOverride, MUTATION_QUEUE_FULL_MESSAGE, MUTATION_TAILS,
-        MUTATION_WAIT_TIMEOUT_SECS,
+        MarkedUnreadOverride, MUTATION_EXECUTION_TIMEOUT_SECS, MUTATION_QUEUE_FULL_MESSAGE,
+        MUTATION_TAILS, MUTATION_WAIT_TIMEOUT_SECS,
     };
     use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
     use std::sync::atomic::Ordering;
@@ -1010,6 +1105,21 @@ mod mutation_queue_tests {
     impl Drop for TimeoutOverrideGuard {
         fn drop(&mut self) {
             MUTATION_WAIT_TIMEOUT_SECS.store(30, Ordering::Relaxed);
+        }
+    }
+
+    /// Restores MUTATION_EXECUTION_TIMEOUT_SECS on drop, even when a test
+    /// assertion panics mid-way.
+    struct ExecutionTimeoutOverrideGuard;
+    impl ExecutionTimeoutOverrideGuard {
+        fn acquire() -> Self {
+            MUTATION_EXECUTION_TIMEOUT_SECS.store(1, Ordering::Relaxed);
+            ExecutionTimeoutOverrideGuard
+        }
+    }
+    impl Drop for ExecutionTimeoutOverrideGuard {
+        fn drop(&mut self) {
+            MUTATION_EXECUTION_TIMEOUT_SECS.store(300, Ordering::Relaxed);
         }
     }
 
@@ -1289,6 +1399,68 @@ mod mutation_queue_tests {
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
         third.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlong_operation_is_dropped_to_release_the_queue() {
+        // Shares the global-timeout override discipline with the other
+        // timeout tests (TEST_TIMEOUT_LOCK), so they never run concurrently.
+        let _timeout_lock = TEST_TIMEOUT_LOCK.lock().await;
+        let _execution_timeout_override = ExecutionTimeoutOverrideGuard::acquire();
+        let key = format!("test-exec-timeout:{}", std::process::id());
+        let (started, wait_started) = oneshot::channel();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            enqueue_mutation(first_key, async move {
+                let _ = started.send(());
+                // Never completes on its own: only the tail's total execution
+                // bound can end this operation.
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+            .await
+        });
+        wait_started.await.unwrap();
+
+        // The operation outlives the 1s execution bound: the tail drops it,
+        // completes with an error, and frees the queue entry — a caller that
+        // is still around gets the failure instead of hanging forever.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+            .await
+            .expect("tail should complete once the execution bound expires")
+            .unwrap();
+        assert_eq!(result, Err("操作超时，请重试。".to_string()));
+
+        // The cleanup hook removes the queue entry (driven by the spawned
+        // tail, so poll briefly for it).
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let removed = MUTATION_TAILS
+                    .lock()
+                    .map(|tails| !tails.contains_key(&key))
+                    .unwrap_or(false);
+                if removed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped operation should free its queue entry");
+
+        // A successor enqueued afterwards runs normally: the queue is not
+        // stuck behind the dropped operation.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let second_order = order.clone();
+        let second = tokio::spawn(async move {
+            enqueue_mutation(key, async move {
+                second_order.lock().unwrap().push(2);
+                Ok(())
+            })
+            .await
+        });
+        second.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), [2]);
     }
 
     #[test]
@@ -2557,9 +2729,54 @@ async fn finalize_pending() -> Result<String, String> {
     info!("finalize_pending: starting for user {}", user_id);
     if CLIENTS.read().await.contains_key(&user_id) {
         // This pending login will never be used — the account is already
-        // signed in. Clear PENDING and drop the freshly built client so its
-        // session is not retained as an orphan (it holds a valid token; the
-        // server-side session expires on its own token lifetime).
+        // signed in. But the password/token login already created a session
+        // on the server: dropping the client here would leave a permanently
+        // valid ghost device session (with a refresh token) behind. Revoke
+        // it first, bounded like logout()/remove_account (this runs under
+        // the SYNC_LIFECYCLE write lock, so an unreachable server must not
+        // freeze the error path). On failure the token is remembered in
+        // PENDING_REMOTE_LOGOUTS so the next login of this account retries
+        // the remote logout (see retry_pending_remote_logout).
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            pending_client.matrix_auth().logout(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                PENDING_REMOTE_LOGOUTS.write().await.insert(
+                    user_id.clone(),
+                    (
+                        matrix_session.tokens.access_token.clone(),
+                        homeserver_url.clone(),
+                    ),
+                );
+                app_log(
+                    "warn",
+                    "auth",
+                    format!("Remote logout of duplicate pending session failed for {user_id}: {e}"),
+                );
+                warn!("Remote logout of duplicate pending session failed for {user_id}: {e}");
+            }
+            Err(_) => {
+                PENDING_REMOTE_LOGOUTS.write().await.insert(
+                    user_id.clone(),
+                    (
+                        matrix_session.tokens.access_token.clone(),
+                        homeserver_url.clone(),
+                    ),
+                );
+                app_log(
+                    "warn",
+                    "auth",
+                    format!("Remote logout of duplicate pending session timed out for {user_id}"),
+                );
+                warn!("Remote logout of duplicate pending session timed out for {user_id}");
+            }
+        }
+        // Clear PENDING and drop the freshly built client so its session is
+        // not retained as an orphan.
         {
             let mut pending = PENDING.write().await;
             *pending = None;
@@ -3652,7 +3869,15 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
     })?;
     let sdk_dir = build_sdk_data_dir(&data_dir, None);
 
-    // Clean up any stale pending directory
+    // Clean up any stale pending directory under the lifecycle write lock
+    // (same level as finalize_pending / logout / restore): a previous login
+    // attempt may still be in flight with its pending client's SQLite store
+    // open on this directory — its lease holds a SYNC_LIFECYCLE read share,
+    // so the write guard drains those calls before the store is deleted
+    // underneath them, and blocks new ones until the fresh pending client
+    // is installed. Lock order SYNC_LIFECYCLE → PENDING matches get_client
+    // and finalize_pending.
+    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
     if sdk_dir.exists() {
         info!("Removing stale pending dir: {}", sdk_dir.display());
         if let Err(e) = remove_dir_all_if_exists(&sdk_dir).await {
@@ -5418,7 +5643,24 @@ async fn degrade_to_traditional_sync(generation: u64, user_id: &str) {
     }
     clear_published_sync(generation).await;
     // Fire-and-forget: the restarted task stops this one via stop_sync_task.
+    // Re-check the active account inside the spawn: if the user switched
+    // accounts while this degrade was in flight, restarting sync now would
+    // stop the NEW account's (possibly healthy) loop and pin it to
+    // traditional mode. The degraded marker stays — the next explicit
+    // start_sync() clears it and re-probes Sliding Sync for that account.
+    let degraded_user_id = user_id.to_string();
     let _handle = tokio::spawn(async move {
+        let active_user = ACTIVE_USER.read().await.clone();
+        if active_user.as_deref() != Some(degraded_user_id.as_str()) {
+            app_log(
+                "info",
+                "sync",
+                format!(
+                    "Skipping degrade restart for {degraded_user_id}: the account is no longer active"
+                ),
+            );
+            return;
+        }
         let _ = start_sync_internal(true).await;
     });
 }
@@ -7821,6 +8063,21 @@ pub async fn send_sticker(
     Ok(())
 }
 
+/// Upper bound on DM-reuse candidates scanned with a `members()` call in
+/// `create_dm`. Each candidate can fetch /members over the network (worst
+/// case ~93s under `bounded_request_config`), so an account with many
+/// DM-shaped rooms could otherwise keep the scan running for a very long
+/// time. Hitting the cap fails closed (a clear, retryable error) rather
+/// than risking a duplicate DM.
+const DM_REUSE_SCAN_MAX_CANDIDATES: usize = 50;
+
+/// Elapsed-time bound for the same scan. create_dm runs undroppable (see
+/// `run_bounded_mutation_undroppable`), so this — together with the
+/// candidate cap above and the per-request HTTP bound — is what keeps the
+/// operation's total duration bounded. Hitting it fails closed like the
+/// candidate cap: the remaining candidates are unverifiable.
+const DM_REUSE_SCAN_MAX_ELAPSED_SECS: u64 = 150;
+
 /// Create a new direct chat room with a user.
 #[frb]
 pub async fn create_dm(account_user_id: String, user_id: String) -> Result<String, String> {
@@ -7850,7 +8107,7 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
     let lifecycle_protection = client.lifecycle_protection();
     let mutation_client = client.clone();
     let mutation_invited_user = invited_user.clone();
-    run_bounded_mutation(
+    run_bounded_mutation_undroppable(
         format!("dm:{account_user_id}:{user_id}"),
         lifecycle_protection,
         async move {
@@ -7873,14 +8130,18 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
                 return Err("当前账号已切换，请重试。".to_string());
             }
             // The reuse scan below calls `members()` per DM candidate, which can
-            // fetch /members over the network while holding the client lease; the
-            // mutation bound covers the whole scan+create so a dead network
-            // cannot stall it — and with it logout/account switch — for N rooms
-            // x the request budget. On timeout the create fails with a clear,
-            // retryable error. Deliberately NOT degrading to members_no_sync:
+            // fetch /members over the network while holding the client lease.
+            // This operation runs UNDROPPABLE (a tail dropped mid-create can
+            // orphan a room whose response never arrived, and the retry's
+            // reuse scan cannot see it until sync delivers it — a duplicate
+            // DM), so the scan is bounded internally: by the candidate cap,
+            // by the elapsed-time cap, and by the per-request HTTP bound.
+            // Deliberately NOT degrading to members_no_sync:
             // that could miss an existing DM whose member list has not synced
             // yet and silently create a duplicate room.
             let mut members_read_failed = false;
+            let scan_started = std::time::Instant::now();
+            let mut scanned_candidates = 0usize;
             let mut reused_room_id = None;
             for room in mutation_client.rooms() {
                 if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
@@ -7924,6 +8185,28 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
                         continue;
                     }
                 }
+
+                // Bound the scan: each remaining candidate costs a `members()`
+                // call that can fetch /members over the network (worst ~93s
+                // under bounded_request_config), so an unbounded scan could
+                // run for a very long time on accounts with many DM-shaped
+                // rooms. Past either cap the remaining candidates are
+                // unverifiable — fail closed like a members() failure instead
+                // of risking a duplicate DM.
+                if scanned_candidates >= DM_REUSE_SCAN_MAX_CANDIDATES
+                    || scan_started.elapsed()
+                        >= std::time::Duration::from_secs(DM_REUSE_SCAN_MAX_ELAPSED_SECS)
+                {
+                    app_log(
+                        "warn",
+                        "rooms",
+                        "DM reuse scan hit its candidate/elapsed limit; failing closed."
+                            .to_string(),
+                    );
+                    members_read_failed = true;
+                    break;
+                }
+                scanned_candidates += 1;
 
                 let members = match room
                     .members(

@@ -70,11 +70,19 @@ final spaceChildrenProvider =
 
 final contactsProvider = FutureProvider<List<rust.Contact>>((ref) async {
   if (!ref.watch(sessionReadyProvider)) return [];
-  final ignoredUserIds = await ref.watch(ignoredUserIdsProvider.future);
+  // Degrade like _previewIgnoreFilter: an unknown ignore list (no snapshot
+  // and the fetch failed) must not take the whole contact list down with it,
+  // so serve the unfiltered contacts instead of erroring.
+  Set<String>? ignoredUserIds;
+  try {
+    ignoredUserIds = await ref.watch(ignoredUserIdsProvider.future);
+  } catch (_) {
+    // Ignore state unknown; contacts are independent of it.
+  }
   final contacts = await rust.getContacts();
-  return contacts
-      .where((contact) => !ignoredUserIds.contains(contact.id))
-      .toList();
+  final filter = ignoredUserIds;
+  if (filter == null) return contacts;
+  return contacts.where((contact) => !filter.contains(contact.id)).toList();
 });
 
 /// Server-backed ignore list. Chat timelines filter these senders immediately,
@@ -1563,15 +1571,23 @@ Future<void> retryFailedLocalMessage(
   // row twice (failed + pending) with duplicate row keys.
   final next = [...messages];
   next[index] = pending;
-  ref.read(localOutgoingMessagesProvider(key).notifier).value = next;
+  // Capture the notifier for the post-send bookkeeping: the provider
+  // outlives the page, so it stays usable even if the page (and its ref)
+  // is disposed while the request is in flight.
+  final outgoing = ref.read(localOutgoingMessagesProvider(key).notifier);
+  outgoing.value = next;
+  final input = rust.FormattedMessageInput(
+    body: message.content,
+    formattedBody: message.formattedBody,
+    mentionedUserIds: message.mentionedUserIds,
+    mentionsRoom: message.mentionsRoom,
+  );
+  final replyTo = message.inReplyTo;
+  // Only the send itself is retried: once the server accepts the message,
+  // a failure in the local bookkeeping below must not restore the failed
+  // entry and report the send as failed (that would offer a retry which
+  // duplicates the message).
   try {
-    final input = rust.FormattedMessageInput(
-      body: message.content,
-      formattedBody: message.formattedBody,
-      mentionedUserIds: message.mentionedUserIds,
-      mentionsRoom: message.mentionsRoom,
-    );
-    final replyTo = message.inReplyTo;
     if (replyTo != null) {
       await rust.sendReply(
         roomId: key.roomId,
@@ -1582,25 +1598,44 @@ Future<void> retryFailedLocalMessage(
     } else {
       await rust.sendMessage(roomId: key.roomId, message: input);
     }
-    final sentId = markLocalOutgoingMessageSent(ref, key, pendingId);
-    // Poll the timeline a few times so the sent local bubble is replaced by
-    // the server echo even when the echo lands just after a refresh (same
-    // behavior as a fresh send; a single refresh can leave the "sent" bubble
-    // lingering for several seconds).
-    unawaited(reconcileSentLocalMessage(ref, key, sentId));
   } catch (_) {
-    // Restore the failed entry so the bubble keeps its error state. Guard
-    // against the page (and its ref) being disposed while the request was
-    // in flight: reads through a stale ref can throw, and the provider
-    // state dies with the page anyway.
-    try {
-      removeLocalOutgoingMessage(ref, key, pendingId);
-      upsertLocalOutgoingMessage(ref, key, failed);
-    } catch (_) {
-      // Provider already disposed; nothing to restore into.
+    // Restore the failed entry so the bubble keeps its error state. Go
+    // through the captured notifier: the page (and its ref) may be disposed
+    // while the request was in flight — reads through a stale ref throw,
+    // but the provider itself outlives the page, and the restored entry
+    // lets a reopened room still offer the retry.
+    final restored = outgoing.value
+        .where((entry) => entry.message.id != pendingId)
+        .toList();
+    final failedIndex = restored.indexWhere(
+      (entry) => entry.message.id == failed.message.id,
+    );
+    if (failedIndex == -1) {
+      restored.add(failed);
+    } else {
+      restored[failedIndex] = failed;
     }
+    outgoing.value = restored;
     rethrow;
   }
+  // The server has already accepted the message. If the page (and its ref)
+  // was disposed while the request was in flight there is no bubble left to
+  // reconcile — drop the pending entry through the captured notifier
+  // instead of leaving it: the provider outlives the page, so a leftover
+  // entry would resurface as a stuck "sending" bubble the next time the
+  // room is opened. The echo renders as a normal message via sync.
+  if (!ref.context.mounted) {
+    outgoing.value = outgoing.value
+        .where((entry) => entry.message.id != pendingId)
+        .toList();
+    return;
+  }
+  final sentId = markLocalOutgoingMessageSent(ref, key, pendingId);
+  // Poll the timeline a few times so the sent local bubble is replaced by
+  // the server echo even when the echo lands just after a refresh (same
+  // behavior as a fresh send; a single refresh can leave the "sent" bubble
+  // lingering for several seconds).
+  unawaited(reconcileSentLocalMessage(ref, key, sentId));
 }
 
 /// Repeatedly refresh the timeline until the local `sent:` message is

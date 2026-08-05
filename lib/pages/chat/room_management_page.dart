@@ -1943,490 +1943,526 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                 label: Text('加载失败: $_error'),
               ),
             )
-          : ListView(
+          : Padding(
+              // CustomScrollView has no `padding` parameter; pad the viewport
+              // itself with the insets the ListView used to carry.
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-              children: [
-                _section(
-                  title: '房间信息',
-                  child: Column(
-                    children: [
-                      Center(
-                        child: Stack(
-                          children: [
-                            if (_avatarPreviewBytes case final bytes?)
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(
-                                  AppRadii.content,
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: _section(
+                      title: '房间信息',
+                      child: Column(
+                        children: [
+                          Center(
+                            child: Stack(
+                              children: [
+                                if (_avatarPreviewBytes case final bytes?)
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadii.content,
+                                    ),
+                                    child: Image.memory(
+                                      bytes,
+                                      width: 76,
+                                      height: 76,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  )
+                                else
+                                  AppAvatar(
+                                    fallback: details!.name,
+                                    size: 76,
+                                    radius: AppRadii.content,
+                                    url: details.avatarUrl,
+                                  ),
+                                Positioned(
+                                  right: -4,
+                                  bottom: -4,
+                                  child: IconButton.filled(
+                                    tooltip: '修改房间头像',
+                                    onPressed: _saving ? null : _pickAvatar,
+                                    icon: const Icon(
+                                      Icons.edit_rounded,
+                                      size: 18,
+                                    ),
+                                  ),
                                 ),
-                                child: Image.memory(
-                                  bytes,
-                                  width: 76,
-                                  height: 76,
-                                  fit: BoxFit.cover,
-                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          TextField(
+                            controller: _nameController,
+                            style: const TextStyle(
+                              color: AppColors.onBackground,
+                            ),
+                            decoration: const InputDecoration(
+                              labelText: '房间名称',
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: _topicController,
+                            minLines: 2,
+                            maxLines: 4,
+                            style: const TextStyle(
+                              color: AppColors.onBackground,
+                            ),
+                            decoration: const InputDecoration(
+                              labelText: '房间主题',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                  SliverToBoxAdapter(
+                    child: _section(
+                      title: _membersLoadError == null
+                          ? '成员 ${_members.length}'
+                          : '成员',
+                      action: IconButton(
+                        tooltip: '邀请用户',
+                        icon: const Icon(Icons.person_add_alt_1_rounded),
+                        onPressed: _showInviteDialog,
+                      ),
+                      child: _membersLoadError != null && _members.isEmpty
+                          ? _partialLoadErrorTile(
+                              label: '无法加载成员',
+                              onRetry: _retryMembers,
+                            )
+                          : Column(
+                              children: [
+                                // Keep previously loaded members visible when a
+                                // refresh fails; only a first load with no data
+                                // at all shows the error tile instead.
+                                if (_membersLoadError != null) ...[
+                                  _partialLoadErrorTile(
+                                    label: '成员刷新失败，显示缓存数据',
+                                    onRetry: _retryMembers,
+                                  ),
+                                  const Divider(height: 1),
+                                ],
+                              ],
+                            ),
+                    ),
+                  ),
+                  // Only the member tiles are virtualized: off-screen entries
+                  // are built lazily, so a rebuild no longer constructs every
+                  // tile up front. The tiles keep the section card's surface
+                  // background and horizontal padding so the section still
+                  // reads as one card.
+                  SliverList.builder(
+                    itemCount: _members.length,
+                    itemBuilder: (context, index) {
+                      final member = _members[index];
+                      return ColoredBox(
+                        color: AppColors.surface,
+                        child: _memberTile(member),
+                      );
+                    },
+                  ),
+                  if (knocksLoadError != null || knockRequests.isNotEmpty) ...[
+                    const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                    SliverToBoxAdapter(
+                      child: _section(
+                        title: knocksLoadError == null
+                            ? '加入请求 ${knockRequests.length}'
+                            : '加入请求',
+                        child: knocksLoadError != null && knockRequests.isEmpty
+                            ? _partialLoadErrorTile(
+                                label: '无法加载加入请求',
+                                onRetry: _retryKnocks,
                               )
-                            else
-                              AppAvatar(
-                                fallback: details!.name,
-                                size: 76,
-                                radius: AppRadii.content,
-                                url: details.avatarUrl,
+                            : Column(
+                                children: [
+                                  if (knocksLoadError != null) ...[
+                                    _partialLoadErrorTile(
+                                      label: '加入请求刷新失败，显示缓存数据',
+                                      onRetry: _retryKnocks,
+                                    ),
+                                    const Divider(height: 1),
+                                  ],
+                                ],
                               ),
-                            Positioned(
-                              right: -4,
-                              bottom: -4,
-                              child: IconButton.filled(
-                                tooltip: '修改房间头像',
-                                onPressed: _saving ? null : _pickAvatar,
-                                icon: const Icon(Icons.edit_rounded, size: 18),
+                      ),
+                    ),
+                    // The knock tiles are virtualized like the member tiles.
+                    SliverList.builder(
+                      itemCount: knockRequests.length,
+                      itemBuilder: (context, index) {
+                        final request = knockRequests[index];
+                        return ColoredBox(
+                          color: AppColors.surface,
+                          child: _knockTile(request),
+                        );
+                      },
+                    ),
+                  ],
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                  SliverToBoxAdapter(
+                    child: _section(
+                      title: '通知与消息',
+                      child: Column(
+                        children: [
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text(
+                              '免打扰',
+                              style: TextStyle(color: AppColors.onBackground),
+                            ),
+                            subtitle: Text(
+                              _mutedLoadError == null
+                                  ? '不接收此房间的推送通知'
+                                  : '通知设置加载/更新失败，点击重试',
+                              style: const TextStyle(
+                                color: AppColors.onSurfaceVariant,
                               ),
                             ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      TextField(
-                        controller: _nameController,
-                        style: const TextStyle(color: AppColors.onBackground),
-                        decoration: const InputDecoration(labelText: '房间名称'),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _topicController,
-                        minLines: 2,
-                        maxLines: 4,
-                        style: const TextStyle(color: AppColors.onBackground),
-                        decoration: const InputDecoration(labelText: '房间主题'),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _section(
-                  title: _membersLoadError == null
-                      ? '成员 ${_members.length}'
-                      : '成员',
-                  action: IconButton(
-                    tooltip: '邀请用户',
-                    icon: const Icon(Icons.person_add_alt_1_rounded),
-                    onPressed: _showInviteDialog,
-                  ),
-                  child: _membersLoadError != null && _members.isEmpty
-                      ? _partialLoadErrorTile(
-                          label: '无法加载成员',
-                          onRetry: _retryMembers,
-                        )
-                      : Column(
-                          children: [
-                            // Keep previously loaded members visible when a
-                            // refresh fails; only a first load with no data
-                            // at all shows the error tile instead.
-                            if (_membersLoadError != null) ...[
-                              _partialLoadErrorTile(
-                                label: '成员刷新失败，显示缓存数据',
-                                onRetry: _retryMembers,
-                              ),
-                              const Divider(height: 1),
-                            ],
-                            for (final member in _members) _memberTile(member),
-                          ],
-                        ),
-                ),
-                if (knocksLoadError != null || knockRequests.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  _section(
-                    title: knocksLoadError == null
-                        ? '加入请求 ${knockRequests.length}'
-                        : '加入请求',
-                    child: knocksLoadError != null && knockRequests.isEmpty
-                        ? _partialLoadErrorTile(
-                            label: '无法加载加入请求',
-                            onRetry: _retryKnocks,
-                          )
-                        : Column(
-                            children: [
-                              if (knocksLoadError != null) ...[
-                                _partialLoadErrorTile(
-                                  label: '加入请求刷新失败，显示缓存数据',
-                                  onRetry: _retryKnocks,
-                                ),
-                                const Divider(height: 1),
-                              ],
-                              for (final request in knockRequests)
-                                ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: AppAvatar(
-                                    fallback: request.displayName,
-                                    size: 40,
-                                    radius: 20,
-                                    url: request.avatarUrl,
-                                  ),
-                                  title: Text(
-                                    request.displayName,
-                                    style: const TextStyle(
-                                      color: AppColors.onBackground,
-                                      fontWeight: FontWeight.w600,
+                            value: _muted,
+                            onChanged: _mutedLoadError == null && !_muteSaving
+                                ? _setMuted
+                                : null,
+                            secondary: _muteSaving
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
                                     ),
+                                  )
+                                : _mutedLoadError == null
+                                ? null
+                                : IconButton(
+                                    tooltip: '重试',
+                                    icon: const Icon(Icons.refresh_rounded),
+                                    onPressed: _muteSaving ? null : _retryMuted,
                                   ),
-                                  subtitle: Text(
-                                    request.reason?.isNotEmpty == true
-                                        ? '${request.userId}\n${request.reason}'
-                                        : request.userId,
-                                    style: const TextStyle(
-                                      color: AppColors.onSurfaceVariant,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  isThreeLine:
-                                      request.reason?.isNotEmpty == true,
-                                  trailing: Wrap(
-                                    spacing: 2,
-                                    children: [
-                                      IconButton(
-                                        tooltip: '批准',
-                                        icon: const Icon(
-                                          Icons.check_rounded,
-                                          color: AppColors.primary,
-                                        ),
-                                        onPressed:
-                                            _pendingKnockUserIds.contains(
-                                              request.userId,
-                                            )
-                                            ? null
-                                            : () => _runKnockAction(
-                                                request,
-                                                true,
-                                              ),
-                                      ),
-                                      IconButton(
-                                        tooltip: '拒绝',
-                                        icon: const Icon(
-                                          Icons.close_rounded,
-                                          color: AppColors.error,
-                                        ),
-                                        onPressed:
-                                            _pendingKnockUserIds.contains(
-                                              request.userId,
-                                            )
-                                            ? null
-                                            : () => _runKnockAction(
-                                                request,
-                                                false,
-                                              ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                            ],
                           ),
-                  ),
-                ],
-                const SizedBox(height: 16),
-                _section(
-                  title: '通知与消息',
-                  child: Column(
-                    children: [
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text(
-                          '免打扰',
-                          style: TextStyle(color: AppColors.onBackground),
-                        ),
-                        subtitle: Text(
-                          _mutedLoadError == null
-                              ? '不接收此房间的推送通知'
-                              : '通知设置加载/更新失败，点击重试',
-                          style: const TextStyle(
-                            color: AppColors.onSurfaceVariant,
-                          ),
-                        ),
-                        value: _muted,
-                        onChanged: _mutedLoadError == null && !_muteSaving
-                            ? _setMuted
-                            : null,
-                        secondary: _muteSaving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : _mutedLoadError == null
-                            ? null
-                            : IconButton(
-                                tooltip: '重试',
-                                icon: const Icon(Icons.refresh_rounded),
-                                onPressed: _muteSaving ? null : _retryMuted,
+                          _actionTile(
+                            icon: Icons.push_pin_rounded,
+                            label: '置顶消息',
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    PinnedMessagesPage(roomId: widget.roomId),
                               ),
-                      ),
-                      _actionTile(
-                        icon: Icons.push_pin_rounded,
-                        label: '置顶消息',
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                PinnedMessagesPage(roomId: widget.roomId),
+                            ),
                           ),
-                        ),
-                      ),
-                      _actionTile(
-                        icon: Icons.done_all_rounded,
-                        label: '标记为已读',
-                        saving: _markSaving,
-                        onTap: _markSaving
-                            ? null
-                            : () async {
-                                // Entry guard (not only the disabled
-                                // button): the rebuild lags a frame, so a
-                                // same-frame second tap could otherwise
-                                // issue a duplicate write.
-                                if (!_accountActive() || _markSaving) return;
-                                setState(() => _markSaving = true);
-                                final suppression =
-                                    roomAutoReadSuppressedProvider(
-                                      widget.roomId,
+                          _actionTile(
+                            icon: Icons.done_all_rounded,
+                            label: '标记为已读',
+                            saving: _markSaving,
+                            onTap: _markSaving
+                                ? null
+                                : () async {
+                                    // Entry guard (not only the disabled
+                                    // button): the rebuild lags a frame, so a
+                                    // same-frame second tap could otherwise
+                                    // issue a duplicate write.
+                                    if (!_accountActive() || _markSaving) {
+                                      return;
+                                    }
+                                    setState(() => _markSaving = true);
+                                    final suppression =
+                                        roomAutoReadSuppressedProvider(
+                                          widget.roomId,
+                                        );
+                                    final suppressionNotifier = ref.read(
+                                      suppression.notifier,
                                     );
-                                final suppressionNotifier = ref.read(
-                                  suppression.notifier,
-                                );
-                                final previousSuppression =
-                                    suppressionNotifier.value;
-                                final suppressionToken =
-                                    setRoomAutoReadSuppressed(
-                                      ref,
-                                      widget.roomId,
-                                      suppressed: false,
+                                    final previousSuppression =
+                                        suppressionNotifier.value;
+                                    final suppressionToken =
+                                        setRoomAutoReadSuppressed(
+                                          ref,
+                                          widget.roomId,
+                                          suppressed: false,
+                                        );
+                                    try {
+                                      await rust.markRoomAsRead(
+                                        accountUserId: _openedUserId ?? '',
+                                        roomId: widget.roomId,
+                                        explicit: true,
+                                      );
+                                      // The account may have switched while the
+                                      // request was in flight: the write itself
+                                      // was guarded server-side, so skip ALL
+                                      // feedback on an account switch (the page
+                                      // shows the switched placeholder — same
+                                      // discipline as `_setMuted`). On a pure
+                                      // token takeover the server write
+                                      // succeeded regardless: still report it;
+                                      // only the override and list invalidation
+                                      // belong to the token holder (a takeover
+                                      // owns that bookkeeping).
+                                      if (!mounted || !_accountActive()) return;
+                                      if (suppressionToken.isCurrent) {
+                                        setRoomUnreadOverrideById(
+                                          ref,
+                                          widget.roomId,
+                                          unread: false,
+                                        );
+                                        _invalidateRoom();
+                                      }
+                                      _showSnackBar('已标记为已读');
+                                    } catch (error) {
+                                      // The provider bookkeeping restores even
+                                      // when the page is gone (the writes are
+                                      // global); only the snackbar needs it.
+                                      if (suppressionToken.isCurrent) {
+                                        // Only the actor holding the suppression
+                                        // token restores it; a takeover (chat
+                                        // page re-activation) owns its own
+                                        // bookkeeping.
+                                        suppressionNotifier.value =
+                                            previousSuppression;
+                                        // A STALE-armed restoration (a previous
+                                        // mark-unread timeout left it true) must
+                                        // still be converged: the old entry's
+                                        // revision no longer matches after this
+                                        // write bumped it, so register afresh
+                                        // (same discipline as the mark-unread
+                                        // branch).
+                                        if (previousSuppression) {
+                                          noteTimedOutUnreadSuppression(
+                                            widget.roomId,
+                                            revision: suppressionToken.value,
+                                          );
+                                        }
+                                      }
+                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                                      if (!mounted || !_accountActive()) return;
+                                      if (mounted) {
+                                        // The write failed regardless of the
+                                        // takeover: surface it (the snackbar
+                                        // shows on the visible page even when
+                                        // the management page sits below the
+                                        // chat).
+                                        _showActionFailure(error);
+                                      }
+                                    } finally {
+                                      if (mounted) {
+                                        setState(() => _markSaving = false);
+                                      }
+                                    }
+                                  },
+                          ),
+                          _actionTile(
+                            icon: Icons.mark_unread_chat_alt_rounded,
+                            label: '标记为未读',
+                            saving: _markSaving,
+                            onTap: _markSaving
+                                ? null
+                                : () async {
+                                    // Entry guard (not only the disabled
+                                    // button): the rebuild lags a frame, so a
+                                    // same-frame second tap could otherwise
+                                    // issue a duplicate write.
+                                    if (!_accountActive() || _markSaving) {
+                                      return;
+                                    }
+                                    setState(() => _markSaving = true);
+                                    final suppression =
+                                        roomAutoReadSuppressedProvider(
+                                          widget.roomId,
+                                        );
+                                    final suppressionNotifier = ref.read(
+                                      suppression.notifier,
                                     );
-                                try {
-                                  await rust.markRoomAsRead(
-                                    accountUserId: _openedUserId ?? '',
-                                    roomId: widget.roomId,
-                                    explicit: true,
-                                  );
-                                  // The account may have switched while the
-                                  // request was in flight: the write itself
-                                  // was guarded server-side, so skip ALL
-                                  // feedback on an account switch (the page
-                                  // shows the switched placeholder — same
-                                  // discipline as `_setMuted`). On a pure
-                                  // token takeover the server write
-                                  // succeeded regardless: still report it;
-                                  // only the override and list invalidation
-                                  // belong to the token holder (a takeover
-                                  // owns that bookkeeping).
-                                  if (!mounted || !_accountActive()) return;
-                                  if (suppressionToken.isCurrent) {
+                                    final previousSuppression =
+                                        suppressionNotifier.value;
+                                    final unreadOverrideNotifier = ref.read(
+                                      roomUnreadOverrideProvider(
+                                        widget.roomId,
+                                      ).notifier,
+                                    );
+                                    final previousUnreadOverride =
+                                        unreadOverrideNotifier.value;
+                                    final suppressionToken =
+                                        setRoomAutoReadSuppressed(
+                                          ref,
+                                          widget.roomId,
+                                          suppressed: true,
+                                        );
                                     setRoomUnreadOverrideById(
                                       ref,
                                       widget.roomId,
-                                      unread: false,
+                                      unread: true,
                                     );
-                                    _invalidateRoom();
-                                  }
-                                  _showSnackBar('已标记为已读');
-                                } catch (error) {
-                                  // The provider bookkeeping restores even
-                                  // when the page is gone (the writes are
-                                  // global); only the snackbar needs it.
-                                  if (suppressionToken.isCurrent) {
-                                    // Only the actor holding the suppression
-                                    // token restores it; a takeover (chat
-                                    // page re-activation) owns its own
-                                    // bookkeeping.
-                                    suppressionNotifier.value =
-                                        previousSuppression;
-                                    // A STALE-armed restoration (a previous
-                                    // mark-unread timeout left it true) must
-                                    // still be converged: the old entry's
-                                    // revision no longer matches after this
-                                    // write bumped it, so register afresh
-                                    // (same discipline as the mark-unread
-                                    // branch).
-                                    if (previousSuppression) {
-                                      noteTimedOutUnreadSuppression(
-                                        widget.roomId,
-                                        revision: suppressionToken.value,
+                                    try {
+                                      await rust.markRoomUnread(
+                                        accountUserId: _openedUserId ?? '',
+                                        roomId: widget.roomId,
                                       );
-                                    }
-                                  }
-                                  // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                                  if (!mounted || !_accountActive()) return;
-                                  if (mounted) {
-                                    // The write failed regardless of the
-                                    // takeover: surface it (the snackbar
-                                    // shows on the visible page even when
-                                    // the management page sits below the
-                                    // chat).
-                                    _showActionFailure(error);
-                                  }
-                                } finally {
-                                  if (mounted) {
-                                    setState(() => _markSaving = false);
-                                  }
-                                }
-                              },
-                      ),
-                      _actionTile(
-                        icon: Icons.mark_unread_chat_alt_rounded,
-                        label: '标记为未读',
-                        saving: _markSaving,
-                        onTap: _markSaving
-                            ? null
-                            : () async {
-                                // Entry guard (not only the disabled
-                                // button): the rebuild lags a frame, so a
-                                // same-frame second tap could otherwise
-                                // issue a duplicate write.
-                                if (!_accountActive() || _markSaving) return;
-                                setState(() => _markSaving = true);
-                                final suppression =
-                                    roomAutoReadSuppressedProvider(
-                                      widget.roomId,
-                                    );
-                                final suppressionNotifier = ref.read(
-                                  suppression.notifier,
-                                );
-                                final previousSuppression =
-                                    suppressionNotifier.value;
-                                final unreadOverrideNotifier = ref.read(
-                                  roomUnreadOverrideProvider(
-                                    widget.roomId,
-                                  ).notifier,
-                                );
-                                final previousUnreadOverride =
-                                    unreadOverrideNotifier.value;
-                                final suppressionToken =
-                                    setRoomAutoReadSuppressed(
-                                      ref,
-                                      widget.roomId,
-                                      suppressed: true,
-                                    );
-                                setRoomUnreadOverrideById(
-                                  ref,
-                                  widget.roomId,
-                                  unread: true,
-                                );
-                                try {
-                                  await rust.markRoomUnread(
-                                    accountUserId: _openedUserId ?? '',
-                                    roomId: widget.roomId,
-                                  );
-                                  if (!mounted || !_accountActive()) return;
-                                  // The server write succeeded regardless of
-                                  // the token: still report it. The
-                                  // invalidation and the room close belong
-                                  // to the token holder (a takeover owns
-                                  // that bookkeeping — closing the room
-                                  // under a new viewer would be wrong).
-                                  if (suppressionToken.isCurrent) {
-                                    _invalidateRoom();
-                                    _closeCurrentRoom();
-                                  }
-                                  _showSnackBar('已标记为未读');
-                                } catch (error) {
-                                  // The provider bookkeeping restores even
-                                  // when the page is gone (the writes are
-                                  // global); only the snackbar needs it.
-                                  if (suppressionToken.isCurrent) {
-                                    // Only the actor holding the suppression
-                                    // token restores it; a takeover (chat
-                                    // page re-activation) owns its own
-                                    // bookkeeping.
-                                    //
-                                    // A timeout is not a failure: the queued
-                                    // write's tail may still land (same
-                                    // discipline as the mute timeout marker).
-                                    // Keep the suppression armed so a later
-                                    // auto-read cannot revoke a marker that
-                                    // did land — drop only the optimistic
-                                    // override (its TTL covers a real
-                                    // failure). A confirmed failure restores
-                                    // both.
-                                    unreadOverrideNotifier.value =
-                                        previousUnreadOverride;
-                                    if (!isMutationTimeout(error)) {
-                                      suppressionNotifier.value =
-                                          previousSuppression;
-                                      // Restoring a STALE-armed suppression
-                                      // (a previous write's timeout left it
-                                      // true) must still be converged: the
-                                      // old entry may already be gone (its
-                                      // revision no longer matches after
-                                      // this write bumped it) — register
-                                      // afresh with the current revision so
-                                      // the sync flow can still lift the
-                                      // suppression once this write is
-                                      // definitively failed.
-                                      if (previousSuppression) {
-                                        noteTimedOutUnreadSuppression(
-                                          widget.roomId,
-                                          revision: suppressionToken.value,
-                                        );
+                                      if (!mounted || !_accountActive()) return;
+                                      // The server write succeeded regardless of
+                                      // the token: still report it. The
+                                      // invalidation and the room close belong
+                                      // to the token holder (a takeover owns
+                                      // that bookkeeping — closing the room
+                                      // under a new viewer would be wrong).
+                                      if (suppressionToken.isCurrent) {
+                                        _invalidateRoom();
+                                        _closeCurrentRoom();
                                       }
-                                    } else {
-                                      // The suppression stays armed: register
-                                      // the room so the sync flow converges
-                                      // it if the write ultimately failed
-                                      // (same discipline as the mute 250s
-                                      // convergence read). The token's
-                                      // revision is the value captured when
-                                      // the write armed the suppression —
-                                      // read before the await, so this works
-                                      // even if the page was disposed.
-                                      noteTimedOutUnreadSuppression(
-                                        widget.roomId,
-                                        revision: suppressionToken.value,
-                                      );
+                                      _showSnackBar('已标记为未读');
+                                    } catch (error) {
+                                      // The provider bookkeeping restores even
+                                      // when the page is gone (the writes are
+                                      // global); only the snackbar needs it.
+                                      if (suppressionToken.isCurrent) {
+                                        // Only the actor holding the suppression
+                                        // token restores it; a takeover (chat
+                                        // page re-activation) owns its own
+                                        // bookkeeping.
+                                        //
+                                        // A timeout is not a failure: the queued
+                                        // write's tail may still land (same
+                                        // discipline as the mute timeout marker).
+                                        // Keep the suppression armed so a later
+                                        // auto-read cannot revoke a marker that
+                                        // did land — drop only the optimistic
+                                        // override (its TTL covers a real
+                                        // failure). A confirmed failure restores
+                                        // both.
+                                        unreadOverrideNotifier.value =
+                                            previousUnreadOverride;
+                                        if (!isMutationTimeout(error)) {
+                                          suppressionNotifier.value =
+                                              previousSuppression;
+                                          // Restoring a STALE-armed suppression
+                                          // (a previous write's timeout left it
+                                          // true) must still be converged: the
+                                          // old entry may already be gone (its
+                                          // revision no longer matches after
+                                          // this write bumped it) — register
+                                          // afresh with the current revision so
+                                          // the sync flow can still lift the
+                                          // suppression once this write is
+                                          // definitively failed.
+                                          if (previousSuppression) {
+                                            noteTimedOutUnreadSuppression(
+                                              widget.roomId,
+                                              revision: suppressionToken.value,
+                                            );
+                                          }
+                                        } else {
+                                          // The suppression stays armed: register
+                                          // the room so the sync flow converges
+                                          // it if the write ultimately failed
+                                          // (same discipline as the mute 250s
+                                          // convergence read). The token's
+                                          // revision is the value captured when
+                                          // the write armed the suppression —
+                                          // read before the await, so this works
+                                          // even if the page was disposed.
+                                          noteTimedOutUnreadSuppression(
+                                            widget.roomId,
+                                            revision: suppressionToken.value,
+                                          );
+                                        }
+                                      }
+                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                                      if (!mounted || !_accountActive()) return;
+                                      if (mounted) {
+                                        // The write failed regardless of the
+                                        // takeover: surface it (the snackbar
+                                        // shows on the visible page even when
+                                        // the management page sits below the
+                                        // chat).
+                                        _showActionFailure(error);
+                                      }
+                                    } finally {
+                                      if (mounted) {
+                                        setState(() => _markSaving = false);
+                                      }
                                     }
-                                  }
-                                  // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                                  if (!mounted || !_accountActive()) return;
-                                  if (mounted) {
-                                    // The write failed regardless of the
-                                    // takeover: surface it (the snackbar
-                                    // shows on the visible page even when
-                                    // the management page sits below the
-                                    // chat).
-                                    _showActionFailure(error);
-                                  }
-                                } finally {
-                                  if (mounted) {
-                                    setState(() => _markSaving = false);
-                                  }
-                                }
-                              },
+                                  },
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                _section(
-                  title: '隐私',
-                  child: _actionTile(
-                    icon: _ignoredUsersLoadError == null
-                        ? Icons.block_rounded
-                        : Icons.refresh_rounded,
-                    label: _ignoredUsersLoadError == null
-                        ? '已忽略用户 (${_ignoredUsers.length})'
-                        : '无法加载已忽略用户',
-                    onTap: _ignoredUsersLoadError == null
-                        ? _showIgnoredUsers
-                        : _retryIgnoredUsers,
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                  SliverToBoxAdapter(
+                    child: _section(
+                      title: '隐私',
+                      child: _actionTile(
+                        icon: _ignoredUsersLoadError == null
+                            ? Icons.block_rounded
+                            : Icons.refresh_rounded,
+                        label: _ignoredUsersLoadError == null
+                            ? '已忽略用户 (${_ignoredUsers.length})'
+                            : '无法加载已忽略用户',
+                        onTap: _ignoredUsersLoadError == null
+                            ? _showIgnoredUsers
+                            : _retryIgnoredUsers,
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                _section(
-                  title: '危险操作',
-                  child: _actionTile(
-                    icon: Icons.exit_to_app_rounded,
-                    label: '退出房间',
-                    danger: true,
-                    onTap: _confirmLeave,
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                  SliverToBoxAdapter(
+                    child: _section(
+                      title: '危险操作',
+                      child: _actionTile(
+                        icon: Icons.exit_to_app_rounded,
+                        label: '退出房间',
+                        danger: true,
+                        onTap: _confirmLeave,
+                      ),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
+    );
+  }
+
+  Widget _knockTile(rust.KnockRequest request) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: AppAvatar(
+        fallback: request.displayName,
+        size: 40,
+        radius: 20,
+        url: request.avatarUrl,
+      ),
+      title: Text(
+        request.displayName,
+        style: const TextStyle(
+          color: AppColors.onBackground,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      subtitle: Text(
+        request.reason?.isNotEmpty == true
+            ? '${request.userId}\n${request.reason}'
+            : request.userId,
+        style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12),
+      ),
+      isThreeLine: request.reason?.isNotEmpty == true,
+      trailing: Wrap(
+        spacing: 2,
+        children: [
+          IconButton(
+            tooltip: '批准',
+            icon: const Icon(Icons.check_rounded, color: AppColors.primary),
+            onPressed: _pendingKnockUserIds.contains(request.userId)
+                ? null
+                : () => _runKnockAction(request, true),
+          ),
+          IconButton(
+            tooltip: '拒绝',
+            icon: const Icon(Icons.close_rounded, color: AppColors.error),
+            onPressed: _pendingKnockUserIds.contains(request.userId)
+                ? null
+                : () => _runKnockAction(request, false),
+          ),
+        ],
+      ),
     );
   }
 

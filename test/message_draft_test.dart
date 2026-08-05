@@ -152,13 +152,17 @@ void main() {
     rustApi.pendingSend!.complete(r'$sent');
     await tester.pumpAndSettle();
 
+    // The page was unmounted when the send completed: the optimistic entry
+    // is dropped outright (its echo renders as a normal message via sync)
+    // rather than marked "sent" and left to resurface as a stuck bubble on
+    // the next visit.
     final outgoing = container.read(
       localOutgoingMessagesProvider((
         roomId: roomId,
         userId: '@alice:example.org',
       )),
     );
-    expect(outgoing.single.message.id, startsWith(localOutgoingSentPrefix));
+    expect(outgoing, isEmpty);
   });
 
   testWidgets('failed send after unmount marks the local message failed', (

@@ -59,6 +59,12 @@ LocalOutgoingMatchResult matchLocalOutgoingMessages(
         });
 
   for (final local in localMessages) {
+    // A failed message never produced a remote event, so it can never have
+    // a remote counterpart. Matching one anyway would consume the echo of a
+    // LATER successful send of the same content: the failed bubble would
+    // vanish and the successful send's bubble would stay unreconciled
+    // forever (a ghost with no delete entry).
+    if (local.message.id.startsWith(localOutgoingFailedPrefix)) continue;
     final localTime = int.tryParse(local.message.timestamp) ?? 0;
     ChatMessage? matched;
     for (final remote in remotes) {

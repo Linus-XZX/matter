@@ -415,10 +415,22 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         // would then offer a retry that duplicates the send).
         debugPrint('Failed to save markdown source: $e');
       }
+      if (!mounted) {
+        // The server accepted the message; with no live page there is no
+        // bubble to reconcile. Drop the optimistic entry through the
+        // captured notifier — the provider outlives the page, so a leftover
+        // entry would resurface as a stuck "sent" bubble on the next visit
+        // (its echo renders as a normal message via sync).
+        if (localId != null && localOutgoing != null) {
+          localOutgoing.value = localOutgoing.value
+              .where((entry) => entry.message.id != localId)
+              .toList();
+        }
+        return;
+      }
       final sentId = localId == null
           ? null
           : markLocalOutgoingMessageSentInState(localOutgoing!, localId);
-      if (!mounted) return;
       _stopTyping();
       if (!isNewMessage) _controller.clear();
       if (editing != null) {

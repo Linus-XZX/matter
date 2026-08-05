@@ -246,6 +246,9 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       do {
         _reloadTrailing = false;
         try {
+          // The page may have been popped while a previous iteration was in
+          // flight: `ref.read` on an unmounted widget throws.
+          if (!mounted) return;
           if (ref.read(activeUserIdProvider) != _subscribedUserId) {
             // The page outlived its account: stop loading (and stop the
             // spinner a `showLoading: true` reload may have started) and

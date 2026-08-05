@@ -531,9 +531,30 @@ Future<void> clearAllSessions() async {
   )) {
     await prefs.remove(key);
   }
+  // Accounts whose removal is still pending are skipped by loadAllSessions
+  // above, so their credentials and caches would survive — and deleting the
+  // markers would orphan them permanently (completePendingSessionRemovals
+  // would never retry them). Clean them up first, then drop the markers.
   for (final key in prefs.getKeys().where(
     (key) => key.startsWith(_removedSessionKeyPrefix),
   )) {
+    try {
+      final userId = utf8.decode(
+        base64Url.decode(key.substring(_removedSessionKeyPrefix.length)),
+      );
+      await _secureStorage.delete(key: _tokenKey(userId));
+      await _secureStorage.delete(key: _refreshTokenKey(userId));
+      await clearCachedMessagesForNamespace(userId);
+      await const MarkdownSourceStore().clearForUser(userId);
+      for (final homeserver in _removedHomeservers(prefs, userId)) {
+        await clearAuthenticatedMediaCacheForSession(
+          userId: userId,
+          homeserver: homeserver,
+        );
+      }
+    } catch (error) {
+      debugPrint('Failed to clean up pending-removed account for $key: $error');
+    }
     await prefs.remove(key);
   }
 }

@@ -169,6 +169,17 @@ class _FakeRustApi implements RustLibApi {
     return contacts;
   }
 
+  Completer<String>? pendingSend;
+
+  @override
+  Future<String> crateApiMatrixSendMessage({
+    required String roomId,
+    required rust.FormattedMessageInput message,
+  }) {
+    final pending = pendingSend ??= Completer<String>();
+    return pending.future;
+  }
+
   @override
   Stream<rust.SyncEvent> crateApiMatrixWatchSyncEvents() => syncEvents.stream;
 
@@ -276,6 +287,7 @@ void main() {
     rustApi.membersCalls = 0;
     rustApi.contactsCalls = 0;
     rustApi.contacts = const [];
+    rustApi.pendingSend = null;
     rustApi.pendingMessages = null;
   });
 
@@ -458,6 +470,98 @@ void main() {
     container.dispose();
     await tester.pump(const Duration(seconds: 1));
   });
+
+  testWidgets('contacts survive a failing ignore-list fetch', (tester) async {
+    rustApi.ignoredUsersError = StateError('offline');
+    rustApi.contacts = const [
+      rust.Contact(
+        id: '@ignored:example.org',
+        name: 'Ignored',
+        status: 'offline',
+      ),
+      rust.Contact(
+        id: '@visible:example.org',
+        name: 'Visible',
+        status: 'online',
+      ),
+    ];
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sessionReadyProvider.notifier).value = true;
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    // No persisted snapshot and a failing fetch: the contact list must not
+    // go down with the ignore list (same degradation as _previewIgnoreFilter),
+    // so the unfiltered contacts are served instead of an error.
+    final contacts = await container.read(contactsProvider.future);
+
+    expect(contacts.map((contact) => contact.id), [
+      '@ignored:example.org',
+      '@visible:example.org',
+    ]);
+    expect(rustApi.contactsCalls, 1);
+  });
+
+  testWidgets(
+    'a retry completing after the page is disposed is not marked failed',
+    (tester) async {
+      // Regression: the old retry path wrapped the post-send local
+      // bookkeeping (mark sent, timeline poll) in the same try as the send.
+      // Leaving the page while the request was in flight made ref.read throw
+      // there, so the catch restored the failed entry and rethrew — reporting
+      // a message the server had already accepted as failed and inviting a
+      // duplicate retry.
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      const key = (
+        roomId: '!retry-disposed:example.org',
+        userId: '@alice:example.org',
+      );
+      final failedId = '${localOutgoingFailedPrefix}1';
+      container.read(localOutgoingMessagesProvider(key).notifier).value = [
+        LocalOutgoingMessage(
+          message: _message(failedId, '0'),
+          sourceImageUrl: null,
+        ),
+      ];
+
+      WidgetRef? ref;
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: Consumer(
+            builder: (context, r, _) {
+              ref = r;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      final pendingSend = Completer<String>();
+      rustApi.pendingSend = pendingSend;
+      final retry = retryFailedLocalMessage(ref!, key, failedId);
+      await tester.pump();
+
+      // Leave the page while the retried send is still in flight.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      // The server accepts the message after the page is gone: the retry
+      // must complete cleanly instead of restoring the failed entry and
+      // rethrowing. The pending entry is dropped through the captured
+      // notifier — the provider outlives the page, so a leftover entry
+      // would resurface as a stuck "sending" bubble on the next visit,
+      // while the echo renders as a normal message via sync.
+      pendingSend.complete(r'$retried');
+      await retry;
+      expect(
+        container
+            .read(localOutgoingMessagesProvider(key))
+            .map((message) => message.message.id),
+        isEmpty,
+      );
+    },
+  );
 
   testWidgets('refreshes ignored users only for their sync event', (
     tester,

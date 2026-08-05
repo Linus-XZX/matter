@@ -182,9 +182,19 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
                   _confirmLeaveSpace(context, ref, details);
               }
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: _SpaceMenuAction.edit, child: Text('编辑空间')),
-              PopupMenuItem(value: _SpaceMenuAction.leave, child: Text('退出空间')),
+            // Editing needs the loaded details: with the fallback (loading /
+            // failed fetch) the dialog would prefill an empty topic and
+            // saving would silently clear the server-side topic.
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: _SpaceMenuAction.edit,
+                enabled: detailsAsync.hasValue,
+                child: const Text('编辑空间'),
+              ),
+              const PopupMenuItem(
+                value: _SpaceMenuAction.leave,
+                child: Text('退出空间'),
+              ),
             ],
           ),
         ],
