@@ -35,6 +35,7 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.9
+  clock: ^1.1.1
   flutter_rust_bridge: 2.12.0
   flutter_riverpod: ^3.3.2
   google_fonts: ^8.1.0
@@ -44,7 +45,7 @@ dependencies:
   path_provider: ^2.1.6
   freezed_annotation: ^3.1.0
   image_picker: ^1.2.3
-  photo_manager: ">=3.9.0 <3.10.0"
+  photo_manager: ^3.11.0
   file_selector: ^1.1.0
   flutter_image_compress: ^2.4.0
   flutter_secure_storage: ^10.3.1
@@ -81,6 +82,9 @@ dev_dependencies:
   # fixed upstream.
   freezed: ^3.2.5
   build_runner: ^2.15.1
+  # Test-only: inject SharedPreferences store failures (see
+  # test/chat_provider_state_test.dart).
+  shared_preferences_platform_interface: ^2.4.2
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

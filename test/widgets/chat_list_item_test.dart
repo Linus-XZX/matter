@@ -1,19 +1,68 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/chat_list_item.dart';
 import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
+import 'package:matter/src/rust/frb_generated.dart';
+
+class _FakeRustApi implements RustLibApi {
+  int markReadCalls = 0;
+  int markUnreadCalls = 0;
+  Object? markReadError;
+  Object? markUnreadError;
+  Completer<void>? pendingMarkUnread;
+
+  @override
+  Future<bool> crateApiMatrixMarkRoomAsRead({
+    required String accountUserId,
+    required String roomId,
+    required bool explicit,
+  }) async {
+    markReadCalls++;
+    if (markReadError case final error?) throw error;
+    return true;
+  }
+
+  @override
+  Future<void> crateApiMatrixMarkRoomUnread({
+    required String accountUserId,
+    required String roomId,
+  }) async {
+    markUnreadCalls++;
+    if (markUnreadError case final error?) throw error;
+    await pendingMarkUnread?.future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
+  }
+}
 
 void main() {
   group('ChatListItem', () {
+    late _FakeRustApi rustApi;
+
+    setUpAll(() {
+      rustApi = _FakeRustApi();
+      RustLib.initMock(api: rustApi);
+    });
+
+    tearDownAll(RustLib.dispose);
     ChatRoom room({
       String id = '!room:example.org',
       String name = 'Room',
       String lastMessage = 'Hello',
       String lastMessageTime = '0',
+      String lastEventId = '0',
       int unreadCount = 0,
+      bool isMarkedUnread = false,
+      bool isMuted = false,
       String roomType = 'group',
       String roomState = 'joined',
     }) => ChatRoom(
@@ -21,9 +70,12 @@ void main() {
       name: name,
       lastMessage: lastMessage,
       lastMessageTime: lastMessageTime,
+      lastEventId: lastEventId,
       unreadCount: unreadCount,
+      isMarkedUnread: isMarkedUnread,
       roomType: roomType,
       isEncrypted: false,
+      isMuted: isMuted,
       roomState: roomState,
     );
 
@@ -150,6 +202,184 @@ void main() {
       expect(find.text('99+'), findsOneWidget);
     });
 
+    testWidgets('shows a dot for an explicit unread marker', (tester) async {
+      const roomId = '!marked-unread:example.org';
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, isMarkedUnread: true)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-dot:$roomId')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('shows mute state in the room list', (tester) async {
+      const roomId = '!muted:example.org';
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, isMuted: true)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-muted-icon:$roomId')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('optimistic read state overrides stale unread counts', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-read:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: false,
+        baselineUnreadCount: 5,
+        baselineMarkedUnread: false,
+        baselineLastEventId: '0',
+      );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, unreadCount: 5)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-badge:$roomId')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('optimistic unread state overrides stale read state', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-unread:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: true,
+        baselineUnreadCount: 0,
+        baselineMarkedUnread: false,
+        baselineLastEventId: '0',
+      );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('room-unread-dot:$roomId')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('new room snapshot invalidates an optimistic read state', (
+      tester,
+    ) async {
+      const roomId = '!optimistic-new-message:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container
+          .read(roomUnreadOverrideProvider(roomId).notifier)
+          .value = const RoomUnreadOverride(
+        unread: false,
+        baselineUnreadCount: 5,
+        baselineMarkedUnread: false,
+        baselineLastEventId: '0',
+      );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId, unreadCount: 6)),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('6'), findsOneWidget);
+      expect(container.read(roomUnreadOverrideProvider(roomId)), isNull);
+    });
+
+    testWidgets(
+      'a room that advanced with the same counters invalidates an optimistic read state',
+      (tester) async {
+        const roomId = '!optimistic-advanced:example.org';
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        // The room was marked read at unreadCount 1; a new message arrived
+        // before the refresh, so the refreshed room still has unreadCount 1
+        // — and even the same millisecond timestamp. The changed latest-event
+        // ID must drop the stale override.
+        container
+            .read(roomUnreadOverrideProvider(roomId).notifier)
+            .value = const RoomUnreadOverride(
+          unread: false,
+          baselineUnreadCount: 1,
+          baselineMarkedUnread: false,
+          baselineLastEventId: r'$old-event',
+        );
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              home: Scaffold(
+                body: ChatListItem(
+                  room: room(
+                    id: roomId,
+                    unreadCount: 1,
+                    lastMessageTime: '100',
+                    lastEventId: r'$new-event',
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('1'), findsOneWidget);
+        expect(container.read(roomUnreadOverrideProvider(roomId)), isNull);
+      },
+    );
+
     testWidgets('shows a person icon for dm rooms', (tester) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -178,6 +408,24 @@ void main() {
       await tester.pump();
 
       expect(find.byIcon(Icons.account_tree_rounded), findsOneWidget);
+    });
+
+    testWidgets('does not show room read actions for spaces', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(roomType: 'space')),
+            ),
+          ),
+        ),
+      );
+
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('标记为已读'), findsNothing);
+      expect(find.text('标记为未读'), findsNothing);
     });
 
     testWidgets('uses the dense layout when requested', (tester) async {
@@ -251,6 +499,122 @@ void main() {
 
       expect(find.text('等待对方批准'), findsOneWidget);
       expect(find.text('撤回'), findsOneWidget);
+    });
+
+    testWidgets('marking a room unread from the long-press menu works', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('标记为未读'), findsOneWidget);
+      expect(find.text('标记为已读'), findsOneWidget);
+
+      await tester.tap(find.text('标记为未读'));
+      await tester.pumpAndSettle();
+
+      expect(rustApi.markUnreadCalls, 1);
+      expect(find.text('已标记为未读'), findsOneWidget);
+      // The optimistic unread override and its suppression are applied.
+      expect(container.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+      expect(container.read(roomUnreadOverrideProvider(roomId)), isNotNull);
+    });
+
+    testWidgets('a failed room action restores the suppression', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+      rustApi.markUnreadError = StateError('offline');
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('标记为未读'));
+      await tester.pumpAndSettle();
+
+      expect(rustApi.markUnreadCalls, 1);
+      // The sheet closes first so the failure message is actually visible.
+      expect(find.text('标记为未读'), findsNothing);
+      expect(find.textContaining('操作失败:'), findsOneWidget);
+      // The failed action must not leave the room stuck in suppression.
+      expect(container.read(roomAutoReadSuppressedProvider(roomId)), isFalse);
+
+      rustApi.markUnreadError = null;
+    });
+
+    testWidgets('a result after the sheet was dismissed still surfaces', (
+      tester,
+    ) async {
+      const roomId = '!room:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+      rustApi.markUnreadCalls = 0;
+      rustApi.pendingMarkUnread = Completer<void>();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: ChatListItem(room: room(id: roomId)),
+            ),
+          ),
+        ),
+      );
+      await tester.longPress(find.text('Room'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('标记为未读'));
+      await tester.pump();
+
+      // The user dismisses the sheet while the request is in flight.
+      await tester.tapAt(const Offset(400, 60));
+      await tester.pumpAndSettle();
+      expect(find.text('标记为未读'), findsNothing);
+
+      // The request completes after the sheet is gone: the result must
+      // still be shown (without popping the route below the sheet).
+      rustApi.pendingMarkUnread!.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.text('已标记为未读'), findsOneWidget);
+      expect(find.byType(ChatListItem), findsOneWidget);
+      rustApi.pendingMarkUnread = null;
     });
   });
 }

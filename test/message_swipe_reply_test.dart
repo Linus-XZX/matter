@@ -2,10 +2,52 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/message_group.dart';
-import 'package:matter/pages/chat/message_input.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
+import 'package:matter/src/rust/frb_generated.dart';
+
+class _FakeRustApi implements RustLibApi {
+  int togglePinnedCalls = 0;
+  String? lastToggleRoomId;
+  String? lastToggleEventId;
+  bool toggleResult = false;
+  Object? toggleError;
+  int pinnedIdsCalls = 0;
+  List<String> pinnedIds = const [];
+  Object? pinnedIdsError;
+
+  @override
+  Future<List<String>> crateApiMatrixGetPinnedEventIds({
+    required String accountUserId,
+    required String roomId,
+  }) async {
+    pinnedIdsCalls++;
+    if (pinnedIdsError case final error?) throw error;
+    return pinnedIds;
+  }
+
+  @override
+  Future<bool> crateApiMatrixSetPinnedMessage({
+    required String accountUserId,
+    required String roomId,
+    required String eventId,
+    required bool pinned,
+  }) async {
+    togglePinnedCalls++;
+    lastToggleRoomId = roomId;
+    lastToggleEventId = eventId;
+    if (toggleError case final error?) throw error;
+    return toggleResult;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
+  }
+}
 
 const _roomId = '!room:example.org';
+const _roomAccountKey = (roomId: _roomId, userId: 'anonymous');
 
 ChatMessage _message({required String id, required bool isMe}) => ChatMessage(
   id: id,
@@ -52,6 +94,136 @@ Widget _buildSubject({
 }
 
 void main() {
+  late _FakeRustApi api;
+
+  setUpAll(() {
+    api = _FakeRustApi();
+    RustLib.initMock(api: api);
+  });
+
+  tearDownAll(RustLib.dispose);
+
+  testWidgets('message menu describes pinning as a toggle', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-toggle', isMe: false);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-toggle')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('置顶/取消置顶'), findsOneWidget);
+  });
+
+  testWidgets('pinning from the message menu calls the toggle', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-action', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = null;
+    api.toggleResult = true;
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-action')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 1);
+    expect(api.lastToggleRoomId, _roomId);
+    expect(api.lastToggleEventId, r'$pin-action');
+    // The menu reports the post-write server state.
+    expect(find.text('消息已置顶'), findsOneWidget);
+  });
+
+  testWidgets('the message menu unpins an already-pinned message', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-action', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = null;
+    api.toggleResult = false;
+    api.pinnedIds = [r'$pin-action'];
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-action')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    // The server state decides the target: pinned -> unpin, reported as such.
+    expect(api.togglePinnedCalls, 1);
+    expect(api.lastToggleEventId, r'$pin-action');
+    expect(find.text('已取消置顶'), findsOneWidget);
+    expect(find.text('消息已置顶'), findsNothing);
+  });
+
+  testWidgets('a failed authoritative pin read does not write stale intent', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-read-fail', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.pinnedIdsError = StateError('authoritative read failed');
+    addTearDown(() => api.pinnedIdsError = null);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-read-fail')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 0);
+    expect(find.textContaining('无法获取置顶状态，请重试'), findsOneWidget);
+  });
+
+  testWidgets('a failed pin action surfaces the error', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-fail', isMe: false);
+    api.togglePinnedCalls = 0;
+    api.toggleError = StateError('offline');
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-fail')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.togglePinnedCalls, 1);
+    // Non-timeout failures go through the shared actionFailureMessage
+    // wording.
+    expect(find.textContaining('操作失败:'), findsOneWidget);
+  });
+
   testWidgets('left swipe past threshold starts a reply to another user', (
     tester,
   ) async {
@@ -74,7 +246,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
     expect(replyRequests, 1);
   });
 
@@ -95,7 +267,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(container.read(replyingToProvider(_roomId)), isNull);
+    expect(container.read(replyingToProvider(_roomAccountKey)), isNull);
   });
 
   testWidgets('left swipe can start from empty space in the message row', (
@@ -124,7 +296,7 @@ void main() {
     await gesture.up();
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
   });
 
   testWidgets('own synced messages can also be swiped to reply', (
@@ -144,7 +316,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(container.read(replyingToProvider(_roomId)), message);
+    expect(container.read(replyingToProvider(_roomAccountKey)), message);
   });
 
   testWidgets('reply icon animates in on the right while swiping', (

@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
+
+const _roomAccountKey = (
+  roomId: '!room:example.org',
+  userId: '@alice:example.org',
+);
 
 rust.ChatMessage _message({
   required String id,
@@ -10,21 +16,27 @@ rust.ChatMessage _message({
   String? content,
   rust.MessageType msgType = rust.MessageType.text,
   String? imageUrl,
+  List<String> mentionedUserIds = const [],
+  List<String> editHistory = const [],
+  List<rust.Reaction> reactions = const [],
+  List<rust.MessageReader> readers = const [],
+  rust.PollInfo? poll,
 }) => rust.ChatMessage(
   id: id,
   senderId: '@alice:example.org',
   senderName: 'Alice',
   content: content ?? id,
-  mentionedUserIds: const [],
+  mentionedUserIds: mentionedUserIds,
   mentionsRoom: false,
   timestamp: timestamp,
   isMe: false,
   msgType: msgType,
   imageUrl: imageUrl,
+  poll: poll,
   isEdited: false,
-  editHistory: const [],
-  reactions: const [],
-  readers: const [],
+  editHistory: editHistory,
+  reactions: reactions,
+  readers: readers,
   totalMembers: 2,
 );
 
@@ -32,8 +44,10 @@ LocalOutgoingMessage _local({
   required String id,
   String timestamp = '100',
   rust.MessageType msgType = rust.MessageType.text,
+  String? replyToUserId,
 }) => LocalOutgoingMessage(
   message: _message(id: id, timestamp: timestamp, msgType: msgType),
+  replyToUserId: replyToUserId,
 );
 
 Future<WidgetRef> _captureRef(WidgetTester tester) async {
@@ -196,76 +210,158 @@ void main() {
       expect(result.map((m) => m.id), [r'$old', r'$new']);
       expect(result.first.content, 'decrypted');
     });
+
+    test('content equality compares generated list fields by value', () {
+      rust.ChatMessage build(List<String> senders) => _message(
+        id: r'$event',
+        timestamp: '100',
+        mentionedUserIds: List.of(['@bob:example.org']),
+        editHistory: List.of(['old body']),
+        reactions: [
+          rust.Reaction(key: '+1', senders: senders, myEventId: r'$reaction'),
+        ],
+        readers: const [
+          rust.MessageReader(userId: '@bob:example.org', displayName: 'Bob'),
+        ],
+      );
+
+      final current = build(List.of(['@bob:example.org']));
+      final equivalent = build(List.of(['@bob:example.org']));
+      final changed = build(List.of(['@carol:example.org']));
+
+      expect(chatMessageContentEquals(current, equivalent), isTrue);
+      expect(chatMessageContentEquals(current, changed), isFalse);
+      final cached = [current];
+      expect(mergeMessageSnapshotAdditions(cached, [equivalent]), same(cached));
+    });
   });
 
   group('local outgoing message state', () {
     testWidgets('upsert adds a new local message', (tester) async {
-      const roomId = '!room:example.org';
       final ref = await _captureRef(tester);
 
       upsertLocalOutgoingMessage(
         ref,
-        roomId,
+        _roomAccountKey,
         _local(id: '${localOutgoingPendingPrefix}1'),
       );
-      expect(ref.read(localOutgoingMessagesProvider(roomId)).length, 1);
+      expect(
+        ref.read(localOutgoingMessagesProvider(_roomAccountKey)).length,
+        1,
+      );
 
       upsertLocalOutgoingMessage(
         ref,
-        roomId,
+        _roomAccountKey,
         _local(id: '${localOutgoingPendingPrefix}2'),
       );
-      expect(ref.read(localOutgoingMessagesProvider(roomId)).length, 2);
+      expect(
+        ref.read(localOutgoingMessagesProvider(_roomAccountKey)).length,
+        2,
+      );
     });
 
     testWidgets('upsert replaces an existing local message', (tester) async {
-      const roomId = '!room:example.org';
       final ref = await _captureRef(tester);
       const id = '${localOutgoingPendingPrefix}1';
 
-      upsertLocalOutgoingMessage(ref, roomId, _local(id: id, timestamp: '100'));
-      upsertLocalOutgoingMessage(ref, roomId, _local(id: id, timestamp: '200'));
+      upsertLocalOutgoingMessage(
+        ref,
+        _roomAccountKey,
+        _local(id: id, timestamp: '100'),
+      );
+      upsertLocalOutgoingMessage(
+        ref,
+        _roomAccountKey,
+        _local(id: id, timestamp: '200'),
+      );
 
-      final messages = ref.read(localOutgoingMessagesProvider(roomId));
+      final messages = ref.read(localOutgoingMessagesProvider(_roomAccountKey));
       expect(messages.length, 1);
       expect(messages.single.message.timestamp, '200');
     });
 
     testWidgets('remove deletes the local message', (tester) async {
-      const roomId = '!room:example.org';
       final ref = await _captureRef(tester);
       const id = '${localOutgoingPendingPrefix}1';
 
-      upsertLocalOutgoingMessage(ref, roomId, _local(id: id));
-      removeLocalOutgoingMessage(ref, roomId, id);
-      expect(ref.read(localOutgoingMessagesProvider(roomId)), isEmpty);
+      upsertLocalOutgoingMessage(ref, _roomAccountKey, _local(id: id));
+      removeLocalOutgoingMessage(ref, _roomAccountKey, id);
+      expect(ref.read(localOutgoingMessagesProvider(_roomAccountKey)), isEmpty);
     });
 
     testWidgets('mark sent rewrites the pending id', (tester) async {
-      const roomId = '!room:example.org';
       final ref = await _captureRef(tester);
       const pendingId = '${localOutgoingPendingPrefix}flight';
 
-      upsertLocalOutgoingMessage(ref, roomId, _local(id: pendingId));
-      final sentId = markLocalOutgoingMessageSent(ref, roomId, pendingId);
+      upsertLocalOutgoingMessage(ref, _roomAccountKey, _local(id: pendingId));
+      final sentId = markLocalOutgoingMessageSent(
+        ref,
+        _roomAccountKey,
+        pendingId,
+      );
 
       expect(sentId, '${localOutgoingSentPrefix}flight');
       final ids = ref
-          .read(localOutgoingMessagesProvider(roomId))
+          .read(localOutgoingMessagesProvider(_roomAccountKey))
           .map((m) => m.message.id);
       expect(ids, [sentId]);
+    });
+
+    testWidgets('mark sent preserves reply sender metadata', (tester) async {
+      final ref = await _captureRef(tester);
+      const pendingId = '${localOutgoingPendingPrefix}reply';
+
+      upsertLocalOutgoingMessage(
+        ref,
+        _roomAccountKey,
+        _local(id: pendingId, replyToUserId: '@original-sender:example.org'),
+      );
+      markLocalOutgoingMessageSent(ref, _roomAccountKey, pendingId);
+
+      expect(
+        ref
+            .read(localOutgoingMessagesProvider(_roomAccountKey))
+            .single
+            .replyToUserId,
+        '@original-sender:example.org',
+      );
     });
 
     testWidgets('mark sent is a no-op when the pending message is gone', (
       tester,
     ) async {
-      const roomId = '!room:example.org';
       final ref = await _captureRef(tester);
       const pendingId = '${localOutgoingPendingPrefix}missing';
 
-      final sentId = markLocalOutgoingMessageSent(ref, roomId, pendingId);
+      final sentId = markLocalOutgoingMessageSent(
+        ref,
+        _roomAccountKey,
+        pendingId,
+      );
       expect(sentId, '${localOutgoingSentPrefix}missing');
-      expect(ref.read(localOutgoingMessagesProvider(roomId)), isEmpty);
+      expect(ref.read(localOutgoingMessagesProvider(_roomAccountKey)), isEmpty);
+    });
+
+    testWidgets('composer state is isolated by account in the same room', (
+      tester,
+    ) async {
+      const bobKey = (roomId: '!room:example.org', userId: '@bob:example.org');
+      final ref = await _captureRef(tester);
+      final message = _message(id: r'$local', timestamp: '100');
+
+      upsertLocalOutgoingMessage(
+        ref,
+        _roomAccountKey,
+        LocalOutgoingMessage(message: message),
+      );
+      ref.read(replyingToProvider(_roomAccountKey).notifier).value = message;
+      ref.read(editingMessageProvider(_roomAccountKey).notifier).value =
+          message;
+
+      expect(ref.read(localOutgoingMessagesProvider(bobKey)), isEmpty);
+      expect(ref.read(replyingToProvider(bobKey)), isNull);
+      expect(ref.read(editingMessageProvider(bobKey)), isNull);
     });
 
     testWidgets('updateMessageCache writes to the provider', (tester) async {
@@ -290,5 +386,52 @@ void main() {
 
       expect(second, same(ref.read(messageCacheProvider(roomId))));
     });
+  });
+
+  testWidgets('latest auto-read suppression intent owns rollback', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final ref = await _captureRef(tester);
+    ref.read(sessionReadyProvider.notifier).value = true;
+
+    final readToken = setRoomAutoReadSuppressed(ref, roomId, suppressed: false);
+    final unreadToken = setRoomAutoReadSuppressed(
+      ref,
+      roomId,
+      suppressed: true,
+    );
+
+    expect(readToken.isCurrent, isFalse);
+    expect(unreadToken.isCurrent, isTrue);
+    expect(ref.read(roomAutoReadSuppressedProvider(roomId)), isTrue);
+  });
+
+  testWidgets('session invalidation makes a suppression token stale', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final ref = await _captureRef(tester);
+    ref.read(sessionReadyProvider.notifier).value = true;
+    final token = setRoomAutoReadSuppressed(ref, roomId, suppressed: true);
+
+    ref.invalidate(roomAutoReadSuppressionRevisionProvider(roomId));
+
+    expect(token.isCurrent, isFalse);
+  });
+
+  testWidgets('account transition makes a suppression token stale', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    final ref = await _captureRef(tester);
+    ref.read(sessionReadyProvider.notifier).value = true;
+    ref.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    final token = setRoomAutoReadSuppressed(ref, roomId, suppressed: true);
+
+    ref.read(sessionReadyProvider.notifier).value = false;
+    ref.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+
+    expect(token.isCurrent, isFalse);
   });
 }

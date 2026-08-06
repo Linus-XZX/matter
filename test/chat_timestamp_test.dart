@@ -66,8 +66,14 @@ void main() {
   test('formatChatListTime uses calendar labels for older days', () {
     final now = DateTime(2026, 6, 13, 12);
 
-    expect(formatChatListTime(timestamp(DateTime(2026, 6, 12)), now: now), '昨天');
-    expect(formatChatListTime(timestamp(DateTime(2026, 6, 10)), now: now), '6/10');
+    expect(
+      formatChatListTime(timestamp(DateTime(2026, 6, 12)), now: now),
+      '昨天',
+    );
+    expect(
+      formatChatListTime(timestamp(DateTime(2026, 6, 10)), now: now),
+      '6/10',
+    );
     expect(
       formatChatListTime(timestamp(DateTime(2025, 12, 31)), now: now),
       '2025/12/31',

@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'pages/chat/chat_detail_page.dart';
 import 'pages/chat/chat_page.dart';
 import 'pages/chat/desktop_room_details_panel.dart';
+import 'pages/chat/room_metadata_patch.dart';
+import 'pages/chat/room_state_edit_tracker.dart';
 import 'pages/chat/space_page.dart';
 import 'pages/contacts/contacts_page.dart';
 import 'pages/settings/encryption_page.dart';
@@ -39,6 +41,19 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   _DesktopRoomSource _desktopRoomSource = _DesktopRoomSource.directMessages;
   bool _showRoomDetails = false;
   String? _lastActiveUserId;
+  final _selectedRoomNameEdit = RoomStateEditTracker();
+  final _selectedRoomAvatarEdit = RoomStateEditTracker();
+
+  /// The selected ChatDetailPage's room-details handler, registered via its
+  /// `onRegisterRoomDetailsHandler` prop. Desktop details-panel edits are
+  /// routed through it so they go through the page's sync-echo trackers.
+  ValueChanged<RoomMetadataPatch>? _desktopRoomDetailsHandler;
+
+  void _registerDesktopRoomDetailsHandler(
+    ValueChanged<RoomMetadataPatch> handler,
+  ) {
+    _desktopRoomDetailsHandler = handler;
+  }
 
   static const double _desktopBreakpoint = 840;
   static const double _desktopDetailsPaneBreakpoint = 1024;
@@ -88,6 +103,11 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         return;
       }
       _handledVerificationFlows.add(status.flowId);
+      // Bound the handled-flow set on long-running sessions: flows are
+      // one-shot, so only recent ones can possibly reappear.
+      while (_handledVerificationFlows.length > 64) {
+        _handledVerificationFlows.remove(_handledVerificationFlows.first);
+      }
       await _showVerificationRequest(status);
     } catch (_) {
       // The active client can be temporarily unavailable during account changes.
@@ -152,6 +172,37 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     }
   }
 
+  void _clearSelectedRoomDetailsEdits() {
+    _selectedRoomNameEdit.clear();
+    _selectedRoomAvatarEdit.clear();
+  }
+
+  rust.ChatRoom _reconcileSelectedRoomDetails(
+    rust.ChatRoom selectedRoom,
+    rust.ChatRoom refreshedRoom,
+  ) {
+    final acceptName = _selectedRoomNameEdit.shouldAccept(
+      refreshedRoom.nameEventId,
+    );
+    final acceptAvatar = _selectedRoomAvatarEdit.shouldAccept(
+      refreshedRoom.avatarEventId,
+    );
+    if (acceptName && acceptAvatar) return refreshedRoom;
+    return _roomWithDetails(
+      refreshedRoom,
+      name: acceptName ? refreshedRoom.name : selectedRoom.name,
+      avatarUrl: acceptAvatar
+          ? refreshedRoom.avatarUrl
+          : selectedRoom.avatarUrl,
+      nameEventId: acceptName
+          ? refreshedRoom.nameEventId
+          : selectedRoom.nameEventId,
+      avatarEventId: acceptAvatar
+          ? refreshedRoom.avatarEventId
+          : selectedRoom.avatarEventId,
+    );
+  }
+
   void _selectRoom(rust.ChatRoom room) {
     if (room.roomType == 'space') {
       _showSpace(
@@ -159,8 +210,134 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       );
       return;
     }
-    if (_selectedRoom?.id == room.id) return;
+    if (_selectedRoom?.id == room.id) {
+      final selectedRoom = _selectedRoom!;
+      final refreshedRoom = _reconcileSelectedRoomDetails(selectedRoom, room);
+      if (selectedRoom != refreshedRoom) {
+        setState(() => _selectedRoom = refreshedRoom);
+      }
+      final autoReadSuppressed = ref.read(
+        roomAutoReadSuppressedProvider(room.id),
+      );
+      if (!autoReadSuppressed &&
+          refreshedRoom.unreadCount == 0 &&
+          !refreshedRoom.isMarkedUnread) {
+        return;
+      }
+      if (autoReadSuppressed) {
+        setRoomAutoReadSuppressed(ref, room.id, suppressed: false);
+      }
+      unawaited(_markSelectedRoomAsRead(refreshedRoom));
+      return;
+    }
+    _clearSelectedRoomDetailsEdits();
     setState(() => _selectedRoom = room);
+  }
+
+  Future<void> _markSelectedRoomAsRead(rust.ChatRoom room) async {
+    // The receipts are written for the account that starts this call.
+    final accountUserId = ref.read(activeUserIdProvider);
+    // No account yet (deep-link before login completed): skip — a write
+    // with an empty account id would be rejected by the Rust guard anyway.
+    if (accountUserId == null) return;
+    try {
+      final cleared = await rust.markRoomAsRead(
+        accountUserId: accountUserId,
+        roomId: room.id,
+        // Selecting the room is a viewing action: rely on the store-checked
+        // inner clear, not the unconditional explicit write.
+        explicit: false,
+      );
+      if (!mounted ||
+          _selectedRoom?.id != room.id ||
+          // The account may have switched mid-flight: the read bookkeeping
+          // must not apply to the new account's session.
+          ref.read(activeUserIdProvider) != accountUserId ||
+          ref.read(roomAutoReadSuppressedProvider(room.id))) {
+        return;
+      }
+      // Only claim the room is read when the flag was actually cleared (a
+      // skipped clear's tail may still fail).
+      if (cleared) {
+        setRoomUnreadOverride(ref, room, unread: false);
+      }
+      ref.invalidate(chatRoomsProvider);
+      ref.invalidate(ungroupedRoomsProvider);
+      ref.invalidate(spaceChildrenProvider);
+      ref.invalidate(searchRoomsProvider);
+    } catch (error) {
+      debugPrint('markRoomAsRead after room reselection failed: $error');
+    }
+  }
+
+  void _updateSelectedRoomDetails(RoomMetadataPatch patch) {
+    final room = _selectedRoom;
+    if (room == null || room.id != patch.roomId) return;
+    var name = room.name;
+    var avatarUrl = room.avatarUrl;
+    var nameEventId = room.nameEventId;
+    var avatarEventId = room.avatarEventId;
+    switch (patch) {
+      case RoomNamePatch():
+        _selectedRoomNameEdit.record(
+          currentEventId: nameEventId,
+          nextEventId: patch.nameEventId,
+        );
+        name = patch.name;
+        nameEventId = patch.nameEventId;
+        break;
+      case RoomAvatarPatch():
+        _selectedRoomAvatarEdit.record(
+          currentEventId: avatarEventId,
+          nextEventId: patch.avatarEventId,
+        );
+        avatarUrl = patch.avatarUrl;
+        avatarEventId = patch.avatarEventId;
+        break;
+    }
+    setState(() {
+      _selectedRoom = _roomWithDetails(
+        room,
+        name: name,
+        avatarUrl: avatarUrl,
+        nameEventId: nameEventId,
+        avatarEventId: avatarEventId,
+      );
+    });
+  }
+
+  rust.ChatRoom _roomWithDetails(
+    rust.ChatRoom room, {
+    required String name,
+    required String? avatarUrl,
+    required String? nameEventId,
+    required String? avatarEventId,
+  }) {
+    return rust.ChatRoom(
+      id: room.id,
+      name: name,
+      avatarUrl: avatarUrl,
+      nameEventId: nameEventId,
+      avatarEventId: avatarEventId,
+      lastMessage: room.lastMessage,
+      lastMessageSender: room.lastMessageSender,
+      lastMessageTime: room.lastMessageTime,
+      lastEventId: room.lastEventId,
+      unreadCount: room.unreadCount,
+      isMarkedUnread: room.isMarkedUnread,
+      roomType: room.roomType,
+      isEncrypted: room.isEncrypted,
+      isMuted: room.isMuted,
+      roomState: room.roomState,
+    );
+  }
+
+  void _clearSelectedRoom() {
+    setState(() {
+      _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
+      _showRoomDetails = false;
+    });
   }
 
   void _showDirectMessages() {
@@ -169,6 +346,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.directMessages;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -178,6 +356,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.ungroupedRooms;
       _selectedDesktopSpace = null;
       _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -187,6 +366,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       _desktopRoomSource = _DesktopRoomSource.space;
       _selectedDesktopSpace = space;
       _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
     });
   }
 
@@ -202,6 +382,22 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         final isDesktop = constraints.maxWidth >= _desktopBreakpoint;
         _syncMobilePageAfterLayoutChange(isDesktop);
         if (isDesktop) {
+          // Only the desktop layout keeps a selected room whose metadata
+          // must follow the room sources; watching them on mobile would
+          // rebuild the whole app on every room list refresh for nothing.
+          if (_desktopRoomSource == _DesktopRoomSource.space) {
+            final spaceId = _selectedDesktopSpace?.id;
+            if (spaceId != null) {
+              // Space children live in spaceChildrenProvider, not
+              // chatRooms: follow that source so a renamed/departed space
+              // child updates the panel snapshot.
+              _syncSelectedRoomFromRooms(
+                ref.watch(spaceChildrenProvider(spaceId)),
+              );
+            }
+          } else {
+            _syncSelectedRoomFromRooms(ref.watch(chatRoomsProvider));
+          }
           return _buildDesktopLayout(context, constraints);
         }
         return _buildMobileLayout();
@@ -215,9 +411,47 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     if (previousUserId == null || previousUserId == activeUserId) return;
 
     _selectedRoom = null;
+    _clearSelectedRoomDetailsEdits();
     _selectedDesktopSpace = null;
     _desktopRoomSource = _DesktopRoomSource.directMessages;
     _showRoomDetails = false;
+  }
+
+  void _syncSelectedRoomFromRooms(AsyncValue<List<rust.ChatRoom>> roomsAsync) {
+    final selectedRoom = _selectedRoom;
+    final rooms = roomsAsync.asData?.value;
+    if (selectedRoom == null || rooms == null) return;
+
+    rust.ChatRoom? refreshedRoom;
+    for (final room in rooms) {
+      if (room.id == selectedRoom.id) {
+        refreshedRoom = room;
+        break;
+      }
+    }
+    if (refreshedRoom == null) {
+      // The selected room no longer exists (e.g. the user left it from the
+      // management page while the desktop panel was open). Clear the stale
+      // selection so the panel does not keep showing a departed room.
+      if (_desktopRoomSource == _DesktopRoomSource.space) {
+        // Space children live in spaceChildrenProvider, not chatRooms, so
+        // their absence here is not necessarily a departure — but a room
+        // removed from the space is gone from chatRooms as well: double-
+        // check against the room list before clearing the selection. A
+        // list that is still LOADING must not clear it — "unknown" is not
+        // "departed" (the room may merely have been moved out of the
+        // space, and the room list refetch races the children refetch).
+        final allRooms = ref.read(chatRoomsProvider).asData?.value;
+        if (allRooms == null) return;
+        if (allRooms.any((room) => room.id == selectedRoom.id)) {
+          return;
+        }
+      }
+      _selectedRoom = null;
+      _clearSelectedRoomDetailsEdits();
+      return;
+    }
+    _selectedRoom = _reconcileSelectedRoomDetails(selectedRoom, refreshedRoom);
   }
 
   void _syncMobilePageAfterLayoutChange(bool isDesktop) {
@@ -293,6 +527,19 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   Widget _buildDesktopLayout(BuildContext context, BoxConstraints constraints) {
     final navigationIndex = ref.watch(navigationIndexProvider);
     final selectedRoom = _selectedRoom;
+    // Match the room list's unread display (including the local override
+    // for pending mark-read/unread writes) so the pane subtitle and the
+    // list's red dot never disagree during the echo window.
+    final unreadOverride = selectedRoom == null
+        ? null
+        : ref.watch(roomUnreadOverrideProvider(selectedRoom.id));
+    final syncedHasUnread = selectedRoom == null
+        ? false
+        : selectedRoom.unreadCount > 0 || selectedRoom.isMarkedUnread;
+    final overrideApplies = unreadOverride?.appliesTo(selectedRoom!) ?? false;
+    final hasUnread = overrideApplies
+        ? unreadOverride!.unread
+        : syncedHasUnread;
     final canShowRoomDetails =
         constraints.maxWidth >= _desktopDetailsPaneBreakpoint;
     final showRoomDetails =
@@ -328,9 +575,13 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                 roomId: selectedRoom.id,
                                 roomName: selectedRoom.name,
                                 avatarUrl: selectedRoom.avatarUrl,
+                                nameEventId: selectedRoom.nameEventId,
+                                avatarEventId: selectedRoom.avatarEventId,
                                 isDm: selectedRoom.roomType == 'dm',
-                                subtitle: selectedRoom.unreadCount > 0
-                                    ? '${selectedRoom.unreadCount} 条未读消息'
+                                subtitle: hasUnread
+                                    ? (selectedRoom.unreadCount > 0
+                                          ? '${selectedRoom.unreadCount} 条未读消息'
+                                          : '已标记未读')
                                     : '在线',
                                 embedded: true,
                                 detailsPanelOpen: showRoomDetails,
@@ -340,6 +591,11 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                                             !_showRoomDetails,
                                       )
                                     : null,
+                                onRoomLeft: _clearSelectedRoom,
+                                onRoomDetailsChanged:
+                                    _updateSelectedRoomDetails,
+                                onRegisterRoomDetailsHandler:
+                                    _registerDesktopRoomDetailsHandler,
                               ),
                       ),
                       if (showRoomDetails) ...[
@@ -350,6 +606,12 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                             roomId: selectedRoom.id,
                             roomName: selectedRoom.name,
                             avatarUrl: selectedRoom.avatarUrl,
+                            onRoomLeft: _clearSelectedRoom,
+                            // Route through the selected page's handler so
+                            // the edit arms its sync-echo tracker (the page
+                            // then forwards to _updateSelectedRoomDetails).
+                            onRoomDetailsChanged: (patch) =>
+                                _desktopRoomDetailsHandler?.call(patch),
                           ),
                         ),
                       ],

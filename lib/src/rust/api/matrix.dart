@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_session_meta`, `add_desired`, `app_log`, `append_media_chunk`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_timeline_cache`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `encryption_settings`, `ensure_media_content_length`, `extract_edit_content`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `image_info_dimensions`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `load_room_sticker_packs`, `location_message_content`, `media_caption_parts`, `media_download_limit`, `media_download_url`, `mentions_parts`, `mxc_to_thumbnail_http`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `receipt_extension_for_subscribed_rooms`, `remove_desired`, `remove_dir_all_if_exists`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_state_label`, `room_to_chat_room`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `take_typing_task_for_room`, `text_message_parts`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_mime_type`, `wait_for_e2ee_initialization`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `EditedTextContent`, `PendingEntry`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_generation_for_client`, `active_session_meta`, `add_desired`, `advance_sync_generation`, `app_log`, `append_media_chunk`, `bounded_request_config`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_active_for_generation`, `clear_published_sync`, `clear_timeline_cache_for`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `degrade_to_traditional_sync`, `delete_account_sdk_store`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation_inner`, `ensure_account_matches`, `ensure_media_content_length`, `extract_edit_content`, `failures_after_stream_end`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_override_expired`, `ignored_user_override_key`, `image_info_dimensions`, `image_message_content`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `interruptible_retry_sleep`, `into_client_and_data_dir`, `is_dm_by_members`, `joined_non_space_room`, `knock_member_events_request`, `knock_state_read_failure`, `lagged_sync_event`, `lifecycle_protection`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `lock_subscription_state`, `marked_unread_override_key`, `media_caption_parts`, `media_client_identity`, `media_download_limit`, `media_download_url`, `mentions_parts`, `merge_current_account_ignored_user_overrides`, `merge_ignored_user_overrides`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event_for_client`, `notify_sync_event_for_generation`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `reacquire_media_client`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides_inner`, `reconcile_ignored_user_overrides`, `reconcile_marked_unread_override`, `remote_logout_retry_settles`, `remove_desired`, `remove_dir_all_if_exists`, `reset`, `resolve_ignored_user`, `resolve_marked_unread`, `retry_pending_remote_logout`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `room_topic_event_id`, `run_bounded_mutation_inner`, `run_bounded_mutation_undroppable`, `run_bounded_mutation`, `run_bounded`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_reply_formatted_body`, `set_connection_status_for_generation`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `set_subscription_user`, `space_child_room_id`, `start_sync_internal`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `subscription_user_matches`, `sync_generation_is_active`, `sync_publication_lock`, `synced_marked_unread`, `take_typing_task_for_owner`, `text_message_parts`, `truncate_utf8`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `upload_media_source`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_message_content`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `ClientIdentity`, `ClientLease`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MediaClientIdentity`, `MutationTail`, `PendingEntry`, `PendingSyncTask`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
@@ -32,6 +32,16 @@ Future<List<LogFileContent>> readLogFiles() =>
 
 Stream<SessionTokenUpdate> watchSessionTokenUpdates() =>
     RustLib.instance.api.crateApiMatrixWatchSessionTokenUpdates();
+
+/// Retry SDK-store cleanup for an account whose persisted removal transaction
+/// was interrupted. Called during startup before any sessions are restored.
+Future<void> cleanupRemovedAccountStore({
+  required String userId,
+  required String dataDir,
+}) => RustLib.instance.api.crateApiMatrixCleanupRemovedAccountStore(
+  userId: userId,
+  dataDir: dataDir,
+);
 
 /// Create a Matrix client for the given homeserver URL.
 /// Must be called before any registration / login attempt.
@@ -134,11 +144,11 @@ Future<List<AccountInfo>> listAccounts() =>
 Future<bool> switchAccount({required String userId}) =>
     RustLib.instance.api.crateApiMatrixSwitchAccount(userId: userId);
 
-/// Logout the active user and remove its data.
-Future<void> logout() => RustLib.instance.api.crateApiMatrixLogout();
+Future<AccountRemovalResult> logout() =>
+    RustLib.instance.api.crateApiMatrixLogout();
 
 /// Remove a specific account by user_id (logout + delete data).
-Future<void> removeAccount({required String userId}) =>
+Future<AccountRemovalResult> removeAccount({required String userId}) =>
     RustLib.instance.api.crateApiMatrixRemoveAccount(userId: userId);
 
 /// Get the current session if logged in, for persisting to disk.
@@ -201,8 +211,8 @@ Future<void> startSync() => RustLib.instance.api.crateApiMatrixStartSync();
 
 /// Stream real-time sync events from Rust → Dart.
 /// Call this once on app start and listen for updates.
-/// When a `SyncCompleted` event arrives, refresh the room list.
-/// When a `MessageSent` event arrives, refresh that room's messages.
+/// `FullRefreshRequired` means specific events were dropped and all
+/// interested views must refresh.
 Stream<SyncEvent> watchSyncEvents() =>
     RustLib.instance.api.crateApiMatrixWatchSyncEvents();
 
@@ -214,16 +224,26 @@ Stream<TypingNotification> watchTypingNotifications() =>
 /// Begin listening for typing notifications in `room_id`. Any previous
 /// subscription for another room is cancelled first (only one room is
 /// tracked at a time). Call `unsubscribe_typing` when leaving the room.
-Future<void> subscribeTypingForRoom({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixSubscribeTypingForRoom(roomId: roomId);
+Future<String> subscribeTypingForRoom({
+  required String roomId,
+  String? accountUserId,
+}) => RustLib.instance.api.crateApiMatrixSubscribeTypingForRoom(
+  roomId: roomId,
+  accountUserId: accountUserId,
+);
 
 /// Stop tracking typing notifications (e.g. when leaving the room screen).
-Future<void> unsubscribeTyping({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixUnsubscribeTyping(roomId: roomId);
+Future<void> unsubscribeTyping({
+  required String roomId,
+  required String subscriptionId,
+}) => RustLib.instance.api.crateApiMatrixUnsubscribeTyping(
+  roomId: roomId,
+  subscriptionId: subscriptionId,
+);
 
 /// Subscribe to the given room in the Sliding Sync instance so that it is
-/// included in every sync roundtrip, ensuring read-receipt deltas for it are
-/// always delivered. Call when entering a room screen.
+/// included in every sync roundtrip, ensuring read-receipt deltas and pinned
+/// state are always delivered. Call when entering a room screen.
 ///
 /// If Sliding Sync is not yet ready (startup race / account switch), the
 /// desire is recorded and applied automatically once the sync loop publishes
@@ -232,8 +252,13 @@ Future<void> unsubscribeTyping({required String roomId}) =>
 /// `desired`/`active` are updated under a single lock so concurrent calls
 /// can't interleave (a late-finishing old subscribe can't overwrite a newer
 /// room).
-Future<void> subscribeRoomForReceipts({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixSubscribeRoomForReceipts(roomId: roomId);
+Future<String> subscribeRoomForReceipts({
+  required String roomId,
+  String? accountUserId,
+}) => RustLib.instance.api.crateApiMatrixSubscribeRoomForReceipts(
+  roomId: roomId,
+  accountUserId: accountUserId,
+);
 
 /// Unsubscribe the given room from Sliding Sync (e.g. when leaving the room
 /// screen). Receipts for it will still arrive when the room has timeline
@@ -244,10 +269,13 @@ Future<void> subscribeRoomForReceipts({required String roomId}) =>
 /// The room is removed only after its last mounted owner unsubscribes. The
 /// update runs under the same lock as subscribe, so overlapping routes cannot
 /// cancel each other's subscription.
-Future<void> unsubscribeRoomForReceipts({required String roomId}) => RustLib
-    .instance
-    .api
-    .crateApiMatrixUnsubscribeRoomForReceipts(roomId: roomId);
+Future<void> unsubscribeRoomForReceipts({
+  required String roomId,
+  required String subscriptionId,
+}) => RustLib.instance.api.crateApiMatrixUnsubscribeRoomForReceipts(
+  roomId: roomId,
+  subscriptionId: subscriptionId,
+);
 
 /// Check if background sync is alive.
 Future<bool> isConnected() => RustLib.instance.api.crateApiMatrixIsConnected();
@@ -283,8 +311,6 @@ Future<String?> mxcToHttp({required String mxcUrl}) =>
 Future<String?> mxcToHttpFull({required String mxcUrl}) =>
     RustLib.instance.api.crateApiMatrixMxcToHttpFull(mxcUrl: mxcUrl);
 
-/// Download media content as raw bytes using the Matrix SDK's HTTP client.
-/// This is more reliable than constructing URLs and loading from Flutter.
 Future<Uint8List?> downloadMediaBytes({required String mxcUrl}) =>
     RustLib.instance.api.crateApiMatrixDownloadMediaBytes(mxcUrl: mxcUrl);
 
@@ -309,8 +335,13 @@ Future<String?> getRefreshToken() =>
 Future<bool> isRoomEncrypted({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixIsRoomEncrypted(roomId: roomId);
 
-Future<List<ChatRoom>> getChatRooms() =>
-    RustLib.instance.api.crateApiMatrixGetChatRooms();
+Future<List<ChatRoom>> getChatRooms({
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetChatRooms(
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 /// Get messages for a room (must sync first).
 Future<List<ChatMessage>> getMessages({required String roomId}) =>
@@ -473,31 +504,237 @@ Future<void> sendSticker({
 );
 
 /// Create a new direct chat room with a user.
-Future<String> createDm({required String userId}) =>
-    RustLib.instance.api.crateApiMatrixCreateDm(userId: userId);
+Future<String> createDm({
+  required String accountUserId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixCreateDm(
+  accountUserId: accountUserId,
+  userId: userId,
+);
 
 /// Create a group room with a name and optional topic.
-Future<String> createGroupRoom({required String name, String? topic}) => RustLib
-    .instance
-    .api
-    .crateApiMatrixCreateGroupRoom(name: name, topic: topic);
+Future<String> createGroupRoom({
+  required String accountUserId,
+  required String name,
+  String? topic,
+}) => RustLib.instance.api.crateApiMatrixCreateGroupRoom(
+  accountUserId: accountUserId,
+  name: name,
+  topic: topic,
+);
 
 /// Create a space room with a name and optional topic.
-Future<String> createSpace({required String name, String? topic}) =>
-    RustLib.instance.api.crateApiMatrixCreateSpace(name: name, topic: topic);
+Future<String> createSpace({
+  required String accountUserId,
+  required String name,
+  String? topic,
+}) => RustLib.instance.api.crateApiMatrixCreateSpace(
+  accountUserId: accountUserId,
+  name: name,
+  topic: topic,
+);
 
 /// Join a room or space by room ID or alias.
-Future<String> joinRoom({required String identifier}) =>
-    RustLib.instance.api.crateApiMatrixJoinRoom(identifier: identifier);
+Future<String> joinRoom({
+  required String accountUserId,
+  required String identifier,
+}) => RustLib.instance.api.crateApiMatrixJoinRoom(
+  accountUserId: accountUserId,
+  identifier: identifier,
+);
 
-Future<void> acceptRoomInvite({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixAcceptRoomInvite(roomId: roomId);
+Future<void> acceptRoomInvite({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixAcceptRoomInvite(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
 
-Future<void> rejectRoomInvite({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixRejectRoomInvite(roomId: roomId);
+Future<void> rejectRoomInvite({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixRejectRoomInvite(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
 
-Future<void> withdrawRoomKnock({required String roomId}) =>
-    RustLib.instance.api.crateApiMatrixWithdrawRoomKnock(roomId: roomId);
+Future<void> withdrawRoomKnock({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixWithdrawRoomKnock(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
+
+/// Leave a joined non-space room.
+Future<void> leaveRoom({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixLeaveRoom(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
+
+/// Return the editable state of a joined non-space room.
+Future<RoomDetails> getRoomDetails({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomDetails(roomId: roomId);
+
+/// Invite a Matrix user to a joined non-space room.
+Future<void> inviteUserToRoom({
+  required String accountUserId,
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixInviteUserToRoom(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  userId: userId,
+);
+
+/// Update a joined non-space room's name and topic.
+Future<RoomDetailsUpdate> updateRoomDetails({
+  required String accountUserId,
+  required String roomId,
+  required String name,
+  required bool updateName,
+  required bool updateTopic,
+  String? topic,
+}) => RustLib.instance.api.crateApiMatrixUpdateRoomDetails(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  name: name,
+  updateName: updateName,
+  updateTopic: updateTopic,
+  topic: topic,
+);
+
+/// Upload and apply a new avatar for a joined non-space room.
+Future<RoomAvatarUpdate> uploadRoomAvatar({
+  required String accountUserId,
+  required String roomId,
+  required String contentType,
+  required List<int> data,
+}) => RustLib.instance.api.crateApiMatrixUploadRoomAvatar(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  contentType: contentType,
+  data: data,
+);
+
+/// Return whether a room has an explicit mute push rule.
+Future<bool> isRoomMuted({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixIsRoomMuted(roomId: roomId);
+
+/// Create or remove an explicit mute push rule for a room.
+Future<void> setRoomMuted({
+  required String accountUserId,
+  required String roomId,
+  required bool muted,
+}) => RustLib.instance.api.crateApiMatrixSetRoomMuted(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  muted: muted,
+);
+
+/// Lightweight authoritative read of the room's pinned event ids (no event
+/// loading). Used by the message long-press menu to decide whether "置顶" or
+/// "取消置顶" applies; failures must be retried instead of falling back to a
+/// local state-store snapshot that may lag the server in either direction.
+Future<List<String>> getPinnedEventIds({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixGetPinnedEventIds(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
+
+/// Set a message's membership in `m.room.pinned_events` to the requested
+/// state. Idempotent: applying an already-held state is a no-op, so a retry
+/// after a caller-side timeout (the first attempt may still be running
+/// server-side, driven by the queue's background task) cannot flip the pin a
+/// second time — a toggle would, and the UI would then contradict the
+/// server state.
+Future<bool> setPinnedMessage({
+  required String accountUserId,
+  required String roomId,
+  required String eventId,
+  required bool pinned,
+}) => RustLib.instance.api.crateApiMatrixSetPinnedMessage(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  eventId: eventId,
+  pinned: pinned,
+);
+
+/// Load every accessible pinned message in display order.
+Future<List<ChatMessage>> getPinnedMessages({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetPinnedMessages(roomId: roomId);
+
+/// Explicitly mark all currently loaded messages in a room as read.
+/// Returns whether the marked-unread flag was actually cleared (the auto
+/// path skips the clear when one is already in flight for this room).
+Future<bool> markRoomAsRead({
+  required String accountUserId,
+  required String roomId,
+  required bool explicit,
+}) => RustLib.instance.api.crateApiMatrixMarkRoomAsRead(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  explicit: explicit,
+);
+
+/// Persist an explicit unread marker for a room in room account data.
+Future<void> markRoomUnread({
+  required String accountUserId,
+  required String roomId,
+}) => RustLib.instance.api.crateApiMatrixMarkRoomUnread(
+  accountUserId: accountUserId,
+  roomId: roomId,
+);
+
+/// List the Matrix user IDs in the current account's ignored-user list.
+Future<IgnoredUsers> getIgnoredUsers() =>
+    RustLib.instance.api.crateApiMatrixGetIgnoredUsers();
+
+/// Add or remove one user from the account's ignored-user list.
+///
+/// Returns the complete post-write list so callers can persist the
+/// authoritative snapshot instead of merging a delta into a possibly
+/// unknown local baseline.
+Future<List<String>> setUserIgnored({
+  required String accountUserId,
+  required String userId,
+  required bool ignored,
+}) => RustLib.instance.api.crateApiMatrixSetUserIgnored(
+  accountUserId: accountUserId,
+  userId: userId,
+  ignored: ignored,
+);
+
+Future<List<KnockRequest>> getRoomKnockRequests({required String roomId}) =>
+    RustLib.instance.api.crateApiMatrixGetRoomKnockRequests(roomId: roomId);
+
+/// Accept a knock request by inviting the requester to the room.
+Future<void> approveRoomKnock({
+  required String accountUserId,
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixApproveRoomKnock(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  userId: userId,
+);
+
+/// Decline a knock request by removing the requester from the room.
+Future<void> rejectRoomKnock({
+  required String accountUserId,
+  required String roomId,
+  required String userId,
+}) => RustLib.instance.api.crateApiMatrixRejectRoomKnock(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  userId: userId,
+);
 
 Future<List<Space>> getSpaces() =>
     RustLib.instance.api.crateApiMatrixGetSpaces();
@@ -505,14 +742,23 @@ Future<List<Space>> getSpaces() =>
 Future<SpaceDetails> getSpaceDetails({required String spaceId}) =>
     RustLib.instance.api.crateApiMatrixGetSpaceDetails(spaceId: spaceId);
 
-Future<List<ChatRoom>> getSpaceChildren({required String spaceId}) =>
-    RustLib.instance.api.crateApiMatrixGetSpaceChildren(spaceId: spaceId);
+Future<List<ChatRoom>> getSpaceChildren({
+  required String spaceId,
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetSpaceChildren(
+  spaceId: spaceId,
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 Future<void> updateSpaceDetails({
+  required String accountUserId,
   required String spaceId,
   required String name,
   String? topic,
 }) => RustLib.instance.api.crateApiMatrixUpdateSpaceDetails(
+  accountUserId: accountUserId,
   spaceId: spaceId,
   name: name,
   topic: topic,
@@ -520,26 +766,40 @@ Future<void> updateSpaceDetails({
 
 /// Add a room to a space, and advertise the reciprocal parent relation.
 Future<void> addRoomToSpace({
+  required String accountUserId,
   required String spaceId,
   required String roomId,
 }) => RustLib.instance.api.crateApiMatrixAddRoomToSpace(
+  accountUserId: accountUserId,
   spaceId: spaceId,
   roomId: roomId,
 );
 
 Future<void> removeRoomFromSpace({
+  required String accountUserId,
   required String spaceId,
   required String roomId,
 }) => RustLib.instance.api.crateApiMatrixRemoveRoomFromSpace(
+  accountUserId: accountUserId,
   spaceId: spaceId,
   roomId: roomId,
 );
 
-Future<void> leaveSpace({required String spaceId}) =>
-    RustLib.instance.api.crateApiMatrixLeaveSpace(spaceId: spaceId);
+Future<void> leaveSpace({
+  required String accountUserId,
+  required String spaceId,
+}) => RustLib.instance.api.crateApiMatrixLeaveSpace(
+  accountUserId: accountUserId,
+  spaceId: spaceId,
+);
 
-Future<List<ChatRoom>> getUngroupedRooms() =>
-    RustLib.instance.api.crateApiMatrixGetUngroupedRooms();
+Future<List<ChatRoom>> getUngroupedRooms({
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixGetUngroupedRooms(
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 Future<List<Contact>> getContacts() =>
     RustLib.instance.api.crateApiMatrixGetContacts();
@@ -618,8 +878,15 @@ Future<String?> getRoomAvatarUrl({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetRoomAvatarUrl(roomId: roomId);
 
 /// Search rooms by name.
-Future<List<ChatRoom>> searchRooms({required String query}) =>
-    RustLib.instance.api.crateApiMatrixSearchRooms(query: query);
+Future<List<ChatRoom>> searchRooms({
+  required String query,
+  List<String>? ignoredUserIds,
+  required bool authoritative,
+}) => RustLib.instance.api.crateApiMatrixSearchRooms(
+  query: query,
+  ignoredUserIds: ignoredUserIds,
+  authoritative: authoritative,
+);
 
 /// Load more messages (paginated) from before a given event.
 Future<List<ChatMessage>> getMessagesBefore({
@@ -656,6 +923,25 @@ class AccountInfo {
           userId == other.userId &&
           deviceId == other.deviceId &&
           homeserverUrl == other.homeserverUrl;
+}
+
+/// Logout the active user and remove its data.
+class AccountRemovalResult {
+  /// The account is already removed when this is set; only stale local SDK
+  /// files may remain and can be cleaned on a later app start.
+  final String? cleanupError;
+
+  const AccountRemovalResult({this.cleanupError});
+
+  @override
+  int get hashCode => cleanupError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountRemovalResult &&
+          runtimeType == other.runtimeType &&
+          cleanupError == other.cleanupError;
 }
 
 /// A single log entry visible to the user.
@@ -902,14 +1188,29 @@ class ChatRoom {
   final String id;
   final String name;
   final String? avatarUrl;
+
+  /// Event IDs of the current name/avatar state. Unlike display values,
+  /// these distinguish repeated values in optimistic-update reconciliation.
+  final String? nameEventId;
+  final String? avatarEventId;
   final String lastMessage;
   final String? lastMessageSender;
   final String lastMessageTime;
+
+  /// Event ID of the latest timeline event (empty when none): the room's
+  /// revision token for optimistic-state baselines.
+  final String lastEventId;
   final int unreadCount;
+
+  /// Whether the user explicitly marked this room as unread.
+  final bool isMarkedUnread;
 
   /// "dm", "group", or "space"
   final String roomType;
   final bool isEncrypted;
+
+  /// Whether an explicit mute push rule exists for this room.
+  final bool isMuted;
 
   /// "joined", "invited", "knocked", "left", or "banned"
   final String roomState;
@@ -918,12 +1219,17 @@ class ChatRoom {
     required this.id,
     required this.name,
     this.avatarUrl,
+    this.nameEventId,
+    this.avatarEventId,
     required this.lastMessage,
     this.lastMessageSender,
     required this.lastMessageTime,
+    required this.lastEventId,
     required this.unreadCount,
+    required this.isMarkedUnread,
     required this.roomType,
     required this.isEncrypted,
+    required this.isMuted,
     required this.roomState,
   });
 
@@ -932,12 +1238,17 @@ class ChatRoom {
       id.hashCode ^
       name.hashCode ^
       avatarUrl.hashCode ^
+      nameEventId.hashCode ^
+      avatarEventId.hashCode ^
       lastMessage.hashCode ^
       lastMessageSender.hashCode ^
       lastMessageTime.hashCode ^
+      lastEventId.hashCode ^
       unreadCount.hashCode ^
+      isMarkedUnread.hashCode ^
       roomType.hashCode ^
       isEncrypted.hashCode ^
+      isMuted.hashCode ^
       roomState.hashCode;
 
   @override
@@ -948,12 +1259,17 @@ class ChatRoom {
           id == other.id &&
           name == other.name &&
           avatarUrl == other.avatarUrl &&
+          nameEventId == other.nameEventId &&
+          avatarEventId == other.avatarEventId &&
           lastMessage == other.lastMessage &&
           lastMessageSender == other.lastMessageSender &&
           lastMessageTime == other.lastMessageTime &&
+          lastEventId == other.lastEventId &&
           unreadCount == other.unreadCount &&
+          isMarkedUnread == other.isMarkedUnread &&
           roomType == other.roomType &&
           isEncrypted == other.isEncrypted &&
+          isMuted == other.isMuted &&
           roomState == other.roomState;
 }
 
@@ -1080,6 +1396,62 @@ class FormattedMessageInput {
           formattedBody == other.formattedBody &&
           mentionedUserIds == other.mentionedUserIds &&
           mentionsRoom == other.mentionsRoom;
+}
+
+/// The account's ignored-user list, tagged with its source freshness.
+class IgnoredUsers {
+  final List<String> userIds;
+
+  /// True when fetched from the server; false when served from the local
+  /// state store (offline fallback). Pending confirmed local writes are
+  /// applied to the fallback, but it can still lag remote changes unless
+  /// the caller is handling a completed sync notification.
+  final bool fromServer;
+
+  const IgnoredUsers({required this.userIds, required this.fromServer});
+
+  @override
+  int get hashCode => userIds.hashCode ^ fromServer.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is IgnoredUsers &&
+          runtimeType == other.runtimeType &&
+          userIds == other.userIds &&
+          fromServer == other.fromServer;
+}
+
+/// A pending request to join a knock-enabled room.
+class KnockRequest {
+  final String userId;
+  final String displayName;
+  final String? avatarUrl;
+  final String? reason;
+
+  const KnockRequest({
+    required this.userId,
+    required this.displayName,
+    this.avatarUrl,
+    this.reason,
+  });
+
+  @override
+  int get hashCode =>
+      userId.hashCode ^
+      displayName.hashCode ^
+      avatarUrl.hashCode ^
+      reason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KnockRequest &&
+          runtimeType == other.runtimeType &&
+          userId == other.userId &&
+          displayName == other.displayName &&
+          avatarUrl == other.avatarUrl &&
+          reason == other.reason;
 }
 
 /// A persisted log file's name and contents.
@@ -1286,6 +1658,103 @@ class Reaction {
           myEventId == other.myEventId;
 }
 
+class RoomAvatarUpdate {
+  final String avatarUrl;
+  final String eventId;
+
+  const RoomAvatarUpdate({required this.avatarUrl, required this.eventId});
+
+  @override
+  int get hashCode => avatarUrl.hashCode ^ eventId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomAvatarUpdate &&
+          runtimeType == other.runtimeType &&
+          avatarUrl == other.avatarUrl &&
+          eventId == other.eventId;
+}
+
+/// Mutable metadata for a joined non-space room.
+class RoomDetails {
+  final String id;
+  final String name;
+  final bool hasExplicitName;
+  final String? avatarUrl;
+  final String? nameEventId;
+  final String? avatarEventId;
+  final String? topicEventId;
+  final String? topic;
+
+  const RoomDetails({
+    required this.id,
+    required this.name,
+    required this.hasExplicitName,
+    this.avatarUrl,
+    this.nameEventId,
+    this.avatarEventId,
+    this.topicEventId,
+    this.topic,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      hasExplicitName.hashCode ^
+      avatarUrl.hashCode ^
+      nameEventId.hashCode ^
+      avatarEventId.hashCode ^
+      topicEventId.hashCode ^
+      topic.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomDetails &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          hasExplicitName == other.hasExplicitName &&
+          avatarUrl == other.avatarUrl &&
+          nameEventId == other.nameEventId &&
+          avatarEventId == other.avatarEventId &&
+          topicEventId == other.topicEventId &&
+          topic == other.topic;
+}
+
+class RoomDetailsUpdate {
+  final String? nameEventId;
+  final String? topicEventId;
+  final String? nameError;
+  final String? topicError;
+
+  const RoomDetailsUpdate({
+    this.nameEventId,
+    this.topicEventId,
+    this.nameError,
+    this.topicError,
+  });
+
+  @override
+  int get hashCode =>
+      nameEventId.hashCode ^
+      topicEventId.hashCode ^
+      nameError.hashCode ^
+      topicError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomDetailsUpdate &&
+          runtimeType == other.runtimeType &&
+          nameEventId == other.nameEventId &&
+          topicEventId == other.topicEventId &&
+          nameError == other.nameError &&
+          topicError == other.topicError;
+}
+
 class SessionTokenUpdate {
   final String userId;
   final String accessToken;
@@ -1486,9 +1955,26 @@ sealed class SyncEvent with _$SyncEvent {
   /// A sync cycle completed (rooms may have new messages).
   const factory SyncEvent.syncCompleted() = SyncEvent_SyncCompleted;
 
+  /// Specific sync events were dropped; all interested views must refresh.
+  const factory SyncEvent.fullRefreshRequired() = SyncEvent_FullRefreshRequired;
+
+  /// Room-list metadata changed without requiring a timeline refresh.
+  const factory SyncEvent.roomListChanged() = SyncEvent_RoomListChanged;
+
   /// A message was sent (room list should refresh).
   const factory SyncEvent.messageSent({required String roomId}) =
       SyncEvent_MessageSent;
+
+  /// A room's pinned-event state changed.
+  const factory SyncEvent.pinnedMessagesChanged({required String roomId}) =
+      SyncEvent_PinnedMessagesChanged;
+
+  /// A room's membership state changed.
+  const factory SyncEvent.roomMembersChanged({required String roomId}) =
+      SyncEvent_RoomMembersChanged;
+
+  /// The account's ignored-user list changed.
+  const factory SyncEvent.ignoredUsersChanged() = SyncEvent_IgnoredUsersChanged;
 }
 
 /// Ephemeral "who is typing right now" update for a room, pushed to Dart.
