@@ -26,7 +26,7 @@ use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
 use super::{
-    image_info_dimensions, media_caption_parts, mentions_parts, sticker_info_dimensions,
+    api_err, image_info_dimensions, media_caption_parts, mentions_parts, sticker_info_dimensions,
     text_message_parts, uint_to_i32, unable_to_decrypt_message, ChatMessage, MessageReader,
     MessageType, PollAnswerInfo, PollAnswerResult, PollInfo, Reaction,
 };
@@ -35,7 +35,9 @@ static TIMELINES: Lazy<Mutex<HashMap<String, Arc<Timeline>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn timeline_key(client: &Client, room: &Room) -> Result<String, String> {
-    let user_id = client.user_id().ok_or("No active user")?;
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("rooms", "No active user".to_string()))?;
     Ok(format!("{}\n{}", user_id, room.room_id()))
 }
 
@@ -61,7 +63,7 @@ async fn get_or_create_timeline(client: &Client, room: &Room) -> Result<Arc<Time
             .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)
             .build()
             .await
-            .map_err(|error| format!("构建房间时间线失败: {error}"))?,
+            .map_err(|error| api_err("rooms", format!("构建房间时间线失败: {error}")))?,
     );
     let mut timelines = TIMELINES.lock().await;
     Ok(timelines
@@ -133,7 +135,7 @@ async fn ensure_initial_window(timeline: &Timeline, target: usize) -> Result<(),
         let hit_start = timeline
             .paginate_backwards(requested)
             .await
-            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("分页加载房间时间线失败: {error}")))?;
         let updated_count = remote_event_count(&snapshot(timeline).await);
         if hit_start || updated_count <= count {
             return Ok(());
@@ -233,7 +235,7 @@ async fn pinned_ids_from_store(room: &Room) -> Result<Vec<matrix_sdk::ruma::Owne
             // A corrupt local state event is not "no pins": treating it as
             // empty would decide the wrong menu direction. Surface the
             // error, same as `get_pinned_event_ids`'s store fallback.
-            .map_err(|error| format!("无法解析本地置顶状态，请重试: {error}")),
+            .map_err(|error| api_err("pinned", format!("无法解析本地置顶状态，请重试: {error}"))),
         // `get_state_event_static` is a pure local-store read: `None`
         // means the synced store definitively has no such state event
         // (the room was never pinned) — show the empty state rather
@@ -242,7 +244,7 @@ async fn pinned_ids_from_store(room: &Room) -> Result<Vec<matrix_sdk::ruma::Owne
         // The store read itself failed: attribute the error to the STORE,
         // not to the network read that triggered the fallback (its
         // `source_error` would mislead — the network may be fine).
-        Err(error) => Err(format!("无法读取本地置顶状态，请重试: {error}")),
+        Err(error) => Err(api_err("pinned", format!("无法读取本地置顶状态，请重试: {error}"))),
     }
 }
 
@@ -288,11 +290,11 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
     let (room_event_cache, _event_cache_drop_handles) = room
         .event_cache()
         .await
-        .map_err(|error| format!("加载置顶消息失败: {error}"))?;
+        .map_err(|error| api_err("pinned", format!("加载置顶消息失败: {error}")))?;
     let (events, mut updates) = room_event_cache
         .subscribe_to_pinned_events()
         .await
-        .map_err(|error| format!("加载置顶消息失败: {error}"))?;
+        .map_err(|error| api_err("pinned", format!("加载置顶消息失败: {error}")))?;
     let mut events: matrix_sdk_ui::eyeball_im::Vector<_> = events.into();
     // Bounded cache wait. Stage budgets: 15s list read + 20s cache wait +
     // 10s pinned-timeline build + 25s focused fetch = 70s, below the
@@ -650,7 +652,7 @@ pub(super) async fn get_messages_before(
         let hit_start = timeline
             .paginate_backwards(100u16)
             .await
-            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("分页加载房间时间线失败: {error}")))?;
         if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
             anchor_visible = true;
             break;
@@ -667,7 +669,7 @@ pub(super) async fn get_messages_before(
             let hit_start = timeline
                 .paginate_backwards(100u16)
                 .await
-                .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+                .map_err(|error| api_err("rooms", format!("分页加载房间时间线失败: {error}")))?;
             if raw_event_position(&snapshot(&timeline).await, from_event_id).is_some() {
                 anchor_visible = true;
                 break;
@@ -687,7 +689,7 @@ pub(super) async fn get_messages_before(
     }
     let items = snapshot(&timeline).await;
     let position = raw_event_position(&items, from_event_id)
-        .ok_or_else(|| "分页锚点已离开当前时间线窗口，请重试。".to_owned())?;
+        .ok_or_else(|| api_err("rooms", "分页锚点已离开当前时间线窗口，请重试。".to_owned()))?;
     let mut before = convert_snapshot(room, &items[..position]).await;
     // Fill the page: the caller re-anchors at the page's oldest, so every
     // returned message must be genuinely older than its anchor. When the
@@ -702,10 +704,10 @@ pub(super) async fn get_messages_before(
         let hit_start = timeline
             .paginate_backwards(100u16)
             .await
-            .map_err(|error| format!("分页加载房间时间线失败: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("分页加载房间时间线失败: {error}")))?;
         let items = snapshot(&timeline).await;
         let position = raw_event_position(&items, from_event_id)
-            .ok_or_else(|| "分页锚点已离开当前时间线窗口，请重试。".to_owned())?;
+            .ok_or_else(|| api_err("rooms", "分页锚点已离开当前时间线窗口，请重试。".to_owned()))?;
         before = convert_snapshot(room, &items[..position]).await;
         if hit_start {
             break;
@@ -728,7 +730,7 @@ async fn focused_messages_before(
     limit: usize,
 ) -> Result<Vec<ChatMessage>, String> {
     let target = matrix_sdk::ruma::EventId::parse(from_event_id)
-        .map_err(|error| format!("无效的分页事件 ID: {error}"))?;
+        .map_err(|error| api_err("rooms", format!("无效的分页事件 ID: {error}")))?;
     let timeline = tokio::time::timeout(
         Duration::from_secs(25),
         TimelineBuilder::new(room)
@@ -742,11 +744,11 @@ async fn focused_messages_before(
             .build(),
     )
     .await
-    .map_err(|_| "加载分页锚点超时，请重试。".to_owned())?
-    .map_err(|error| format!("加载分页锚点失败: {error}"))?;
+    .map_err(|_| api_err("rooms", "加载分页锚点超时，请重试。".to_owned()))?
+    .map_err(|error| api_err("rooms", format!("加载分页锚点失败: {error}")))?;
     let items = snapshot(&timeline).await;
     let position = raw_event_position(&items, from_event_id)
-        .ok_or_else(|| "分页锚点不可用，请重试。".to_owned())?;
+        .ok_or_else(|| api_err("rooms", "分页锚点不可用，请重试。".to_owned()))?;
     let before = convert_snapshot(room, &items[..position]).await;
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }

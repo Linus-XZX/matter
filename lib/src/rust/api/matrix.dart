@@ -24,6 +24,19 @@ List<AppLogEntry> getRecentLogs() =>
 /// Clear the buffered diagnostic logs.
 void clearAppLogs() => RustLib.instance.api.crateApiMatrixClearAppLogs();
 
+/// Write a log entry from the Dart side into the same app-wide log system
+/// (ring buffer, persisted file, live stream) used by Rust. Unknown levels
+/// fall back to "info".
+void logAppMessage({
+  required String level,
+  required String tag,
+  required String message,
+}) => RustLib.instance.api.crateApiMatrixLogAppMessage(
+  level: level,
+  tag: tag,
+  message: message,
+);
+
 /// Read the persisted app logs (`matter.log` and its rotated backup), oldest
 /// first, for the log bundle export. Unlike `get_recent_logs`, these are not
 /// limited to the 5,000-entry ring buffer.

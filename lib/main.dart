@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,6 +22,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await cleanupStaleDecryptedVideoSources();
   await RustLib.init();
+  _installDartErrorLogging();
 
   var hasSessions = false;
   try {
@@ -29,11 +31,11 @@ Future<void> main() async {
       final dataDir = (await getApplicationSupportDirectory()).path;
       await completePendingSessionRemovals(dataDir: dataDir);
     } catch (e) {
-      debugPrint('Pending account cleanup failed: $e');
+      _logDartError('startup', 'Pending account cleanup failed: $e');
     }
     hasSessions = (await loadAllSessions()).isNotEmpty;
   } catch (e) {
-    debugPrint('Bootstrap check failed: $e');
+    _logDartError('startup', 'Bootstrap check failed: $e');
   }
 
   SystemChrome.setSystemUIOverlayStyle(
@@ -60,6 +62,31 @@ Future<void> main() async {
       child: _AppRoot(hasSessions: hasSessions),
     ),
   );
+}
+
+/// Record a Dart-side error in the app-wide log (the same ring buffer,
+/// persisted file, and live stream the Rust side writes to), and keep it
+/// visible in debug consoles.
+void _logDartError(String tag, String message) {
+  debugPrint(message);
+  rust.logAppMessage(level: 'error', tag: tag, message: message);
+}
+
+/// Forward uncaught Dart errors — framework errors and unhandled async
+/// errors — into the app-wide log. These are otherwise invisible in release
+/// builds, where `debugPrint` output is dropped.
+void _installDartErrorLogging() {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    _logDartError(
+      'flutter',
+      '${details.exceptionAsString()}\n${details.stack}',
+    );
+  };
+  ui.PlatformDispatcher.instance.onError = (error, stack) {
+    _logDartError('dart', '$error\n$stack');
+    return true;
+  };
 }
 
 class _AppRoot extends ConsumerStatefulWidget {
@@ -112,7 +139,7 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       );
     } catch (error) {
       // Automatic checks stay silent; users can retry from Settings.
-      debugPrint('Automatic update check failed: $error');
+      _logDartError('startup', 'Automatic update check failed: $error');
     }
   }
 
@@ -157,7 +184,10 @@ class _AppRootState extends ConsumerState<_AppRoot> {
             restoredDisplayName = await loadDisplayName(session.userId);
           }
         } catch (e) {
-          debugPrint('Failed to restore session for ${session.userId}: $e');
+          _logDartError(
+            'startup',
+            'Failed to restore session for ${session.userId}: $e',
+          );
         }
       }
 
@@ -175,7 +205,7 @@ class _AppRootState extends ConsumerState<_AppRoot> {
         );
       }
     } catch (e) {
-      debugPrint('Session restore failed: $e');
+      _logDartError('startup', 'Session restore failed: $e');
       restoredActiveId = null;
     }
 
