@@ -4,7 +4,7 @@ framework_path = File.join(rust_target_dir, 'rust_lib_matter.framework')
 
 Pod::Spec.new do |s|
   s.name             = 'rust_lib_matter'
-  s.version          = '0.1.5'
+  s.version          = '0.1.6'
   s.summary          = 'Rust core library for Matter'
   s.homepage         = 'https://github.com/slopwerks/matter'
   s.license          = { :type => 'MIT' }

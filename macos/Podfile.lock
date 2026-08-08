@@ -2,7 +2,7 @@ PODS:
   - flutter_image_compress_macos (1.0.0):
     - FlutterMacOS
   - FlutterMacOS (1.0.0)
-  - rust_lib_matter (0.1.5)
+  - rust_lib_matter (0.1.6)
 
 DEPENDENCIES:
   - flutter_image_compress_macos (from `Flutter/ephemeral/.symlinks/plugins/flutter_image_compress_macos/macos`)
