@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/markdown/markdown_source_store.dart';
+import '../../features/matrix_html/matrix_html_parser.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
@@ -641,7 +642,11 @@ class MessageGroupWidget extends ConsumerWidget {
       fontSize: 15,
       height: 1.35,
     );
-    final urlMatches = detectMessageUrls(message.content);
+    final formattedBody = message.formattedBody;
+    final previewTextSource = formattedBody == null || formattedBody.isEmpty
+        ? message.content
+        : matrixHtmlTextExcludingCode(formattedBody);
+    final urlMatches = detectMessageUrls(previewTextSource);
     Uri? previewUri;
     for (final match in urlMatches) {
       if (matrixUserIdFromUri(match.uri) == null) {
