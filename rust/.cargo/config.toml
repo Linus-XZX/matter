@@ -5,3 +5,11 @@ rustflags = [
   "-C", "link-arg=aarch64-apple-ios",
   "-C", "link-arg=-miphoneos-version-min=17.0",
 ]
+
+[target.aarch64-apple-ios-sim]
+linker = "clang"
+rustflags = [
+  "-C", "link-arg=-target",
+  "-C", "link-arg=arm64-apple-ios-simulator",
+  "-C", "link-arg=-mios-simulator-version-min=17.0",
+]
