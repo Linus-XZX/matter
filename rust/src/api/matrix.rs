@@ -207,6 +207,13 @@ fn app_log(level: &str, tag: &str, message: String) {
     }
 }
 
+/// Record an API failure in the app log and return the message for
+/// propagation to Dart, so no error crosses the FFI boundary silently.
+fn api_err(tag: &str, message: String) -> String {
+    app_log("error", tag, message.clone());
+    message
+}
+
 /// Stream app log entries from Rust → Dart (live).
 #[frb]
 pub fn watch_app_logs(sink: crate::frb_generated::StreamSink<AppLogEntry>) {
@@ -245,6 +252,18 @@ pub fn clear_app_logs() {
     if let Ok(mut ring) = LOG_RING.lock() {
         ring.clear();
     }
+}
+
+/// Write a log entry from the Dart side into the same app-wide log system
+/// (ring buffer, persisted file, live stream) used by Rust. Unknown levels
+/// fall back to "info".
+#[frb(sync)]
+pub fn log_app_message(level: String, tag: String, message: String) {
+    let level = match level.as_str() {
+        "error" | "warn" => level,
+        _ => "info".to_string(),
+    };
+    app_log(&level, &tag, message);
 }
 
 /// A persisted log file's name and contents.
@@ -595,7 +614,7 @@ where
     let future = {
         let mut tails = MUTATION_TAILS
             .lock()
-            .map_err(|_| "操作队列不可用，请重试。".to_string())?;
+            .map_err(|_| api_err("mutation", "操作队列不可用，请重试。".to_string()))?;
         let previous = tails
             .get(&key)
             .map(|tail| (tail.future.clone(), tail.depth));
@@ -609,7 +628,7 @@ where
             .as_ref()
             .is_some_and(|(_, depth)| *depth >= MUTATION_QUEUE_MAX_DEPTH)
         {
-            return Err(MUTATION_QUEUE_FULL_MESSAGE.to_string());
+            return Err(api_err("mutation", MUTATION_QUEUE_FULL_MESSAGE.to_string()));
         }
         let depth = previous.as_ref().map_or(1, |(_, depth)| depth + 1);
         let previous = previous.map(|(future, _)| future);
@@ -715,7 +734,7 @@ where
         // stale queue entry that panics every successor. Catch it and turn
         // it into a regular error so cleanup always runs.
         .catch_unwind()
-        .map(|result| result.unwrap_or_else(|_| Err("操作执行异常，请重试。".to_string())))
+        .map(|result| result.unwrap_or_else(|_| Err(api_err("mutation", "操作执行异常，请重试。".to_string()))))
         .boxed()
         .shared();
         // Chain on a unit-typed projection so operations with different
@@ -821,7 +840,7 @@ where
         enqueue_mutation_inner(key, protected_operation, drop_on_execution_timeout),
     )
     .await
-    .map_err(|_| MUTATION_TIMEOUT_MESSAGE.to_string())?
+    .map_err(|_| api_err("mutation", MUTATION_TIMEOUT_MESSAGE.to_string()))?
 }
 
 /// Total bound for a non-queued P0 write. These hold the client lease
@@ -836,7 +855,7 @@ where
 {
     tokio::time::timeout(std::time::Duration::from_secs(90), operation)
         .await
-        .map_err(|_| "操作超时，请重试。".to_string())?
+        .map_err(|_| api_err("mutation", "操作超时，请重试。".to_string()))?
 }
 
 async fn synced_marked_unread(room: &Room) -> bool {
@@ -1711,7 +1730,12 @@ fn install_session_token_callback(client: &Client) -> Result<(), String> {
                 Ok(())
             }),
         )
-        .map_err(|error| format!("Failed to install session token callback: {error}"))
+        .map_err(|error| {
+            api_err(
+                "auth",
+                format!("Failed to install session token callback: {error}"),
+            )
+        })
 }
 
 #[frb]
@@ -1919,7 +1943,7 @@ async fn lock_subscription_state<'a, T>(
 > {
     let subscription_user = subscription_user.read().await;
     if !subscription_user_matches(subscription_user.as_deref(), account_user_id) {
-        return Err(inactive_error.to_string());
+        return Err(api_err("sync", inactive_error.to_string()));
     }
     let state = state.lock().await;
     Ok((subscription_user, state))
@@ -2607,7 +2631,12 @@ async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), S
     remove_dir_all_if_exists(&sdk_dir)
         .await
         .map(|_| ())
-        .map_err(|error| format!("Failed to delete SDK store for {user_id}: {error}"))
+        .map_err(|error| {
+            api_err(
+                "auth",
+                format!("Failed to delete SDK store for {user_id}: {error}"),
+            )
+        })
 }
 
 /// Retry SDK-store cleanup for an account whose persisted removal transaction
@@ -3404,9 +3433,12 @@ async fn load_room_sticker_packs(
         .get_state_events_static::<ruma::events::image_pack::RoomImagePackEventContent>()
         .await
         .map_err(|e| {
-            format!(
-                "Failed to load sticker packs for room {}: {e}",
-                room.room_id()
+            api_err(
+                "rooms",
+                format!(
+                    "Failed to load sticker packs for room {}: {e}",
+                    room.room_id()
+                ),
             )
         })?;
 
@@ -3786,11 +3818,11 @@ fn uiaa_to_auth_result(uiaa_info: &UiaaInfo) -> AuthResult {
 }
 
 fn get_room_by_id(client: &Client, room_id: &str) -> Result<Room, String> {
-    let parsed_room_id =
-        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let parsed_room_id = matrix_sdk::ruma::RoomId::parse(room_id)
+        .map_err(|e| api_err("rooms", format!("Invalid room ID: {e}")))?;
     client
         .get_room(parsed_room_id.as_ref())
-        .ok_or_else(|| format!("房间不存在: {room_id}"))
+        .ok_or_else(|| api_err("rooms", format!("房间不存在: {room_id}")))
 }
 
 async fn remove_dir_all_if_exists(path: &Path) -> Result<bool, String> {
@@ -3926,9 +3958,12 @@ pub async fn register_get_uiaa_session(
         "auth",
         format!("register_get_uiaa_session: user={}", username),
     );
-    let client = get_client()
-        .await
-        .ok_or("No client created. Call create_client first.")?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "auth",
+            "No client created. Call create_client first.".to_string(),
+        )
+    })?;
 
     let mut request = RegistrationRequest::new();
     request.username = Some(username);
@@ -3993,9 +4028,12 @@ pub async fn register_complete_uiaa(
         "auth",
         format!("register_complete_uiaa: user={}", username),
     );
-    let client = get_client()
-        .await
-        .ok_or("No client created. Call create_client first.")?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "auth",
+            "No client created. Call create_client first.".to_string(),
+        )
+    })?;
 
     let mut request = RegistrationRequest::new();
     request.username = Some(username);
@@ -4013,7 +4051,7 @@ pub async fn register_complete_uiaa(
             drop(client);
             let finalized = finalize_pending()
                 .await
-                .map_err(|e| format!("Finalization failed: {e}"))?;
+                .map_err(|e| api_err("auth", format!("Finalization failed: {e}")))?;
             info!("Account finalized after registration: {}", finalized);
             Ok(AuthResult {
                 success: true,
@@ -4065,9 +4103,12 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
         "auth",
         format!("login_with_password: user={}", username),
     );
-    let client = get_client()
-        .await
-        .ok_or("No client created. Call create_client first.")?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "auth",
+            "No client created. Call create_client first.".to_string(),
+        )
+    })?;
 
     match client
         .matrix_auth()
@@ -4081,7 +4122,7 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
             drop(client);
             let finalized = finalize_pending()
                 .await
-                .map_err(|e| format!("Finalization failed: {e}"))?;
+                .map_err(|e| api_err("auth", format!("Finalization failed: {e}")))?;
             app_log(
                 "info",
                 "auth",
@@ -4122,12 +4163,19 @@ pub async fn login_with_token(
     device_id: String,
     refresh_token: Option<String>,
 ) -> Result<AuthResult, String> {
-    let client = get_client()
-        .await
-        .ok_or("No client created. Call create_client first.")?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "auth",
+            "No client created. Call create_client first.".to_string(),
+        )
+    })?;
 
-    let parsed_user_id = matrix_sdk::ruma::UserId::parse(&user_id)
-        .map_err(|e| friendly_auth_error(&format!("无效的用户 ID: {e}"), "用户 ID 格式无效"))?;
+    let parsed_user_id = matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| {
+        api_err(
+            "auth",
+            friendly_auth_error(&format!("无效的用户 ID: {e}"), "用户 ID 格式无效"),
+        )
+    })?;
     let parsed_device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
 
     let session = MatrixSession {
@@ -4146,9 +4194,12 @@ pub async fn login_with_token(
         .restore_session(session, RoomLoadSettings::default())
         .await
         .map_err(|e| {
-            friendly_auth_error(
-                &format!("Restore session failed: {e}"),
-                "Token 登录失败，请检查输入信息",
+            api_err(
+                "auth",
+                friendly_auth_error(
+                    &format!("Restore session failed: {e}"),
+                    "Token 登录失败，请检查输入信息",
+                ),
             )
         })?;
 
@@ -4167,7 +4218,7 @@ pub async fn login_with_token(
 
     let final_client = get_client()
         .await
-        .ok_or_else(|| "Token 登录成功，但无法获取最终会话".to_string())?;
+        .ok_or_else(|| api_err("auth", "Token 登录成功，但无法获取最终会话".to_string()))?;
 
     Ok(AuthResult {
         success: true,
@@ -4216,19 +4267,23 @@ pub async fn get_active_user_id() -> Option<String> {
 /// homeserver. Used to populate the profile editor with current values.
 #[frb]
 pub async fn get_profile() -> Result<UserProfile, String> {
-    let client = get_client().await.ok_or("No client created.")?;
-    let user_id = client.user_id().ok_or("Not logged in.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("auth", "No client created.".to_string()))?;
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("auth", "Not logged in.".to_string()))?;
 
     let account = client.account();
     let display_name = account
         .get_display_name()
         .await
-        .map_err(|e| format!("Failed to fetch display name: {e}"))?
+        .map_err(|e| api_err("auth", format!("Failed to fetch display name: {e}")))?
         .unwrap_or_default();
     let avatar_url = account
         .get_avatar_url()
         .await
-        .map_err(|e| format!("Failed to fetch avatar: {e}"))?
+        .map_err(|e| api_err("auth", format!("Failed to fetch avatar: {e}")))?
         .map(|u| u.to_string());
 
     Ok(UserProfile {
@@ -4241,7 +4296,9 @@ pub async fn get_profile() -> Result<UserProfile, String> {
 /// Update the current user's display name. Empty string clears it.
 #[frb]
 pub async fn set_display_name(name: String) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("auth", "No client created.".to_string()))?;
     let account = client.account();
     let trimmed = name.trim();
     account
@@ -4251,7 +4308,7 @@ pub async fn set_display_name(name: String) -> Result<(), String> {
             Some(trimmed)
         })
         .await
-        .map_err(|e| format!("Failed to set display name: {e}"))?;
+        .map_err(|e| api_err("auth", format!("Failed to set display name: {e}")))?;
     Ok(())
 }
 
@@ -4259,22 +4316,24 @@ pub async fn set_display_name(name: String) -> Result<(), String> {
 /// `upload_avatar`. Pass an empty string to remove the avatar.
 #[frb]
 pub async fn set_avatar_url(mxc: String) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("auth", "No client created.".to_string()))?;
     let account = client.account();
     let trimmed = mxc.trim();
     if trimmed.is_empty() {
         account
             .set_avatar_url(None)
             .await
-            .map_err(|e| format!("Failed to remove avatar: {e}"))?;
+            .map_err(|e| api_err("auth", format!("Failed to remove avatar: {e}")))?;
     } else {
         use std::convert::TryFrom;
         let mxc_uri = matrix_sdk::ruma::OwnedMxcUri::try_from(trimmed)
-            .map_err(|e| format!("Invalid mxc URI: {e}"))?;
+            .map_err(|e| api_err("auth", format!("Invalid mxc URI: {e}")))?;
         account
             .set_avatar_url(Some(&mxc_uri))
             .await
-            .map_err(|e| format!("Failed to set avatar: {e}"))?;
+            .map_err(|e| api_err("auth", format!("Failed to set avatar: {e}")))?;
     }
     Ok(())
 }
@@ -4285,15 +4344,20 @@ pub async fn set_avatar_url(mxc: String) -> Result<(), String> {
 /// a half-set profile.
 #[frb]
 pub async fn upload_avatar(content_type: String, data: Vec<u8>) -> Result<String, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("auth", "No client created.".to_string()))?;
     let account = client.account();
-    let mime: mime::Mime = content_type
-        .parse()
-        .map_err(|e| format!("Invalid content type '{content_type}': {e}"))?;
+    let mime: mime::Mime = content_type.parse().map_err(|e| {
+        api_err(
+            "auth",
+            format!("Invalid content type '{content_type}': {e}"),
+        )
+    })?;
     let mxc = account
         .upload_avatar(&mime, data)
         .await
-        .map_err(|e| format!("Failed to upload avatar: {e}"))?;
+        .map_err(|e| api_err("auth", format!("Failed to upload avatar: {e}")))?;
     Ok(mxc.to_string())
 }
 
@@ -4368,7 +4432,8 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
         active.clone()
     };
 
-    let user_id = active_user.ok_or("No active account to logout")?;
+    let user_id =
+        active_user.ok_or_else(|| api_err("auth", "No active account to logout".to_string()))?;
     clear_verification_session().await;
     set_subscription_user(None).await;
     stop_sync_task(None, false).await;
@@ -4378,7 +4443,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
         let mut clients = CLIENTS.write().await;
         clients
             .remove(&user_id)
-            .ok_or("Active account missing from store")?
+            .ok_or_else(|| api_err("auth", "Active account missing from store".to_string()))?
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
@@ -4505,7 +4570,9 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
 
     let entry = {
         let mut clients = CLIENTS.write().await;
-        clients.remove(&user_id).ok_or("Account not found")?
+        clients
+            .remove(&user_id)
+            .ok_or_else(|| api_err("auth", "Account not found".to_string()))?
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
@@ -4742,7 +4809,7 @@ fn active_session_meta(client: &Client) -> Result<(String, String), String> {
     let session = client
         .matrix_auth()
         .session()
-        .ok_or("No active Matrix session")?;
+        .ok_or_else(|| api_err("verification", "No active Matrix session".to_string()))?;
     Ok((
         session.meta.user_id.to_string(),
         session.meta.device_id.to_string(),
@@ -4750,12 +4817,14 @@ fn active_session_meta(client: &Client) -> Result<(String, String), String> {
 }
 
 async fn current_verification_session() -> Result<(ClientLease, VerificationSession), String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("verification", "No active client".to_string()))?;
     let session = VERIFICATION_SESSION
         .read()
         .await
         .clone()
-        .ok_or("No active verification")?;
+        .ok_or_else(|| api_err("verification", "No active verification".to_string()))?;
     Ok((client, session))
 }
 
@@ -4775,22 +4844,29 @@ async fn clear_verification_session_if(flow_id: &str) {
 
 #[frb]
 pub async fn list_own_devices() -> Result<Vec<VerificationDevice>, String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("verification", "No active client".to_string()))?;
     let (user_id, current_device_id) = active_session_meta(&client)?;
-    let user_id =
-        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id)
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
 
     // Refresh the identity first so the device list isn't limited to stale local data.
     client
         .encryption()
         .request_user_identity(&user_id)
         .await
-        .map_err(|e| format!("Failed to refresh encryption identity: {e}"))?;
+        .map_err(|e| {
+            api_err(
+                "verification",
+                format!("Failed to refresh encryption identity: {e}"),
+            )
+        })?;
     let devices = client
         .encryption()
         .get_user_devices(&user_id)
         .await
-        .map_err(|e| format!("Failed to load devices: {e}"))?;
+        .map_err(|e| api_err("verification", format!("Failed to load devices: {e}")))?;
 
     let mut result = devices
         .devices()
@@ -4807,24 +4883,34 @@ pub async fn list_own_devices() -> Result<Vec<VerificationDevice>, String> {
 
 #[frb]
 pub async fn start_device_verification(device_id: String) -> Result<(), String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("verification", "No active client".to_string()))?;
     let (user_id, current_device_id) = active_session_meta(&client)?;
     if device_id == current_device_id {
-        return Err("Cannot verify the current device with itself".into());
+        return Err(api_err(
+            "verification",
+            "Cannot verify the current device with itself".to_string(),
+        ));
     }
-    let user_id =
-        matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
+    let user_id = matrix_sdk::ruma::UserId::parse(user_id)
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
     let device_id = matrix_sdk::ruma::OwnedDeviceId::from(device_id);
     let device = client
         .encryption()
         .get_device(&user_id, &device_id)
         .await
-        .map_err(|e| format!("Failed to load device: {e}"))?
-        .ok_or("Device is no longer available")?;
+        .map_err(|e| api_err("verification", format!("Failed to load device: {e}")))?
+        .ok_or_else(|| api_err("verification", "Device is no longer available".to_string()))?;
     let request = device
         .request_verification_with_methods(vec![VerificationMethod::SasV1])
         .await
-        .map_err(|e| format!("Failed to request verification: {e}"))?;
+        .map_err(|e| {
+            api_err(
+                "verification",
+                format!("Failed to request verification: {e}"),
+            )
+        })?;
 
     *VERIFICATION_SESSION.write().await = Some(VerificationSession {
         user_id: user_id.to_string(),
@@ -4840,16 +4926,26 @@ pub async fn start_device_verification(device_id: String) -> Result<(), String> 
 pub async fn accept_device_verification() -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("无效的用户 ID: {e}"))?;
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
     let request = client
         .encryption()
         .get_verification_request(&user_id, &session.flow_id)
         .await
-        .ok_or("Verification request is no longer available")?;
+        .ok_or_else(|| {
+            api_err(
+                "verification",
+                "Verification request is no longer available".to_string(),
+            )
+        })?;
     request
         .accept_with_methods(vec![VerificationMethod::SasV1])
         .await
-        .map_err(|e| format!("Failed to accept verification: {e}"))?;
+        .map_err(|e| {
+            api_err(
+                "verification",
+                format!("Failed to accept verification: {e}"),
+            )
+        })?;
     if let Some(active) = VERIFICATION_SESSION.write().await.as_mut() {
         active.accepted = true;
     }
@@ -4858,12 +4954,14 @@ pub async fn accept_device_verification() -> Result<(), String> {
 
 #[frb]
 pub async fn get_device_verification_status() -> Result<Option<DeviceVerificationStatus>, String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("verification", "No active client".to_string()))?;
     let Some(session) = VERIFICATION_SESSION.read().await.clone() else {
         return Ok(None);
     };
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("无效的用户 ID: {e}"))?;
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
 
     let request = client
         .encryption()
@@ -4873,10 +4971,12 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
     if session.accepted {
         if let Some(request) = request.as_ref() {
             if request.is_ready() && request.we_started() {
-                request
-                    .start_sas()
-                    .await
-                    .map_err(|e| format!("Failed to start emoji verification: {e}"))?;
+                request.start_sas().await.map_err(|e| {
+                    api_err(
+                        "verification",
+                        format!("Failed to start emoji verification: {e}"),
+                    )
+                })?;
             }
         }
     }
@@ -4892,9 +4992,12 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
             && !sas.is_done()
             && sas.cancel_info().is_none()
         {
-            sas.accept()
-                .await
-                .map_err(|e| format!("Failed to accept emoji verification: {e}"))?;
+            sas.accept().await.map_err(|e| {
+                api_err(
+                    "verification",
+                    format!("Failed to accept emoji verification: {e}"),
+                )
+            })?;
         }
         if sas.is_done() {
             return Ok(Some(DeviceVerificationStatus {
@@ -4990,16 +5093,24 @@ pub async fn get_device_verification_status() -> Result<Option<DeviceVerificatio
 pub async fn confirm_device_verification() -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("无效的用户 ID: {e}"))?;
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
     let sas = client
         .encryption()
         .get_verification(&user_id, &session.flow_id)
         .await
         .and_then(Verification::sas)
-        .ok_or("Emoji verification is not ready")?;
-    sas.confirm()
-        .await
-        .map_err(|e| format!("Failed to confirm verification: {e}"))?;
+        .ok_or_else(|| {
+            api_err(
+                "verification",
+                "Emoji verification is not ready".to_string(),
+            )
+        })?;
+    sas.confirm().await.map_err(|e| {
+        api_err(
+            "verification",
+            format!("Failed to confirm verification: {e}"),
+        )
+    })?;
 
     // Confirmation is sent before the other device's MAC/done event arrives.
     // Wait briefly so callers can refresh the verified-device state immediately.
@@ -5017,7 +5128,7 @@ pub async fn confirm_device_verification() -> Result<(), String> {
 pub async fn cancel_device_verification(mismatch: bool) -> Result<(), String> {
     let (client, session) = current_verification_session().await?;
     let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id)
-        .map_err(|e| format!("无效的用户 ID: {e}"))?;
+        .map_err(|e| api_err("verification", format!("无效的用户 ID: {e}")))?;
     if let Some(sas) = client
         .encryption()
         .get_verification(&user_id, &session.flow_id)
@@ -5029,16 +5140,23 @@ pub async fn cancel_device_verification(mismatch: bool) -> Result<(), String> {
         } else {
             sas.cancel().await
         }
-        .map_err(|e| format!("Failed to cancel verification: {e}"))?;
+        .map_err(|e| {
+            api_err(
+                "verification",
+                format!("Failed to cancel verification: {e}"),
+            )
+        })?;
     } else if let Some(request) = client
         .encryption()
         .get_verification_request(&user_id, &session.flow_id)
         .await
     {
-        request
-            .cancel()
-            .await
-            .map_err(|e| format!("Failed to cancel verification: {e}"))?;
+        request.cancel().await.map_err(|e| {
+            api_err(
+                "verification",
+                format!("Failed to cancel verification: {e}"),
+            )
+        })?;
     }
     clear_verification_session_if(&session.flow_id).await;
     Ok(())
@@ -5046,7 +5164,9 @@ pub async fn cancel_device_verification(mismatch: bool) -> Result<(), String> {
 
 #[frb]
 pub async fn get_encryption_recovery_info() -> Result<EncryptionRecoveryInfo, String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("encryption", "No active client".to_string()))?;
     let state = match client.encryption().recovery().state() {
         RecoveryState::Unknown => "unknown",
         RecoveryState::Enabled => "enabled",
@@ -5069,22 +5189,34 @@ pub async fn recover_encryption(recovery_key_or_passphrase: String) -> Result<()
 
     let value = recovery_key_or_passphrase.trim();
     if value.is_empty() {
-        return Err("Recovery key or passphrase is empty".into());
+        return Err(api_err(
+            "encryption",
+            "Recovery key or passphrase is empty".to_string(),
+        ));
     }
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("encryption", "No active client".to_string()))?;
     client
         .encryption()
         .recovery()
         .recover(value)
         .await
-        .map_err(|e| format!("Failed to recover encryption data: {e}"))?;
+        .map_err(|e| {
+            api_err(
+                "encryption",
+                format!("Failed to recover encryption data: {e}"),
+            )
+        })?;
     notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
     Ok(())
 }
 
 #[frb]
 pub async fn enable_encryption_recovery(passphrase: Option<String>) -> Result<String, String> {
-    let client = get_client().await.ok_or("No active client")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("encryption", "No active client".to_string()))?;
     let recovery = client.encryption().recovery();
     let passphrase = passphrase
         .map(|value| value.trim().to_string())
@@ -5098,7 +5230,12 @@ pub async fn enable_encryption_recovery(passphrase: Option<String>) -> Result<St
     } else {
         recovery.enable().wait_for_backups_to_upload().await
     };
-    result.map_err(|e| format!("Failed to enable encryption recovery: {e}"))
+    result.map_err(|e| {
+        api_err(
+            "encryption",
+            format!("Failed to enable encryption recovery: {e}"),
+        )
+    })
 }
 
 // ── Sync & real-time ─────────────────────────────────────────────────
@@ -5125,7 +5262,10 @@ pub async fn sync_once() -> Result<(), String> {
     let user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
     if !sync_generation_is_active(generation, &user_id).await {
-        return Err("Active account changed before syncing.".to_string());
+        return Err(api_err(
+            "sync",
+            "Active account changed before syncing.".to_string(),
+        ));
     }
     let hs = client.homeserver().to_string();
     app_log(
@@ -5140,7 +5280,10 @@ pub async fn sync_once() -> Result<(), String> {
 
     if let Err(error) = client.event_cache().subscribe() {
         set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
-        return Err(format!("Failed to subscribe to the event cache: {error}"));
+        return Err(api_err(
+            "sync",
+            format!("Failed to subscribe to the event cache: {error}"),
+        ));
     }
 
     let result = tokio::time::timeout(
@@ -5153,7 +5296,10 @@ pub async fn sync_once() -> Result<(), String> {
     .await;
 
     if !sync_generation_is_active(generation, &user_id).await {
-        return Err("Active account changed while syncing.".to_string());
+        return Err(api_err(
+            "sync",
+            "Active account changed while syncing.".to_string(),
+        ));
     }
 
     match result {
@@ -5226,11 +5372,17 @@ fn start_sync_internal(
 
         let generation = stop_sync_task(None, true).await;
         if !sync_generation_is_active(generation, &user_id).await {
-            return Err("Active account changed while starting sync.".to_string());
+            return Err(api_err(
+                "sync",
+                "Active account changed while starting sync.".to_string(),
+            ));
         }
         if let Err(error) = client.event_cache().subscribe() {
             set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
-            return Err(format!("Failed to subscribe to the event cache: {error}"));
+            return Err(api_err(
+                "sync",
+                format!("Failed to subscribe to the event cache: {error}"),
+            ));
         }
 
         // Try Sliding Sync first
@@ -5384,7 +5536,10 @@ fn start_sync_internal(
         if !sync_generation_is_active(generation, &user_id).await {
             pending.handle.abort();
             clear_published_sync(generation).await;
-            return Err("Active account changed while starting sync.".to_string());
+            return Err(api_err(
+                "sync",
+                "Active account changed while starting sync.".to_string(),
+            ));
         }
 
         let mut current_task = SYNC_TASK.lock().await;
@@ -5392,7 +5547,10 @@ fn start_sync_internal(
             pending.handle.abort();
             drop(current_task);
             clear_published_sync(generation).await;
-            return Err("Active account changed while starting sync.".to_string());
+            return Err(api_err(
+                "sync",
+                "Active account changed while starting sync.".to_string(),
+            ));
         }
         if let Some(running) = current_task.take() {
             running.handle.abort();
@@ -5838,7 +5996,9 @@ pub async fn subscribe_typing_for_room(
     room_id: String,
     account_user_id: Option<String>,
 ) -> Result<String, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("typing", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     let subscription_id = NEXT_TYPING_SUBSCRIPTION_ID
         .fetch_add(1, Ordering::Relaxed)
@@ -5957,7 +6117,7 @@ pub async fn subscribe_room_for_receipts(
     account_user_id: Option<String>,
 ) -> Result<String, String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("无效的房间 ID: {e}"))?;
+        .map_err(|e| api_err("sync", format!("无效的房间 ID: {e}")))?;
     let subscription_id = NEXT_ROOM_SUBSCRIPTION_ID
         .fetch_add(1, Ordering::Relaxed)
         .to_string();
@@ -5992,7 +6152,7 @@ pub async fn unsubscribe_room_for_receipts(
     subscription_id: String,
 ) -> Result<(), String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("无效的房间 ID: {e}"))?;
+        .map_err(|e| api_err("sync", format!("无效的房间 ID: {e}")))?;
     let mut state = ROOM_SUBSCRIPTION.lock().await;
     let last_subscriber = state.remove_desired(&room_id, &subscription_id);
     if last_subscriber {
@@ -6138,13 +6298,16 @@ struct MediaClientIdentity {
 }
 
 async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, String> {
-    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("media", "No active user".to_string()))?
+        .to_string();
     let instance_id = CLIENTS
         .read()
         .await
         .get(&user_id)
         .map(|entry| entry.instance_id)
-        .ok_or("Active account is no longer available")?;
+        .ok_or_else(|| api_err("media", "Active account is no longer available".to_string()))?;
     Ok(MediaClientIdentity {
         user_id,
         instance_id,
@@ -6152,18 +6315,28 @@ async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, S
 }
 
 async fn reacquire_media_client(identity: &MediaClientIdentity) -> Result<ClientLease, String> {
-    let client = get_client()
-        .await
-        .ok_or("Media transfer completed, but the account is logged out.")?;
-    ensure_account_matches(&client, &identity.user_id)
-        .map_err(|_| "Media transfer completed, but the active account changed.".to_string())?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "media",
+            "Media transfer completed, but the account is logged out.".to_string(),
+        )
+    })?;
+    ensure_account_matches(&client, &identity.user_id).map_err(|_| {
+        api_err(
+            "media",
+            "Media transfer completed, but the active account changed.".to_string(),
+        )
+    })?;
     let current_instance_id = CLIENTS
         .read()
         .await
         .get(&identity.user_id)
         .map(|entry| entry.instance_id);
     if current_instance_id != Some(identity.instance_id) {
-        return Err("Media transfer completed, but the account session changed.".to_string());
+        return Err(api_err(
+            "media",
+            "Media transfer completed, but the account session changed.".to_string(),
+        ));
     }
     Ok(client)
 }
@@ -6228,12 +6401,20 @@ fn media_download_limit(max_size_bytes: i32) -> Result<usize, String> {
     usize::try_from(max_size_bytes)
         .ok()
         .filter(|limit| *limit > 0)
-        .ok_or_else(|| "Media download limit must be positive.".to_string())
+        .ok_or_else(|| {
+            api_err(
+                "media",
+                "Media download limit must be positive.".to_string(),
+            )
+        })
 }
 
 fn ensure_media_content_length(content_length: Option<u64>, limit: usize) -> Result<(), String> {
     if content_length.is_some_and(|length| length > limit as u64) {
-        return Err(format!("Media exceeds the {limit}-byte download limit."));
+        return Err(api_err(
+            "media",
+            format!("Media exceeds the {limit}-byte download limit."),
+        ));
     }
     Ok(())
 }
@@ -6242,9 +6423,12 @@ fn append_media_chunk(content: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Resu
     let next_length = content
         .len()
         .checked_add(chunk.len())
-        .ok_or_else(|| "Media download is too large.".to_string())?;
+        .ok_or_else(|| api_err("media", "Media download is too large.".to_string()))?;
     if next_length > limit {
-        return Err(format!("Media exceeds the {limit}-byte download limit."));
+        return Err(api_err(
+            "media",
+            format!("Media exceeds the {limit}-byte download limit."),
+        ));
     }
     content.extend_from_slice(chunk);
     Ok(())
@@ -6258,29 +6442,39 @@ fn media_download_url(
         matrix_sdk::ruma::events::room::MediaSource::Plain(uri) => uri.to_string(),
         matrix_sdk::ruma::events::room::MediaSource::Encrypted(file) => file.url.to_string(),
     };
-    let mxc_url = url::Url::parse(&mxc_url).map_err(|e| format!("Invalid media URL: {e}"))?;
+    let mxc_url = url::Url::parse(&mxc_url)
+        .map_err(|e| api_err("media", format!("Invalid media URL: {e}")))?;
     if mxc_url.scheme() != "mxc" {
-        return Err("Media URL must use the mxc scheme.".to_string());
+        return Err(api_err(
+            "media",
+            "Media URL must use the mxc scheme.".to_string(),
+        ));
     }
     let server_name = mxc_url
         .host_str()
         .filter(|server_name| !server_name.is_empty())
-        .ok_or("Media URL is missing a server name.")?;
+        .ok_or_else(|| api_err("media", "Media URL is missing a server name.".to_string()))?;
     let server_name = match mxc_url.port() {
         Some(port) => format!("{server_name}:{port}"),
         None => server_name.to_string(),
     };
     let media_id = mxc_url.path().trim_start_matches('/');
     if media_id.is_empty() {
-        return Err("Media URL is missing a media ID.".to_string());
+        return Err(api_err(
+            "media",
+            "Media URL is missing a media ID.".to_string(),
+        ));
     }
 
     let mut url = client.homeserver();
     url.set_query(None);
     url.set_fragment(None);
-    let mut segments = url
-        .path_segments_mut()
-        .map_err(|_| "Homeserver URL cannot contain path segments.".to_string())?;
+    let mut segments = url.path_segments_mut().map_err(|_| {
+        api_err(
+            "media",
+            "Homeserver URL cannot contain path segments.".to_string(),
+        )
+    })?;
     segments.pop_if_empty();
     segments.extend([
         "_matrix",
@@ -6303,15 +6497,18 @@ fn decrypt_media_bytes(
     let capacity = encrypted.len();
     let mut cursor = Cursor::new(encrypted);
     let mut decryptor = matrix_sdk_base::crypto::AttachmentDecryptor::new(&mut cursor, file.into())
-        .map_err(|e| format!("Invalid encrypted media: {e}"))?;
+        .map_err(|e| api_err("media", format!("Invalid encrypted media: {e}")))?;
     let mut decrypted = Vec::with_capacity(capacity);
     decryptor
         .by_ref()
         .take(limit as u64 + 1)
         .read_to_end(&mut decrypted)
-        .map_err(|e| format!("Media decryption failed: {e}"))?;
+        .map_err(|e| api_err("media", format!("Media decryption failed: {e}")))?;
     if decrypted.len() > limit {
-        return Err(format!("Media exceeds the {limit}-byte download limit."));
+        return Err(api_err(
+            "media",
+            format!("Media exceeds the {limit}-byte download limit."),
+        ));
     }
     Ok(decrypted)
 }
@@ -6326,17 +6523,19 @@ pub async fn download_media_source_bytes(
 ) -> Result<Vec<u8>, String> {
     use futures_util::StreamExt;
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
     let source: matrix_sdk::ruma::events::room::MediaSource =
         serde_json::from_str(&media_source_json)
-            .map_err(|e| format!("Invalid media source: {e}"))?;
+            .map_err(|e| api_err("media", format!("Invalid media source: {e}")))?;
     let limit = media_download_limit(max_size_bytes)?;
     let url = media_download_url(&client, &source)?;
     let identity = media_client_identity(&client).await?;
     let session = client
         .matrix_auth()
         .session()
-        .ok_or("No authenticated session.")?;
+        .ok_or_else(|| api_err("media", "No authenticated session.".to_string()))?;
     let http_client = client.http_client().clone();
     drop(client);
     let content = tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
@@ -6345,15 +6544,16 @@ pub async fn download_media_source_bytes(
             .bearer_auth(session.tokens.access_token)
             .send()
             .await
-            .map_err(|e| format!("Media download failed: {e}"))?
+            .map_err(|e| api_err("media", format!("Media download failed: {e}")))?
             .error_for_status()
-            .map_err(|e| format!("Media download failed: {e}"))?;
+            .map_err(|e| api_err("media", format!("Media download failed: {e}")))?;
         ensure_media_content_length(response.content_length(), limit)?;
 
         let mut encrypted = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Media download failed: {e}"))?;
+            let chunk =
+                chunk.map_err(|e| api_err("media", format!("Media download failed: {e}")))?;
             append_media_chunk(&mut encrypted, &chunk, limit)?;
         }
 
@@ -6365,7 +6565,12 @@ pub async fn download_media_source_bytes(
         }
     })
     .await
-    .map_err(|_| "Media download timed out. Please retry.".to_string())??;
+    .map_err(|_| {
+        api_err(
+            "media",
+            "Media download timed out. Please retry.".to_string(),
+        )
+    })??;
     reacquire_media_client(&identity).await?;
     app_log(
         "info",
@@ -6394,7 +6599,7 @@ pub async fn get_refresh_token() -> Option<String> {
 pub async fn is_room_encrypted(room_id: String) -> Result<bool, String> {
     let client = get_client()
         .await
-        .ok_or_else(|| "No client created.".to_string())?;
+        .ok_or_else(|| api_err("encryption", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     Ok(room
         .latest_encryption_state()
@@ -6857,7 +7062,9 @@ fn unable_to_decrypt_message(
 /// Get messages for a room (must sync first).
 #[frb]
 pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     // Bounded like the other P0 calls: the load holds the client lease
     // (blocking logout/account switch) and pagination can run several
@@ -6867,19 +7074,26 @@ pub async fn get_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
 
 #[frb]
 pub async fn get_sticker_packs(room_id: String) -> Result<Vec<StickerPack>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
 
     let parsed_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("无效的房间 ID: {e}"))?;
+        .map_err(|e| api_err("media", format!("无效的房间 ID: {e}")))?;
     let room = client
         .get_room(&parsed_room_id)
-        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
+        .ok_or_else(|| api_err("media", format!("房间不存在: {room_id}")))?;
 
     let imported_room_packs = client
         .account()
         .account_data::<ruma::events::image_pack::ImagePackRoomsEventContent>()
         .await
-        .map_err(|e| format!("Failed to load image-pack room mapping: {e}"))?
+        .map_err(|e| {
+            api_err(
+                "media",
+                format!("Failed to load image-pack room mapping: {e}"),
+            )
+        })?
         .and_then(|raw| raw.deserialize().ok())
         .map(|content| {
             content
@@ -6927,7 +7141,7 @@ pub async fn get_sticker_packs(room_id: String) -> Result<Vec<StickerPack>, Stri
         .account()
         .account_data::<ruma::events::image_pack::AccountImagePackEventContent>()
         .await
-        .map_err(|e| format!("Failed to load user sticker pack: {e}"))?
+        .map_err(|e| api_err("media", format!("Failed to load user sticker pack: {e}")))?
     {
         if let Ok(user_pack_content) = user_pack_raw.deserialize() {
             if let Some(pack) = account_image_pack_to_sticker_pack(user_pack_content) {
@@ -6950,8 +7164,9 @@ fn build_mentions(
     mentions.room = room;
     for user_id in user_ids {
         mentions.user_ids.insert(
-            matrix_sdk::ruma::UserId::parse(user_id)
-                .map_err(|e| format!("Invalid mentioned user ID {user_id}: {e}"))?,
+            matrix_sdk::ruma::UserId::parse(user_id).map_err(|e| {
+                api_err("rooms", format!("Invalid mentioned user ID {user_id}: {e}"))
+            })?,
         );
     }
     Ok(mentions)
@@ -6992,7 +7207,9 @@ pub async fn send_message(
 ) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let content = build_text_content(message)?;
@@ -7000,7 +7217,7 @@ pub async fn send_message(
     let response = room
         .send(content)
         .await
-        .map_err(|e| format!("Send failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Send failed: {e}")))?;
 
     app_log("info", "rooms", format!("Message sent to {}", room_id));
     info!("Message sent to {}", room_id);
@@ -7020,7 +7237,10 @@ fn poll_start_for_forward(
     use matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent;
 
     let UnstablePollStartEventContent::New(content) = content else {
-        return Err("无法将投票编辑事件作为新投票转发".to_string());
+        return Err(api_err(
+            "rooms",
+            "无法将投票编辑事件作为新投票转发".to_string(),
+        ));
     };
     let mut content = content.clone();
     content.relates_to = None;
@@ -7044,31 +7264,33 @@ pub async fn forward_message(
 ) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let source_room = get_room_by_id(&client, &source_room_id)?;
     let target_room = get_room_by_id(&client, &target_room_id)?;
-    let event_id =
-        matrix_sdk::ruma::EventId::parse(event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
+    let event_id = matrix_sdk::ruma::EventId::parse(event_id)
+        .map_err(|e| api_err("rooms", format!("无效的事件 ID: {e}")))?;
     let timeline_event = source_room
         .event(&event_id, None)
         .await
-        .map_err(|e| format!("Load message failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Load message failed: {e}")))?;
 
     if timeline_event.kind.is_utd() {
-        return Err("无法转发未解密的消息".to_string());
+        return Err(api_err("rooms", "无法转发未解密的消息".to_string()));
     }
 
     let event = timeline_event
         .raw()
         .deserialize()
-        .map_err(|e| format!("Read message failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Read message failed: {e}")))?;
 
     let event_id = match event {
         matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
             matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(message),
         ) => {
             let Some(original) = message.as_original() else {
-                return Err("无法转发已撤回的消息".to_string());
+                return Err(api_err("rooms", "无法转发已撤回的消息".to_string()));
             };
             let mut content = original.content.clone();
             if matches!(
@@ -7082,7 +7304,7 @@ pub async fn forward_message(
             target_room
                 .send(content)
                 .await
-                .map_err(|e| format!("Forward failed: {e}"))?
+                .map_err(|e| api_err("rooms", format!("Forward failed: {e}")))?
                 .response
                 .event_id
                 .to_string()
@@ -7091,14 +7313,14 @@ pub async fn forward_message(
             matrix_sdk::ruma::events::AnySyncMessageLikeEvent::Sticker(sticker),
         ) => {
             let Some(original) = sticker.as_original() else {
-                return Err("无法转发已撤回的贴纸".to_string());
+                return Err(api_err("rooms", "无法转发已撤回的贴纸".to_string()));
             };
             let mut content = original.content.clone();
             content.relates_to = None;
             target_room
                 .send(content)
                 .await
-                .map_err(|e| format!("Forward failed: {e}"))?
+                .map_err(|e| api_err("rooms", format!("Forward failed: {e}")))?
                 .response
                 .event_id
                 .to_string()
@@ -7107,18 +7329,18 @@ pub async fn forward_message(
             matrix_sdk::ruma::events::AnySyncMessageLikeEvent::UnstablePollStart(poll),
         ) => {
             let Some(original) = poll.as_original() else {
-                return Err("无法转发已撤回的投票".to_string());
+                return Err(api_err("rooms", "无法转发已撤回的投票".to_string()));
             };
             let content = poll_start_for_forward(&original.content)?;
             target_room
                 .send(content)
                 .await
-                .map_err(|e| format!("Forward failed: {e}"))?
+                .map_err(|e| api_err("rooms", format!("Forward failed: {e}")))?
                 .response
                 .event_id
                 .to_string()
         }
-        _ => return Err("该消息类型暂不支持转发".to_string()),
+        _ => return Err(api_err("rooms", "该消息类型暂不支持转发".to_string())),
     };
 
     app_log(
@@ -7145,7 +7367,7 @@ fn parse_supplied_mime_type(value: Option<String>) -> Result<Option<mime::Mime>,
     value
         .parse::<mime::Mime>()
         .map(Some)
-        .map_err(|error| format!("Invalid MIME type: {error}"))
+        .map_err(|error| api_err("media", format!("Invalid MIME type: {error}")))
 }
 
 fn image_mime_type(filename: &str, supplied: Option<String>) -> Result<mime::Mime, String> {
@@ -7168,7 +7390,10 @@ fn image_mime_type(filename: &str, supplied: Option<String>) -> Result<mime::Mim
         }
     };
     if mime_type.type_() != mime::IMAGE {
-        return Err(format!("Expected an image MIME type, got {mime_type}"));
+        return Err(api_err(
+            "media",
+            format!("Expected an image MIME type, got {mime_type}"),
+        ));
     }
     Ok(mime_type)
 }
@@ -7194,7 +7419,10 @@ fn video_mime_type(filename: &str, supplied: Option<String>) -> Result<mime::Mim
         fallback.parse().expect("valid static MIME type")
     };
     if mime_type.type_() != mime::VIDEO {
-        return Err(format!("Expected a video MIME type, got {mime_type}"));
+        return Err(api_err(
+            "media",
+            format!("Expected a video MIME type, got {mime_type}"),
+        ));
     }
     Ok(mime_type)
 }
@@ -7228,22 +7456,25 @@ async fn upload_media_source(
     tokio::time::timeout(MEDIA_SEND_TOTAL_TIMEOUT, async move {
         if encrypted {
             let mut reader = Cursor::new(data.as_slice());
-            let encrypted_file = client
-                .upload_encrypted_file(&mut reader)
-                .await
-                .map_err(|error| format!("Encrypted media upload failed: {error}"))?;
+            let encrypted_file =
+                client
+                    .upload_encrypted_file(&mut reader)
+                    .await
+                    .map_err(|error| {
+                        api_err("media", format!("Encrypted media upload failed: {error}"))
+                    })?;
             Ok(MediaSource::Encrypted(Box::new(encrypted_file)))
         } else {
             let upload = client
                 .media()
                 .upload(&mime_type, data, None)
                 .await
-                .map_err(|error| format!("Media upload failed: {error}"))?;
+                .map_err(|error| api_err("media", format!("Media upload failed: {error}")))?;
             Ok(MediaSource::Plain(upload.content_uri))
         }
     })
     .await
-    .map_err(|_| "Media upload timed out. Please retry.".to_string())?
+    .map_err(|_| api_err("media", "Media upload timed out. Please retry.".to_string()))?
 }
 
 fn image_message_content(
@@ -7306,14 +7537,16 @@ pub async fn send_image_message(
     width: Option<i32>,
     height: Option<i32>,
 ) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     let mime_type = image_mime_type(&filename, mime_type)?;
     let identity = media_client_identity(&client).await?;
     let encrypted = room
         .latest_encryption_state()
         .await
-        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .map_err(|error| api_err("media", format!("Check room encryption failed: {error}")))?
         .is_encrypted();
     let upload_client = client.client.clone();
     drop(room);
@@ -7339,11 +7572,18 @@ pub async fn send_image_message(
         .and_then(|value| matrix_sdk::ruma::UInt::new(value as u64));
     let source =
         upload_media_source(upload_client, encrypted, mime_type.clone(), image_data).await?;
-    let client = reacquire_media_client(&identity)
-        .await
-        .map_err(|error| format!("Image uploaded, but the message was not sent: {error}"))?;
-    let room = get_room_by_id(&client, &room_id)
-        .map_err(|error| format!("Image uploaded, but the room is unavailable: {error}"))?;
+    let client = reacquire_media_client(&identity).await.map_err(|error| {
+        api_err(
+            "media",
+            format!("Image uploaded, but the message was not sent: {error}"),
+        )
+    })?;
+    let room = get_room_by_id(&client, &room_id).map_err(|error| {
+        api_err(
+            "media",
+            format!("Image uploaded, but the room is unavailable: {error}"),
+        )
+    })?;
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
     let content = image_message_content(
         filename,
@@ -7355,8 +7595,13 @@ pub async fn send_image_message(
     );
     tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
         .await
-        .map_err(|_| "Image uploaded, but sending the message timed out.".to_string())?
-        .map_err(|e| format!("Send image message failed: {e}"))?;
+        .map_err(|_| {
+            api_err(
+                "media",
+                "Image uploaded, but sending the message timed out.".to_string(),
+            )
+        })?
+        .map_err(|e| api_err("media", format!("Send image message failed: {e}")))?;
 
     app_log(
         "info",
@@ -7383,7 +7628,9 @@ pub async fn send_file_message(
     mime_type: Option<String>,
     size: Option<i32>,
 ) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     let mime_type = parse_supplied_mime_type(mime_type)?.unwrap_or(mime::APPLICATION_OCTET_STREAM);
     let file_size = size
@@ -7394,7 +7641,7 @@ pub async fn send_file_message(
     let encrypted = room
         .latest_encryption_state()
         .await
-        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .map_err(|error| api_err("media", format!("Check room encryption failed: {error}")))?
         .is_encrypted();
     let upload_client = client.client.clone();
     drop(room);
@@ -7413,17 +7660,29 @@ pub async fn send_file_message(
 
     let source =
         upload_media_source(upload_client, encrypted, mime_type.clone(), file_data).await?;
-    let client = reacquire_media_client(&identity)
-        .await
-        .map_err(|error| format!("File uploaded, but the message was not sent: {error}"))?;
-    let room = get_room_by_id(&client, &room_id)
-        .map_err(|error| format!("File uploaded, but the room is unavailable: {error}"))?;
+    let client = reacquire_media_client(&identity).await.map_err(|error| {
+        api_err(
+            "media",
+            format!("File uploaded, but the message was not sent: {error}"),
+        )
+    })?;
+    let room = get_room_by_id(&client, &room_id).map_err(|error| {
+        api_err(
+            "media",
+            format!("File uploaded, but the room is unavailable: {error}"),
+        )
+    })?;
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
     let content = file_message_content(filename, &mime_type, file_size, source);
     tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
         .await
-        .map_err(|_| "File uploaded, but sending the message timed out.".to_string())?
-        .map_err(|e| format!("Send file message failed: {e}"))?;
+        .map_err(|_| {
+            api_err(
+                "media",
+                "File uploaded, but sending the message timed out.".to_string(),
+            )
+        })?
+        .map_err(|e| api_err("media", format!("Send file message failed: {e}")))?;
 
     app_log("info", "rooms", format!("File message sent to {}", room_id));
     info!("File message sent to {}", room_id);
@@ -7450,14 +7709,16 @@ pub async fn send_video_message(
     duration_ms: Option<i32>,
     size: Option<i32>,
 ) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     let mime_type = video_mime_type(&filename, mime_type)?;
     let identity = media_client_identity(&client).await?;
     let encrypted = room
         .latest_encryption_state()
         .await
-        .map_err(|error| format!("Check room encryption failed: {error}"))?
+        .map_err(|error| api_err("media", format!("Check room encryption failed: {error}")))?
         .is_encrypted();
     let upload_client = client.client.clone();
     drop(room);
@@ -7489,11 +7750,18 @@ pub async fn send_video_message(
         .or_else(|| matrix_sdk::ruma::UInt::new(video_data.len() as u64));
     let source =
         upload_media_source(upload_client, encrypted, mime_type.clone(), video_data).await?;
-    let client = reacquire_media_client(&identity)
-        .await
-        .map_err(|error| format!("Video uploaded, but the message was not sent: {error}"))?;
-    let room = get_room_by_id(&client, &room_id)
-        .map_err(|error| format!("Video uploaded, but the room is unavailable: {error}"))?;
+    let client = reacquire_media_client(&identity).await.map_err(|error| {
+        api_err(
+            "media",
+            format!("Video uploaded, but the message was not sent: {error}"),
+        )
+    })?;
+    let room = get_room_by_id(&client, &room_id).map_err(|error| {
+        api_err(
+            "media",
+            format!("Video uploaded, but the room is unavailable: {error}"),
+        )
+    })?;
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
     let content = video_message_content(
         filename,
@@ -7506,8 +7774,13 @@ pub async fn send_video_message(
     );
     tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
         .await
-        .map_err(|_| "Video uploaded, but sending the message timed out.".to_string())?
-        .map_err(|e| format!("Send video message failed: {e}"))?;
+        .map_err(|_| {
+            api_err(
+                "media",
+                "Video uploaded, but sending the message timed out.".to_string(),
+            )
+        })?
+        .map_err(|e| api_err("media", format!("Send video message failed: {e}")))?;
 
     app_log(
         "info",
@@ -7528,33 +7801,49 @@ pub async fn send_video_message(
 /// Validate the RFC 5870 subset supported by the attachment composer.
 fn validated_geo_uri(value: &str) -> Result<String, String> {
     let value = value.trim();
-    let uri = url::Url::parse(value).map_err(|error| format!("Invalid geo URI: {error}"))?;
+    let uri = url::Url::parse(value)
+        .map_err(|error| api_err("media", format!("Invalid geo URI: {error}")))?;
     if uri.scheme() != "geo" || uri.query().is_some() || uri.fragment().is_some() {
-        return Err("Location must be a geo: URI without a query or fragment.".to_string());
+        return Err(api_err(
+            "media",
+            "Location must be a geo: URI without a query or fragment.".to_string(),
+        ));
     }
 
     let coordinate_part = uri.path().split(';').next().unwrap_or_default();
     let coordinates = coordinate_part.split(',').collect::<Vec<_>>();
     if !(2..=3).contains(&coordinates.len()) {
-        return Err("Location must contain latitude and longitude.".to_string());
+        return Err(api_err(
+            "media",
+            "Location must contain latitude and longitude.".to_string(),
+        ));
     }
     if coordinates
         .iter()
         .any(|coordinate| coordinate.contains(['e', 'E']))
     {
-        return Err("Location coordinates must use decimal notation.".to_string());
+        return Err(api_err(
+            "media",
+            "Location coordinates must use decimal notation.".to_string(),
+        ));
     }
     let latitude = coordinates[0]
         .parse::<f64>()
-        .map_err(|_| "Invalid latitude.".to_string())?;
+        .map_err(|_| api_err("media", "Invalid latitude.".to_string()))?;
     let longitude = coordinates[1]
         .parse::<f64>()
-        .map_err(|_| "Invalid longitude.".to_string())?;
+        .map_err(|_| api_err("media", "Invalid longitude.".to_string()))?;
     if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
-        return Err("Latitude must be between -90 and 90.".to_string());
+        return Err(api_err(
+            "media",
+            "Latitude must be between -90 and 90.".to_string(),
+        ));
     }
     if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
-        return Err("Longitude must be between -180 and 180.".to_string());
+        return Err(api_err(
+            "media",
+            "Longitude must be between -180 and 180.".to_string(),
+        ));
     }
     if coordinates.len() == 3
         && coordinates[2]
@@ -7563,7 +7852,7 @@ fn validated_geo_uri(value: &str) -> Result<String, String> {
             .filter(|altitude| altitude.is_finite())
             .is_none()
     {
-        return Err("Invalid altitude.".to_string());
+        return Err(api_err("media", "Invalid altitude.".to_string()));
     }
     Ok(value.to_owned())
 }
@@ -7599,11 +7888,13 @@ pub async fn send_location(room_id: String, body: String, geo_uri: String) -> Re
 
     let content = location_message_content(&body, &geo_uri)?;
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     room.send(content)
         .await
-        .map_err(|e| format!("Send location failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Send location failed: {e}")))?;
 
     app_log(
         "info",
@@ -7638,7 +7929,10 @@ fn poll_start_content(
 
     let question = question.trim();
     if question.is_empty() {
-        return Err("A poll question cannot be empty.".to_string());
+        return Err(api_err(
+            "rooms",
+            "A poll question cannot be empty.".to_string(),
+        ));
     }
 
     let mut answer_list = Vec::with_capacity(answers.len());
@@ -7653,17 +7947,27 @@ fn poll_start_content(
         ));
     }
     if !(2..=20).contains(&answer_list.len()) {
-        return Err("A poll needs between 2 and 20 answers.".to_string());
+        return Err(api_err(
+            "rooms",
+            "A poll needs between 2 and 20 answers.".to_string(),
+        ));
     }
     if !(1..=answer_list.len()).contains(&max_selections) {
-        return Err("A poll's maximum selections must match its answers.".to_string());
+        return Err(api_err(
+            "rooms",
+            "A poll's maximum selections must match its answers.".to_string(),
+        ));
     }
     let mut fallback = question.to_owned();
     for (index, answer) in answer_list.iter().enumerate() {
         fallback.push_str(&format!("\n{}. {}", index + 1, answer.text));
     }
-    let poll_answers = UnstablePollAnswers::try_from(answer_list)
-        .map_err(|_| "A poll needs between 2 and 20 answers.".to_string())?;
+    let poll_answers = UnstablePollAnswers::try_from(answer_list).map_err(|_| {
+        api_err(
+            "rooms",
+            "A poll needs between 2 and 20 answers.".to_string(),
+        )
+    })?;
 
     let mut poll_start = UnstablePollStartContentBlock::new(question, poll_answers);
     poll_start.kind = if disclosed {
@@ -7689,15 +7993,21 @@ pub async fn send_poll(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let max_selections = usize::try_from(max_selections)
-        .map_err(|_| "A poll's maximum selections must be positive.".to_string())?;
+    let max_selections = usize::try_from(max_selections).map_err(|_| {
+        api_err(
+            "rooms",
+            "A poll's maximum selections must be positive.".to_string(),
+        )
+    })?;
     let content = poll_start_content(&question, answers, disclosed, max_selections)?;
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     room.send(content)
         .await
-        .map_err(|e| format!("Send poll failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Send poll failed: {e}")))?;
 
     app_log("info", "rooms", format!("Poll message sent to {}", room_id));
     info!("Poll message sent to {}", room_id);
@@ -7717,7 +8027,10 @@ fn validate_poll_answer_ids(answer_ids: &[String]) -> Result<(), String> {
         || answer_ids.iter().any(|answer_id| answer_id.is_empty())
         || answer_ids.iter().collect::<BTreeSet<_>>().len() != answer_ids.len()
     {
-        return Err("A poll response needs 1 to 20 unique answer ids.".to_string());
+        return Err(api_err(
+            "rooms",
+            "A poll response needs 1 to 20 unique answer ids.".to_string(),
+        ));
     }
     Ok(())
 }
@@ -7736,15 +8049,17 @@ pub async fn send_poll_response(
 
     validate_poll_answer_ids(&answer_ids)?;
     let event_id = matrix_sdk::ruma::EventId::parse(poll_start_event_id.as_str())
-        .map_err(|e| format!("Invalid poll event id: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Invalid poll event id: {e}")))?;
 
     let content = UnstablePollResponseEventContent::new(answer_ids, event_id);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     room.send(content)
         .await
-        .map_err(|e| format!("Send poll response failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Send poll response failed: {e}")))?;
 
     notify_sync_event_for_generation(
         generation,
@@ -7763,15 +8078,17 @@ pub async fn end_poll(room_id: String, poll_start_event_id: String) -> Result<()
     use matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent;
 
     let event_id = matrix_sdk::ruma::EventId::parse(poll_start_event_id.as_str())
-        .map_err(|e| format!("Invalid poll event id: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Invalid poll event id: {e}")))?;
 
     let content = UnstablePollEndEventContent::new("结束投票", event_id);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     room.send(content)
         .await
-        .map_err(|e| format!("End poll failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("End poll failed: {e}")))?;
 
     notify_sync_event_for_generation(
         generation,
@@ -8010,17 +8327,19 @@ pub async fn send_sticker(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
 
     let room = client
         .get_room(
             &matrix_sdk::ruma::RoomId::parse(room_id.clone())
-                .map_err(|e| format!("无效的房间 ID: {e}"))?,
+                .map_err(|e| api_err("rooms", format!("无效的房间 ID: {e}")))?,
         )
-        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
+        .ok_or_else(|| api_err("rooms", format!("房间不存在: {room_id}")))?;
 
     let content_uri = matrix_sdk::ruma::OwnedMxcUri::try_from(image_url.trim())
-        .map_err(|e| format!("Invalid sticker MXC URI: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Invalid sticker MXC URI: {e}")))?;
 
     let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
     if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
@@ -8046,7 +8365,7 @@ pub async fn send_sticker(
 
     room.send(content)
         .await
-        .map_err(|e| format!("Send sticker message failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Send sticker message failed: {e}")))?;
 
     app_log(
         "info",
@@ -8081,11 +8400,13 @@ const DM_REUSE_SCAN_MAX_ELAPSED_SECS: u64 = 150;
 /// Create a new direct chat room with a user.
 #[frb]
 pub async fn create_dm(account_user_id: String, user_id: String) -> Result<String, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
-    let invited_user =
-        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("无效的用户 ID: {e}"))?;
+    let invited_user = matrix_sdk::ruma::UserId::parse(&user_id)
+        .map_err(|e| api_err("rooms", format!("无效的用户 ID: {e}")))?;
 
     // Serialize per (account, target) pair: two concurrent calls could both
     // scan before either create lands, each decide "no DM exists" and
@@ -8118,7 +8439,7 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
             // creating under it would orphan the room from the new session.
             let mutation_client = mutation_client;
             if !mutation_client.matrix_auth().logged_in() {
-                return Err("当前账号已登出，请重新登录。".to_string());
+                return Err(api_err("rooms", "当前账号已登出，请重新登录。".to_string()));
             }
             let is_current_client = CLIENTS
                 .read()
@@ -8127,7 +8448,7 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
                 .map(|e| e.instance_id)
                 == expected_instance_id;
             if !is_current_client {
-                return Err("当前账号已切换，请重试。".to_string());
+                return Err(api_err("rooms", "当前账号已切换，请重试。".to_string()));
             }
             // The reuse scan below calls `members()` per DM candidate, which can
             // fetch /members over the network while holding the client lease.
@@ -8260,7 +8581,10 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
                 return Ok(room_id);
             }
             if members_read_failed {
-                return Err("无法确认是否已有私聊，请重试。".to_string());
+                return Err(api_err(
+                    "rooms",
+                    "无法确认是否已有私聊，请重试。".to_string(),
+                ));
             }
 
             let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
@@ -8270,7 +8594,7 @@ pub async fn create_dm(account_user_id: String, user_id: String) -> Result<Strin
             let response = mutation_client
                 .create_room(request)
                 .await
-                .map_err(|e| format!("创建房间失败: {e}"))?;
+                .map_err(|e| api_err("rooms", format!("创建房间失败: {e}")))?;
 
             app_log(
                 "info",
@@ -8291,13 +8615,15 @@ pub async fn create_group_room(
     name: String,
     topic: Option<String>,
 ) -> Result<String, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     // Mirror update_room_details: an empty name would create a nameless
     // room (the Dart callers already intercept, this is defense in depth).
     let name = name.trim().to_owned();
     if name.is_empty() {
-        return Err("房间名称不能为空。".to_string());
+        return Err(api_err("rooms", "房间名称不能为空。".to_string()));
     }
     // Mirror update_room_details: trim the topic too (the Dart callers
     // already pass trimmed values; this is defense in depth).
@@ -8313,7 +8639,7 @@ pub async fn create_group_room(
         let response = client
             .create_room(request)
             .await
-            .map_err(|e| format!("创建房间失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("创建房间失败: {e}")))?;
 
         app_log(
             "info",
@@ -8333,14 +8659,16 @@ pub async fn create_space(
     name: String,
     topic: Option<String>,
 ) -> Result<String, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     // Mirror update_room_details / create_group_room: an empty name would
     // create a nameless space (the Dart callers already intercept, this is
     // defense in depth).
     let name = name.trim().to_owned();
     if name.is_empty() {
-        return Err("空间名称不能为空。".to_string());
+        return Err(api_err("rooms", "空间名称不能为空。".to_string()));
     }
     // Mirror update_space_details: trim the topic too (the Dart callers
     // already pass trimmed values; this is defense in depth).
@@ -8354,7 +8682,7 @@ pub async fn create_space(
     creation_content.room_type = Some(matrix_sdk::ruma::room::RoomType::Space);
     request.creation_content = Some(
         matrix_sdk::ruma::serde::Raw::new(&creation_content)
-            .map_err(|e| format!("空间创建内容编码失败: {e}"))?,
+            .map_err(|e| api_err("rooms", format!("空间创建内容编码失败: {e}")))?,
     );
 
     // Bounded like the other P0 writes: the create request holds the client
@@ -8363,7 +8691,7 @@ pub async fn create_space(
         let response = client
             .create_room(request)
             .await
-            .map_err(|e| format!("创建空间失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("创建空间失败: {e}")))?;
 
         app_log(
             "info",
@@ -8381,11 +8709,13 @@ pub async fn create_space(
 pub async fn join_room(account_user_id: String, identifier: String) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
     let id_or_alias = matrix_sdk::ruma::RoomOrAliasId::parse(identifier.clone())
-        .map_err(|e| format!("无效的房间或空间标识: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("无效的房间或空间标识: {e}")))?;
 
     // Bounded like the other P0 writes: joining is a network operation
     // holding the client lease.
@@ -8393,7 +8723,7 @@ pub async fn join_room(account_user_id: String, identifier: String) -> Result<St
         let room = client
             .join_room_by_id_or_alias(&id_or_alias, &[])
             .await
-            .map_err(|e| format!("加入房间失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("加入房间失败: {e}")))?;
         app_log("info", "rooms", format!("Joined room: {}", room.room_id()));
         info!("Joined room: {}", room.room_id());
         Ok(room.room_id().to_string())
@@ -8407,16 +8737,18 @@ pub async fn join_room(account_user_id: String, identifier: String) -> Result<St
 pub async fn accept_room_invite(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
-        return Err(format!("该房间不是邀请状态: {room_id}"));
+        return Err(api_err("rooms", format!("该房间不是邀请状态: {room_id}")));
     }
     run_bounded(async move {
         room.join()
             .await
-            .map_err(|e| format!("接受邀请失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("接受邀请失败: {e}")))?;
         Ok(())
     })
     .await?;
@@ -8428,16 +8760,18 @@ pub async fn accept_room_invite(account_user_id: String, room_id: String) -> Res
 pub async fn reject_room_invite(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Invited {
-        return Err(format!("该房间不是邀请状态: {room_id}"));
+        return Err(api_err("rooms", format!("该房间不是邀请状态: {room_id}")));
     }
     run_bounded(async move {
         room.leave()
             .await
-            .map_err(|e| format!("拒绝邀请失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("拒绝邀请失败: {e}")))?;
         Ok(())
     })
     .await?;
@@ -8449,16 +8783,21 @@ pub async fn reject_room_invite(account_user_id: String, room_id: String) -> Res
 pub async fn withdraw_room_knock(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
     if room.state() != matrix_sdk::RoomState::Knocked {
-        return Err(format!("该房间不是加入请求状态: {room_id}"));
+        return Err(api_err(
+            "rooms",
+            format!("该房间不是加入请求状态: {room_id}"),
+        ));
     }
     run_bounded(async move {
         room.leave()
             .await
-            .map_err(|e| format!("撤回加入请求失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("撤回加入请求失败: {e}")))?;
         Ok(())
     })
     .await?;
@@ -8469,7 +8808,10 @@ pub async fn withdraw_room_knock(account_user_id: String, room_id: String) -> Re
 fn joined_non_space_room(client: &Client, room_id: &str) -> Result<Room, String> {
     let room = get_room_by_id(client, room_id)?;
     if room.state() != matrix_sdk::RoomState::Joined || room.is_space() {
-        return Err(format!("该房间不是已加入的非空间房间: {room_id}"));
+        return Err(api_err(
+            "rooms",
+            format!("该房间不是已加入的非空间房间: {room_id}"),
+        ));
     }
     Ok(room)
 }
@@ -8510,9 +8852,12 @@ async fn is_dm_by_members(room: &Room) -> bool {
 /// the account the caller opened it for, never on whatever account became
 /// active in between.
 fn ensure_account_matches(client: &Client, account_user_id: &str) -> Result<(), String> {
-    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    let active_user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?
+        .to_string();
     if active_user_id != account_user_id {
-        return Err("当前账号已切换，请重试。".to_string());
+        return Err(api_err("account", "当前账号已切换，请重试。".to_string()));
     }
     Ok(())
 }
@@ -8522,13 +8867,15 @@ fn ensure_account_matches(client: &Client, account_user_id: &str) -> Result<(), 
 pub async fn leave_room(account_user_id: String, room_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     run_bounded(async move {
         room.leave()
             .await
-            .map_err(|error| format!("退出房间失败: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("退出房间失败: {error}")))?;
         Ok(())
     })
     .await?;
@@ -8539,7 +8886,9 @@ pub async fn leave_room(account_user_id: String, room_id: String) -> Result<(), 
 /// Return the editable state of a joined non-space room.
 #[frb]
 pub async fn get_room_details(room_id: String) -> Result<RoomDetails, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = joined_non_space_room(&client, &room_id)?;
     let has_explicit_name = room.name().is_some_and(|name| !name.trim().is_empty());
     let (name_event_id, avatar_event_id, topic_event_id) = tokio::join!(
@@ -8571,15 +8920,17 @@ pub async fn invite_user_to_room(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("无效的用户 ID: {error}"))?;
+        .map_err(|error| api_err("rooms", format!("无效的用户 ID: {error}")))?;
     run_bounded(async move {
         room.invite_user_by_id(&user_id)
             .await
-            .map_err(|error| format!("邀请用户失败: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("邀请用户失败: {error}")))?;
         Ok(())
     })
     .await?;
@@ -8599,7 +8950,9 @@ pub async fn update_room_details(
 ) -> Result<RoomDetailsUpdate, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let name = name.trim().to_owned();
@@ -8652,16 +9005,18 @@ pub async fn upload_room_avatar(
 ) -> Result<RoomAvatarUpdate, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     // Only validates the room exists and is joined; the room used for the
     // state event is re-fetched under a fresh lease after the upload.
     joined_non_space_room(&client, &room_id)?;
     let mime: mime::Mime = content_type
         .parse()
-        .map_err(|error| format!("无效的内容类型 '{content_type}': {error}"))?;
+        .map_err(|error| api_err("rooms", format!("无效的内容类型 '{content_type}': {error}")))?;
     if mime.type_() != mime::IMAGE {
-        return Err(format!("不是图片格式: {mime}"));
+        return Err(api_err("rooms", format!("不是图片格式: {mime}")));
     }
     let media = client.media();
     // The upload can legitimately take minutes (the SDK sizes its own
@@ -8676,17 +9031,20 @@ pub async fn upload_room_avatar(
             media.upload(&mime, data, None),
         )
         .await
-        .map_err(|_| "上传超时，请重试。".to_string())?
-        .map_err(|error| format!("上传房间头像失败: {error}"))?
+        .map_err(|_| api_err("rooms", "上传超时，请重试。".to_string()))?
+        .map_err(|error| api_err("rooms", format!("上传房间头像失败: {error}")))?
     };
     // Re-acquire the lease for the state-event step (short, bounded by
     // run_bounded) and re-verify the account: the account may have switched
     // or logged out entirely during the upload. Either way the upload
     // already landed — say so (the Dart catch passes "已上传" messages
     // through verbatim).
-    let client = get_client()
-        .await
-        .ok_or_else(|| "头像已上传，但当前账号已登出，无法应用。请重新登录后重试。".to_string())?;
+    let client = get_client().await.ok_or_else(|| {
+        api_err(
+            "rooms",
+            "头像已上传，但当前账号已登出，无法应用。请重新登录后重试。".to_string(),
+        )
+    })?;
     ensure_account_matches(&client, &account_user_id)
         .map_err(|_| "头像已上传，但当前账号已切换，未应用。请重新选择图片以应用。".to_string())?;
     let room = joined_non_space_room(&client, &room_id).map_err(|_| {
@@ -8707,8 +9065,13 @@ pub async fn upload_room_avatar(
             room.set_avatar_url(&upload.content_uri, Some(info)),
         )
         .await
-        .map_err(|_| "头像已上传，但应用失败（请求超时），请重试。".to_string())?
-        .map_err(|error| format!("更新房间头像失败: {error}"))?;
+        .map_err(|_| {
+            api_err(
+                "rooms",
+                "头像已上传，但应用失败（请求超时），请重试。".to_string(),
+            )
+        })?
+        .map_err(|error| api_err("rooms", format!("更新房间头像失败: {error}")))?;
         notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
         Ok(RoomAvatarUpdate {
             avatar_url: upload.content_uri.to_string(),
@@ -8721,7 +9084,9 @@ pub async fn upload_room_avatar(
 /// Return whether a room has an explicit mute push rule.
 #[frb]
 pub async fn is_room_muted(room_id: String) -> Result<bool, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = joined_non_space_room(&client, &room_id)?;
     // Bounded like the other P0 calls: the notification-settings read holds
     // the client lease for the call's duration (the settings instance is a
@@ -8750,10 +9115,15 @@ pub async fn set_room_muted(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("rooms", "No active user".to_string()))?
+        .to_string();
     // Capture the account's current client instance id: the queued write
     // must fail fast when a logout+relogin replaced the client before it
     // executes — rebuilding the shared NotificationSettings cache entry
@@ -8771,7 +9141,7 @@ pub async fn set_room_muted(
             // NotificationSettings instance (keyed by this user_id, it would
             // shadow a fresh session's settings entry).
             if !mutation_client.matrix_auth().logged_in() {
-                return Err("当前账号已登出，请重新登录。".to_string());
+                return Err(api_err("rooms", "当前账号已登出，请重新登录。".to_string()));
             }
             // `logged_in()` can still pass when the remote logout failed/timed
             // out server-side (the local session kept its token while the
@@ -8782,7 +9152,7 @@ pub async fn set_room_muted(
             let is_current_client =
                 CLIENTS.read().await.get(&user_id).map(|e| e.instance_id) == expected_instance_id;
             if !is_current_client {
-                return Err("当前账号已切换，请重试。".to_string());
+                return Err(api_err("rooms", "当前账号已切换，请重试。".to_string()));
             }
             // Push-rule updates are read-modify-write server calls; serialize per
             // room so rapid toggles apply in click order instead of racing. The
@@ -8807,7 +9177,7 @@ pub async fn set_room_muted(
                         matrix_sdk::notification_settings::RoomNotificationMode::Mute,
                     )
                     .await
-                    .map_err(|error| format!("更新通知设置失败: {error}"))?;
+                    .map_err(|error| api_err("rooms", format!("更新通知设置失败: {error}")))?;
             } else {
                 // Unknown encryption state (room joined but `m.room.encryption`
                 // not synced yet) must default to encrypted: unmuting with
@@ -8833,7 +9203,7 @@ pub async fn set_room_muted(
                         matrix_sdk::notification_settings::IsOneToOne::from(is_one_to_one),
                     )
                     .await
-                    .map_err(|error| format!("更新通知设置失败: {error}"))?;
+                    .map_err(|error| api_err("rooms", format!("更新通知设置失败: {error}")))?;
             }
             // Broadcast from inside the queued operation: even when the caller
             // times out (90s bound) and this tail keeps running, the room list
@@ -8855,7 +9225,9 @@ pub async fn get_pinned_event_ids(
     account_user_id: String,
     room_id: String,
 ) -> Result<Vec<String>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("pinned", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     run_bounded(async move {
@@ -8868,8 +9240,8 @@ pub async fn get_pinned_event_ids(
             room.load_pinned_events(),
         )
         .await
-        .map_err(|_| "加载置顶状态超时，请重试".to_string())?
-        .map_err(|error| format!("加载置顶状态失败，请重试: {error}"))?
+        .map_err(|_| api_err("pinned", "加载置顶状态超时，请重试".to_string()))?
+        .map_err(|error| api_err("pinned", format!("加载置顶状态失败，请重试: {error}")))?
         .unwrap_or_default();
         Ok(ids.into_iter().map(|id| id.to_string()).collect())
     })
@@ -8891,11 +9263,13 @@ pub async fn set_pinned_message(
 ) -> Result<bool, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("pinned", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let event_id = matrix_sdk::ruma::EventId::parse(event_id)
-        .map_err(|error| format!("无效的事件 ID: {error}"))?;
+        .map_err(|error| api_err("pinned", format!("无效的事件 ID: {error}")))?;
     // Capture the account's current client instance id: the queued write
     // may execute after a logout+relogin replaced the client (deep
     // predecessor chains). Same discipline as `set_room_muted` /
@@ -8918,7 +9292,10 @@ pub async fn set_pinned_message(
             // would mislead with an unrelated error).
             let mutation_client = room.client();
             if !mutation_client.matrix_auth().logged_in() {
-                return Err("当前账号已登出，请重新登录。".to_string());
+                return Err(api_err(
+                    "pinned",
+                    "当前账号已登出，请重新登录。".to_string(),
+                ));
             }
             let is_current_client = CLIENTS
                 .read()
@@ -8927,7 +9304,7 @@ pub async fn set_pinned_message(
                 .map(|e| e.instance_id)
                 == expected_instance_id;
             if !is_current_client {
-                return Err("当前账号已切换，请重试。".to_string());
+                return Err(api_err("pinned", "当前账号已切换，请重试。".to_string()));
             }
             // RMW against the authoritative server state: the SDK's in-memory
             // room state lags our own writes until the sync echo, so rapid
@@ -8940,7 +9317,7 @@ pub async fn set_pinned_message(
             let mut pinned_ids = room
                 .load_pinned_events()
                 .await
-                .map_err(|error| format!("加载置顶状态失败: {error}"))?
+                .map_err(|error| api_err("pinned", format!("加载置顶状态失败: {error}")))?
                 .unwrap_or_default();
             let already_pinned = pinned_ids.iter().any(|id| id == &event_id);
             let changed = if pinned {
@@ -8966,7 +9343,7 @@ pub async fn set_pinned_message(
                 ),
             )
             .await
-            .map_err(|error| format!("更新置顶消息失败: {error}"))?;
+            .map_err(|error| api_err("pinned", format!("更新置顶消息失败: {error}")))?;
                 // Broadcast from inside the queued operation: even when the
                 // caller times out (90s bound) and this tail keeps running, the
                 // pinned page still learns about the change.
@@ -8987,7 +9364,9 @@ pub async fn set_pinned_message(
 /// Load every accessible pinned message in display order.
 #[frb]
 pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("pinned", "No client created.".to_string()))?;
     let room = joined_non_space_room(&client, &room_id)?;
     // The load holds the client lease (SYNC_LIFECYCLE read lock) for its
     // whole duration, blocking logout/account switch, which need the write
@@ -9003,7 +9382,7 @@ pub async fn get_pinned_messages(room_id: String) -> Result<Vec<ChatMessage>, St
         sdk_timeline::get_pinned_messages(&room),
     )
     .await
-    .map_err(|_| "加载置顶消息超时。".to_string())?
+    .map_err(|_| api_err("pinned", "加载置顶消息超时。".to_string()))?
 }
 
 /// Explicitly mark all currently loaded messages in a room as read.
@@ -9017,11 +9396,17 @@ pub async fn mark_room_as_read(
 ) -> Result<bool, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("account", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let user_id = client.user_id().ok_or("No active user")?.to_string();
-    let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?
+        .to_string();
+    let override_key = marked_unread_override_key(&client, &room)
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?;
     // Capture the account's current client instance id: the queued clear
     // may execute after a logout+relogin replaced the client (deep
     // predecessor chains). Same discipline as the other queued writes.
@@ -9059,7 +9444,10 @@ pub async fn mark_room_as_read(
         // queued writes).
         let mutation_client = room.client();
         if !mutation_client.matrix_auth().logged_in() {
-            return Err("当前账号已登出，请重新登录。".to_string());
+            return Err(api_err(
+                "account",
+                "当前账号已登出，请重新登录。".to_string(),
+            ));
         }
         let is_current_client = CLIENTS
             .read()
@@ -9068,7 +9456,7 @@ pub async fn mark_room_as_read(
             .map(|e| e.instance_id)
             == expected_instance_id;
         if !is_current_client {
-            return Err("当前账号已切换，请重试。".to_string());
+            return Err(api_err("account", "当前账号已切换，请重试。".to_string()));
         }
         let baseline = synced_marked_unread(&room).await;
         let had_pending_unread_override = MARKED_UNREAD_OVERRIDES
@@ -9103,7 +9491,10 @@ pub async fn mark_room_as_read(
                 // The receipt ran concurrently (tokio::join!) and may
                 // already have been sent: say so instead of a bare clear
                 // failure — a retry re-sends both idempotently.
-                format!("已读回执可能已发送，但清除未读标记失败: {clear_error}，请重试。")
+                api_err(
+                    "account",
+                    format!("已读回执可能已发送，但清除未读标记失败: {clear_error}，请重试。"),
+                )
             })?;
         // The explicit branch is deliberately NOT gated on the locally
         // visible marker (baseline or our own pending override): a `false`
@@ -9127,7 +9518,12 @@ pub async fn mark_room_as_read(
             // sent yet.
             sdk_timeline::clear_marked_unread(&room)
                 .await
-                .map_err(|clear_error| format!("清除未读标记失败: {clear_error}，请重试。"))?;
+                .map_err(|clear_error| {
+                    api_err(
+                        "account",
+                        format!("清除未读标记失败: {clear_error}，请重试。"),
+                    )
+                })?;
         }
         // The override suppresses the flag until the clear's echo
         // arrives. When a clear was just issued (explicit action, or our
@@ -9212,7 +9608,7 @@ pub async fn mark_room_as_read(
                 run_bounded_mutation(clear_key, lifecycle_protection, clear_operation),
             )
             .await
-            .unwrap_or_else(|_| Err(MUTATION_TIMEOUT_MESSAGE.to_string()))
+            .unwrap_or_else(|_| Err(api_err("account", MUTATION_TIMEOUT_MESSAGE.to_string())))
             .map(|()| true)
         })
     };
@@ -9231,13 +9627,19 @@ pub async fn mark_room_as_read(
                     // do); only the receipt send failed. Say so instead of
                     // claiming the whole action failed — a retry re-sends
                     // the receipt only.
-                    format!("未读标记已清除，但已读回执发送失败: {error}")
+                    api_err(
+                        "account",
+                        format!("未读标记已清除，但已读回执发送失败: {error}"),
+                    )
                 })?;
             } else {
                 // The clear was skipped (one is already in flight and
                 // covers this flag state); only the receipt failed.
                 receipt_result.map_err(|error| {
-                    format!("已读回执发送失败: {error}（未读标记清除已在后台进行）")
+                    api_err(
+                        "account",
+                        format!("已读回执发送失败: {error}（未读标记清除已在后台进行）"),
+                    )
                 })?;
             }
             cleared
@@ -9251,13 +9653,15 @@ pub async fn mark_room_as_read(
                 // running in its background tail, so neither "失败" nor
                 // "请重试" applies.
                 if clear_error == MUTATION_TIMEOUT_MESSAGE {
-                    return Err(
+                    return Err(api_err(
+                        "account",
                         "已读回执已发送；清除未读标记的操作仍在后台执行，请稍后刷新确认。"
                             .to_string(),
-                    );
+                    ));
                 }
-                return Err(format!(
-                    "已读回执已发送，但清除未读标记失败: {clear_error}，请重试。"
+                return Err(api_err(
+                    "account",
+                    format!("已读回执已发送，但清除未读标记失败: {clear_error}，请重试。"),
                 ));
             }
             // Both sides failed. When the clear side timed out (its
@@ -9271,15 +9675,19 @@ pub async fn mark_room_as_read(
             // delivered" branch is needed here.)
             if clear_error == MUTATION_TIMEOUT_MESSAGE {
                 let receipt_error = receipt_result.unwrap_err();
-                return Err(format!(
-                    "已读回执发送失败: {receipt_error}；清除未读标记的操作仍在后台执行，请稍后刷新确认。"
+                return Err(api_err(
+                    "account",
+                    format!("已读回执发送失败: {receipt_error}；清除未读标记的操作仍在后台执行，请稍后刷新确认。"),
                 ));
             }
             // The receipt (the primary action) failed too: surface both
             // errors instead of hiding the receipt failure behind the clear.
             let receipt_error = receipt_result.unwrap_err();
-            return Err(format!(
-                "已读回执发送失败: {receipt_error}；清除未读标记失败: {clear_error}，请重试。"
+            return Err(api_err(
+                "account",
+                format!(
+                    "已读回执发送失败: {receipt_error}；清除未读标记失败: {clear_error}，请重试。"
+                ),
             ));
         }
     };
@@ -9293,12 +9701,18 @@ pub async fn mark_room_unread(account_user_id: String, room_id: String) -> Resul
 
     use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("account", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
-    let user_id = client.user_id().ok_or("No active user")?.to_string();
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?
+        .to_string();
     let mutation_key = format!("read:{user_id}:{room_id}");
-    let override_key = marked_unread_override_key(&client, &room).ok_or("No active user")?;
+    let override_key = marked_unread_override_key(&client, &room)
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?;
     // Capture the account's current client instance id: the queued write
     // shares `read:{user}:{room}` with the clear path and may execute after
     // a logout+relogin replaced the client (deep predecessor chains). Same
@@ -9313,7 +9727,10 @@ pub async fn mark_room_unread(account_user_id: String, room_id: String) -> Resul
         // apply a late unread marker (and its wording would otherwise
         // mislead).
         if !mutation_client.matrix_auth().logged_in() {
-            return Err("当前账号已登出，请重新登录。".to_string());
+            return Err(api_err(
+                "account",
+                "当前账号已登出，请重新登录。".to_string(),
+            ));
         }
         let is_current_client = CLIENTS
             .read()
@@ -9322,13 +9739,13 @@ pub async fn mark_room_unread(account_user_id: String, room_id: String) -> Resul
             .map(|e| e.instance_id)
             == expected_instance_id;
         if !is_current_client {
-            return Err("当前账号已切换，请重试。".to_string());
+            return Err(api_err("account", "当前账号已切换，请重试。".to_string()));
         }
         let baseline = synced_marked_unread(&room).await;
         room.set_account_data(MarkedUnreadEventContent::new(true))
             .await
             .map(|_| ())
-            .map_err(|error| format!("标记房间为未读失败: {error}"))?;
+            .map_err(|error| api_err("account", format!("标记房间为未读失败: {error}")))?;
         set_marked_unread_override(override_key, baseline, true).await;
         // Broadcast from inside the queued operation (like mute/pin/read):
         // even when the caller times out and this tail keeps running, the
@@ -9355,7 +9772,9 @@ pub struct IgnoredUsers {
 /// List the Matrix user IDs in the current account's ignored-user list.
 #[frb]
 pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("account", "No client created.".to_string()))?;
     let account = client.account();
     // Bounded like the other P0 calls: the server read holds the client
     // lease (blocking logout/account switch).
@@ -9373,7 +9792,12 @@ pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
                     .account_data::<IgnoredUserListEventContent>()
                     .await
                     .map_err(|error| {
-                        format!("加载忽略用户列表失败: {network_error}；本地缓存读取失败: {error}")
+                        api_err(
+                            "account",
+                            format!(
+                                "加载忽略用户列表失败: {network_error}；本地缓存读取失败: {error}"
+                            ),
+                        )
                     })?,
                 false,
             ),
@@ -9381,7 +9805,7 @@ pub async fn get_ignored_users() -> Result<IgnoredUsers, String> {
         let mut content = raw
             .map(|raw| raw.deserialize())
             .transpose()
-            .map_err(|error| format!("解析忽略用户列表失败: {error}"))?
+            .map_err(|error| api_err("account", format!("解析忽略用户列表失败: {error}")))?
             .unwrap_or_default();
         if !from_server {
             merge_current_account_ignored_user_overrides(&client, &mut content).await;
@@ -9409,13 +9833,18 @@ pub async fn set_user_ignored(
     user_id: String,
     ignored: bool,
 ) -> Result<Vec<String>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
-    let active_user_id = client.user_id().ok_or("No active user")?.to_string();
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("account", "No client created.".to_string()))?;
+    let active_user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("account", "No active user".to_string()))?
+        .to_string();
     if active_user_id != account_user_id {
-        return Err("当前账号已切换，请重试。".to_string());
+        return Err(api_err("account", "当前账号已切换，请重试。".to_string()));
     }
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("无效的用户 ID: {error}"))?
+        .map_err(|error| api_err("account", format!("无效的用户 ID: {error}")))?
         .to_owned();
     // Capture the account's current client instance id: the queued write may
     // execute after a logout+relogin replaced the client (deep predecessor
@@ -9436,7 +9865,10 @@ pub async fn set_user_ignored(
             // apply a late ignored-list edit (and its wording would otherwise
             // mislead).
             if !mutation_client.matrix_auth().logged_in() {
-                return Err("当前账号已登出，请重新登录。".to_string());
+                return Err(api_err(
+                    "account",
+                    "当前账号已登出，请重新登录。".to_string(),
+                ));
             }
             let is_current_client = CLIENTS
                 .read()
@@ -9445,16 +9877,16 @@ pub async fn set_user_ignored(
                 .map(|e| e.instance_id)
                 == expected_instance_id;
             if !is_current_client {
-                return Err("当前账号已切换，请重试。".to_string());
+                return Err(api_err("account", "当前账号已切换，请重试。".to_string()));
             }
             let account = mutation_client.account();
             let mut content = account
                 .fetch_account_data_static::<IgnoredUserListEventContent>()
                 .await
-                .map_err(|error| format!("加载忽略用户列表失败: {error}"))?
+                .map_err(|error| api_err("account", format!("加载忽略用户列表失败: {error}")))?
                 .map(|raw| raw.deserialize())
                 .transpose()
-                .map_err(|error| format!("解析忽略用户列表失败: {error}"))?
+                .map_err(|error| api_err("account", format!("解析忽略用户列表失败: {error}")))?
                 .unwrap_or_default();
             if ignored {
                 content
@@ -9475,7 +9907,7 @@ pub async fn set_user_ignored(
             account
                 .set_account_data(content)
                 .await
-                .map_err(|error| format!("更新忽略用户列表失败: {error}"))?;
+                .map_err(|error| api_err("account", format!("更新忽略用户列表失败: {error}")))?;
             if let Some(key) = override_key {
                 set_ignored_user_override(key, synced_baseline, ignored).await;
             }
@@ -9508,21 +9940,23 @@ fn knock_member_events_request(
 pub async fn get_room_knock_requests(room_id: String) -> Result<Vec<KnockRequest>, String> {
     use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEvent};
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = joined_non_space_room(&client, &room_id)?;
     let request = knock_member_events_request(room.room_id().to_owned());
     let response = run_bounded(async move {
         client
             .send(request)
             .await
-            .map_err(|error| format!("无法加载加入请求列表: {error}"))
+            .map_err(|error| api_err("rooms", format!("无法加载加入请求列表: {error}")))
     })
     .await?;
     let mut requests = Vec::with_capacity(response.chunk.len());
     for raw in response.chunk {
         let event: RoomMemberEvent = raw
             .deserialize()
-            .map_err(|error| format!("无法解析加入请求数据: {error}"))?;
+            .map_err(|error| api_err("rooms", format!("无法解析加入请求数据: {error}")))?;
         let RoomMemberEvent::Original(event) = event else {
             continue;
         };
@@ -9564,9 +9998,9 @@ fn knock_state_read_failure(error: &matrix_sdk::HttpError) -> String {
     // A missing member event surfaces as a 404 with the standard
     // M_NOT_FOUND error kind; match either marker.
     if text.contains("M_NOT_FOUND") || text.contains("404") {
-        return "该用户已不再是此房间的加入请求。".to_string();
+        return api_err("rooms", "该用户已不再是此房间的加入请求。".to_string());
     }
-    format!("无法确认加入请求状态，请重试: {error}")
+    api_err("rooms", format!("无法确认加入请求状态，请重试: {error}"))
 }
 
 /// Accept a knock request by inviting the requester to the room.
@@ -9582,11 +10016,13 @@ pub async fn approve_room_knock(
 
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("无效的用户 ID: {error}"))?;
+        .map_err(|error| api_err("rooms", format!("无效的用户 ID: {error}")))?;
     // Symmetric with reject_room_knock: the knock list can lag the server
     // (the user withdrew the request, or another admin handled it). Inviting
     // on stale data would add a member who is no longer knocking, so
@@ -9614,10 +10050,13 @@ pub async fn approve_room_knock(
                 .ok()
                 .and_then(|value| value.get("content").cloned())
                 .and_then(|value| serde_json::from_value(value).ok())
-                .ok_or_else(|| "无法确认加入请求状态，请重试。".to_string())?,
+                .ok_or_else(|| api_err("rooms", "无法确认加入请求状态，请重试。".to_string()))?,
         };
         if content.membership != MembershipState::Knock {
-            return Err("该用户已不再是此房间的加入请求。".to_string());
+            return Err(api_err(
+                "rooms",
+                "该用户已不再是此房间的加入请求。".to_string(),
+            ));
         }
         room.invite_user_by_id(&user_id).await.map_err(|error| {
             // The membership was verified as knock moments ago, but another
@@ -9625,7 +10064,10 @@ pub async fn approve_room_knock(
             // in between, turning the invite into a failed action on a
             // stale request. Tell the user the state may have changed
             // instead of a bare failure.
-            format!("批准加入请求失败: {error}（该用户可能已被其他管理员处理）")
+            api_err(
+                "rooms",
+                format!("批准加入请求失败: {error}（该用户可能已被其他管理员处理）"),
+            )
         })?;
         Ok(())
     })
@@ -9647,11 +10089,13 @@ pub async fn reject_room_knock(
 
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
     let room = joined_non_space_room(&client, &room_id)?;
     let user_id = matrix_sdk::ruma::UserId::parse(user_id.trim())
-        .map_err(|error| format!("无效的用户 ID: {error}"))?;
+        .map_err(|error| api_err("rooms", format!("无效的用户 ID: {error}")))?;
     // The knock list can lag the server (another admin may have approved the
     // request, or the user withdrew it): re-verify the current membership
     // from the server before kicking, since `kick_user` would otherwise
@@ -9679,17 +10123,23 @@ pub async fn reject_room_knock(
                 .ok()
                 .and_then(|value| value.get("content").cloned())
                 .and_then(|value| serde_json::from_value(value).ok())
-                .ok_or_else(|| "无法确认加入请求状态，请重试。".to_string())?,
+                .ok_or_else(|| api_err("rooms", "无法确认加入请求状态，请重试。".to_string()))?,
         };
         if content.membership != MembershipState::Knock {
-            return Err("该用户已不再是此房间的加入请求。".to_string());
+            return Err(api_err(
+                "rooms",
+                "该用户已不再是此房间的加入请求。".to_string(),
+            ));
         }
         room.kick_user(&user_id, None).await.map_err(|error| {
             // The membership was verified as knock moments ago, but another
             // admin may have approved it in between, turning the kick into a
             // failed removal of a joined member. Tell the user the state may
             // have changed instead of a bare failure.
-            format!("拒绝加入请求失败: {error}（该用户可能已被其他管理员处理）")
+            api_err(
+                "rooms",
+                format!("拒绝加入请求失败: {error}（该用户可能已被其他管理员处理）"),
+            )
         })?;
         Ok(())
     })
@@ -9700,7 +10150,9 @@ pub async fn reject_room_knock(
 
 #[frb]
 pub async fn get_spaces() -> Result<Vec<Space>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
 
     // Bounded like the other P0 reads: the scan (room_to_chat_room per
     // room, including the notification-settings reads) holds the client
@@ -9727,16 +10179,21 @@ pub async fn get_spaces() -> Result<Vec<Space>, String> {
 
 #[frb]
 pub async fn get_space_details(space_id: String) -> Result<SpaceDetails, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("无效的空间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
 
     if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-        return Err(format!("该空间不是已加入状态: {space_id}"));
+        return Err(api_err(
+            "spaces",
+            format!("该空间不是已加入状态: {space_id}"),
+        ));
     }
 
     let chat_room = room_to_chat_room(&room, None, false).await;
@@ -9858,7 +10315,9 @@ pub async fn get_space_children(
     ignored_user_ids: Option<Vec<String>>,
     authoritative: bool,
 ) -> Result<Vec<ChatRoom>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     let ignored_user_ids =
         ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
@@ -9869,14 +10328,14 @@ pub async fn get_space_children(
         let space_room = client
             .get_room(
                 &matrix_sdk::ruma::RoomId::parse(space_id.clone())
-                    .map_err(|e| format!("无效的空间 ID: {e}"))?,
+                    .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?,
             )
-            .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+            .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
 
         let child_events = space_room
             .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
             .await
-            .map_err(|e| format!("加载空间子房间失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("加载空间子房间失败: {e}")))?;
 
         let mut child_rooms = Vec::new();
         for raw_child in child_events {
@@ -9933,22 +10392,27 @@ pub async fn update_space_details(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("无效的空间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
 
     if room.state() != matrix_sdk::RoomState::Joined || !room.is_space() {
-        return Err(format!("该空间不是已加入状态: {space_id}"));
+        return Err(api_err(
+            "spaces",
+            format!("该空间不是已加入状态: {space_id}"),
+        ));
     }
 
     let trimmed_name = name.trim().to_string();
     if trimmed_name.is_empty() {
-        return Err("空间名称不能为空。".to_string());
+        return Err(api_err("spaces", "空间名称不能为空。".to_string()));
     }
 
     // Bounded like the other P0 writes: two sequential state writes hold the
@@ -9956,7 +10420,7 @@ pub async fn update_space_details(
     run_bounded(async move {
         room.set_name(trimmed_name)
             .await
-            .map_err(|e| format!("更新空间名称失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("更新空间名称失败: {e}")))?;
         notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
         let normalized_topic = topic.unwrap_or_default().trim().to_string();
@@ -9967,7 +10431,7 @@ pub async fn update_space_details(
         room.set_room_topic(&normalized_topic).await.map_err(|e| {
             // The name write above already landed: say so instead of
             // reporting a plain whole-action failure.
-            format!("空间名称已更新，但主题更新失败: {e}")
+            api_err("spaces", format!("空间名称已更新，但主题更新失败: {e}"))
         })?;
         notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
@@ -9992,27 +10456,32 @@ pub async fn add_room_to_space(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("无效的空间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?;
     let child_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("无效的房间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的房间 ID: {e}")))?;
 
     let space_room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
     let child_room = client
         .get_room(&child_room_id)
-        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("房间不存在: {room_id}")))?;
 
     let via = vec![client
         .user_id()
-        .ok_or("No active user.")?
+        .ok_or_else(|| api_err("spaces", "No active user.".to_string()))?
         .server_name()
         .to_owned()];
-    let current_user_id = client.user_id().ok_or("No active user.")?.to_owned();
+    let current_user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("spaces", "No active user.".to_string()))?
+        .to_owned();
 
     // Bounded like the other P0 writes: two sequential state writes hold the
     // client lease.
@@ -10038,7 +10507,7 @@ pub async fn add_room_to_space(
                 matrix_sdk::ruma::events::space::child::SpaceChildEventContent::new(via.clone()),
             )
             .await
-            .map_err(|e| format!("将房间加入空间失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("将房间加入空间失败: {e}")))?;
         notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
 
         if can_set_parent {
@@ -10053,7 +10522,7 @@ pub async fn add_room_to_space(
                     // reporting a plain whole-action failure (same
                     // partial-success discipline as update_space_details; a
                     // retry converges — the child write is done).
-                    format!("已加入空间，但设置空间父级失败: {e}")
+                    api_err("spaces", format!("已加入空间，但设置空间父级失败: {e}"))
                 })?;
             notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
         }
@@ -10078,21 +10547,26 @@ pub async fn remove_room_from_space(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("无效的空间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?;
     let child_room_id = matrix_sdk::ruma::RoomId::parse(room_id.clone())
-        .map_err(|e| format!("无效的房间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的房间 ID: {e}")))?;
 
     let space_room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
     let child_room = client
         .get_room(&child_room_id)
-        .ok_or_else(|| format!("房间不存在: {room_id}"))?;
-    let current_user_id = client.user_id().ok_or("No active user.")?.to_owned();
+        .ok_or_else(|| api_err("spaces", format!("房间不存在: {room_id}")))?;
+    let current_user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("spaces", "No active user.".to_string()))?
+        .to_owned();
 
     // Bounded like the other P0 writes: the state reads and writes hold
     // the client lease.
@@ -10100,7 +10574,7 @@ pub async fn remove_room_from_space(
         let child_events = space_room
             .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
             .await
-            .map_err(|e| format!("加载空间子房间失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("加载空间子房间失败: {e}")))?;
         let space_child_event_id = child_events.into_iter().find_map(|raw_child| {
             let Ok(child_event) = raw_child.deserialize() else {
                 return None;
@@ -10116,7 +10590,7 @@ pub async fn remove_room_from_space(
         let parent_events = child_room
             .get_state_events_static::<matrix_sdk::ruma::events::space::parent::SpaceParentEventContent>()
             .await
-            .map_err(|e| format!("加载空间父级失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("加载空间父级失败: {e}")))?;
         let space_parent_event_id = parent_events.into_iter().find_map(|raw_parent| {
             let Ok(parent_event) = raw_parent.deserialize() else {
                 return None;
@@ -10155,7 +10629,7 @@ pub async fn remove_room_from_space(
                     serde_json::json!({}),
                 )
                 .await
-                .map_err(|e| format!("将房间移出空间失败: {e}"))?;
+                .map_err(|e| api_err("spaces", format!("将房间移出空间失败: {e}")))?;
             child_removed = true;
             notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
         }
@@ -10174,9 +10648,9 @@ pub async fn remove_room_from_space(
                     // partial-success discipline as update_space_details;
                     // a retry converges — the child link is already empty).
                     if child_removed {
-                        format!("已从空间移除，但父级关系清理失败: {e}")
+                        api_err("spaces", format!("已从空间移除，但父级关系清理失败: {e}"))
                     } else {
-                        format!("移除空间父级关系失败: {e}")
+                        api_err("spaces", format!("移除空间父级关系失败: {e}"))
                     }
                 })?;
             notify_sync_event_for_generation(generation, SyncEvent::SyncCompleted);
@@ -10194,7 +10668,7 @@ pub async fn remove_room_from_space(
             // another device, or one-directional). Fail closed like the
             // knock actions — the UI must not claim "已从空间移除" while
             // the server relationship survives.
-            return Err("未能找到空间关系，请刷新后重试".to_string());
+            return Err(api_err("spaces", "未能找到空间关系，请刷新后重试".to_string()));
         }
 
         app_log(
@@ -10213,23 +10687,25 @@ pub async fn remove_room_from_space(
 pub async fn leave_space(account_user_id: String, space_id: String) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     ensure_account_matches(&client, &account_user_id)?;
 
     let space_room_id = matrix_sdk::ruma::RoomId::parse(space_id.clone())
-        .map_err(|e| format!("无效的空间 ID: {e}"))?;
+        .map_err(|e| api_err("spaces", format!("无效的空间 ID: {e}")))?;
     let room = client
         .get_room(&space_room_id)
-        .ok_or_else(|| format!("空间不存在: {space_id}"))?;
+        .ok_or_else(|| api_err("spaces", format!("空间不存在: {space_id}")))?;
 
     if !room.is_space() {
-        return Err(format!("该房间不是空间: {space_id}"));
+        return Err(api_err("spaces", format!("该房间不是空间: {space_id}")));
     }
 
     run_bounded(async move {
         room.leave()
             .await
-            .map_err(|e| format!("退出空间失败: {e}"))?;
+            .map_err(|e| api_err("spaces", format!("退出空间失败: {e}")))?;
         Ok(())
     })
     .await?;
@@ -10245,7 +10721,9 @@ pub async fn get_ungrouped_rooms(
     ignored_user_ids: Option<Vec<String>>,
     authoritative: bool,
 ) -> Result<Vec<ChatRoom>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("spaces", "No client created.".to_string()))?;
     let ignored_user_ids =
         ignored_user_ids.map(|ids| ids.into_iter().collect::<std::collections::HashSet<_>>());
 
@@ -10262,7 +10740,7 @@ pub async fn get_ungrouped_rooms(
             let child_events = room
                 .get_state_events_static::<matrix_sdk::ruma::events::space::child::SpaceChildEventContent>()
                 .await
-                .map_err(|e| format!("加载空间子房间失败: {e}"))?;
+                .map_err(|e| api_err("spaces", format!("加载空间子房间失败: {e}")))?;
 
             for raw_child in child_events {
                 let Ok(child_event) = raw_child.deserialize() else {
@@ -10316,7 +10794,9 @@ pub async fn get_ungrouped_rooms(
 
 #[frb]
 pub async fn get_contacts() -> Result<Vec<Contact>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("contacts", "No client created.".to_string()))?;
     let my_user_id = client.user_id().map(|user_id| user_id.to_string());
     // Bounded like the other P0 reads: each room's `members()` call can
     // fetch /members over the network while holding the client lease, so an
@@ -10332,7 +10812,7 @@ pub async fn get_contacts() -> Result<Vec<Contact>, String> {
             let members = room
                 .members(matrix_sdk::RoomMemberships::JOIN)
                 .await
-                .map_err(|e| format!("获取联系人失败: {e}"))?;
+                .map_err(|e| api_err("contacts", format!("获取联系人失败: {e}")))?;
 
             for member in members {
                 let user_id = member.user_id().to_string();
@@ -10393,17 +10873,19 @@ pub async fn send_reply(
 ) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
     // Parse the event ID we're replying to
     let event_id = matrix_sdk::ruma::EventId::parse(&reply_to_event_id)
-        .map_err(|e| format!("无效的事件 ID: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("无效的事件 ID: {e}")))?;
 
     let mut reply_content = build_text_content(message)?;
     if let Some(reply_to_user_id) = reply_to_user_id {
         let reply_to_user_id = matrix_sdk::ruma::UserId::parse(&reply_to_user_id)
-            .map_err(|e| format!("Invalid reply user ID: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("Invalid reply user ID: {e}")))?;
         reply_content
             .mentions
             .get_or_insert_with(matrix_sdk::ruma::events::Mentions::new)
@@ -10417,7 +10899,7 @@ pub async fn send_reply(
     let response = room
         .send(reply_content)
         .await
-        .map_err(|e| format!("Reply failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Reply failed: {e}")))?;
 
     app_log(
         "info",
@@ -10450,11 +10932,13 @@ pub async fn edit_message(
 ) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id =
-        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
+    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
+        .map_err(|e| api_err("rooms", format!("无效的事件 ID: {e}")))?;
 
     use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
     let previous_mentions = build_mentions(&previous_mentioned_user_ids, previous_mentions_room)?;
@@ -10466,7 +10950,7 @@ pub async fn edit_message(
     let response = room
         .send(content)
         .await
-        .map_err(|e| format!("Edit failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Edit failed: {e}")))?;
 
     app_log(
         "info",
@@ -10495,11 +10979,13 @@ pub async fn send_reaction(
 ) -> Result<String, String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id =
-        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
+    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
+        .map_err(|e| api_err("rooms", format!("无效的事件 ID: {e}")))?;
 
     use matrix_sdk::ruma::events::relation::Annotation;
     let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::from(Annotation::new(
@@ -10510,7 +10996,7 @@ pub async fn send_reaction(
     let handle = room
         .send(content)
         .await
-        .map_err(|e| format!("Reaction failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Reaction failed: {e}")))?;
     let new_event_id = handle.response.event_id.to_string();
 
     app_log(
@@ -10532,15 +11018,17 @@ pub async fn redact_message(
 ) -> Result<(), String> {
     let generation = SYNC_GENERATION.load(Ordering::SeqCst);
 
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
-    let parsed_event_id =
-        matrix_sdk::ruma::EventId::parse(&event_id).map_err(|e| format!("无效的事件 ID: {e}"))?;
+    let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
+        .map_err(|e| api_err("rooms", format!("无效的事件 ID: {e}")))?;
 
     room.redact(&parsed_event_id, reason.as_deref(), None)
         .await
-        .map_err(|e| format!("Redact failed: {e}"))?;
+        .map_err(|e| api_err("rooms", format!("Redact failed: {e}")))?;
 
     app_log(
         "info",
@@ -10555,19 +11043,23 @@ pub async fn redact_message(
 /// Send a typing notice to a room.
 #[frb]
 pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("typing", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
 
     room.typing_notice(typing)
         .await
-        .map_err(|e| format!("Typing notice failed: {e}"))?;
+        .map_err(|e| api_err("typing", format!("Typing notice failed: {e}")))?;
     Ok(())
 }
 
 /// Get members of a room.
 #[frb]
 pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     // Bounded like the other P0 calls: `members()` can issue a network
     // /members request (lazy-loaded member list) while holding the client
@@ -10576,7 +11068,7 @@ pub async fn get_room_members(room_id: String) -> Result<Vec<Contact>, String> {
         let members = room
             .members(matrix_sdk::RoomMemberships::JOIN)
             .await
-            .map_err(|e| format!("获取成员失败: {e}"))?;
+            .map_err(|e| api_err("rooms", format!("获取成员失败: {e}")))?;
 
         app_log(
             "info",
@@ -10640,7 +11132,9 @@ pub async fn get_messages_before(
     from_event_id: String,
     limit: u32,
 ) -> Result<Vec<ChatMessage>, String> {
-    let client = get_client().await.ok_or("No client created.")?;
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
     let room = get_room_by_id(&client, &room_id)?;
     // Bounded like the other P0 calls: pagination holds the client lease.
     run_bounded(async move {

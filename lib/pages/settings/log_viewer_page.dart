@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../features/diagnostics/diagnostic_exporter.dart';
 import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
@@ -30,7 +29,6 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
   final _scrollController = ScrollController();
   final _searchController = TextEditingController();
   bool _autoScroll = true;
-  bool _exporting = false;
   String? _levelFilter;
   String? _tagFilter;
   String _searchQuery = '';
@@ -72,25 +70,6 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
-  }
-
-  Future<void> _exportDiagnostics() async {
-    if (_exporting) return;
-    setState(() => _exporting = true);
-    try {
-      final saved = await const DiagnosticExporter().export();
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(saved ? '诊断报告已导出' : '已取消导出')));
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导出诊断报告失败：$error')));
-    } finally {
-      if (mounted) setState(() => _exporting = false);
-    }
   }
 
   void _clearLogs() {
@@ -154,24 +133,6 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
           ),
         ),
         actions: [
-          _exporting
-              ? const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              : IconButton(
-                  icon: const Icon(
-                    Icons.file_download_outlined,
-                    color: AppColors.onSurfaceVariant,
-                    size: 20,
-                  ),
-                  onPressed: _exportDiagnostics,
-                  tooltip: '导出诊断报告',
-                ),
           IconButton(
             icon: Icon(
               _autoScroll

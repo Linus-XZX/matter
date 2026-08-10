@@ -8,55 +8,10 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../pages/chat/file_download_saver.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 
-class DiagnosticLogEntry {
-  const DiagnosticLogEntry({
-    required this.timestamp,
-    required this.level,
-    required this.tag,
-    required this.message,
-  });
-
-  factory DiagnosticLogEntry.fromRust(rust.AppLogEntry entry) {
-    return DiagnosticLogEntry(
-      timestamp: entry.timestamp.toInt(),
-      level: entry.level,
-      tag: entry.tag,
-      message: entry.message,
-    );
-  }
-
-  final int timestamp;
-  final String level;
-  final String tag;
-  final String message;
-}
-
 class DiagnosticExporter {
   const DiagnosticExporter();
 
-  Future<bool> export() async {
-    final generatedAt = DateTime.now();
-    final packageInfo = await PackageInfo.fromPlatform();
-    final deviceInfo = await _collectDeviceInfo();
-    final report = buildDiagnosticReport(
-      generatedAt: generatedAt,
-      appInfo: {
-        'Name': packageInfo.appName,
-        'Version': '${packageInfo.version} (${packageInfo.buildNumber})',
-        'Package': packageInfo.packageName,
-      },
-      deviceInfo: deviceInfo,
-      logs: rust.getRecentLogs().map(DiagnosticLogEntry.fromRust),
-    );
-
-    return saveDownloadedFile(
-      filename: _diagnosticFilename(generatedAt),
-      bytes: Uint8List.fromList(utf8.encode(report)),
-    );
-  }
-
-  /// Export the full persisted logs as a zip bundle. Unlike [export], this is
-  /// not limited to the 5,000-entry in-memory buffer. Log contents are
+  /// Export the full persisted logs as a zip bundle. Log contents are
   /// redacted before packing.
   Future<bool> exportLogsZip() async {
     final generatedAt = DateTime.now();
@@ -81,7 +36,7 @@ class DiagnosticExporter {
     _addZipTextEntry(archive, 'device-info.txt', info.toString());
 
     for (final file in await rust.readLogFiles()) {
-      _addZipTextEntry(archive, file.name, _redactLogMessage(file.content));
+      _addZipTextEntry(archive, file.name, redactLogMessage(file.content));
     }
 
     final zipBytes = ZipEncoder().encodeBytes(archive);
@@ -90,47 +45,6 @@ class DiagnosticExporter {
       bytes: zipBytes,
     );
   }
-}
-
-String buildDiagnosticReport({
-  required DateTime generatedAt,
-  required Map<String, String> appInfo,
-  required Map<String, String> deviceInfo,
-  required Iterable<DiagnosticLogEntry> logs,
-}) {
-  final entries = logs.toList(growable: false);
-  final report = StringBuffer()
-    ..writeln('Matter diagnostic report')
-    ..writeln('Generated at (UTC): ${generatedAt.toUtc().toIso8601String()}')
-    ..writeln()
-    ..writeln('This report includes diagnostic logs and device information.')
-    ..writeln(
-      'Access tokens, refresh tokens, passwords, registration tokens, and Bearer values are redacted on export.',
-    )
-    ..writeln('Chat message bodies and attachment contents are not collected.')
-    ..writeln()
-    ..writeln('== Application ==');
-
-  _writeSection(report, appInfo);
-  report
-    ..writeln()
-    ..writeln('== Device ==');
-  _writeSection(report, deviceInfo);
-  report
-    ..writeln()
-    ..writeln('== Logs (${entries.length}) ==');
-
-  for (final entry in entries) {
-    final timestamp = DateTime.fromMillisecondsSinceEpoch(
-      entry.timestamp,
-    ).toUtc();
-    final message = _redactLogMessage(entry.message).replaceAll('\n', '\n    ');
-    report.writeln(
-      '${timestamp.toIso8601String()} [${entry.level.toUpperCase()}] [${entry.tag}] $message',
-    );
-  }
-
-  return report.toString();
 }
 
 Future<Map<String, String>> _collectDeviceInfo() async {
@@ -216,9 +130,6 @@ void _writeSection(StringBuffer report, Map<String, String> values) {
   }
 }
 
-String _diagnosticFilename(DateTime generatedAt) =>
-    _exportFilename('matter-diagnostics', 'txt', generatedAt);
-
 String _logBundleFilename(DateTime generatedAt) =>
     _exportFilename('matter-logs', 'zip', generatedAt);
 
@@ -256,7 +167,7 @@ final _sensitiveValuePattern = RegExp(
 );
 final _bearerValuePattern = RegExp(r'(Bearer\s+)\S+', caseSensitive: false);
 
-String _redactLogMessage(String message) {
+String redactLogMessage(String message) {
   return message
       .replaceAllMapped(
         _sensitiveValuePattern,

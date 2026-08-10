@@ -4,6 +4,54 @@ import 'package:html/parser.dart' as html;
 import '../markdown/markdown_composer.dart';
 import 'matrix_html_node.dart';
 
+/// Returns the text content of [source] with monospace (`pre`/`code`)
+/// sections removed, so URLs inside code do not trigger link previews.
+///
+/// Inline nodes keep their original adjacency so URLs spanning inline
+/// formatting stay intact; separators are inserted only at block-level
+/// boundaries and where code nodes are removed.
+String matrixHtmlTextExcludingCode(String source) {
+  final nodes = const MatrixHtmlParser().parse(source);
+  final buffer = StringBuffer();
+  void collect(List<MatrixHtmlNode> nodes) {
+    for (final node in nodes) {
+      if (node is MatrixTextNode) {
+        buffer.write(node.text);
+        continue;
+      }
+      final element = node as MatrixElementNode;
+      if (element.tag == 'pre' || element.tag == 'code') {
+        buffer.write(' ');
+      } else if (_blockLevelTags.contains(element.tag)) {
+        buffer.write(' ');
+        collect(element.children);
+        buffer.write(' ');
+      } else {
+        collect(element.children);
+      }
+    }
+  }
+
+  collect(nodes);
+  return buffer.toString();
+}
+
+const _blockLevelTags = {
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'blockquote',
+  'ul',
+  'ol',
+  'li',
+  'br',
+  'hr',
+};
+
 class MatrixHtmlParser {
   static const maxDepth = 100;
   static const _allowedTags = {
