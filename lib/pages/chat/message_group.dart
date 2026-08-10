@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/markdown/markdown_composer.dart';
 import '../../features/markdown/markdown_source_store.dart';
 import '../../features/matrix_html/matrix_html_parser.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
@@ -642,7 +643,12 @@ class MessageGroupWidget extends ConsumerWidget {
       fontSize: 15,
       height: 1.35,
     );
-    final formattedBody = message.formattedBody;
+    final formattedBody =
+        recoverDegradedTableHtml(
+          body: message.content,
+          formattedBody: message.formattedBody,
+        ) ??
+        message.formattedBody;
     final previewTextSource = formattedBody == null || formattedBody.isEmpty
         ? message.content
         : matrixHtmlTextExcludingCode(formattedBody);
@@ -658,7 +664,7 @@ class MessageGroupWidget extends ConsumerWidget {
     final metadata = _buildMessageMetadata(context, ref, message);
     final metadataWidth = _messageMetadataWidth(context, message);
     final hasReply = message.inReplyTo != null;
-    final hasFormattedBody = message.formattedBody?.isNotEmpty == true;
+    final hasFormattedBody = formattedBody?.isNotEmpty == true;
     final replyContent = hasReply ? _getReplyContent(message.inReplyTo!) : null;
     final replyPreviewWidth = replyContent == null
         ? 0.0
@@ -697,7 +703,7 @@ class MessageGroupWidget extends ConsumerWidget {
         if (hasFormattedBody)
           MatrixHtmlMessage(
             key: ValueKey('formatted-body-metadata:${message.id}'),
-            html: message.formattedBody!,
+            html: formattedBody!,
             style: textStyle,
             accentColor: isMe ? Colors.white : AppColors.secondary,
             mentionDisplayNames: mentionDisplayNames,

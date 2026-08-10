@@ -212,6 +212,7 @@ class _MatrixNodeRenderer {
       'li',
       'pre',
       'hr',
+      'table',
     }.contains(tag);
   }
 
@@ -340,9 +341,133 @@ class _MatrixNodeRenderer {
         );
       case 'hr':
         return Divider(color: baseStyle.color?.withValues(alpha: 0.3));
+      case 'table':
+        return _renderTable(element);
       default:
         return _richText([element], baseStyle);
     }
+  }
+
+  Widget? _renderTable(MatrixElementNode table) {
+    final rows = <(bool, List<MatrixElementNode>)>[];
+    final captions = <MatrixElementNode>[];
+    void collectRows(MatrixHtmlNode node, bool inHeader) {
+      if (node is! MatrixElementNode) return;
+      if (node.tag == 'caption') {
+        captions.add(node);
+        return;
+      }
+      if (node.tag == 'tr') {
+        final cells = node.children
+            .whereType<MatrixElementNode>()
+            .where((cell) => cell.tag == 'th' || cell.tag == 'td')
+            .toList();
+        if (cells.isNotEmpty) {
+          rows.add((inHeader, cells));
+        }
+        return;
+      }
+      final header = inHeader || node.tag == 'thead';
+      for (final child in node.children) {
+        collectRows(child, header);
+      }
+    }
+
+    for (final child in table.children) {
+      collectRows(child, false);
+    }
+    if (rows.isEmpty && captions.isEmpty) return null;
+
+    // Remote HTML is not guaranteed to be regular (ragged rows, colspan):
+    // pad rows to a uniform column count so Table never sees irregular
+    // row lengths.
+    final columnCount = rows.fold<int>(
+      1,
+      (max, row) => math.max(max, row.$2.length),
+    );
+
+    final borderColor = (baseStyle.color ?? Colors.white).withValues(
+      alpha: 0.25,
+    );
+    final grid = rows.isEmpty
+        ? null
+        : Container(
+            constraints: const BoxConstraints(maxWidth: 520),
+            decoration: BoxDecoration(
+              border: Border.all(color: borderColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Table(
+                  defaultColumnWidth: const IntrinsicColumnWidth(),
+                  border: TableBorder.symmetric(
+                    inside: BorderSide(color: borderColor),
+                  ),
+                  children: [
+                    for (final (isHeader, cells) in rows)
+                      TableRow(
+                        decoration: isHeader
+                            ? BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.14),
+                              )
+                            : null,
+                        children: [
+                          for (final cell in cells)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              child: _richText(
+                                cell.children,
+                                isHeader || cell.tag == 'th'
+                                    ? baseStyle.copyWith(
+                                        fontWeight: FontWeight.w800,
+                                      )
+                                    : baseStyle,
+                              ),
+                            ),
+                          for (var i = cells.length; i < columnCount; i++)
+                            const SizedBox.shrink(),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+    if (grid == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final caption in captions)
+            _richText(
+              caption.children,
+              baseStyle.copyWith(fontWeight: FontWeight.w700),
+            ),
+        ],
+      );
+    }
+    if (captions.isEmpty) return grid;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final caption in captions)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: _richText(
+              caption.children,
+              baseStyle.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+        grid,
+      ],
+    );
   }
 
   Widget _renderList(
@@ -437,6 +562,7 @@ class _MatrixNodeRenderer {
       case 'ol':
       case 'pre':
       case 'hr':
+      case 'table':
         return null;
       default:
         return _inlineBlock([element], baseStyle);
@@ -449,6 +575,10 @@ class _MatrixNodeRenderer {
     );
   }
 
+  // Some senders emit HTML source with blank-line runs between stripped
+  // structures; rendering them literally produces huge vertical gaps.
+  static final _blankLineRun = RegExp(r'[ \t]*\n[ \t\n]*');
+
   List<InlineSpan> _inlineSpans(
     List<MatrixHtmlNode> nodes,
     TextStyle inherited,
@@ -456,7 +586,12 @@ class _MatrixNodeRenderer {
     final spans = <InlineSpan>[];
     for (final node in nodes) {
       if (node is MatrixTextNode) {
-        spans.add(TextSpan(text: node.text, style: inherited));
+        spans.add(
+          TextSpan(
+            text: node.text.replaceAll(_blankLineRun, '\n'),
+            style: inherited,
+          ),
+        );
         continue;
       }
       final element = node as MatrixElementNode;

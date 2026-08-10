@@ -50,6 +50,13 @@ const _blockLevelTags = {
   'li',
   'br',
   'hr',
+  'table',
+  'thead',
+  'tbody',
+  'tr',
+  'th',
+  'td',
+  'caption',
 };
 
 class MatrixHtmlParser {
@@ -78,6 +85,13 @@ class MatrixHtmlParser {
     'h5',
     'h6',
     'span',
+    'table',
+    'thead',
+    'tbody',
+    'tr',
+    'th',
+    'td',
+    'caption',
   };
   static const _discardWithContents = {'script', 'style', 'iframe', 'object'};
 
