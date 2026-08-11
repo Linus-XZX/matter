@@ -18,16 +18,28 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
+import 'message_input.dart' show editingDraftProvider;
 import 'file_message_bubble.dart';
 import 'forward_message_sheet.dart';
 import 'image_message_bubble.dart';
 import 'link_preview.dart';
 import 'location_message_bubble.dart';
 import 'message_insert_animation.dart';
+import 'message_reader_page.dart';
 import 'message_text.dart';
 import 'poll_message_bubble.dart';
 import 'video_message_bubble.dart';
 import 'send_flight.dart';
+
+/// The HTML a text message should render with: the sender's formatted body,
+/// or HTML rebuilt from the markdown source when the sender's HTML lost its
+/// table structure. Null for plain-text messages.
+String? effectiveFormattedHtml(ChatMessage message) =>
+    recoverDegradedTableHtml(
+      body: message.content,
+      formattedBody: message.formattedBody,
+    ) ??
+    message.formattedBody;
 
 class MessageGroup {
   final String senderId;
@@ -310,6 +322,17 @@ class MessageGroupWidget extends ConsumerWidget {
     );
     void onMentionTap(String userId) =>
         _showMemberProfile(context, userId, membersById[userId]);
+    final readerHtml = message.msgType == MessageType.text
+        ? effectiveFormattedHtml(message)
+        : null;
+    final VoidCallback? onReadFullScreen =
+        readerHtml != null && readerHtml.isNotEmpty
+        ? () => _openReaderFullScreen(
+            context,
+            html: readerHtml,
+            mentionDisplayNames: mentionDisplayNames,
+          )
+        : null;
     final coreBubble =
         message.msgType == MessageType.video &&
             (message.imageUrl != null || message.mediaSourceJson != null)
@@ -419,7 +442,12 @@ class MessageGroupWidget extends ConsumerWidget {
                     message,
                   )
                 : null)
-          : () => _showContextMenu(bubbleContext ?? context, ref, message),
+          : () => _showContextMenu(
+              bubbleContext ?? context,
+              ref,
+              message,
+              onReadFullScreen: onReadFullScreen,
+            ),
       behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: EdgeInsets.only(
@@ -624,6 +652,29 @@ class MessageGroupWidget extends ConsumerWidget {
     );
   }
 
+  /// Opens the full-screen reader for a formatted message. The reader
+  /// lives on the root navigator and can outlive this bubble (responsive
+  /// layout switch), so mentions inside it are shown through the
+  /// navigator's context instead of this bubble's.
+  void _openReaderFullScreen(
+    BuildContext context, {
+    required String html,
+    required Map<String, String> mentionDisplayNames,
+  }) {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    openMessageReader(
+      context,
+      html: html,
+      mentionDisplayNames: mentionDisplayNames,
+      onMentionTap: (userId) {
+        final navContext = navigator.context;
+        if (navContext.mounted) {
+          _showMemberProfile(navContext, userId, membersById[userId]);
+        }
+      },
+    );
+  }
+
   Widget _buildTextBubble(
     BuildContext context,
     WidgetRef ref,
@@ -643,12 +694,7 @@ class MessageGroupWidget extends ConsumerWidget {
       fontSize: 15,
       height: 1.35,
     );
-    final formattedBody =
-        recoverDegradedTableHtml(
-          body: message.content,
-          formattedBody: message.formattedBody,
-        ) ??
-        message.formattedBody;
+    final formattedBody = effectiveFormattedHtml(message);
     final previewTextSource = formattedBody == null || formattedBody.isEmpty
         ? message.content
         : matrixHtmlTextExcludingCode(formattedBody);
@@ -665,6 +711,7 @@ class MessageGroupWidget extends ConsumerWidget {
     final metadataWidth = _messageMetadataWidth(context, message);
     final hasReply = message.inReplyTo != null;
     final hasFormattedBody = formattedBody?.isNotEmpty == true;
+    final readerHtml = hasFormattedBody ? formattedBody : null;
     final replyContent = hasReply ? _getReplyContent(message.inReplyTo!) : null;
     final replyPreviewWidth = replyContent == null
         ? 0.0
@@ -700,16 +747,41 @@ class MessageGroupWidget extends ConsumerWidget {
         ?senderHeader,
         if (replyContent != null)
           _buildReplyPreview(context, replyContent, isMe),
-        if (hasFormattedBody)
-          MatrixHtmlMessage(
-            key: ValueKey('formatted-body-metadata:${message.id}'),
-            html: formattedBody!,
-            style: textStyle,
+        if (readerHtml != null)
+          CollapsibleMessageContent(
+            maxCollapsedHeight: 320,
             accentColor: isMe ? Colors.white : AppColors.secondary,
-            mentionDisplayNames: mentionDisplayNames,
-            onMentionTap: onMentionTap,
-            trailingMetadata: metadata,
-            minWidth: replyPreviewWidth,
+            backgroundColor: isMe
+                ? AppColors.primary
+                : AppColors.surfaceElevated,
+            contentKey: readerHtml,
+            onExpand: () => _openReaderFullScreen(
+              context,
+              html: readerHtml,
+              mentionDisplayNames: mentionDisplayNames,
+            ),
+            // While collapsed, the metadata shows once in the overlay row
+            // and the clipped content is the metadata-less variant, so it
+            // is never mounted twice or half-clipped.
+            overflowChild: MatrixHtmlMessage(
+              key: ValueKey('formatted-body-collapsed:${message.id}'),
+              html: readerHtml,
+              style: textStyle,
+              accentColor: isMe ? Colors.white : AppColors.secondary,
+              mentionDisplayNames: mentionDisplayNames,
+              onMentionTap: onMentionTap,
+            ),
+            overflowMetadata: metadata,
+            child: MatrixHtmlMessage(
+              key: ValueKey('formatted-body-metadata:${message.id}'),
+              html: readerHtml,
+              style: textStyle,
+              accentColor: isMe ? Colors.white : AppColors.secondary,
+              mentionDisplayNames: mentionDisplayNames,
+              onMentionTap: onMentionTap,
+              trailingMetadata: metadata,
+              minWidth: replyPreviewWidth,
+            ),
           )
         else
           _AdaptiveTextMetadata(
@@ -1246,8 +1318,9 @@ class MessageGroupWidget extends ConsumerWidget {
   void _showContextMenu(
     BuildContext context,
     WidgetRef ref,
-    ChatMessage message,
-  ) {
+    ChatMessage message, {
+    VoidCallback? onReadFullScreen,
+  }) {
     final overlay = Overlay.of(context, rootOverlay: true);
     final overlayContext = overlay.context;
     // Geometry of the long-pressed bubble, for popover positioning.
@@ -1267,6 +1340,7 @@ class MessageGroupWidget extends ConsumerWidget {
         isMe: message.isMe,
         bubbleRect: bubbleRect,
         onClose: close,
+        onReadFullScreen: onReadFullScreen,
         onCopy: () async {
           await Clipboard.setData(ClipboardData(text: message.content));
           if (overlayContext.mounted) {
@@ -1429,6 +1503,7 @@ class MessageGroupWidget extends ConsumerWidget {
   void _startReply(WidgetRef ref, ChatMessage message) {
     final roomAccountKey = activeRoomAccountKey(ref, roomId);
     ref.read(editingMessageProvider(roomAccountKey).notifier).value = null;
+    ref.read(editingDraftProvider(roomAccountKey).notifier).value = null;
     ref.read(replyingToProvider(roomAccountKey).notifier).value = message;
     onReplyRequested?.call();
   }
@@ -1463,7 +1538,8 @@ class MessageGroupWidget extends ConsumerWidget {
                     roomAccountKey,
                     message.id,
                   );
-                  if (context.mounted) {
+                  if (context.mounted &&
+                      ref.read(activeUserIdProvider) == roomAccountKey.userId) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text('已重新发送'),
@@ -1472,7 +1548,8 @@ class MessageGroupWidget extends ConsumerWidget {
                     );
                   }
                 } catch (error) {
-                  if (context.mounted) {
+                  if (context.mounted &&
+                      ref.read(activeUserIdProvider) == roomAccountKey.userId) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
                         content: Text('重试失败: $error'),
@@ -1822,6 +1899,7 @@ class _FloatingMessageMenu extends StatefulWidget {
   final VoidCallback onPin;
   final void Function(String emoji) onReact;
   final VoidCallback onShowFullEmojiPicker;
+  final VoidCallback? onReadFullScreen;
 
   const _FloatingMessageMenu({
     required this.message,
@@ -1836,6 +1914,7 @@ class _FloatingMessageMenu extends StatefulWidget {
     required this.onPin,
     required this.onReact,
     required this.onShowFullEmojiPicker,
+    this.onReadFullScreen,
   });
 
   @override
@@ -1964,6 +2043,12 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
                 icon: Icons.copy_rounded,
                 label: '复制',
                 onTap: () => _select(widget.onCopy),
+              ),
+            if (widget.onReadFullScreen != null)
+              _IconTextAction(
+                icon: Icons.article_outlined,
+                label: '全屏阅读',
+                onTap: () => _select(widget.onReadFullScreen!),
               ),
             _IconTextAction(
               icon: Icons.reply_rounded,

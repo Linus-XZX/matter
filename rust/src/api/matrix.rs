@@ -7202,6 +7202,7 @@ fn build_text_content(
 
 #[frb]
 pub async fn send_message(
+    account_user_id: String,
     room_id: String,
     message: FormattedMessageInput,
 ) -> Result<String, String> {
@@ -7210,6 +7211,7 @@ pub async fn send_message(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let content = build_text_content(message)?;
@@ -10866,6 +10868,7 @@ pub async fn get_contacts() -> Result<Vec<Contact>, String> {
 /// Send a reply to a specific message in a room.
 #[frb]
 pub async fn send_reply(
+    account_user_id: String,
     room_id: String,
     message: FormattedMessageInput,
     reply_to_event_id: String,
@@ -10876,6 +10879,7 @@ pub async fn send_reply(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     // Parse the event ID we're replying to
@@ -10924,6 +10928,7 @@ pub async fn send_reply(
 /// client-side by `get_messages` (see `Relation::Replacement` parsing).
 #[frb]
 pub async fn edit_message(
+    account_user_id: String,
     room_id: String,
     event_id: String,
     message: FormattedMessageInput,
@@ -10935,6 +10940,7 @@ pub async fn edit_message(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)

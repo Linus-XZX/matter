@@ -364,9 +364,11 @@ Future<List<StickerPack>> getStickerPacks({required String roomId}) =>
     RustLib.instance.api.crateApiMatrixGetStickerPacks(roomId: roomId);
 
 Future<String> sendMessage({
+  required String accountUserId,
   required String roomId,
   required FormattedMessageInput message,
 }) => RustLib.instance.api.crateApiMatrixSendMessage(
+  accountUserId: accountUserId,
   roomId: roomId,
   message: message,
 );
@@ -819,11 +821,13 @@ Future<List<Contact>> getContacts() =>
 
 /// Send a reply to a specific message in a room.
 Future<String> sendReply({
+  required String accountUserId,
   required String roomId,
   required FormattedMessageInput message,
   required String replyToEventId,
   String? replyToUserId,
 }) => RustLib.instance.api.crateApiMatrixSendReply(
+  accountUserId: accountUserId,
   roomId: roomId,
   message: message,
   replyToEventId: replyToEventId,
@@ -837,12 +841,14 @@ Future<String> sendReply({
 /// Tuwunel relays edits (MSC2676); the displayed edit history is aggregated
 /// client-side by `get_messages` (see `Relation::Replacement` parsing).
 Future<String> editMessage({
+  required String accountUserId,
   required String roomId,
   required String eventId,
   required FormattedMessageInput message,
   required List<String> previousMentionedUserIds,
   required bool previousMentionsRoom,
 }) => RustLib.instance.api.crateApiMatrixEditMessage(
+  accountUserId: accountUserId,
   roomId: roomId,
   eventId: eventId,
   message: message,

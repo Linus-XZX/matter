@@ -1590,13 +1590,18 @@ Future<void> retryFailedLocalMessage(
   try {
     if (replyTo != null) {
       await rust.sendReply(
+        accountUserId: key.userId,
         roomId: key.roomId,
         message: input,
         replyToEventId: replyTo,
         replyToUserId: failed.replyToUserId,
       );
     } else {
-      await rust.sendMessage(roomId: key.roomId, message: input);
+      await rust.sendMessage(
+        accountUserId: key.userId,
+        roomId: key.roomId,
+        message: input,
+      );
     }
   } catch (_) {
     // Restore the failed entry so the bubble keeps its error state. Go
@@ -1624,7 +1629,7 @@ Future<void> retryFailedLocalMessage(
   // instead of leaving it: the provider outlives the page, so a leftover
   // entry would resurface as a stuck "sending" bubble the next time the
   // room is opened. The echo renders as a normal message via sync.
-  if (!ref.context.mounted) {
+  if (!ref.context.mounted || ref.read(activeUserIdProvider) != key.userId) {
     outgoing.value = outgoing.value
         .where((entry) => entry.message.id != pendingId)
         .toList();
@@ -1739,21 +1744,48 @@ void markLocalOutgoingMessageFailedInState(
   outgoing.value = next;
 }
 
-Future<void> refreshMessagesRef(Ref ref, String roomId) async {
-  final namespace = ref.read(activeUserIdProvider) ?? 'anonymous';
-  ref.invalidate(messagesProvider(roomId));
+Future<void> refreshMessagesRef(Ref ref, String roomId) =>
+    _refreshMessagesShared(
+      roomId,
+      read: ref.read,
+      invalidate: ref.invalidate,
+      isAlive: () => ref.mounted,
+    );
+
+/// Same refresh as [refreshMessagesRef] but driven by a [ProviderContainer]:
+/// it never unmounts, so callers whose widget ref may die mid-flight (e.g.
+/// the full-screen composer falling back after a layout switch) still get
+/// the reconciled fetch.
+Future<void> refreshMessagesContainer(
+  ProviderContainer container,
+  String roomId,
+) => _refreshMessagesShared(
+  roomId,
+  read: container.read,
+  invalidate: container.invalidate,
+  isAlive: () => true,
+);
+
+Future<void> _refreshMessagesShared(
+  String roomId, {
+  required T Function<T>(ProviderListenable<T> provider) read,
+  required void Function(ProviderOrFamily provider) invalidate,
+  required bool Function() isAlive,
+}) async {
+  final namespace = read(activeUserIdProvider) ?? 'anonymous';
+  invalidate(messagesProvider(roomId));
   // Reconcile the fresh fetch into the in-memory cache + disk snapshot so the
   // UI (which watches messageCacheProvider) never has to flip through a
   // loading state. This is the path used by syncStreamProvider.
   try {
-    final latest = await ref.read(messagesProvider(roomId).future);
-    if (!ref.mounted) return;
-    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
-    final allowDiskCache = await _canPersistMessagesForRoom(ref.read, roomId);
-    if (!ref.mounted) return;
-    if ((ref.read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
-    ref.read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
-    final current = ref.read(messageCacheProvider(roomId));
+    final latest = await read(messagesProvider(roomId).future);
+    if (!isAlive()) return;
+    if ((read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
+    final allowDiskCache = await _canPersistMessagesForRoom(read, roomId);
+    if (!isAlive()) return;
+    if ((read(activeUserIdProvider) ?? 'anonymous') != namespace) return;
+    read(messageCacheOwnerProvider(roomId).notifier).value = namespace;
+    final current = read(messageCacheProvider(roomId));
     final reconciled = reconcileMessageSnapshot(current, latest);
     // Content-equality check (same discipline as updateMessageCache): the
     // snapshot is rebuilt on every refresh, so `identical` would be false
@@ -1768,7 +1800,7 @@ Future<void> refreshMessagesRef(Ref ref, String roomId) async {
       }
     }
     if (!equal) {
-      ref.read(messageCacheProvider(roomId).notifier).value = reconciled;
+      read(messageCacheProvider(roomId).notifier).value = reconciled;
     }
     unawaited(
       saveCachedMessages(
@@ -2041,7 +2073,9 @@ Future<void> sendReply(
   String message,
   String replyToEventId,
 ) async {
+  final accountUserId = ref.read(activeUserIdProvider) ?? '';
   await rust.sendReply(
+    accountUserId: accountUserId,
     roomId: roomId,
     message: rust.FormattedMessageInput(
       body: message,
@@ -2050,6 +2084,7 @@ Future<void> sendReply(
     ),
     replyToEventId: replyToEventId,
   );
+  if (!ref.mounted || ref.read(activeUserIdProvider) != accountUserId) return;
   await refreshMessagesRef(ref, roomId);
   ref.invalidate(chatRoomsProvider);
 }

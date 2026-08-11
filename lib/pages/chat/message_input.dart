@@ -15,6 +15,7 @@ import '../../widgets/liquid_glass.dart';
 import 'attachment_picker.dart';
 import 'composer_picker_panel.dart';
 import 'latest_message_control.dart';
+import 'markdown_composer_page.dart';
 import 'send_flight.dart';
 import 'sticker_catalog.dart';
 
@@ -24,7 +25,251 @@ final messageDraftProvider =
       (_) => MutableState(''),
     );
 
+/// In-progress edit text for [editingMessageProvider]'s message, isolated
+/// by account and room. The full-screen composer syncs here while editing
+/// so an edit survives the input widget being disposed (e.g. responsive
+/// layout switches); matched by message id so a stale edit never leaks
+/// into a different message's prefill.
+final editingDraftProvider =
+    NotifierProvider.family<
+      MutableState<({String editingId, String text})?>,
+      ({String editingId, String text})?,
+      RoomAccountKey
+    >((_) => MutableState(null));
+
 enum InputPanelMode { none, keyboard, emoji, attachment }
+
+/// Sends [rawText] through the normal pipeline (optimistic local bubble,
+/// reply/edit handling, failure retry). Returns true once the server has
+/// accepted the message; on failure [onError] receives the underlying
+/// error and false is returned.
+///
+/// Defined outside [MessageInputState] so a caller that may outlive the
+/// state — the full-screen composer on the root navigator survives a
+/// layout switch disposing this widget — can invoke the pipeline without
+/// touching a dead ref. For the same reason the post-send refresh goes
+/// through [refreshContainer] when provided: a `ProviderContainer` never
+/// unmounts, unlike a widget [ref] that may be gone by the time the
+/// refresh finishes. Conflicts with the live state's synchronous part
+/// (double-sending the same text) are prevented by the composer's sending
+/// guard; the failure path is safe on a live input because `_composerOpen`
+/// routes it to the composer variant.
+Future<bool> sendDraftText(
+  WidgetRef ref, {
+  required String roomId,
+  required RoomAccountKey draftKey,
+  required String rawText,
+  required int totalMembers,
+  ValueNotifier<bool>? sendInFlight,
+  bool composerHoldsDraft = false,
+  ProviderContainer? refreshContainer,
+  void Function(Object error)? onError,
+  void Function(MessageSendPresentation presentation, bool success)?
+  onMessageSent,
+  void Function(String localId, MessageSendPresentation presentation)?
+  onMessageQueued,
+  MessageSendPresentation Function()? resolveSendPresentation,
+}) async {
+  final text = rawText.trim();
+  if (text.isEmpty) return false;
+  final compiled = const MarkdownComposer().compile(text);
+  if (compiled.body.trim().isEmpty) return false;
+
+  final editing = ref.read(editingMessageProvider(draftKey));
+  final replyTo = ref.read(replyingToProvider(draftKey));
+  final replyState = ref.read(replyingToProvider(draftKey).notifier);
+  final draftState = ref.read(messageDraftProvider(draftKey).notifier);
+  final editingState = ref.read(editingMessageProvider(draftKey).notifier);
+  final editDraftState = ref.read(editingDraftProvider(draftKey).notifier);
+  final plainDraftBeforeSend = draftState.value;
+  bool accountStillActive() =>
+      refreshContainer == null ||
+      refreshContainer.read(activeUserIdProvider) == draftKey.userId;
+  MutableState<List<LocalOutgoingMessage>>? fallbackOutgoing;
+  LocalOutgoingMessage? fallbackFailedMessage;
+  if (composerHoldsDraft && editing == null) {
+    final outgoingState = ref.read(
+      localOutgoingMessagesProvider(draftKey).notifier,
+    );
+    fallbackOutgoing = outgoingState;
+    var timestamp = DateTime.now().millisecondsSinceEpoch;
+    for (final message in ref.read(messageCacheProvider(roomId))) {
+      final candidate = int.tryParse(message.timestamp) ?? 0;
+      if (candidate >= timestamp) timestamp = candidate + 1;
+    }
+    for (final outgoing in outgoingState.value) {
+      final candidate = int.tryParse(outgoing.message.timestamp) ?? 0;
+      if (candidate >= timestamp) timestamp = candidate + 1;
+    }
+    final failedId =
+        '$localOutgoingFailedPrefix${DateTime.now().microsecondsSinceEpoch}';
+    fallbackFailedMessage = LocalOutgoingMessage(
+      message: rust.ChatMessage(
+        id: failedId,
+        senderId: draftKey.userId,
+        senderName: '我',
+        content: compiled.body,
+        formattedBody: compiled.formattedBody,
+        mentionedUserIds: compiled.mentionedUserIds,
+        mentionsRoom: compiled.mentionsRoom,
+        timestamp: timestamp.toString(),
+        isMe: true,
+        msgType: rust.MessageType.text,
+        inReplyTo: replyTo?.id,
+        isEdited: false,
+        editHistory: const [],
+        reactions: const [],
+        readers: const [],
+        totalMembers: totalMembers,
+      ),
+      replyToUserId: (replyTo == null || replyTo.isMe)
+          ? null
+          : replyTo.senderId,
+    );
+  }
+
+  sendInFlight?.value = true;
+  if (editing != null && composerHoldsDraft) {
+    // The composer route may be closed mid-flight (its result already
+    // reports the text as consumed). A newly mounted input must not find
+    // the pre-send state and offer it for a second send while the first is
+    // still running — so the provider state is consumed up front and only
+    // put back on failure.
+    editingState.value = null;
+    editDraftState.value = null;
+  } else if (editing == null) {
+    if (composerHoldsDraft) {
+      draftState.value = '';
+    }
+    // Consume the relation before the network wait. A newly selected reply
+    // then belongs to the next draft and must not be cleared by this send's
+    // eventual success.
+    if (replyTo != null) replyState.value = null;
+  }
+  try {
+    String remoteEventId;
+    if (editing != null) {
+      remoteEventId = await rust.editMessage(
+        accountUserId: draftKey.userId,
+        roomId: roomId,
+        eventId: editing.id,
+        message: compiled.toRust(),
+        previousMentionedUserIds: editing.mentionedUserIds,
+        previousMentionsRoom: editing.mentionsRoom,
+      );
+    } else if (replyTo != null) {
+      remoteEventId = await rust.sendReply(
+        accountUserId: draftKey.userId,
+        roomId: roomId,
+        message: compiled.toRust(),
+        replyToEventId: replyTo.id,
+        replyToUserId: replyTo.isMe ? null : replyTo.senderId,
+      );
+    } else {
+      remoteEventId = await rust.sendMessage(
+        accountUserId: draftKey.userId,
+        roomId: roomId,
+        message: compiled.toRust(),
+      );
+    }
+    var persistMarkdownSource = false;
+    if (accountStillActive()) {
+      final canPersist = await _canPersistMarkdownSource(roomId);
+      persistMarkdownSource = accountStillActive() && canPersist;
+    }
+    try {
+      await const MarkdownSourceStore().save(
+        userId: draftKey.userId,
+        roomId: roomId,
+        eventId: editing?.id ?? remoteEventId,
+        source: compiled.source,
+        body: compiled.body,
+        formattedBody: compiled.formattedBody,
+        persist: persistMarkdownSource,
+      );
+    } catch (e) {
+      // The message was already accepted by the server; failing to persist
+      // the markdown source must not flip the bubble into "failed" (which
+      // would then offer a retry that duplicates the send).
+      debugPrint('Failed to save markdown source: $e');
+    }
+    if (editing != null && !composerHoldsDraft) {
+      final currentEditDraft = editDraftState.value;
+      final stillSendingSameText =
+          editingState.value?.id == editing.id &&
+          (currentEditDraft == null ||
+              (currentEditDraft.editingId == editing.id &&
+                  currentEditDraft.text == rawText));
+      if (stillSendingSameText) {
+        editingState.value = null;
+        editDraftState.value = null;
+      }
+    }
+    if ((editing != null || composerHoldsDraft) && accountStillActive()) {
+      // No local bubble was queued (edit, or composer send outliving its
+      // input): reconcile through a refresh. A container never unmounts, so
+      // the refresh still lands after the caller's widget tore down
+      // mid-flight; the plain WidgetRef path is fine when the input itself
+      // initiated the send.
+      unawaited(
+        refreshContainer != null
+            ? refreshMessagesContainer(refreshContainer, roomId)
+            : refreshMessages(ref, roomId),
+      );
+    }
+    return true;
+  } catch (e) {
+    // No optimistic entry was queued, so nothing else needs cleanup. A
+    // composer-side send already consumed the provider state up front:
+    // restore it, otherwise an in-flight close (result: consumed) would
+    // lose the text for good.
+    if (composerHoldsDraft) {
+      final stateStillConsumed =
+          draftState.value == (editing == null ? '' : plainDraftBeforeSend) &&
+          replyState.value == (editing == null ? null : replyTo) &&
+          editingState.value == null &&
+          editDraftState.value == null;
+      // A remounted input may already contain a newer draft/reply/edit. In
+      // that case the failure is still reported, but the old snapshot must
+      // not overwrite the user's newer work. Preserve a failed new message
+      // as a retryable timeline entry instead of silently dropping it.
+      if (!stateStillConsumed) {
+        if (fallbackOutgoing != null && fallbackFailedMessage != null) {
+          final failedId = fallbackFailedMessage.message.id;
+          if (!fallbackOutgoing.value.any(
+            (entry) => entry.message.id == failedId,
+          )) {
+            fallbackOutgoing.value = [
+              ...fallbackOutgoing.value,
+              fallbackFailedMessage,
+            ];
+          }
+        }
+        onError?.call(e);
+        return false;
+      }
+      if (editing != null) {
+        editingState.value = editing;
+        editDraftState.value = (editingId: editing.id, text: rawText);
+      } else {
+        draftState.value = rawText;
+        if (replyTo != null) replyState.value = replyTo;
+      }
+    }
+    onError?.call(e);
+    return false;
+  } finally {
+    sendInFlight?.value = false;
+  }
+}
+
+Future<bool> _canPersistMarkdownSource(String roomId) async {
+  try {
+    return !await rust.isRoomEncrypted(roomId: roomId);
+  } catch (_) {
+    return false;
+  }
+}
 
 class MessageInput extends ConsumerStatefulWidget {
   final String roomId;
@@ -81,7 +326,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   final _textFieldKey = GlobalKey();
   RoomAccountKey get _draftKey => activeRoomAccountKey(ref, widget.roomId);
   bool _hasText = false;
+  bool _hasLongText = false;
   bool _isSending = false;
+
+  /// Tracks the full-screen markdown composer: while it is open, a failed
+  /// send must drop the optimistic entry (the composer still holds the
+  /// draft, so a retry resends instead of leaving a duplicate failed
+  /// bubble) rather than marking it failed for bubble-level retry.
+  bool _composerOpen = false;
   Timer? _typingTimer;
   Timer? _typingKeepAliveTimer;
   bool _isTyping = false;
@@ -105,6 +357,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       selection: TextSelection.collapsed(offset: draft.length),
     );
     _hasText = draft.trim().isNotEmpty;
+    _hasLongText = _isLongDraft(draft);
     _controller.addListener(_onTextChanged);
     if (defaultTargetPlatform != TargetPlatform.linux) {
       _focusNode.onKeyEvent = _handleKeyEvent;
@@ -150,15 +403,34 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     super.dispose();
   }
 
+  /// Whether a draft has outgrown the inline field: on narrow screens this
+  /// is what makes the full-screen editor entry appear.
+  static bool _isLongDraft(String text) =>
+      text.length >= 80 || text.contains('\n');
+
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
-    if (ref.read(editingMessageProvider(_draftKey)) == null) {
+    final editing = ref.read(editingMessageProvider(_draftKey));
+    if (editing == null) {
       ref.read(messageDraftProvider(_draftKey).notifier).value =
           _controller.text;
+    } else {
+      // Keep the surviving edit draft in step with the inline text, so a
+      // layout switch never recovers an older full-screen edit over a
+      // newer inline one (or vice versa).
+      ref.read(editingDraftProvider(_draftKey).notifier).value = (
+        editingId: editing.id,
+        text: _controller.text,
+      );
     }
-    if (_hasText != hasText) {
+    // On narrow screens the full-screen editor entry stays hidden for
+    // short messages and surfaces once the draft outgrows the inline
+    // field — exactly when editing in place starts to hurt.
+    final hasLongText = _isLongDraft(_controller.text);
+    if (_hasText != hasText || _hasLongText != hasLongText) {
       setState(() {
         _hasText = hasText;
+        _hasLongText = hasLongText;
       });
     }
     if (hasText) {
@@ -310,15 +582,167 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
   }
 
-  Future<void> _sendMessage() async {
-    final text = _controller.text.trim();
-    if (text.isEmpty || _isSending) return;
+  Future<void> _sendMessage() => _sendMessageText(_controller.text);
+
+  /// Long-press on the attachment button: a small menu of extra composer
+  /// tools that don't deserve a permanent spot in the input row.
+  Future<void> _showComposerToolsMenu(BuildContext buttonContext) async {
+    final buttonBox = buttonContext.findRenderObject();
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (buttonBox is! RenderBox ||
+        !buttonBox.attached ||
+        !buttonBox.hasSize ||
+        overlay is! RenderBox) {
+      return;
+    }
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        buttonBox.localToGlobal(Offset.zero) & buttonBox.size,
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem<String>(
+          value: 'markdown',
+          child: Row(
+            children: [
+              Icon(
+                Icons.edit_note_rounded,
+                color: AppColors.onSurfaceVariant,
+                size: 22,
+              ),
+              SizedBox(width: 12),
+              Text('Markdown 编辑器'),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (action == 'markdown' && mounted) {
+      _openMarkdownComposer();
+    }
+  }
+
+  /// Opens the full-screen markdown composer with the current draft. On
+  /// close the (possibly edited) text is written back so no draft is lost;
+  /// a completed send has already cleared the input via the send pipeline.
+  ///
+  /// The composer route lives on the root navigator and can outlive this
+  /// state (e.g. a responsive layout switch disposes the page while the
+  /// composer stays open), so the text is also synced live into provider
+  /// state that survives — [messageDraftProvider] for new messages,
+  /// [editingDraftProvider] for edits — and a send after this state is gone
+  /// goes through [sendDraftText] with provider state only.
+  Future<void> _openMarkdownComposer() async {
+    _focusNode.unfocus();
+    widget.onPanelModeChanged(InputPanelMode.none);
+    _composerOpen = true;
+    // Captured now, while mounted: these provider notifiers (and the
+    // container for the post-send refresh) stay valid after this state is
+    // disposed, unlike ref.
     final draftKey = _draftKey;
+    final roomId = widget.roomId;
+    final totalMembers = widget.totalMembers;
+    final container = ProviderScope.containerOf(context, listen: false);
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final editing = ref.read(editingMessageProvider(draftKey));
+    final draftState = ref.read(messageDraftProvider(draftKey).notifier);
+    final editDraftState = ref.read(editingDraftProvider(draftKey).notifier);
+    void persistText(String text) {
+      if (editing == null) {
+        draftState.value = text;
+      } else {
+        editDraftState.value = (editingId: editing.id, text: text);
+      }
+    }
+
+    void showSendError(Object error) {
+      if (container.read(activeUserIdProvider) != draftKey.userId) return;
+      final feedbackContext = navigator.context;
+      if (!feedbackContext.mounted) return;
+      ScaffoldMessenger.maybeOf(feedbackContext)?.showSnackBar(
+        SnackBar(
+          content: Text('发送失败: $error'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+
+    final result = await navigator.push<MarkdownComposerResult>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) {
+          // While this state is alive the input's own pipeline sends
+          // (flight animation, reply-bar clearance); once it is gone the
+          // route's element still provides a live ref whose container is
+          // the shared one, so the composer keeps a working send.
+          return MarkdownComposerPage(
+            initialText: _controller.text,
+            onSend: (text, composerRef) => mounted
+                ? _sendMessageText(text, onDetachedError: showSendError)
+                : sendDraftText(
+                    composerRef,
+                    roomId: roomId,
+                    draftKey: draftKey,
+                    rawText: text,
+                    totalMembers: totalMembers,
+                    composerHoldsDraft: true,
+                    // A ProviderContainer never unmounts, so the
+                    // post-send refresh still lands after the composer
+                    // route popped itself away.
+                    refreshContainer: container,
+                    onError: showSendError,
+                  ),
+            onTyping: () {
+              if (mounted) _handleTyping();
+            },
+            onDraftChanged: persistText,
+          );
+        },
+      ),
+    );
+    _composerOpen = false;
+    if (!mounted) {
+      // The host is gone (layout switch): the live sync above already
+      // keeps provider state current, and this covers the final text on
+      // close, so a future mount recovers it. The controller path below
+      // belongs to the dead state.
+      if (result != null && !result.sent) persistText(result.text);
+      return;
+    }
+    if (result == null || result.sent) return;
+    if (result.text != _controller.text) {
+      _controller.value = TextEditingValue(
+        text: result.text,
+        selection: TextSelection.collapsed(offset: result.text.length),
+      );
+    }
+  }
+
+  /// Sends [rawText] through the shared [sendDraftText] core first; only
+  /// after the server accepts it do the local UI affordances run (optimistic
+  /// bubble, reply-bar clearance, editing-state reset, reconcile). The
+  /// full-screen markdown composer sends through this while the input is
+  /// alive (see `_openMarkdownComposer`), and falls back to [sendDraftText]
+  /// directly once a layout switch disposed this state.
+  Future<bool> _sendMessageText(
+    String rawText, {
+    void Function(Object error)? onDetachedError,
+  }) async {
+    final text = rawText.trim();
+    if (text.isEmpty || _isSending) return false;
+    final draftKey = _draftKey;
+    final container = ProviderScope.containerOf(context, listen: false);
     final compiled = _markdownComposer.compile(text);
-    if (compiled.body.trim().isEmpty) return;
+    if (compiled.body.trim().isEmpty) return false;
 
     final editing = ref.read(editingMessageProvider(draftKey));
     final replyTo = ref.read(replyingToProvider(draftKey));
+    // Captured while mounted: the failure path may run after this state
+    // was disposed (a composer send outliving a layout switch), where ref
+    // is dead but these notifiers are not.
+    final replyState = ref.read(replyingToProvider(draftKey).notifier);
+    final draftState = ref.read(messageDraftProvider(draftKey).notifier);
     final shouldRestoreKeyboard =
         widget.panelMode == InputPanelMode.keyboard || _focusNode.hasFocus;
 
@@ -330,6 +754,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final sendPresentation = localId != null
         ? widget.resolveSendPresentation()
         : null;
+
     MutableState<List<LocalOutgoingMessage>>? localOutgoing;
     LocalOutgoingMessage? failedLocalMessage;
     if (localId != null) {
@@ -337,8 +762,10 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         _registerTextSendFlight(localId, compiled.body);
       }
       widget.onMessageQueued(sendFlightId(localId), sendPresentation!);
-      // Capture the reply target now: it is cleared from the provider below,
-      // but a failed send needs it to retry with the correct mention.
+      // Capture the reply target into the optimistic entry. The provider
+      // [sendDraftText] captures and then clears the reply relation before
+      // awaiting the network, so a relation chosen while this send is in
+      // flight belongs to the next draft and survives settlement.
       final replyToUserId = (replyTo == null || replyTo.isMe)
           ? null
           : replyTo.senderId;
@@ -368,102 +795,71 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         ),
       );
       _controller.clear();
-      if (replyTo != null) {
-        ref.read(replyingToProvider(draftKey).notifier).value = null;
-      }
     }
 
     setState(() => _isSending = true);
+    Object? sendError;
+    final sent = await sendDraftText(
+      ref,
+      roomId: widget.roomId,
+      draftKey: draftKey,
+      rawText: rawText,
+      totalMembers: widget.totalMembers,
+      onError: (e) => sendError = e,
+      // The network wait may span a layout switch that disposes this state;
+      // the container-driven refresh still lands afterwards.
+      refreshContainer: container,
+    );
 
-    try {
-      String remoteEventId;
-      if (editing != null) {
-        remoteEventId = await rust.editMessage(
-          roomId: widget.roomId,
-          eventId: editing.id,
-          message: compiled.toRust(),
-          previousMentionedUserIds: editing.mentionedUserIds,
-          previousMentionsRoom: editing.mentionsRoom,
-        );
-      } else if (replyTo != null) {
-        remoteEventId = await rust.sendReply(
-          roomId: widget.roomId,
-          message: compiled.toRust(),
-          replyToEventId: replyTo.id,
-          replyToUserId: replyTo.isMe ? null : replyTo.senderId,
-        );
-      } else {
-        remoteEventId = await rust.sendMessage(
-          roomId: widget.roomId,
-          message: compiled.toRust(),
-        );
-      }
-      final persistMarkdownSource = await _canPersistMarkdownSource();
-      try {
-        await _markdownSourceStore.save(
-          userId: draftKey.userId,
-          roomId: widget.roomId,
-          eventId: editing?.id ?? remoteEventId,
-          source: compiled.source,
-          body: compiled.body,
-          formattedBody: compiled.formattedBody,
-          persist: persistMarkdownSource,
-        );
-      } catch (e) {
-        // The message was already accepted by the server; failing to persist
-        // the markdown source must not flip the bubble into "failed" (which
-        // would then offer a retry that duplicates the send).
-        debugPrint('Failed to save markdown source: $e');
-      }
-      if (!mounted) {
-        // The server accepted the message; with no live page there is no
-        // bubble to reconcile. Drop the optimistic entry through the
-        // captured notifier — the provider outlives the page, so a leftover
-        // entry would resurface as a stuck "sent" bubble on the next visit
-        // (its echo renders as a normal message via sync).
-        if (localId != null && localOutgoing != null) {
+    void handleFailure(Object error) {
+      if (localId != null && localOutgoing != null) {
+        if (_composerOpen) {
+          // The full-screen composer still holds the draft and will offer
+          // the retry: remove the optimistic entry outright — marking it
+          // failed would leave a bubble that a retry from the editor
+          // duplicates — and restore the reply relation cleared at queue
+          // time so the retry stays a reply. All through captured
+          // notifiers: this state may already be disposed (layout switch
+          // while the send was in flight), where ref is dead.
           localOutgoing.value = localOutgoing.value
               .where((entry) => entry.message.id != localId)
               .toList();
+          if (replyTo != null) {
+            replyState.value = replyTo;
+          }
+          // The queue-time controller clear also emptied the shared draft;
+          // the composer still holds the text, so put it back into the
+          // surviving draft state instead of losing it with this widget.
+          if (editing == null) {
+            draftState.value = rawText;
+          }
+        } else if (failedLocalMessage != null) {
+          markLocalOutgoingMessageFailedInState(
+            localOutgoing,
+            localId,
+            failedLocalMessage,
+          );
+          // Mirror the historical behavior: once the failure lands on a
+          // retryable bubble, the reply bar is dismissed (the bubble keeps
+          // the mention target for the retry).
+          if (replyTo != null) {
+            replyState.value = null;
+          }
         }
-        return;
       }
-      final sentId = localId == null
-          ? null
-          : markLocalOutgoingMessageSentInState(localOutgoing!, localId);
-      _stopTyping();
-      if (!isNewMessage) _controller.clear();
-      if (editing != null) {
-        ref.read(editingMessageProvider(draftKey).notifier).value = null;
-        _restoreDraft();
+      final accountStillActive =
+          container.read(activeUserIdProvider) == draftKey.userId;
+      if (mounted) {
+        setState(() => _isSending = false);
       }
-      if (localId != null) {
-        widget.onMessageSent(sendPresentation!, true);
-        unawaited(_reconcileSentLocalMessage(draftKey, sentId!));
-      } else {
-        unawaited(refreshMessages(ref, widget.roomId));
-      }
-    } catch (e) {
-      if (localId != null &&
-          localOutgoing != null &&
-          failedLocalMessage != null) {
-        markLocalOutgoingMessageFailedInState(
-          localOutgoing,
-          localId,
-          failedLocalMessage,
-        );
-      }
+      if (!accountStillActive) return;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('发送失败: $e'),
+            content: Text('发送失败: $error'),
             duration: const Duration(seconds: 2),
           ),
         );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isSending = false);
         if (shouldRestoreKeyboard) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
@@ -472,8 +868,49 @@ class _MessageInputState extends ConsumerState<MessageInput> {
             SystemChannels.textInput.invokeMethod<void>('TextInput.show');
           });
         }
+      } else {
+        onDetachedError?.call(error);
       }
     }
+
+    if (!sent) {
+      handleFailure(sendError ?? StateError('send failed'));
+      return false;
+    }
+
+    final accountStillActive =
+        container.read(activeUserIdProvider) == draftKey.userId;
+    if (!mounted || !accountStillActive) {
+      // The server accepted the message; with no live page there is no
+      // bubble to reconcile. A leftover optimistic entry would resurface as a
+      // stuck "sent" bubble on the next visit (its echo renders as a normal
+      // message via sync), so drop it through the captured notifier.
+      if (localId != null && localOutgoing != null) {
+        localOutgoing.value = localOutgoing.value
+            .where((entry) => entry.message.id != localId)
+            .toList();
+      }
+      if (mounted) setState(() => _isSending = false);
+      return true;
+    }
+    final sentId = localId == null
+        ? null
+        : markLocalOutgoingMessageSentInState(localOutgoing!, localId);
+    _stopTyping();
+    if (editing != null && ref.read(editingMessageProvider(draftKey)) == null) {
+      // No _controller.clear() here: the shared core has already left
+      // editing mode, so clearing would write '' over the preserved
+      // non-edit draft in messageDraftProvider. _restoreDraft puts the
+      // controller back on that draft.
+      _restoreDraft();
+    }
+    if (localId != null) {
+      widget.onMessageSent(sendPresentation!, true);
+      unawaited(_reconcileSentLocalMessage(draftKey, sentId!));
+    }
+    // Edits were already refreshed by the shared core.
+    setState(() => _isSending = false);
+    return true;
   }
 
   Rect? _globalRectFor(GlobalKey key) {
@@ -703,6 +1140,31 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   Widget build(BuildContext context) {
     final replyTo = ref.watch(replyingToProvider(_draftKey));
     final editing = ref.watch(editingMessageProvider(_draftKey));
+    // Follow external text writes: the full-screen composer syncs its text
+    // into these providers live, and a layout switch may mount a fresh
+    // input while the composer is still open. Our own writes echo back
+    // with identical text and no-op, so this cannot loop.
+    ref.listen(messageDraftProvider(_draftKey), (_, next) {
+      if (ref.read(editingMessageProvider(_draftKey)) != null) return;
+      if (_controller.text != next) {
+        _controller.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+      }
+    });
+    ref.listen(editingDraftProvider(_draftKey), (_, next) {
+      final editing = ref.read(editingMessageProvider(_draftKey));
+      if (editing == null || next == null || next.editingId != editing.id) {
+        return;
+      }
+      if (_controller.text != next.text) {
+        _controller.value = TextEditingValue(
+          text: next.text,
+          selection: TextSelection.collapsed(offset: next.text.length),
+        );
+      }
+    });
     final visiblePickerMode =
         widget.panelMode == InputPanelMode.emoji ||
             widget.panelMode == InputPanelMode.attachment
@@ -783,18 +1245,42 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                           color: AppColors.onBackground,
                           fontSize: 15,
                         ),
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           hintText: '消息',
-                          hintStyle: TextStyle(
+                          hintStyle: const TextStyle(
                             color: AppColors.onSurfaceVariant,
                             fontSize: 15,
                           ),
-                          contentPadding: EdgeInsets.symmetric(
+                          contentPadding: const EdgeInsets.symmetric(
                             horizontal: 14,
                             vertical: 11,
                           ),
                           border: InputBorder.none,
                           isDense: true,
+                          suffixIcon:
+                              // Wide layouts (desktop, tablet landscape)
+                              // always show the full-screen editor entry;
+                              // on narrow (phone portrait) screens it only
+                              // appears once the draft outgrows the field.
+                              MediaQuery.sizeOf(context).width >= 600 ||
+                                  _hasLongText
+                              ? IconButton(
+                                  tooltip: '全屏编辑',
+                                  onPressed: _isSending
+                                      ? null
+                                      : _openMarkdownComposer,
+                                  padding: EdgeInsets.zero,
+                                  icon: const Icon(
+                                    Icons.open_in_full_rounded,
+                                    color: AppColors.onSurfaceVariant,
+                                    size: 20,
+                                  ),
+                                )
+                              : null,
+                          suffixIconConstraints: const BoxConstraints.tightFor(
+                            width: 36,
+                            height: 36,
+                          ),
                         ),
                         maxLines: null,
                         textInputAction: TextInputAction.newline,
@@ -872,20 +1358,45 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                                     children: [
                                       SizedBox.square(
                                         dimension: 44,
-                                        child: IconButton(
-                                          tooltip: '附件',
-                                          onPressed: _isSending
-                                              ? null
-                                              : _toggleAttachmentPicker,
-                                          padding: EdgeInsets.zero,
-                                          icon: Icon(
-                                            Icons.add_rounded,
-                                            color:
-                                                widget.panelMode ==
-                                                    InputPanelMode.attachment
-                                                ? AppColors.primary
-                                                : AppColors.onSurfaceVariant,
-                                            size: 26,
+                                        child: Builder(
+                                          builder: (buttonContext) => Tooltip(
+                                            message: '附件',
+                                            // Desktop hover still shows the
+                                            // tooltip; its long-press
+                                            // trigger is left to the InkWell
+                                            // below so the tools menu can
+                                            // use it.
+                                            triggerMode:
+                                                TooltipTriggerMode.manual,
+                                            child: Material(
+                                              type: MaterialType.transparency,
+                                              child: InkWell(
+                                                customBorder:
+                                                    const CircleBorder(),
+                                                onTap: _isSending
+                                                    ? null
+                                                    : _toggleAttachmentPicker,
+                                                onLongPress: _isSending
+                                                    ? null
+                                                    : () =>
+                                                          _showComposerToolsMenu(
+                                                            buttonContext,
+                                                          ),
+                                                child: Center(
+                                                  child: Icon(
+                                                    Icons.add_rounded,
+                                                    color:
+                                                        widget.panelMode ==
+                                                            InputPanelMode
+                                                                .attachment
+                                                        ? AppColors.primary
+                                                        : AppColors
+                                                              .onSurfaceVariant,
+                                                    size: 26,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -1021,29 +1532,41 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   Future<void> _prefillEditingSource(rust.ChatMessage editing) async {
     final draftKey = _draftKey;
-    final allowPersistence = await _canPersistMarkdownSource();
-    final source = await _markdownSourceStore.load(
-      userId: draftKey.userId,
-      roomId: widget.roomId,
-      eventId: editing.id,
-      body: editing.content,
-      formattedBody: editing.formattedBody,
-      allowPersistence: allowPersistence,
-    );
+    // An in-progress edit from a (possibly disposed) full-screen composer
+    // session takes precedence over the stored original. Captured before
+    // the awaits: after an unmount this state's ref is dead, the notifier
+    // is not.
+    final editDraftState = ref.read(editingDraftProvider(draftKey).notifier);
+    var pending = editDraftState.value;
+    String? source;
+    if (pending != null && pending.editingId == editing.id) {
+      source = pending.text;
+    } else {
+      final allowPersistence = await _canPersistMarkdownSource(widget.roomId);
+      source = await _markdownSourceStore.load(
+        userId: draftKey.userId,
+        roomId: widget.roomId,
+        eventId: editing.id,
+        body: editing.content,
+        formattedBody: editing.formattedBody,
+        allowPersistence: allowPersistence,
+      );
+      // The full-screen composer may have synced a newer edit while the
+      // store read was in flight; re-check so it wins over the stored text.
+      pending = editDraftState.value;
+      if (pending != null && pending.editingId == editing.id) {
+        source = pending.text;
+      }
+    }
     if (!mounted || _lastEditingId != editing.id) return;
     _controller.text = source ?? editing.content;
     _controller.selection = TextSelection.fromPosition(
       TextPosition(offset: _controller.text.length),
     );
-    setState(() => _hasText = _controller.text.trim().isNotEmpty);
-  }
-
-  Future<bool> _canPersistMarkdownSource() async {
-    try {
-      return !await rust.isRoomEncrypted(roomId: widget.roomId);
-    } catch (_) {
-      return false;
-    }
+    setState(() {
+      _hasText = _controller.text.trim().isNotEmpty;
+      _hasLongText = _isLongDraft(_controller.text);
+    });
   }
 
   void _restoreDraft() {
@@ -1057,8 +1580,12 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
     _controller.addListener(_onTextChanged);
     final hasText = draft.trim().isNotEmpty;
-    if (_hasText != hasText) {
-      setState(() => _hasText = hasText);
+    final hasLongText = _isLongDraft(draft);
+    if (_hasText != hasText || _hasLongText != hasLongText) {
+      setState(() {
+        _hasText = hasText;
+        _hasLongText = hasLongText;
+      });
     }
   }
 
@@ -1154,6 +1681,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
           GestureDetector(
             onTap: () {
               ref.read(editingMessageProvider(_draftKey).notifier).value = null;
+              ref.read(editingDraftProvider(_draftKey).notifier).value = null;
               _restoreDraft();
             },
             child: const Icon(
