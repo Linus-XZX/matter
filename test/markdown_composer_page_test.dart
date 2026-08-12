@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/markdown/markdown_source_store.dart';
 import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/markdown_composer_page.dart';
+import 'package:matter/pages/chat/message_group.dart';
 import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -20,7 +21,10 @@ class _FakeRustApi implements RustLibApi {
   rust.FormattedMessageInput? lastMessage;
   String? lastAccountUserId;
   String? lastReplyToEventId;
+  List<String>? lastPreviousMentionedUserIds;
+  bool? lastPreviousMentionsRoom;
   final typingNotices = <bool>[];
+  final typingNoticeAccountUserIds = <String>[];
   int getMessagesCalls = 0;
 
   /// When set, [crateApiMatrixIsRoomEncrypted] waits on this completer
@@ -50,6 +54,8 @@ class _FakeRustApi implements RustLibApi {
   }) {
     lastAccountUserId = accountUserId;
     lastMessage = message;
+    lastPreviousMentionedUserIds = previousMentionedUserIds;
+    lastPreviousMentionsRoom = previousMentionsRoom;
     return (pendingEdit ??= Completer<String>()).future;
   }
 
@@ -84,9 +90,11 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixSendTypingNotice({
+    required String accountUserId,
     required String roomId,
     required bool typing,
   }) async {
+    typingNoticeAccountUserIds.add(accountUserId);
     typingNotices.add(typing);
   }
 
@@ -111,7 +119,10 @@ void main() {
     rustApi.blockedIsRoomEncrypted = null;
     rustApi.lastMessage = null;
     rustApi.lastReplyToEventId = null;
+    rustApi.lastPreviousMentionedUserIds = null;
+    rustApi.lastPreviousMentionsRoom = null;
     rustApi.typingNotices.clear();
+    rustApi.typingNoticeAccountUserIds.clear();
     rustApi.getMessagesCalls = 0;
     SharedPreferences.setMockInitialValues({});
   });
@@ -606,6 +617,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(MarkdownComposerPage), findsOneWidget);
 
+      // The disposed input sent its final `false`; further edits in the
+      // surviving route must start a fresh notice through the route-owned
+      // fallback instead of silently losing typing state.
+      rustApi.typingNotices.clear();
+      await tester.enterText(composerField(), 'hello after layout switch');
+      await tester.pump();
+      expect(rustApi.typingNotices, contains(true));
+
       // The input host is gone, but the composer falls back to provider-
       // only state, so sending still initiates (instead of degrading to
       // "not sent" through a dead ref).
@@ -803,6 +822,43 @@ void main() {
       expect(rustApi.getMessagesCalls, greaterThanOrEqualTo(1));
     });
 
+    testWidgets('live composer send refreshes after its input is disposed', (
+      tester,
+    ) async {
+      const roomId = '!composer-live-disposed-refresh:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(sessionReadyProvider.notifier).value = true;
+
+      final showInput = await pumpSwitchableHost(tester, container, roomId);
+      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
+      await tester.pumpAndSettle();
+      await tester.enterText(composerField(), 'refresh after disposal');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+
+      expect(rustApi.pendingSend, isNotNull);
+      expect(container.read(localOutgoingMessagesProvider(key)), hasLength(1));
+
+      // The route survives, but the input state that initiated the send does
+      // not. The accepted event still needs an explicit fetch after its local
+      // optimistic entry is removed.
+      showInput.value = false;
+      await tester.pump();
+      rustApi.pendingSend!.complete(r'$sent-after-disposal');
+      await tester.pumpAndSettle();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(MarkdownComposerPage), findsNothing);
+      expect(container.read(localOutgoingMessagesProvider(key)), isEmpty);
+      expect(rustApi.getMessagesCalls, greaterThanOrEqualTo(1));
+    });
+
     testWidgets('fallback send stays bound to its initiating account and '
         'does not refresh the next account', (tester) async {
       const roomId = '!composer-fallback-account:example.org';
@@ -951,6 +1007,219 @@ void main() {
       await tester.pump(const Duration(seconds: 4));
     });
 
+    testWidgets(
+      'a detached edit stays recoverable while its send is in flight',
+      (tester) async {
+        const roomId = '!composer-edit-in-flight:example.org';
+        const key = (roomId: roomId, userId: '@alice:example.org');
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        container.read(activeUserIdProvider.notifier).value =
+            '@alice:example.org';
+        container
+            .read(editingMessageProvider(key).notifier)
+            .value = chatMessage(
+          id: r'$edit-in-flight',
+          senderId: '@alice:example.org',
+          content: 'original',
+          isMe: true,
+        );
+
+        final showInput = await pumpSwitchableHost(tester, container, roomId);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.open_in_full_rounded));
+        await tester.pumpAndSettle();
+        await tester.enterText(composerField(), 'unsaved edit');
+        await tester.pump();
+
+        // Force the composer onto the provider-only send path, then close it
+        // while the request is pending and mount a fresh input behind it.
+        showInput.value = false;
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.send_rounded));
+        await tester.pump();
+        expect(rustApi.pendingEdit, isNotNull);
+        await tester.tap(find.byIcon(Icons.close_rounded));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        showInput.value = true;
+        // The remounted input intentionally shows an in-flight spinner, so
+        // pump only enough frames for its asynchronous edit prefill.
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // The remounted input must retain the edit while the send is pending;
+        // otherwise starting another action here can overwrite the only copy.
+        expect(
+          container.read(editingMessageProvider(key))?.id,
+          r'$edit-in-flight',
+        );
+        expect(container.read(editingDraftProvider(key))?.text, 'unsaved edit');
+
+        rustApi.pendingEdit!.completeError(StateError('offline'));
+        await tester.pumpAndSettle();
+        expect(
+          container.read(editingMessageProvider(key))?.id,
+          r'$edit-in-flight',
+        );
+        expect(container.read(editingDraftProvider(key))?.text, 'unsaved edit');
+
+        await tester.pump(const Duration(seconds: 4));
+      },
+    );
+
+    testWidgets('an in-flight edit cannot be replaced by edit or reply', (
+      tester,
+    ) async {
+      const roomId = '!edit-transition-guard:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      final currentEdit = chatMessage(
+        id: r'$edit-current',
+        senderId: '@alice:example.org',
+        content: 'current edit',
+        isMe: true,
+      );
+      final otherMessage = chatMessage(
+        id: r'$edit-other',
+        senderId: '@alice:example.org',
+        content: 'other message',
+        isMe: true,
+      );
+      container.read(editingMessageProvider(key).notifier).value = currentEdit;
+      container.read(editingSendInFlightProvider(key).notifier).value =
+          currentEdit.id;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: MessageGroupWidget(
+                group: MessageGroup(
+                  senderId: otherMessage.senderId,
+                  senderName: otherMessage.senderName,
+                  isMe: true,
+                  messages: [otherMessage],
+                ),
+                roomId: roomId,
+                messageIndex: {otherMessage.id: otherMessage},
+                showAvatar: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final bubble = find.byKey(const ValueKey('text-bubble:\$edit-other'));
+      await tester.longPress(bubble);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('编辑'));
+      await tester.pump();
+      expect(container.read(editingMessageProvider(key))?.id, r'$edit-current');
+      expect(find.text('编辑正在发送，请稍候'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      await tester.longPress(bubble);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回复'));
+      await tester.pump();
+      expect(container.read(editingMessageProvider(key))?.id, r'$edit-current');
+      expect(container.read(replyingToProvider(key)), isNull);
+    });
+
+    testWidgets('switching from edit to reply restores the plain draft', (
+      tester,
+    ) async {
+      const roomId = '!edit-to-reply:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(messageDraftProvider(key).notifier).value = 'plain draft';
+      final editing = chatMessage(
+        id: r'$editing',
+        senderId: '@alice:example.org',
+        content: 'edit this message',
+        isMe: true,
+      );
+      final replyTarget = chatMessage(
+        id: r'$reply-target',
+        senderId: '@bob:example.org',
+        content: 'reply to me',
+        isMe: false,
+      );
+      container.read(editingMessageProvider(key).notifier).value = editing;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: Column(
+                children: [
+                  Expanded(
+                    child: MessageGroupWidget(
+                      group: MessageGroup(
+                        senderId: replyTarget.senderId,
+                        senderName: replyTarget.senderName,
+                        isMe: false,
+                        messages: [replyTarget],
+                      ),
+                      roomId: roomId,
+                      messageIndex: {replyTarget.id: replyTarget},
+                      showAvatar: false,
+                    ),
+                  ),
+                  MessageInput(
+                    roomId: roomId,
+                    totalMembers: 2,
+                    panelMode: InputPanelMode.none,
+                    pickerHeight: 0,
+                    pickerFullHeight: 300,
+                    pickerBaseHeight: 300,
+                    pickerMaxHeight: 500,
+                    animatePickerHeight: false,
+                    onPanelModeChanged: (_) {},
+                    onPickerHeightChanged: (_) {},
+                    resolveSendPresentation: () =>
+                        MessageSendPresentation.quiet,
+                    onMessageQueued: (_, _) {},
+                    onMessageSent: (_, _) {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(inputField()).controller!.text,
+        editing.content,
+      );
+
+      await tester.longPress(
+        find.byKey(const ValueKey('text-bubble:\$reply-target')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回复'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(editingMessageProvider(key)), isNull);
+      expect(container.read(replyingToProvider(key))?.id, replyTarget.id);
+      expect(
+        tester.widget<TextField>(inputField()).controller!.text,
+        'plain draft',
+      );
+    });
+
     testWidgets('a successful edit keeps the previous plain draft', (
       tester,
     ) async {
@@ -1045,6 +1314,47 @@ void main() {
       await tester.pumpAndSettle();
     });
 
+    testWidgets('a follow-up edit diffs mentions against the accepted edit', (
+      tester,
+    ) async {
+      const roomId = '!edit-mention-baseline:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      const bob = '@bob:example.org';
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      container.read(editingMessageProvider(key).notifier).value = chatMessage(
+        id: r'$edit-mentions',
+        senderId: '@alice:example.org',
+        content: 'original',
+        isMe: true,
+      );
+
+      await tester.pumpWidget(messageInput(container, roomId));
+      await tester.pumpAndSettle();
+      await tester.enterText(inputField(), '$bob first edit');
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+      expect(rustApi.lastPreviousMentionedUserIds, isEmpty);
+
+      await tester.enterText(inputField(), '$bob follow-up edit');
+      rustApi.pendingEdit!.complete(r'$first-edit');
+      await tester.pump();
+      await tester.pump();
+
+      rustApi.pendingEdit = Completer<String>();
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+
+      expect(rustApi.lastPreviousMentionedUserIds, [bob]);
+      expect(rustApi.lastPreviousMentionsRoom, isFalse);
+
+      rustApi.pendingEdit!.complete(r'$second-edit');
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 4));
+    });
+
     testWidgets('a newer composer edit wins over the stored original while '
         'the edit prefill read is in flight', (tester) async {
       const roomId = '!composer-prefill-race:example.org';
@@ -1094,6 +1404,69 @@ void main() {
 
       // Flush the typing timers started by the prefill.
       await tester.pump(const Duration(seconds: 4));
+    });
+
+    testWidgets('edit actions stay disabled until source prefill completes', (
+      tester,
+    ) async {
+      const roomId = '!edit-prefill-disabled:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(messageInput(container, roomId));
+      await tester.enterText(inputField(), 'unrelated draft');
+      await tester.pump();
+
+      rustApi.blockedIsRoomEncrypted = Completer<bool>();
+      container.read(editingMessageProvider(key).notifier).value = chatMessage(
+        id: r'$edit-loading',
+        senderId: '@alice:example.org',
+        content: 'original source',
+        isMe: true,
+      );
+      await tester.pump();
+
+      expect(tester.widget<TextField>(inputField()).readOnly, isTrue);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.descendant(
+                of: find.byKey(const ValueKey('send_only')),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.open_in_full_rounded),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      rustApi.blockedIsRoomEncrypted!.complete(false);
+      rustApi.blockedIsRoomEncrypted = null;
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<TextField>(inputField()).readOnly, isFalse);
+      expect(
+        tester.widget<TextField>(inputField()).controller!.text,
+        'original source',
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.send_rounded),
+            )
+            .onPressed,
+        isNotNull,
+      );
     });
 
     testWidgets('editing a message in the composer survives a layout '
@@ -1182,6 +1555,54 @@ void main() {
       expect(container.read(replyingToProvider(key))?.id, r'$reply-target');
     });
 
+    testWidgets('a failed send preserves a newer reply selection', (
+      tester,
+    ) async {
+      const roomId = '!reply-failure-keeps-newer:example.org';
+      const key = (roomId: roomId, userId: '@alice:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+      final firstReply = chatMessage(
+        id: r'$reply-first',
+        senderId: '@bob:example.org',
+        content: 'first',
+        isMe: false,
+      );
+      final nextReply = chatMessage(
+        id: r'$reply-next',
+        senderId: '@carol:example.org',
+        content: 'next',
+        isMe: false,
+      );
+      container.read(replyingToProvider(key).notifier).value = firstReply;
+
+      await tester.pumpWidget(messageInput(container, roomId));
+      await tester.enterText(inputField(), '**send this first**');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+      expect(rustApi.pendingReply, isNotNull);
+
+      // The first relation was consumed at queue time. This selection belongs
+      // to the next draft and must survive settlement of the older request.
+      container.read(replyingToProvider(key).notifier).value = nextReply;
+      await tester.pump();
+      rustApi.pendingReply!.completeError(StateError('offline'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(replyingToProvider(key))?.id, r'$reply-next');
+      expect(
+        container
+            .read(localOutgoingMessagesProvider(key))
+            .single
+            .markdownSource,
+        '**send this first**',
+      );
+      await tester.pump(const Duration(seconds: 4));
+    });
+
     testWidgets('a remounted input follows the composer draft instead of '
         'going stale', (tester) async {
       const roomId = '!composer-remount:example.org';
@@ -1239,6 +1660,33 @@ void main() {
       expect(rustApi.typingNotices, contains(true));
 
       // Let the idle-stop typing timers run out so none are left pending.
+      await tester.pump(const Duration(seconds: 4));
+    });
+
+    testWidgets('a live input stays bound to its initiating account', (
+      tester,
+    ) async {
+      const roomId = '!typing-account:example.org';
+      const alice = '@alice:example.org';
+      const aliceKey = (roomId: roomId, userId: alice);
+      const bobKey = (roomId: roomId, userId: '@bob:example.org');
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value = alice;
+
+      await tester.pumpWidget(messageInput(container, roomId));
+      container.read(activeUserIdProvider.notifier).value = bobKey.userId;
+      await tester.enterText(inputField(), 'still Alice draft');
+      await tester.pump();
+
+      expect(
+        container.read(messageDraftProvider(aliceKey)),
+        'still Alice draft',
+      );
+      expect(container.read(messageDraftProvider(bobKey)), '');
+      expect(rustApi.typingNoticeAccountUserIds, [alice]);
+
+      // Flush the input's idle-stop timer.
       await tester.pump(const Duration(seconds: 4));
     });
 

@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../features/markdown/markdown_source_store.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'auth_provider.dart';
 import 'connection_provider.dart';
@@ -902,6 +903,20 @@ void clearActiveSessionStateFromRef(Ref ref, {bool markSessionReady = false}) {
   );
 }
 
+/// Drop room-scoped composer state only for the account being removed.
+/// Ordinary account switches deliberately do not call this, so drafts remain
+/// available when the user switches back.
+void clearAccountComposerStateFromRef(Ref ref, String userId) {
+  _resetAccountComposerState(_ProviderAccess.fromRef(ref), userId);
+}
+
+void _resetAccountComposerState(_ProviderAccess ref, String userId) {
+  final revision = ref.read(
+    _accountComposerStateRevisionProvider(userId).notifier,
+  );
+  revision.value++;
+}
+
 void _clearActiveSessionState(
   _ProviderAccess ref, {
   bool markSessionReady = false,
@@ -910,7 +925,11 @@ void _clearActiveSessionState(
   // any refresh still in flight for it: while the session is down the sync
   // subscription is stopped, so the IgnoredUsersChanged that would normally
   // demote a stale confirmed list can be missed across a re-login.
-  resetIgnoredListAccountState(ref.read(activeUserIdProvider) ?? '');
+  final outgoingUserId = ref.read(activeUserIdProvider);
+  resetIgnoredListAccountState(outgoingUserId ?? '');
+  if (outgoingUserId != null) {
+    _resetAccountComposerState(ref, outgoingUserId);
+  }
   ref.read(isLoggedInProvider.notifier).value = false;
   ref.read(currentUserProvider.notifier).value = null;
   ref.read(currentAccessTokenProvider.notifier).value = null;
@@ -1422,6 +1441,7 @@ String sentLocalOutgoingId(String pendingId) {
 class LocalOutgoingMessage {
   final rust.ChatMessage message;
   final String? sourceImageUrl;
+  final String? markdownSource;
 
   /// Sender of the message this outgoing message replies to. Preserved so a
   /// failed reply can be retried with the correct `reply_to` mention.
@@ -1430,11 +1450,31 @@ class LocalOutgoingMessage {
   const LocalOutgoingMessage({
     required this.message,
     this.sourceImageUrl,
+    this.markdownSource,
     this.replyToUserId,
   });
 }
 
 typedef RoomAccountKey = ({String roomId, String userId});
+
+final _accountComposerStateRevisionProvider =
+    NotifierProvider.family<MutableState<int>, int, String>(
+      (_) => MutableState(0),
+    );
+
+/// A room/account state cell that is reset when its account is explicitly
+/// removed, without affecting state belonging to other signed-in accounts.
+class AccountScopedMutableState<T> extends MutableState<T> {
+  AccountScopedMutableState(super.initialValue, this.userId);
+
+  final String userId;
+
+  @override
+  T build() {
+    ref.watch(_accountComposerStateRevisionProvider(userId));
+    return super.build();
+  }
+}
 
 RoomAccountKey activeRoomAccountKey(WidgetRef ref, String roomId) => (
   roomId: roomId,
@@ -1451,21 +1491,24 @@ final replyingToProvider =
       MutableState<rust.ChatMessage?>,
       rust.ChatMessage?,
       RoomAccountKey
-    >((_) => MutableState(null));
+    >((key) => AccountScopedMutableState(null, key.userId));
 
 final editingMessageProvider =
     NotifierProvider.family<
       MutableState<rust.ChatMessage?>,
       rust.ChatMessage?,
       RoomAccountKey
-    >((_) => MutableState(null));
+    >((key) => AccountScopedMutableState(null, key.userId));
 
 final localOutgoingMessagesProvider =
     NotifierProvider.family<
       MutableState<List<LocalOutgoingMessage>>,
       List<LocalOutgoingMessage>,
       RoomAccountKey
-    >((_) => MutableState(const <LocalOutgoingMessage>[]));
+    >(
+      (key) =>
+          AccountScopedMutableState(const <LocalOutgoingMessage>[], key.userId),
+    );
 
 void upsertLocalOutgoingMessage(
   WidgetRef ref,
@@ -1519,6 +1562,7 @@ Future<void> retryFailedLocalMessage(
   if (message.msgType != rust.MessageType.text) {
     throw StateError('仅支持重试文本消息');
   }
+  final container = ProviderScope.containerOf(ref.context, listen: false);
   final pendingId = failedId.startsWith(localOutgoingFailedPrefix)
       ? '$localOutgoingPendingPrefix'
             '${failedId.substring(localOutgoingFailedPrefix.length)}'
@@ -1563,6 +1607,7 @@ Future<void> retryFailedLocalMessage(
       totalMembers: message.totalMembers,
     ),
     sourceImageUrl: failed.sourceImageUrl,
+    markdownSource: failed.markdownSource,
     // Keep the reply target across the retry so the resent reply mentions
     // the original message's author (sendReply takes replyToUserId).
     replyToUserId: failed.replyToUserId,
@@ -1587,9 +1632,10 @@ Future<void> retryFailedLocalMessage(
   // a failure in the local bookkeeping below must not restore the failed
   // entry and report the send as failed (that would offer a retry which
   // duplicates the message).
+  late final String remoteEventId;
   try {
     if (replyTo != null) {
-      await rust.sendReply(
+      remoteEventId = await rust.sendReply(
         accountUserId: key.userId,
         roomId: key.roomId,
         message: input,
@@ -1597,7 +1643,7 @@ Future<void> retryFailedLocalMessage(
         replyToUserId: failed.replyToUserId,
       );
     } else {
-      await rust.sendMessage(
+      remoteEventId = await rust.sendMessage(
         accountUserId: key.userId,
         roomId: key.roomId,
         message: input,
@@ -1622,6 +1668,32 @@ Future<void> retryFailedLocalMessage(
     }
     outgoing.value = restored;
     rethrow;
+  }
+  final markdownSource = failed.markdownSource;
+  if (markdownSource != null) {
+    try {
+      if (container.read(activeUserIdProvider) == key.userId) {
+        final persist = await _canPersistMessagesForRoom(
+          container.read,
+          key.roomId,
+        );
+        if (container.read(activeUserIdProvider) == key.userId) {
+          await const MarkdownSourceStore().save(
+            userId: key.userId,
+            roomId: key.roomId,
+            eventId: remoteEventId,
+            source: markdownSource,
+            body: message.content,
+            formattedBody: message.formattedBody,
+            persist: persist,
+          );
+        }
+      }
+    } catch (e) {
+      // The server already accepted the retry. Source persistence is best
+      // effort and must never turn that accepted send back into a failure.
+      debugPrint('Failed to save retried markdown source: $e');
+    }
   }
   // The server has already accepted the message. If the page (and its ref)
   // was disposed while the request was in flight there is no bubble left to
@@ -1722,6 +1794,7 @@ String markLocalOutgoingMessageSentInState(
       totalMembers: message.totalMembers,
     ),
     sourceImageUrl: local.sourceImageUrl,
+    markdownSource: local.markdownSource,
     replyToUserId: local.replyToUserId,
   );
   outgoing.value = next;

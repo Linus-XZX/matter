@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -34,9 +36,9 @@ class MarkdownComposerPage extends ConsumerStatefulWidget {
   /// so the draft is not lost.
   final Future<bool> Function(String text, WidgetRef ref) onSend;
 
-  /// Pinged while the editor has non-empty text so the caller can keep the
-  /// room's "typing" notice alive while composing full-screen.
-  final VoidCallback? onTyping;
+  /// Reports active and idle typing transitions. The editor owns the idle
+  /// timer because its route can outlive the input widget that opened it.
+  final ValueChanged<bool>? onTyping;
 
   /// Called with the current text on every edit, so the draft can be
   /// synced to state that outlives the page's host (a responsive layout
@@ -65,6 +67,8 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
   bool _sending = false;
   bool _closing = false;
   late bool _hasText;
+  bool _typingActive = false;
+  Timer? _typingIdleTimer;
 
   @override
   void initState() {
@@ -75,9 +79,24 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
       final text = _controller.text;
       final hasText = text.trim().isNotEmpty;
       if (hasText != _hasText) setState(() => _hasText = hasText);
-      if (hasText) widget.onTyping?.call();
+      if (hasText) {
+        _typingActive = true;
+        widget.onTyping?.call(true);
+        _typingIdleTimer?.cancel();
+        _typingIdleTimer = Timer(const Duration(seconds: 3), _stopTyping);
+      } else {
+        _stopTyping();
+      }
       widget.onDraftChanged?.call(text);
     });
+  }
+
+  void _stopTyping() {
+    _typingIdleTimer?.cancel();
+    _typingIdleTimer = null;
+    if (!_typingActive) return;
+    _typingActive = false;
+    widget.onTyping?.call(false);
   }
 
   /// Single exit path for the close button, system back and a completed
@@ -120,6 +139,7 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
 
   @override
   void dispose() {
+    _stopTyping();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();

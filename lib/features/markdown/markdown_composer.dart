@@ -39,7 +39,11 @@ class MarkdownComposer {
     final htmlRenderer = _MatrixMarkdownHtmlRenderer(mentions);
     final html = htmlRenderer.render(nodes).trim();
     final body = _PlainMarkdownRenderer().render(nodes).trim();
-    final formattedBody = (source == body && mentions.isEmpty) || html.isEmpty
+    final hasRichBlock = nodes.any(
+      (node) => node is md.Element && node.tag != 'p',
+    );
+    final formattedBody =
+        (source == body && mentions.isEmpty && !hasRichBlock) || html.isEmpty
         ? null
         : html;
 
@@ -379,12 +383,24 @@ bool _looksLikeFlattenedTable({
 
 bool _containsTokenSequence(List<String> haystack, List<String> needle) {
   if (needle.isEmpty || needle.length > haystack.length) return false;
-  outer:
-  for (var start = 0; start + needle.length <= haystack.length; start++) {
-    for (var i = 0; i < needle.length; i++) {
-      if (haystack[start + i] != needle[i]) continue outer;
+
+  // Remote messages are untrusted and this runs while building a bubble.
+  // Use KMP so repeated tokens cannot turn table recovery quadratic.
+  final prefixLengths = List<int>.filled(needle.length, 0);
+  for (var i = 1, matched = 0; i < needle.length; i++) {
+    while (matched > 0 && needle[i] != needle[matched]) {
+      matched = prefixLengths[matched - 1];
     }
-    return true;
+    if (needle[i] == needle[matched]) matched++;
+    prefixLengths[i] = matched;
+  }
+
+  for (var matched = 0, i = 0; i < haystack.length; i++) {
+    while (matched > 0 && haystack[i] != needle[matched]) {
+      matched = prefixLengths[matched - 1];
+    }
+    if (haystack[i] == needle[matched]) matched++;
+    if (matched == needle.length) return true;
   }
   return false;
 }

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
+import 'package:matter/features/markdown/markdown_source_store.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/connection_provider.dart';
@@ -563,6 +564,79 @@ void main() {
       );
     },
   );
+
+  testWidgets('a successful retry saves the original markdown source', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    const key = (
+      roomId: '!retry-markdown:example.org',
+      userId: '@alice:example.org',
+    );
+    const failedId = '${localOutgoingFailedPrefix}markdown';
+    const eventId = r'$retried-markdown';
+    const source = '| a | b |\n|---|---|\n| **one** | two |';
+    const body = 'a | b\none | two';
+    const formattedBody =
+        '<table><tr><th>a</th><th>b</th></tr>'
+        '<tr><td><strong>one</strong></td><td>two</td></tr></table>';
+    container.read(activeUserIdProvider.notifier).value = key.userId;
+    container.read(localOutgoingMessagesProvider(key).notifier).value = [
+      LocalOutgoingMessage(
+        message: rust.ChatMessage(
+          id: failedId,
+          senderId: key.userId,
+          senderName: 'Alice',
+          content: body,
+          formattedBody: formattedBody,
+          mentionedUserIds: const [],
+          mentionsRoom: false,
+          timestamp: '0',
+          isMe: true,
+          msgType: rust.MessageType.text,
+          isEdited: false,
+          editHistory: const [],
+          reactions: const [],
+          readers: const [],
+          totalMembers: 2,
+        ),
+        markdownSource: source,
+      ),
+    ];
+
+    WidgetRef? ref;
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: Consumer(
+          builder: (context, r, _) {
+            ref = r;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+    final pendingSend = Completer<String>();
+    rustApi.pendingSend = pendingSend;
+    final retry = retryFailedLocalMessage(ref!, key, failedId);
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    pendingSend.complete(eventId);
+    await retry;
+
+    expect(
+      await const MarkdownSourceStore().load(
+        userId: key.userId,
+        roomId: key.roomId,
+        eventId: eventId,
+        body: body,
+        formattedBody: formattedBody,
+        allowPersistence: true,
+      ),
+      source,
+    );
+  });
 
   testWidgets('refreshes ignored users only for their sync event', (
     tester,

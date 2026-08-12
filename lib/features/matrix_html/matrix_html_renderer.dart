@@ -132,6 +132,10 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
 }
 
 class _MatrixNodeRenderer {
+  static const _maxRichTableRows = 200;
+  static const _maxRichTableColumns = 32;
+  static const _maxRichTableGridCells = 1024;
+
   final BuildContext context;
   final TextStyle baseStyle;
   final Color accentColor;
@@ -389,8 +393,35 @@ class _MatrixNodeRenderer {
     final borderColor = (baseStyle.color ?? Colors.white).withValues(
       alpha: 0.25,
     );
+    final exceedsRichTableBudget =
+        rows.length > _maxRichTableRows ||
+        columnCount > _maxRichTableColumns ||
+        rows.length * columnCount > _maxRichTableGridCells;
     final grid = rows.isEmpty
         ? null
+        : exceedsRichTableBudget
+        ? Container(
+            constraints: const BoxConstraints(maxWidth: 520),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              border: Border.all(color: borderColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                rows
+                    .map(
+                      (row) => row.$2
+                          .map((cell) => cell.textContent.trim())
+                          .join(' | '),
+                    )
+                    .join(' / '),
+                style: baseStyle,
+                maxLines: 1,
+              ),
+            ),
+          )
         : Container(
             constraints: const BoxConstraints(maxWidth: 520),
             decoration: BoxDecoration(
@@ -421,13 +452,9 @@ class _MatrixNodeRenderer {
                                 horizontal: 10,
                                 vertical: 6,
                               ),
-                              child: _richText(
-                                cell.children,
-                                isHeader || cell.tag == 'th'
-                                    ? baseStyle.copyWith(
-                                        fontWeight: FontWeight.w800,
-                                      )
-                                    : baseStyle,
+                              child: _renderTableCell(
+                                cell,
+                                isHeader || cell.tag == 'th',
                               ),
                             ),
                           for (var i = cells.length; i < columnCount; i++)
@@ -467,6 +494,28 @@ class _MatrixNodeRenderer {
           ),
         grid,
       ],
+    );
+  }
+
+  Widget _renderTableCell(MatrixElementNode cell, bool isHeader) {
+    final renderer = _MatrixNodeRenderer(
+      context: context,
+      baseStyle: isHeader
+          ? baseStyle.copyWith(fontWeight: FontWeight.w800)
+          : baseStyle,
+      accentColor: accentColor,
+      onLinkTap: onLinkTap,
+      mentionDisplayNames: mentionDisplayNames,
+      onMentionTap: onMentionTap,
+      gestureRecognizers: gestureRecognizers,
+    );
+    final blocks = renderer.renderBlocks(cell.children);
+    if (blocks.isEmpty) return const SizedBox.shrink();
+    if (blocks.length == 1) return blocks.single;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: blocks,
     );
   }
 

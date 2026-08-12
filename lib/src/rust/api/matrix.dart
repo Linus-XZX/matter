@@ -882,11 +882,15 @@ Future<void> redactMessage({
 );
 
 /// Send a typing notice to a room.
-Future<void> sendTypingNotice({required String roomId, required bool typing}) =>
-    RustLib.instance.api.crateApiMatrixSendTypingNotice(
-      roomId: roomId,
-      typing: typing,
-    );
+Future<void> sendTypingNotice({
+  required String accountUserId,
+  required String roomId,
+  required bool typing,
+}) => RustLib.instance.api.crateApiMatrixSendTypingNotice(
+  accountUserId: accountUserId,
+  roomId: roomId,
+  typing: typing,
+);
 
 /// Get members of a room.
 Future<List<Contact>> getRoomMembers({required String roomId}) =>

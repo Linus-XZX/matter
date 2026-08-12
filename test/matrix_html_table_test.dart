@@ -124,6 +124,16 @@ void main() {
       );
     });
 
+    test('recovery handles repeated token prefixes without losing a match', () {
+      expect(
+        recoverDegradedTableHtml(
+          body: '| a a | a b |\n|---|---|',
+          formattedBody: '<p>prefix a a a a a b suffix</p>',
+        ),
+        contains('<table>'),
+      );
+    });
+
     test('image cells keep their alt text in the plain fallback', () {
       final result = composer.compile('''
 | image | status |
@@ -239,6 +249,57 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.byType(Table), findsOneWidget);
       expect(find.text('z', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('pathological ragged tables fall back without grid expansion', (
+      tester,
+    ) async {
+      final wideRow = List.generate(
+        40,
+        (index) => '<td>wide-$index</td>',
+      ).join();
+      final narrowRows = List.generate(
+        40,
+        (index) => '<tr><td>row-$index</td></tr>',
+      ).join();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MatrixHtmlMessage(
+              html: '<table><tr>$wideRow</tr>$narrowRows</table>',
+              style: const TextStyle(fontSize: 15),
+              accentColor: Colors.cyan,
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(Table), findsNothing);
+      expect(find.textContaining('wide-39'), findsOneWidget);
+      expect(find.textContaining('row-39'), findsOneWidget);
+    });
+
+    testWidgets('table cells preserve block structure', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: MatrixHtmlMessage(
+              html:
+                  '<table><tr><td><p>first</p><p>second</p>'
+                  '<ul><li>third</li></ul></td></tr></table>',
+              style: TextStyle(fontSize: 15),
+              accentColor: Colors.cyan,
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('first', findRichText: true), findsOneWidget);
+      expect(find.text('second', findRichText: true), findsOneWidget);
+      expect(find.text('third', findRichText: true), findsOneWidget);
     });
 
     testWidgets('table captions stay visible', (tester) async {

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/message_group.dart';
 import 'package:matter/pages/chat/message_reader_page.dart';
+import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
 
 void main() {
@@ -427,5 +428,137 @@ void main() {
 
       expect(find.text('全屏阅读'), findsNothing);
     });
+  });
+
+  testWidgets('starting an edit clears a previously selected reply', (
+    tester,
+  ) async {
+    const roomId = '!edit-reply:example.org';
+    const key = (roomId: roomId, userId: 'anonymous');
+    const reply = ChatMessage(
+      id: r'$reply',
+      senderId: '@bob:example.org',
+      senderName: 'Bob',
+      content: 'reply target',
+      mentionedUserIds: [],
+      mentionsRoom: false,
+      timestamp: '99',
+      isMe: false,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+    const ownMessage = ChatMessage(
+      id: r'$own',
+      senderId: '@alice:example.org',
+      senderName: 'Alice',
+      content: 'edit me',
+      mentionedUserIds: [],
+      mentionsRoom: false,
+      timestamp: '100',
+      isMe: true,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(replyingToProvider(key).notifier).value = reply;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: ownMessage.senderId,
+                senderName: ownMessage.senderName,
+                isMe: true,
+                messages: const [ownMessage],
+              ),
+              roomId: roomId,
+              messageIndex: const {r'$own': ownMessage},
+              showAvatar: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('text-bubble:\$own')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('编辑'));
+    await tester.pumpAndSettle();
+
+    expect(container.read(editingMessageProvider(key))?.id, r'$own');
+    expect(container.read(replyingToProvider(key)), isNull);
+  });
+
+  testWidgets('mention display-name changes re-evaluate collapsed height', (
+    tester,
+  ) async {
+    const userId = '@alice:example.org';
+    final mention = '<a href="https://matrix.to/#/$userId">$userId</a>';
+    final message = ChatMessage(
+      id: r'$mention-layout',
+      senderId: '@bob:example.org',
+      senderName: 'Bob',
+      content: userId,
+      formattedBody: '<p>${List.filled(12, mention).join(' ')}</p>',
+      mentionedUserIds: const [userId],
+      mentionsRoom: false,
+      timestamp: '100',
+      isMe: false,
+      msgType: MessageType.text,
+      isEdited: false,
+      editHistory: const [],
+      reactions: const [],
+      readers: const [],
+      totalMembers: 2,
+    );
+
+    Widget app(String displayName) => ProviderScope(
+      child: MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 300,
+            child: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: message.senderId,
+                senderName: message.senderName,
+                isMe: false,
+                messages: [message],
+              ),
+              roomId: '!mention-layout:example.org',
+              messageIndex: {message.id: message},
+              membersById: {
+                userId: Contact(
+                  id: userId,
+                  name: displayName,
+                  status: 'online',
+                ),
+              },
+              showAvatar: false,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(app('A very long display name ' * 8));
+    await tester.pumpAndSettle();
+    expect(find.text('展开阅读'), findsOneWidget);
+
+    await tester.pumpWidget(app('A'));
+    await tester.pumpAndSettle();
+    expect(find.text('展开阅读'), findsNothing);
   });
 }

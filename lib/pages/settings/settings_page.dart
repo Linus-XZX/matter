@@ -74,6 +74,11 @@ class AccountSwitchController {
       warning = _appendCleanupWarning(warning, error);
     }
 
+    // The account is gone from the running client even if a best-effort local
+    // cache cleanup warned. Remove only its room-scoped composer state; the
+    // account switched to above keeps its drafts intact.
+    clearAccountComposerStateFromRef(_ref, userId);
+
     if (localCleanupSucceeded && cleanupWarning == null) {
       try {
         await unmarkSessionRemoved(userId);

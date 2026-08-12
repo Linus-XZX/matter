@@ -18,7 +18,8 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_avatar.dart';
 import 'chat_timestamp.dart';
 import 'emoji_picker_panel.dart';
-import 'message_input.dart' show editingDraftProvider;
+import 'message_input.dart'
+    show editingDraftProvider, editingSendInFlightProvider;
 import 'file_message_bubble.dart';
 import 'forward_message_sheet.dart';
 import 'image_message_bubble.dart';
@@ -405,6 +406,7 @@ class MessageGroupWidget extends ConsumerWidget {
             isMe,
             isFirst: isFirst,
             isLast: isLast,
+            formattedBody: readerHtml,
             mentionDisplayNames: mentionDisplayNames,
             onMentionTap: onMentionTap,
           );
@@ -498,7 +500,9 @@ class MessageGroupWidget extends ConsumerWidget {
       width: double.infinity,
       child: _SwipeToReply(
         key: ValueKey('swipe-reply:$visualMessageId'),
-        onReply: isLocalOutgoing ? null : () => _startReply(ref, message),
+        onReply: isLocalOutgoing
+            ? null
+            : () => _startReply(context, ref, message),
         linkedOffset: linkedAvatarOffset,
         child: Align(
           alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -682,6 +686,7 @@ class MessageGroupWidget extends ConsumerWidget {
     bool isMe, {
     bool isFirst = false,
     bool isLast = false,
+    required String? formattedBody,
     required Map<String, String> mentionDisplayNames,
     required MessageMentionTapHandler onMentionTap,
   }) {
@@ -694,7 +699,6 @@ class MessageGroupWidget extends ConsumerWidget {
       fontSize: 15,
       height: 1.35,
     );
-    final formattedBody = effectiveFormattedHtml(message);
     final previewTextSource = formattedBody == null || formattedBody.isEmpty
         ? message.content
         : matrixHtmlTextExcludingCode(formattedBody);
@@ -754,7 +758,14 @@ class MessageGroupWidget extends ConsumerWidget {
             backgroundColor: isMe
                 ? AppColors.primary
                 : AppColors.surfaceElevated,
-            contentKey: readerHtml,
+            contentKey: Object.hash(
+              readerHtml,
+              Object.hashAllUnordered(
+                mentionDisplayNames.entries.map(
+                  (entry) => Object.hash(entry.key, entry.value),
+                ),
+              ),
+            ),
             onExpand: () => _openReaderFullScreen(
               context,
               html: readerHtml,
@@ -1352,7 +1363,7 @@ class MessageGroupWidget extends ConsumerWidget {
             );
           }
         },
-        onReply: () => _startReply(ref, message),
+        onReply: () => _startReply(overlayContext, ref, message),
         onForward: () async {
           final targetRoom = await showForwardMessageSheet(
             context: overlayContext,
@@ -1364,13 +1375,12 @@ class MessageGroupWidget extends ConsumerWidget {
           }
         },
         onEdit: () {
-          ref
-                  .read(
-                    editingMessageProvider(
-                      activeRoomAccountKey(ref, roomId),
-                    ).notifier,
-                  )
-                  .value =
+          final roomAccountKey = activeRoomAccountKey(ref, roomId);
+          if (_blockEditingTransition(overlayContext, ref, roomAccountKey)) {
+            return;
+          }
+          ref.read(replyingToProvider(roomAccountKey).notifier).value = null;
+          ref.read(editingMessageProvider(roomAccountKey).notifier).value =
               message;
         },
         onRecall: () async {
@@ -1500,8 +1510,26 @@ class MessageGroupWidget extends ConsumerWidget {
     overlay.insert(entry);
   }
 
-  void _startReply(WidgetRef ref, ChatMessage message) {
+  bool _blockEditingTransition(
+    BuildContext context,
+    WidgetRef ref,
+    RoomAccountKey roomAccountKey,
+  ) {
+    if (ref.read(editingSendInFlightProvider(roomAccountKey)) == null) {
+      return false;
+    }
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text('编辑正在发送，请稍候'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+    return true;
+  }
+
+  void _startReply(BuildContext context, WidgetRef ref, ChatMessage message) {
     final roomAccountKey = activeRoomAccountKey(ref, roomId);
+    if (_blockEditingTransition(context, ref, roomAccountKey)) return;
     ref.read(editingMessageProvider(roomAccountKey).notifier).value = null;
     ref.read(editingDraftProvider(roomAccountKey).notifier).value = null;
     ref.read(replyingToProvider(roomAccountKey).notifier).value = message;

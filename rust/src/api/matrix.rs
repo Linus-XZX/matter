@@ -6872,7 +6872,7 @@ fn sanitized_formatted_body(
     }
     let html = matrix_sdk::ruma::html::sanitize_html(
         &formatted.body,
-        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
         matrix_sdk::ruma::html::RemoveReplyFallback::No,
     );
     (!html.trim().is_empty()).then_some(html)
@@ -6890,7 +6890,7 @@ fn sanitized_reply_formatted_body(
     }
     let html = matrix_sdk::ruma::html::sanitize_html(
         &formatted.body,
-        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
         matrix_sdk::ruma::html::RemoveReplyFallback::Yes,
     );
     (!html.trim().is_empty()).then_some(html)
@@ -6980,6 +6980,43 @@ mod formatted_message_tests {
             .contains("<strong>"));
         assert!(!json["formatted_body"].as_str().unwrap().contains("<script"));
         assert_eq!(json["m.mentions"]["user_ids"][0], "@alice:example.org");
+    }
+
+    #[test]
+    fn matrix_links_survive_outgoing_and_incoming_sanitization() {
+        let html = r#"<a href="matrix:u/alice:example.org">Alice</a>"#;
+        let content = build_text_content(FormattedMessageInput {
+            body: "Alice".to_string(),
+            formatted_body: Some(html.to_string()),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json["formatted_body"]
+            .as_str()
+            .unwrap()
+            .contains(r#"href="matrix:u/alice:example.org""#));
+
+        let formatted = FormattedBody::html(html.to_string());
+        let (_, incoming_html, _, _) = text_message_parts("Alice", Some(&formatted), None, false);
+        assert!(incoming_html
+            .as_deref()
+            .unwrap()
+            .contains(r#"href="matrix:u/alice:example.org""#));
+    }
+
+    #[test]
+    fn matrix_links_survive_reply_fallback_removal() {
+        let formatted = FormattedBody::html(
+            r#"<mx-reply><blockquote>Earlier</blockquote></mx-reply><a href="matrix:u/alice:example.org">Alice</a>"#
+                .to_string(),
+        );
+        let (_, html, _, _) = text_message_parts("Alice", Some(&formatted), None, true);
+
+        let html = html.unwrap();
+        assert!(!html.contains("mx-reply"));
+        assert!(html.contains(r#"href="matrix:u/alice:example.org""#));
     }
 
     #[test]
@@ -7181,7 +7218,7 @@ fn build_text_content(
         .map(|html| {
             matrix_sdk::ruma::html::sanitize_html(
                 &html,
-                matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+                matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
                 matrix_sdk::ruma::html::RemoveReplyFallback::No,
             )
         })
@@ -11048,10 +11085,15 @@ pub async fn redact_message(
 
 /// Send a typing notice to a room.
 #[frb]
-pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), String> {
+pub async fn send_typing_notice(
+    account_user_id: String,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
     let client = get_client()
         .await
         .ok_or_else(|| api_err("typing", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     room.typing_notice(typing)

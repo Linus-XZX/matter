@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:matter/pages/chat/message_input.dart';
 import 'package:matter/pages/settings/settings_page.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
@@ -561,6 +562,61 @@ void main() {
       );
     },
   );
+
+  test('account removal clears only that account composer state', () async {
+    const aliceKey = (
+      roomId: '!shared:example.org',
+      userId: '@alice:example.org',
+    );
+    const bobKey = (roomId: '!shared:example.org', userId: '@bob:example.org');
+    final container = createContainer();
+    addTearDown(container.dispose);
+    container.read(messageDraftProvider(aliceKey).notifier).value =
+        'alice draft';
+    container.read(editingDraftProvider(aliceKey).notifier).value = (
+      editingId: r'$alice-edit',
+      text: 'alice edit',
+    );
+    container.read(messageDraftProvider(bobKey).notifier).value = 'bob draft';
+    container.read(editingDraftProvider(bobKey).notifier).value = (
+      editingId: r'$bob-edit',
+      text: 'bob edit',
+    );
+    container.read(editingSendInFlightProvider(bobKey).notifier).value =
+        r'$bob-edit';
+
+    await container
+        .read(accountSwitchControllerProvider)
+        .removeAccount('@bob:example.org');
+
+    expect(container.read(messageDraftProvider(bobKey)), '');
+    expect(container.read(editingDraftProvider(bobKey)), isNull);
+    expect(container.read(editingSendInFlightProvider(bobKey)), isNull);
+    expect(container.read(messageDraftProvider(aliceKey)), 'alice draft');
+    expect(container.read(editingDraftProvider(aliceKey))?.text, 'alice edit');
+  });
+
+  test('ordinary account switches preserve composer state', () async {
+    const aliceKey = (
+      roomId: '!shared:example.org',
+      userId: '@alice:example.org',
+    );
+    final container = createContainer();
+    addTearDown(container.dispose);
+    container.read(messageDraftProvider(aliceKey).notifier).value =
+        'alice draft';
+    container.read(editingDraftProvider(aliceKey).notifier).value = (
+      editingId: r'$alice-edit',
+      text: 'alice edit',
+    );
+
+    await container
+        .read(accountSwitchControllerProvider)
+        .switchTo('@bob:example.org');
+
+    expect(container.read(messageDraftProvider(aliceKey)), 'alice draft');
+    expect(container.read(editingDraftProvider(aliceKey))?.text, 'alice edit');
+  });
 
   test('a failed last-account logout restarts the old sync', () async {
     await removeSession('@bob:example.org');

@@ -30,6 +30,22 @@ void main() {
     expect(result.formattedBody, isNull);
   });
 
+  test('standalone rich blocks create formatted_body', () {
+    expect(composer.compile('- one\n- two').formattedBody, contains('<ul>'));
+    expect(
+      composer.compile('> quoted').formattedBody,
+      contains('<blockquote>'),
+    );
+    expect(composer.compile('---').formattedBody, contains('<hr'));
+  });
+
+  test('plain paragraphs do not create formatted_body', () {
+    final result = composer.compile('hello\n\nworld');
+
+    expect(result.body, 'hello\n\nworld');
+    expect(result.formattedBody, isNull);
+  });
+
   test('raw HTML is treated as text', () {
     final result = composer.compile('<script>alert("x")</script>');
 
