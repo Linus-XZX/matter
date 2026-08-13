@@ -432,7 +432,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   final _textFieldKey = GlobalKey();
   late final RoomAccountKey _draftKey;
   bool _hasText = false;
-  bool _hasLongText = false;
   bool _isSending = false;
 
   /// Tracks the full-screen markdown composer: while it is open, a failed
@@ -468,7 +467,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       selection: TextSelection.collapsed(offset: draft.length),
     );
     _hasText = draft.trim().isNotEmpty;
-    _hasLongText = _isLongDraft(draft);
     _controller.addListener(_onTextChanged);
     if (defaultTargetPlatform != TargetPlatform.linux) {
       _focusNode.onKeyEvent = _handleKeyEvent;
@@ -514,11 +512,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     super.dispose();
   }
 
-  /// Whether a draft has outgrown the inline field: on narrow screens this
-  /// is what makes the full-screen editor entry appear.
-  static bool _isLongDraft(String text) =>
-      text.length >= 80 || text.contains('\n');
-
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
     final editing = ref.read(editingMessageProvider(_draftKey));
@@ -534,14 +527,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         text: _controller.text,
       );
     }
-    // On narrow screens the full-screen editor entry stays hidden for
-    // short messages and surfaces once the draft outgrows the inline
-    // field — exactly when editing in place starts to hurt.
-    final hasLongText = _isLongDraft(_controller.text);
-    if (_hasText != hasText || _hasLongText != hasLongText) {
+    if (_hasText != hasText) {
       setState(() {
         _hasText = hasText;
-        _hasLongText = hasLongText;
       });
     }
     if (hasText) {
@@ -1398,30 +1386,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                           ),
                           border: InputBorder.none,
                           isDense: true,
-                          suffixIcon:
-                              // Wide layouts (desktop, tablet landscape)
-                              // always show the full-screen editor entry;
-                              // on narrow (phone portrait) screens it only
-                              // appears once the draft outgrows the field.
-                              MediaQuery.sizeOf(context).width >= 600 ||
-                                  _hasLongText
-                              ? IconButton(
-                                  tooltip: '全屏编辑',
-                                  onPressed: sendBusy
-                                      ? null
-                                      : _openMarkdownComposer,
-                                  padding: EdgeInsets.zero,
-                                  icon: const Icon(
-                                    Icons.open_in_full_rounded,
-                                    color: AppColors.onSurfaceVariant,
-                                    size: 20,
-                                  ),
-                                )
-                              : null,
-                          suffixIconConstraints: const BoxConstraints.tightFor(
-                            width: 36,
-                            height: 36,
-                          ),
                         ),
                         maxLines: null,
                         textInputAction: TextInputAction.newline,
@@ -1714,7 +1678,6 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         _editingSourceLoadingId = null;
       }
       _hasText = _controller.text.trim().isNotEmpty;
-      _hasLongText = _isLongDraft(_controller.text);
     });
   }
 
@@ -1730,11 +1693,9 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     );
     _controller.addListener(_onTextChanged);
     final hasText = draft.trim().isNotEmpty;
-    final hasLongText = _isLongDraft(draft);
-    if (_hasText != hasText || _hasLongText != hasLongText) {
+    if (_hasText != hasText) {
       setState(() {
         _hasText = hasText;
-        _hasLongText = hasLongText;
       });
     }
   }
