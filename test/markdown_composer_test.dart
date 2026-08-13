@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/markdown/markdown_composer.dart';
+import 'package:matter/features/matrix_html/matrix_html_parser.dart';
 
 void main() {
   const composer = MarkdownComposer();
@@ -46,11 +47,87 @@ void main() {
     expect(result.formattedBody, isNull);
   });
 
-  test('raw HTML is treated as text', () {
-    final result = composer.compile('<script>alert("x")</script>');
+  test('raw HTML passes through to formatted body', () {
+    final result = composer.compile('mix <b>bold</b> html');
 
-    expect(result.body, '<script>alert("x")</script>');
-    expect(result.formattedBody, isNull);
+    expect(result.body, 'mix bold html');
+    expect(result.formattedBody, contains('<b>bold</b>'));
+  });
+
+  test('HTML blocks pass through verbatim', () {
+    final result = composer.compile('<div>block</div>');
+
+    expect(result.body, 'block');
+    expect(result.formattedBody, contains('<div>block</div>'));
+  });
+
+  test('script tags are discarded by the display parser', () {
+    final result = composer.compile('<script>alert("x")</script>after');
+
+    // The composer emits the raw HTML; the display-side whitelist parser is
+    // the sanitizer and drops script tags with their contents.
+    final nodes = const MatrixHtmlParser().parse(result.formattedBody ?? '');
+    expect(nodes.map((node) => node.textContent).join(), 'after');
+  });
+
+  test('task lists compile to checkboxes', () {
+    final result = composer.compile('- [ ] todo\n- [x] done');
+
+    expect(result.body, '- [ ] todo\n- [x] done');
+    expect(result.formattedBody, contains('<input type="checkbox" disabled>'));
+    expect(
+      result.formattedBody,
+      contains('<input type="checkbox" disabled checked>'),
+    );
+  });
+
+  test('images compile to img tags with alt and title', () {
+    final result = composer.compile(
+      '![a cat](https://example.org/cat.png "my cat")',
+    );
+
+    expect(result.body, 'a cat');
+    expect(
+      result.formattedBody,
+      contains(
+        '<img src="https://example.org/cat.png" alt="a cat" title="my cat">',
+      ),
+    );
+  });
+
+  test('images with unsafe sources degrade to alt text', () {
+    final result = composer.compile('![alt](javascript:alert(1))');
+
+    expect(result.formattedBody, isNot(contains('<img')));
+    expect(result.formattedBody, isNot(contains('javascript:')));
+  });
+
+  test('inline math compiles to data-mx-maths spans', () {
+    final result = composer.compile(r'the formula $x^2$ works');
+
+    expect(result.body, r'the formula $x^2$ works');
+    expect(result.formattedBody, contains('<span data-mx-maths="x^2"></span>'));
+  });
+
+  test('block math compiles to data-mx-maths divs', () {
+    final result = composer.compile('\$\$\nx^2 + y^2\n\$\$');
+
+    expect(result.formattedBody, contains('<div data-mx-maths="x^2 + y^2">'));
+  });
+
+  test('table column alignment survives compile', () {
+    final result = composer.compile('| a | b | c |\n|:---|:---:|---:|\n| 1 | 2 | 3 |');
+
+    expect(result.formattedBody, contains('<th align="left">a</th>'));
+    expect(result.formattedBody, contains('<th align="center">b</th>'));
+    expect(result.formattedBody, contains('<th align="right">c</th>'));
+    expect(result.formattedBody, contains('<td align="center">2</td>'));
+  });
+
+  test('currency amounts are not math', () {
+    final result = composer.compile(r'costs $5 and $10 total');
+
+    expect(result.formattedBody, isNot(contains('data-mx-maths')));
   });
 
   test('unsafe links lose link behavior', () {

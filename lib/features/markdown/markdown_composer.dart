@@ -42,8 +42,15 @@ class MarkdownComposer {
     final hasRichBlock = nodes.any(
       (node) => node is md.Element && node.tag != 'p',
     );
+    // Inline-only rich content (math spans keep their `$…$` markers in the
+    // plain body, so `source == body` alone would suppress formatted_body).
+    final hasRichInline = _hasRichInline(nodes);
     final formattedBody =
-        (source == body && mentions.isEmpty && !hasRichBlock) || html.isEmpty
+        (source == body &&
+                mentions.isEmpty &&
+                !hasRichBlock &&
+                !hasRichInline) ||
+            html.isEmpty
         ? null
         : html;
 
@@ -57,25 +64,142 @@ class MarkdownComposer {
   }
 
   md.Document _newDocument() => md.Document(
-    blockSyntaxes: const [
-      md.FencedCodeBlockSyntax(),
-      md.EmptyBlockSyntax(),
-      md.SetextHeaderSyntax(),
-      md.HeaderSyntax(),
-      md.CodeBlockSyntax(),
-      md.BlockquoteSyntax(),
-      md.HorizontalRuleSyntax(),
-      md.TableSyntax(),
-      md.UnorderedListSyntax(),
-      md.OrderedListSyntax(),
-      md.LinkReferenceDefinitionSyntax(),
-      md.ParagraphSyntax(),
+    blockSyntaxes: [
+      const md.FencedCodeBlockSyntax(),
+      const _MathBlockSyntax(),
+      const md.EmptyBlockSyntax(),
+      const md.SetextHeaderSyntax(),
+      const md.HeaderSyntax(),
+      const md.CodeBlockSyntax(),
+      const md.BlockquoteSyntax(),
+      const md.HorizontalRuleSyntax(),
+      const md.TableSyntax(),
+      const md.UnorderedListWithCheckboxSyntax(),
+      const md.OrderedListWithCheckboxSyntax(),
+      const md.LinkReferenceDefinitionSyntax(),
+      const _RawHtmlBlockSyntax(),
+      const md.ParagraphSyntax(),
     ],
-    inlineSyntaxes: [md.StrikethroughSyntax(), md.AutolinkExtensionSyntax()],
+    inlineSyntaxes: [
+      md.StrikethroughSyntax(),
+      md.AutolinkExtensionSyntax(),
+      _RawHtmlInlineSyntax(),
+      _MathInlineSyntax(),
+    ],
     extensionSet: md.ExtensionSet.none,
     withDefaultBlockSyntaxes: false,
     encodeHtml: false,
   );
+}
+
+/// AST tags carrying raw HTML that is emitted verbatim into
+/// `formatted_body`. (A `md.Text` subclass would not survive parsing: the
+/// inline parser merges adjacent text nodes, dropping any marker subclass.)
+/// The display-side `MatrixHtmlParser` whitelist is the sanitizer, so
+/// escaping here would show the tags literally instead.
+const rawHtmlInlineTag = 'raw-html';
+const rawHtmlBlockTag = 'raw-html-block';
+
+/// Like [md.HtmlBlockSyntax], but wraps the result in a marked element so
+/// the composer renderers can tell raw HTML apart from ordinary text.
+class _RawHtmlBlockSyntax extends md.HtmlBlockSyntax {
+  const _RawHtmlBlockSyntax();
+
+  @override
+  md.Node parse(md.BlockParser parser) {
+    final childLines = parseChildLines(parser);
+    var text = childLines.map((e) => e.content).join('\n').trimRight();
+    if (parser.previousSyntax != null || parser.parentSyntax != null) {
+      text = '\n$text';
+      if (parser.parentSyntax is md.ListSyntax) {
+        text = '$text\n';
+      }
+    }
+    return md.Element.text(rawHtmlBlockTag, text);
+  }
+}
+
+/// Like [md.InlineHtmlSyntax], but wraps the matched tag in a marked element
+/// instead of letting it merge into surrounding plain text.
+class _RawHtmlInlineSyntax extends md.InlineHtmlSyntax {
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.text(rawHtmlInlineTag, match[0]!));
+    return true;
+  }
+}
+
+/// Inline math: `$...$`. Follows the pandoc-style heuristics (opening `$`
+/// not followed by a space, closing `$` not preceded by a space and not
+/// followed by a digit) so currency text like "$5 and $10" is left alone.
+class _MathInlineSyntax extends md.InlineSyntax {
+  _MathInlineSyntax()
+    : super(
+        r'(?<!\\)\$(?!\$|\s)((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?!\d)',
+        startCharacter: 0x24, // $
+      );
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final tex = match[1] ?? '';
+    if (tex.isEmpty) return false;
+    parser.addNode(
+      md.Element.text('span', tex)..attributes['data-mx-maths'] = '',
+    );
+    return true;
+  }
+}
+
+/// Block math: lines wrapped in `$$` fences, either a single line
+/// (`$$x^2$$`) or a multi-line block.
+class _MathBlockSyntax extends md.BlockSyntax {
+  const _MathBlockSyntax();
+
+  @override
+  RegExp get pattern => RegExp(r'^[ \t]*\$\$');
+
+  @override
+  md.Node? parse(md.BlockParser parser) {
+    final first = parser.current.content.trim();
+    parser.advance();
+    var body = first.substring(2);
+    if (body.length > 2 && body.endsWith(r'$$')) {
+      body = body.substring(0, body.length - 2);
+    } else {
+      final lines = <String>[body];
+      while (!parser.isDone) {
+        final line = parser.current.content.trimRight();
+        parser.advance();
+        if (line.endsWith(r'$$')) {
+          lines.add(line.substring(0, line.length - 2));
+          break;
+        }
+        lines.add(line);
+      }
+      body = lines.join('\n');
+    }
+    body = body.trim();
+    if (body.isEmpty) return null;
+    return md.Element.text('div', body)..attributes['data-mx-maths'] = '';
+  }
+}
+
+/// Whether the AST carries inline-level rich content that the plain-text
+/// body cannot represent faithfully: raw HTML, images, checkboxes, math.
+bool _hasRichInline(List<md.Node> nodes) {
+  for (final node in nodes) {
+    if (node is! md.Element) continue;
+    final tag = node.tag;
+    if (tag == rawHtmlInlineTag ||
+        tag == rawHtmlBlockTag ||
+        tag == 'img' ||
+        tag == 'input' ||
+        node.attributes.containsKey('data-mx-maths')) {
+      return true;
+    }
+    if (_hasRichInline(node.children ?? const [])) return true;
+  }
+  return false;
 }
 
 class _MatrixMarkdownHtmlRenderer {
@@ -115,6 +239,11 @@ class _MatrixMarkdownHtmlRenderer {
             .join() ??
         '';
     switch (node.tag) {
+      case rawHtmlInlineTag:
+      case rawHtmlBlockTag:
+        // Raw HTML passes through unescaped; `children` above is escaped
+        // text and must not be used here.
+        return node.textContent;
       case 'p':
         return '<p>$children</p>';
       case 'h1':
@@ -134,9 +263,12 @@ class _MatrixMarkdownHtmlRenderer {
       case 'thead':
       case 'tbody':
       case 'tr':
+        return '<${node.tag}>$children</${node.tag}>';
       case 'th':
       case 'td':
-        return '<${node.tag}>$children</${node.tag}>';
+        final align = safeMatrixHtmlAlign(node.attributes['align']);
+        final attr = align == null ? '' : ' align="$align"';
+        return '<${node.tag}$attr>$children</${node.tag}>';
       case 'ol':
         final start = int.tryParse(node.attributes['start'] ?? '');
         final attr = start != null && start != 1 ? ' start="$start"' : '';
@@ -157,8 +289,38 @@ class _MatrixMarkdownHtmlRenderer {
         return '<br>';
       case 'hr':
         return '<hr>';
+      case 'span':
+        if (node.attributes.containsKey('data-mx-maths')) {
+          return '<span data-mx-maths="${_escapeAttribute(node.textContent)}">'
+              '</span>';
+        }
+        return children;
+      case 'div':
+        if (node.attributes.containsKey('data-mx-maths')) {
+          return '<div data-mx-maths="${_escapeAttribute(node.textContent)}">'
+              '</div>';
+        }
+        return children;
+      case 'input':
+        if (node.attributes['type'] != 'checkbox') return '';
+        final checked = node.attributes.containsKey('checked')
+            ? ' checked'
+            : '';
+        return '<input type="checkbox" disabled$checked>';
       case 'img':
-        return _escape.convert(node.attributes['alt'] ?? '');
+        final src = safeMatrixHtmlImgSrc(node.attributes['src']);
+        if (src == null) return _escape.convert(node.attributes['alt'] ?? '');
+        final buffer = StringBuffer('<img src="${_escapeAttribute(src)}"');
+        final alt = node.attributes['alt'];
+        if (alt != null && alt.isNotEmpty) {
+          buffer.write(' alt="${_escapeAttribute(alt)}"');
+        }
+        final title = node.attributes['title'];
+        if (title != null && title.isNotEmpty) {
+          buffer.write(' title="${_escapeAttribute(title)}"');
+        }
+        buffer.write('>');
+        return buffer.toString();
       default:
         return children;
     }
@@ -205,6 +367,10 @@ class _PlainMarkdownRenderer {
   String _renderBlock(md.Node node, int depth) {
     if (node is md.Text) return node.text;
     if (node is! md.Element) return '';
+    if (node.tag == rawHtmlBlockTag) return htmlTextContent(node.textContent);
+    if (node.tag == 'div' && node.attributes.containsKey('data-mx-maths')) {
+      return '\$\$${node.textContent}\$\$';
+    }
     switch (node.tag) {
       case 'p':
       case 'h1':
@@ -266,8 +432,15 @@ class _PlainMarkdownRenderer {
   }
 
   String _renderListItem(md.Element item, int depth, String marker) {
+    final children = List<md.Node>.of(item.children ?? const <md.Node>[]);
+    // Task lists carry a leading checkbox `input`, either as a direct child
+    // (tight lists) or inside the first paragraph (loose lists).
+    final taskState = _takeTaskCheckbox(children);
+    if (taskState != null) {
+      marker = '$marker[${taskState ? 'x' : ' '}] ';
+    }
     final parts = <String>[];
-    for (final child in item.children ?? const <md.Node>[]) {
+    for (final child in children) {
       if (child is md.Element && (child.tag == 'ul' || child.tag == 'ol')) {
         final nested = _renderList(
           child,
@@ -295,6 +468,49 @@ class _PlainMarkdownRenderer {
   String _inline(List<md.Node>? nodes) => _visibleMarkdownText(nodes);
 }
 
+/// Removes a leading task-list checkbox (`input[type=checkbox]`) from
+/// [nodes], looking one level into a leading paragraph, and returns its
+/// checked state — or null when the item is not a task.
+bool? _takeTaskCheckbox(List<md.Node> nodes) {
+  if (nodes.isEmpty) return null;
+  final first = nodes.first;
+  if (first is md.Element && first.tag == 'input') {
+    if (first.attributes['type'] != 'checkbox') return null;
+    nodes.removeAt(0);
+    return first.attributes.containsKey('checked');
+  }
+  if (first is md.Element && first.tag == 'p') {
+    final paragraphChildren = first.children;
+    if (paragraphChildren != null && paragraphChildren.isNotEmpty) {
+      final nested = paragraphChildren.first;
+      if (nested is md.Element &&
+          nested.tag == 'input' &&
+          nested.attributes['type'] == 'checkbox') {
+        paragraphChildren.removeAt(0);
+        return nested.attributes.containsKey('checked');
+      }
+    }
+  }
+  return null;
+}
+
+/// The plain-text content of an HTML fragment, with all tags stripped.
+String htmlTextContent(String htmlSource) {
+  final buffer = StringBuffer();
+  void walk(dom.Node node) {
+    if (node is dom.Text) {
+      buffer.write(node.data);
+      return;
+    }
+    for (final child in node.nodes) {
+      walk(child);
+    }
+  }
+
+  walk(html_parser.parseFragment(htmlSource));
+  return buffer.toString();
+}
+
 /// The visible text of markdown AST nodes: text nodes as-is, images as
 /// their alt text, `br` as a line break; everything else recurses. Shared
 /// by the plain-text fallback renderer and degraded-table matching so
@@ -306,7 +522,15 @@ String _visibleMarkdownText(List<md.Node>? nodes) {
     if (node is md.Text) {
       buffer.write(node.text);
     } else if (node is md.Element) {
-      if (node.tag == 'img') {
+      final isMath =
+          (node.tag == 'span' || node.tag == 'div') &&
+          node.attributes.containsKey('data-mx-maths');
+      if (node.tag == rawHtmlInlineTag || node.tag == rawHtmlBlockTag) {
+        buffer.write(htmlTextContent(node.textContent));
+      } else if (isMath) {
+        final fence = node.tag == 'div' ? '\$\$' : '\$';
+        buffer.write('$fence${node.textContent}$fence');
+      } else if (node.tag == 'img') {
         buffer.write(node.attributes['alt'] ?? '');
       } else if (node.tag == 'br') {
         buffer.write('\n');
@@ -506,6 +730,23 @@ String? safeMatrixHtmlHref(String? value) {
     return null;
   }
   return uri.toString();
+}
+
+/// Like [safeMatrixHtmlHref] but for image sources, which additionally may
+/// be `mxc://` URIs (resolved to authenticated HTTP media at render time).
+String? safeMatrixHtmlImgSrc(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null) return null;
+  if (!const {'http', 'https', 'mxc'}.contains(uri.scheme)) return null;
+  return uri.toString();
+}
+
+/// A whitelisted `align` attribute value, or null for anything else.
+String? safeMatrixHtmlAlign(String? value) {
+  const allowed = {'left', 'center', 'right', 'justify'};
+  final normalized = value?.trim().toLowerCase();
+  return allowed.contains(normalized) ? normalized : null;
 }
 
 String? _safeHref(String? value) => safeMatrixHtmlHref(value);
