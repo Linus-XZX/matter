@@ -119,6 +119,12 @@ fn init_log_store(data_dir: &str) {
     }
 }
 
+/// Initialize persisted logging before startup session discovery begins.
+#[frb(sync)]
+pub fn initialize_log_store(data_dir: String) {
+    init_log_store(&data_dir);
+}
+
 /// Format epoch milliseconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC) without pulling
 /// in a date library.
 fn format_utc(millis: i64) -> String {
@@ -3880,6 +3886,20 @@ fn friendly_auth_error(raw: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
+#[cfg(test)]
+mod auth_error_tests {
+    use super::friendly_auth_error;
+
+    #[test]
+    fn password_login_errors_do_not_expose_server_response_text() {
+        let raw = "[403 / M_FORBIDDEN] password was secret-value";
+        let safe = friendly_auth_error(raw, "登录失败，请稍后重试");
+
+        assert_eq!(safe, "认证失败，请检查账号、密码或 Token");
+        assert!(!safe.contains("secret-value"));
+    }
+}
+
 // ── Auth functions ───────────────────────────────────────────────────
 
 /// Create a Matrix client for the given homeserver URL.
@@ -4110,23 +4130,47 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
         )
     })?;
 
-    match client
+    let started = std::time::Instant::now();
+    let login_result = client
         .matrix_auth()
         .login_username(&username, &password)
         .request_refresh_token()
         .initial_device_display_name("Matter")
-        .await
-    {
+        .await;
+    match login_result {
         Ok(response) => {
-            // Auto-finalize: migrate pending client to per-user store
-            drop(client);
-            let finalized = finalize_pending()
-                .await
-                .map_err(|e| api_err("auth", format!("Finalization failed: {e}")))?;
+            let request_elapsed_ms = started.elapsed().as_millis();
             app_log(
                 "info",
                 "auth",
-                format!("Account finalized after password login: {}", finalized),
+                format!(
+                    "Password login response accepted for {} after {} ms; \
+                     device={}, starting local finalization",
+                    response.user_id, request_elapsed_ms, response.device_id,
+                ),
+            );
+            // Auto-finalize: migrate pending client to per-user store
+            drop(client);
+            let finalization_started = std::time::Instant::now();
+            let finalized = finalize_pending().await.map_err(|e| {
+                api_err(
+                    "auth",
+                    format!(
+                        "Password login local finalization failed after {} ms: {e}",
+                        finalization_started.elapsed().as_millis(),
+                    ),
+                )
+            })?;
+            app_log(
+                "info",
+                "auth",
+                format!(
+                    "Account finalized after password login: {} \
+                     (request={} ms, finalization={} ms)",
+                    finalized,
+                    request_elapsed_ms,
+                    finalization_started.elapsed().as_millis(),
+                ),
             );
             info!("Account finalized after password login: {}", finalized);
             Ok(AuthResult {
@@ -4141,17 +4185,30 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
                 flows: None,
             })
         }
-        Err(e) => Ok(AuthResult {
-            success: false,
-            user_id: None,
-            device_id: None,
-            access_token: None,
-            refresh_token: None,
-            error: Some(friendly_auth_error(&format!("{e}"), "登录失败，请稍后重试")),
-            needs_uiaa: false,
-            session: None,
-            flows: None,
-        }),
+        Err(e) => {
+            let raw_error = format!("{e}");
+            let friendly_error = friendly_auth_error(&raw_error, "登录失败，请稍后重试");
+            app_log(
+                "error",
+                "auth",
+                format!(
+                    "Password login request or local SDK activation failed after {} ms: {}",
+                    started.elapsed().as_millis(),
+                    friendly_error,
+                ),
+            );
+            Ok(AuthResult {
+                success: false,
+                user_id: None,
+                device_id: None,
+                access_token: None,
+                refresh_token: None,
+                error: Some(friendly_error),
+                needs_uiaa: false,
+                session: None,
+                flows: None,
+            })
+        }
     }
 }
 
@@ -4422,6 +4479,9 @@ pub struct AccountRemovalResult {
     /// The account is already removed when this is set; only stale local SDK
     /// files may remain and can be cleaned on a later app start.
     pub cleanup_error: Option<String>,
+    /// Local removal completed, but the homeserver did not confirm logout.
+    /// The server-side device session may still be valid.
+    pub remote_logout_pending: bool,
 }
 
 #[frb]
@@ -4447,6 +4507,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
+    let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bound the remote logout: the server may be unreachable and the SDK
         // has no HTTP timeout, which would otherwise freeze account removal
@@ -4461,6 +4522,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
+                remote_logout_pending = true;
                 // The token may still be valid on the server: remember it so
                 // the next login of this account can retry the remote logout
                 // (see finalize_pending) instead of leaving a ghost session.
@@ -4481,6 +4543,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
                 warn!("Remote logout failed for {}: {e}", user_id);
             }
             Err(_) => {
+                remote_logout_pending = true;
                 if let Some(session) = client.matrix_auth().session() {
                     PENDING_REMOTE_LOGOUTS.write().await.insert(
                         user_id.clone(),
@@ -4542,6 +4605,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
 
     Ok(AccountRemovalResult {
         cleanup_error: store_delete_result.err(),
+        remote_logout_pending,
     })
 }
 
@@ -4576,6 +4640,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
+    let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bounded remote logout: see logout() — an unreachable server must
         // not freeze account removal, which runs under the write lock.
@@ -4587,6 +4652,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
+                remote_logout_pending = true;
                 // The token may still be valid on the server: remember it so
                 // the next login of this account can retry the remote logout
                 // (see finalize_pending) instead of leaving a ghost session.
@@ -4607,6 +4673,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
                 warn!("Remote logout failed while removing {}: {e}", user_id);
             }
             Err(_) => {
+                remote_logout_pending = true;
                 if let Some(session) = client.matrix_auth().session() {
                     PENDING_REMOTE_LOGOUTS.write().await.insert(
                         user_id.clone(),
@@ -4654,6 +4721,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
 
     Ok(AccountRemovalResult {
         cleanup_error: store_delete_result.err(),
+        remote_logout_pending,
     })
 }
 

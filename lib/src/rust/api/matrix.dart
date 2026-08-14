@@ -12,6 +12,10 @@ part 'matrix.freezed.dart';
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `ClientIdentity`, `ClientLease`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MediaClientIdentity`, `MutationTail`, `PendingEntry`, `PendingSyncTask`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
+/// Initialize persisted logging before startup session discovery begins.
+void initializeLogStore({required String dataDir}) =>
+    RustLib.instance.api.crateApiMatrixInitializeLogStore(dataDir: dataDir);
+
 /// Stream app log entries from Rust → Dart (live).
 Stream<AppLogEntry> watchAppLogs() =>
     RustLib.instance.api.crateApiMatrixWatchAppLogs();
@@ -944,17 +948,25 @@ class AccountRemovalResult {
   /// files may remain and can be cleaned on a later app start.
   final String? cleanupError;
 
-  const AccountRemovalResult({this.cleanupError});
+  /// Local removal completed, but the homeserver did not confirm logout.
+  /// The server-side device session may still be valid.
+  final bool remoteLogoutPending;
+
+  const AccountRemovalResult({
+    this.cleanupError,
+    required this.remoteLogoutPending,
+  });
 
   @override
-  int get hashCode => cleanupError.hashCode;
+  int get hashCode => cleanupError.hashCode ^ remoteLogoutPending.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is AccountRemovalResult &&
           runtimeType == other.runtimeType &&
-          cleanupError == other.cleanupError;
+          cleanupError == other.cleanupError &&
+          remoteLogoutPending == other.remoteLogoutPending;
 }
 
 /// A single log entry visible to the user.

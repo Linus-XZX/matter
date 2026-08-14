@@ -28,6 +28,7 @@ class _FakeRustApi implements RustLibApi {
   bool failNextAliceSwitch = false;
   bool failLogout = false;
   String? cleanupError;
+  bool remoteLogoutPending = false;
   Object? listAccountsError;
 
   @override
@@ -95,7 +96,10 @@ class _FakeRustApi implements RustLibApi {
     removeStarted?.complete();
     await removeBarrier?.future;
     removedAccounts.add(userId);
-    return rust.AccountRemovalResult(cleanupError: cleanupError);
+    return rust.AccountRemovalResult(
+      cleanupError: cleanupError,
+      remoteLogoutPending: remoteLogoutPending,
+    );
   }
 
   @override
@@ -104,7 +108,10 @@ class _FakeRustApi implements RustLibApi {
     await logoutBarrier?.future;
     if (failLogout) throw StateError('logout failed after sync stopped');
     removedAccounts.add(activeUserId);
-    return rust.AccountRemovalResult(cleanupError: cleanupError);
+    return rust.AccountRemovalResult(
+      cleanupError: cleanupError,
+      remoteLogoutPending: remoteLogoutPending,
+    );
   }
 
   @override
@@ -156,6 +163,7 @@ void main() {
     rustApi.failNextAliceSwitch = false;
     rustApi.failLogout = false;
     rustApi.cleanupError = null;
+    rustApi.remoteLogoutPending = false;
     rustApi.listAccountsError = null;
 
     await addSession(
@@ -520,6 +528,28 @@ void main() {
         'matrix_session_removed_${base64Url.encode(utf8.encode('@alice:example.org'))}',
       ),
       isTrue,
+    );
+  });
+
+  test('remote logout warning still commits local account removal', () async {
+    await removeSession('@bob:example.org');
+    final container = createContainer();
+    addTearDown(container.dispose);
+    container.read(isLoggedInProvider.notifier).value = true;
+    rustApi.remoteLogoutPending = true;
+
+    final warning = await container
+        .read(accountSwitchControllerProvider)
+        .removeAccount('@alice:example.org');
+
+    expect(warning, contains('服务器上的登录设备可能仍然有效'));
+    expect(await loadAllSessions(), isEmpty);
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+      prefs.containsKey(
+        'matrix_session_removed_${base64Url.encode(utf8.encode('@alice:example.org'))}',
+      ),
+      isFalse,
     );
   });
 

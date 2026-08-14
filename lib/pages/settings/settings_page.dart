@@ -10,6 +10,7 @@ import '../../features/diagnostics/diagnostic_exporter.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/authenticated_media_cache.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/session_credential_store.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 
 import '../../theme/app_theme.dart';
@@ -44,6 +45,15 @@ class AccountSwitchController {
     return current == null ? next : '$current；$next';
   }
 
+  String? _removalWarning(rust.AccountRemovalResult result) {
+    final warnings = <String>[
+      ?result.cleanupError,
+      if (result.remoteLogoutPending)
+        '远端会话撤销失败，服务器上的登录设备可能仍然有效，请从其他已登录客户端删除该设备',
+    ];
+    return warnings.isEmpty ? null : warnings.join('；');
+  }
+
   Future<T> _runWithPersistedRemovalIntent<T>(
     String userId,
     Future<T> Function() removeFromRust,
@@ -63,9 +73,9 @@ class AccountSwitchController {
 
   Future<String?> _commitLocalAccountRemoval(
     String userId,
-    String? cleanupWarning,
+    rust.AccountRemovalResult result,
   ) async {
-    var warning = cleanupWarning;
+    var warning = _removalWarning(result);
     var localCleanupSucceeded = false;
     try {
       await _ref.read(accountSessionRemoverProvider)(userId);
@@ -74,7 +84,7 @@ class AccountSwitchController {
       warning = _appendCleanupWarning(warning, error);
     }
 
-    if (localCleanupSucceeded && cleanupWarning == null) {
+    if (localCleanupSucceeded && result.cleanupError == null) {
       try {
         await unmarkSessionRemoved(userId);
       } catch (error) {
@@ -208,7 +218,7 @@ class AccountSwitchController {
         userId,
         () => rust.removeAccount(userId: userId),
       );
-      return _commitLocalAccountRemoval(userId, result.cleanupError);
+      return _commitLocalAccountRemoval(userId, result);
     } else if (isCurrentAccount) {
       _ref.read(sessionReadyProvider.notifier).value = false;
       late final rust.AccountRemovalResult result;
@@ -229,10 +239,7 @@ class AccountSwitchController {
         }
         Error.throwWithStackTrace(error, stackTrace);
       }
-      final warning = await _commitLocalAccountRemoval(
-        userId,
-        result.cleanupError,
-      );
+      final warning = await _commitLocalAccountRemoval(userId, result);
       try {
         return warning;
       } finally {
@@ -249,7 +256,7 @@ class AccountSwitchController {
         userId,
         () => rust.removeAccount(userId: userId),
       );
-      return _commitLocalAccountRemoval(userId, result.cleanupError);
+      return _commitLocalAccountRemoval(userId, result);
     }
   }
 }
@@ -269,6 +276,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _checkingForUpdate = false;
   bool _exportingLogs = false;
   bool _clearingCache = false;
+  bool _credentialCompatibilityMode = false;
+  bool _updatingCredentialCompatibilityMode = false;
   // The account being switched to (if any): shows progress on its tile and
   // blocks further switches. The Rust-side switch waits for the lifecycle
   // write lock, which in-flight P0 operations can hold for up to ~90s, so
@@ -283,6 +292,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     super.initState();
     _loadAccounts();
     _loadAppVersion();
+    _loadCredentialCompatibilityMode();
     if (!kIsWeb) _loadCacheSize();
     unawaited(refreshCurrentUserProfile(ref));
   }
@@ -294,6 +304,59 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     } catch (error) {
       debugPrint('Failed to load app version: $error');
       if (mounted) setState(() => _versionLabel = '版本信息不可用');
+    }
+  }
+
+  Future<void> _loadCredentialCompatibilityMode() async {
+    final enabled = await isSessionCredentialCompatibilityModeEnabled();
+    if (mounted) {
+      setState(() => _credentialCompatibilityMode = enabled);
+    }
+  }
+
+  Future<void> _disableCredentialCompatibilityMode() async {
+    if (_updatingCredentialCompatibilityMode) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('关闭凭据兼容模式'),
+        content: const Text(
+          '关闭后将删除兼容模式保存的登录凭据。由于当前设备的系统密钥库不可用，'
+          '下次启动可能需要重新登录。\n\n确定继续吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('关闭并删除凭据'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _updatingCredentialCompatibilityMode = true);
+    try {
+      await disableSessionCredentialCompatibilityMode();
+      if (mounted) {
+        setState(() => _credentialCompatibilityMode = false);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('兼容模式已关闭，下次启动可能需要重新登录')));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('关闭兼容模式失败：$error')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _updatingCredentialCompatibilityMode = false);
+      }
     }
   }
 
@@ -493,12 +556,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     // block further account actions instead of a frozen-looking UI.
     setState(() => _removingAccountId = userId);
     try {
-      final cleanupError = await accountController.removeAccount(userId);
+      final warning = await accountController.removeAccount(userId);
       await _loadAccounts();
-      if (cleanupError != null && mounted) {
+      if (warning != null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('账号已移除，但本地缓存清理失败: $cleanupError'),
+            content: Text('账号已从本机移除，但操作未完整完成: $warning'),
             duration: const Duration(seconds: 3),
           ),
         );
@@ -728,6 +791,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     _buildGroup(
                       title: '存储',
                       items: [
+                        if (_credentialCompatibilityMode)
+                          _SettingItem(
+                            icon: Icons.warning_amber_rounded,
+                            iconColor: AppColors.warning,
+                            title: '凭据兼容模式',
+                            subtitle: '已启用 · Root 权限可读取登录凭据',
+                            trailing: _updatingCredentialCompatibilityMode
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : null,
+                            onTap: _updatingCredentialCompatibilityMode
+                                ? null
+                                : _disableCredentialCompatibilityMode,
+                          ),
                         _SettingItem(
                           icon: Icons.cleaning_services_rounded,
                           iconColor: AppColors.secondary,
