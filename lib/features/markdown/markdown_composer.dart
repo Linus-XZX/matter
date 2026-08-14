@@ -5,6 +5,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:markdown/markdown.dart' as md;
 
 import '../../src/rust/api/matrix.dart' as rust;
+import '../matrix_html/matrix_link_router.dart';
 
 class CompiledMarkdownMessage {
   final String source;
@@ -209,35 +210,75 @@ class _MatrixMarkdownHtmlRenderer {
 
   _MatrixMarkdownHtmlRenderer(this.mentions);
 
-  String render(List<md.Node> nodes) => nodes
-      .map((node) => _renderNode(node))
-      .where((part) => part.isNotEmpty)
-      .join();
+  String render(List<md.Node> nodes) {
+    final rendered = nodes
+        .map((node) => _renderNode(node))
+        .where((part) => part.isNotEmpty)
+        .join();
+    return _linkAndCollectMentions(rendered);
+  }
 
-  String _renderNode(md.Node node, {bool inCode = false, bool inLink = false}) {
-    if (node is md.Text) {
-      if (!inCode &&
-          RegExp(
-            r'(^|\s)@room(?=\s|$|[.,!?;:，。！？；：])',
-            multiLine: true,
-          ).hasMatch(node.text)) {
-        mentionsRoom = true;
+  String _linkAndCollectMentions(String source) {
+    final fragment = html_parser.parseFragment(source);
+
+    void visit(
+      dom.Node node, {
+      bool inCode = false,
+      bool inLink = false,
+      bool inMath = false,
+    }) {
+      if (node is dom.Text) {
+        if (inCode || inMath) return;
+        if (RegExp(
+          r'(^|\s)@room(?=\s|$|[.,!?;:，。！？；：])',
+          multiLine: true,
+        ).hasMatch(node.data)) {
+          mentionsRoom = true;
+        }
+        if (inLink) return;
+        final replacement = _renderTextWithMentions(node.data);
+        if (replacement != _escape.convert(node.data)) {
+          node.replaceWith(html_parser.parseFragment(replacement));
+        }
+        return;
       }
-      if (!inCode && !inLink) return _renderTextWithMentions(node.text);
+      if (node is! dom.Element) return;
+
+      final tag = node.localName;
+      final nextInCode = inCode || tag == 'code' || tag == 'pre';
+      final nextInMath = inMath || node.attributes.containsKey('data-mx-maths');
+      if (tag == 'script' || tag == 'style') return;
+
+      final nextInLink = inLink || tag == 'a';
+      if (!nextInCode && !nextInMath && tag == 'a') {
+        final href = node.attributes['href'];
+        final uri = href == null ? null : Uri.tryParse(href);
+        final userId = uri == null ? null : matrixUserIdFromUri(uri);
+        if (userId != null) mentions.add(userId);
+      }
+      for (final child in node.nodes.toList()) {
+        visit(
+          child,
+          inCode: nextInCode,
+          inLink: nextInLink,
+          inMath: nextInMath,
+        );
+      }
+    }
+
+    for (final node in fragment.nodes.toList()) {
+      visit(node);
+    }
+    return fragment.outerHtml;
+  }
+
+  String _renderNode(md.Node node) {
+    if (node is md.Text) {
       return _escape.convert(node.text);
     }
     if (node is! md.Element) return '';
 
-    final nextInCode = inCode || node.tag == 'code' || node.tag == 'pre';
-    final nextInLink = inLink || node.tag == 'a';
-    final children =
-        node.children
-            ?.map(
-              (child) =>
-                  _renderNode(child, inCode: nextInCode, inLink: nextInLink),
-            )
-            .join() ??
-        '';
+    final children = node.children?.map(_renderNode).join() ?? '';
     switch (node.tag) {
       case rawHtmlInlineTag:
       case rawHtmlBlockTag:
@@ -266,9 +307,7 @@ class _MatrixMarkdownHtmlRenderer {
         return '<${node.tag}>$children</${node.tag}>';
       case 'th':
       case 'td':
-        final align = safeMatrixHtmlAlign(node.attributes['align']);
-        final attr = align == null ? '' : ' align="$align"';
-        return '<${node.tag}$attr>$children</${node.tag}>';
+        return '<${node.tag}>$children</${node.tag}>';
       case 'ol':
         final start = int.tryParse(node.attributes['start'] ?? '');
         final attr = start != null && start != 1 ? ' start="$start"' : '';
@@ -282,8 +321,6 @@ class _MatrixMarkdownHtmlRenderer {
       case 'a':
         final href = _safeHref(node.attributes['href']);
         if (href == null) return children;
-        final userId = _matrixUserIdFromHref(href);
-        if (userId != null) mentions.add(userId);
         return '<a href="${_escapeAttribute(href)}">$children</a>';
       case 'br':
         return '<br>';
@@ -303,18 +340,20 @@ class _MatrixMarkdownHtmlRenderer {
         return children;
       case 'input':
         if (node.attributes['type'] != 'checkbox') return '';
-        final checked = node.attributes.containsKey('checked')
-            ? ' checked'
-            : '';
-        return '<input type="checkbox" disabled$checked>';
+        return node.attributes.containsKey('checked') ? '[x] ' : '[ ] ';
       case 'img':
         final src = safeMatrixHtmlImgSrc(node.attributes['src']);
-        if (src == null) return _escape.convert(node.attributes['alt'] ?? '');
-        final buffer = StringBuffer('<img src="${_escapeAttribute(src)}"');
+        if (src == null || Uri.parse(src).scheme != 'mxc') {
+          return _escape.convert(node.attributes['alt'] ?? '');
+        }
+        // Match ruma-html's deterministic attribute ordering so the echoed
+        // formatted body still matches the locally stored Markdown source.
+        final buffer = StringBuffer('<img');
         final alt = node.attributes['alt'];
         if (alt != null && alt.isNotEmpty) {
           buffer.write(' alt="${_escapeAttribute(alt)}"');
         }
+        buffer.write(' src="${_escapeAttribute(src)}"');
         final title = node.attributes['title'];
         if (title != null && title.isNotEmpty) {
           buffer.write(' title="${_escapeAttribute(title)}"');
@@ -753,13 +792,3 @@ String? _safeHref(String? value) => safeMatrixHtmlHref(value);
 
 String _escapeAttribute(String value) =>
     const HtmlEscape(HtmlEscapeMode.attribute).convert(value);
-
-String? _matrixUserIdFromHref(String href) {
-  final uri = Uri.tryParse(href);
-  if (uri == null || uri.host.toLowerCase() != 'matrix.to') return null;
-  final target = Uri.decodeComponent(
-    uri.fragment,
-  ).replaceFirst(RegExp(r'^/'), '');
-  if (!RegExp(r'^@[^\s:]+:[^\s:]+$').hasMatch(target)) return null;
-  return target;
-}

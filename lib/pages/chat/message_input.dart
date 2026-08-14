@@ -1397,132 +1397,91 @@ class _MessageInputState extends ConsumerState<MessageInput> {
                     ),
                   ),
                   const SizedBox(width: 6),
-                  AnimatedContainer(
-                    duration: _toolbarAnimationDuration,
-                    curve: _toolbarAnimationCurve,
-                    width: _hasText ? 44 : 94,
+                  SizedBox(
+                    width: 94,
                     height: 44,
-                    alignment: Alignment.centerRight,
-                    child: ClipRect(
-                      child: AnimatedSwitcher(
-                        duration: _toolbarAnimationDuration,
-                        switchInCurve: _toolbarAnimationCurve,
-                        switchOutCurve: Curves.easeInCubic,
-                        layoutBuilder: (currentChild, previousChildren) {
-                          return Stack(
-                            alignment: Alignment.centerRight,
-                            children: [...previousChildren, ?currentChild],
-                          );
-                        },
-                        transitionBuilder: (child, animation) {
-                          final scale = Tween<double>(
-                            begin: 0.92,
-                            end: 1,
-                          ).animate(animation);
-                          return FadeTransition(
-                            opacity: animation,
-                            child: ScaleTransition(
-                              scale: scale,
-                              alignment: Alignment.centerRight,
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: _hasText
-                            ? SizedBox.square(
-                                key: const ValueKey('send_only'),
-                                dimension: 44,
-                                child: IconButton(
-                                  onPressed: sendBusy ? null : _sendMessage,
-                                  padding: EdgeInsets.zero,
-                                  icon: sendBusy
-                                      ? const SizedBox.square(
-                                          dimension: 20,
-                                          child: CircularProgressIndicator(
-                                            color: AppColors.primary,
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Icon(
-                                          Icons.send_rounded,
-                                          color: AppColors.primary,
-                                          size: 25,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        SizedBox.square(
+                          dimension: 44,
+                          child: Builder(
+                            builder: (buttonContext) => Tooltip(
+                              message: '附件',
+                              // Desktop hover still shows the tooltip; its
+                              // long-press trigger belongs to the InkWell so
+                              // it can open the tools menu instead.
+                              triggerMode: TooltipTriggerMode.manual,
+                              child: Material(
+                                type: MaterialType.transparency,
+                                child: InkWell(
+                                  customBorder: const CircleBorder(),
+                                  onTap: sendBusy
+                                      ? null
+                                      : _toggleAttachmentPicker,
+                                  onLongPress: sendBusy
+                                      ? null
+                                      : () => _showComposerToolsMenu(
+                                          buttonContext,
                                         ),
-                                ),
-                              )
-                            : OverflowBox(
-                                alignment: Alignment.centerRight,
-                                minWidth: 94,
-                                maxWidth: 94,
-                                child: SizedBox(
-                                  key: const ValueKey('tools'),
-                                  width: 94,
-                                  height: 44,
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
-                                    children: [
-                                      SizedBox.square(
-                                        dimension: 44,
-                                        child: Builder(
-                                          builder: (buttonContext) => Tooltip(
-                                            message: '附件',
-                                            // Desktop hover still shows the
-                                            // tooltip; its long-press
-                                            // trigger is left to the InkWell
-                                            // below so the tools menu can
-                                            // use it.
-                                            triggerMode:
-                                                TooltipTriggerMode.manual,
-                                            child: Material(
-                                              type: MaterialType.transparency,
-                                              child: InkWell(
-                                                customBorder:
-                                                    const CircleBorder(),
-                                                onTap: sendBusy
-                                                    ? null
-                                                    : _toggleAttachmentPicker,
-                                                onLongPress: sendBusy
-                                                    ? null
-                                                    : () =>
-                                                          _showComposerToolsMenu(
-                                                            buttonContext,
-                                                          ),
-                                                child: Center(
-                                                  child: Icon(
-                                                    Icons.add_rounded,
-                                                    color:
-                                                        widget.panelMode ==
-                                                            InputPanelMode
-                                                                .attachment
-                                                        ? AppColors.primary
-                                                        : AppColors
-                                                              .onSurfaceVariant,
-                                                    size: 26,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      SizedBox.square(
-                                        dimension: 44,
-                                        child: IconButton(
-                                          tooltip: '语音消息暂未提供',
-                                          icon: const Icon(
-                                            Icons.mic_none_rounded,
-                                            color: AppColors.onSurfaceVariant,
-                                            size: 25,
-                                          ),
-                                          onPressed: null,
-                                          padding: EdgeInsets.zero,
-                                        ),
-                                      ),
-                                    ],
+                                  child: Center(
+                                    child: Icon(
+                                      Icons.add_rounded,
+                                      color:
+                                          widget.panelMode ==
+                                              InputPanelMode.attachment
+                                          ? AppColors.primary
+                                          : AppColors.onSurfaceVariant,
+                                      size: 26,
+                                    ),
                                   ),
                                 ),
                               ),
-                      ),
+                            ),
+                          ),
+                        ),
+                        AnimatedSwitcher(
+                          duration: _toolbarAnimationDuration,
+                          switchInCurve: _toolbarAnimationCurve,
+                          switchOutCurve: Curves.easeInCubic,
+                          child: _hasText
+                              ? SizedBox.square(
+                                  key: const ValueKey('send_only'),
+                                  dimension: 44,
+                                  child: IconButton(
+                                    onPressed: sendBusy ? null : _sendMessage,
+                                    padding: EdgeInsets.zero,
+                                    icon: sendBusy
+                                        ? const SizedBox.square(
+                                            dimension: 20,
+                                            child: CircularProgressIndicator(
+                                              color: AppColors.primary,
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.send_rounded,
+                                            color: AppColors.primary,
+                                            size: 25,
+                                          ),
+                                  ),
+                                )
+                              : SizedBox.square(
+                                  key: const ValueKey('voice_only'),
+                                  dimension: 44,
+                                  child: IconButton(
+                                    tooltip: '语音消息暂未提供',
+                                    icon: const Icon(
+                                      Icons.mic_none_rounded,
+                                      color: AppColors.onSurfaceVariant,
+                                      size: 25,
+                                    ),
+                                    onPressed: null,
+                                    padding: EdgeInsets.zero,
+                                  ),
+                                ),
+                        ),
+                      ],
                     ),
                   ),
                 ],

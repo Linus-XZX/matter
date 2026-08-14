@@ -7007,6 +7007,40 @@ mod formatted_message_tests {
     }
 
     #[test]
+    fn formatting_without_visible_content_falls_back_to_plain_text() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "image".to_string(),
+            formatted_body: Some(r#"<p><img src="https://example.org/cat.png"></p>"#.to_string()),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+
+        assert_eq!(json["body"], "image");
+        assert!(json.get("formatted_body").is_none(), "{json}");
+    }
+
+    #[test]
+    fn mxc_images_remain_visible_formatted_content() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "a cat".to_string(),
+            formatted_body: Some(
+                r#"<p><img src="mxc://example.org/cat" alt="a cat"></p>"#.to_string(),
+            ),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+
+        assert_eq!(
+            json["formatted_body"],
+            r#"<p><img alt="a cat" src="mxc://example.org/cat"></p>"#
+        );
+    }
+
+    #[test]
     fn matrix_links_survive_reply_fallback_removal() {
         let formatted = FormattedBody::html(
             r#"<mx-reply><blockquote>Earlier</blockquote></mx-reply><a href="matrix:u/alice:example.org">Alice</a>"#
@@ -7209,6 +7243,34 @@ fn build_mentions(
     Ok(mentions)
 }
 
+fn sanitized_html_has_visible_content(html: &str) -> bool {
+    fn node_has_visible_content(node: matrix_sdk::ruma::html::NodeRef) -> bool {
+        match node.data() {
+            matrix_sdk::ruma::html::NodeData::Text(text) if !text.borrow().trim().is_empty() => {
+                return true;
+            }
+            matrix_sdk::ruma::html::NodeData::Element(element) => {
+                let name = element.name.local.as_ref();
+                let attrs = element.attrs.borrow();
+                if name == "hr"
+                    || (name == "img" && attrs.iter().any(|attr| attr.name.local.as_ref() == "src"))
+                    || attrs.iter().any(|attr| {
+                        attr.name.local.as_ref() == "data-mx-maths" && !attr.value.trim().is_empty()
+                    })
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        node.children().any(node_has_visible_content)
+    }
+
+    matrix_sdk::ruma::html::Html::parse(html)
+        .children()
+        .any(node_has_visible_content)
+}
+
 fn build_text_content(
     message: FormattedMessageInput,
 ) -> Result<matrix_sdk::ruma::events::room::message::RoomMessageEventContent, String> {
@@ -7222,7 +7284,7 @@ fn build_text_content(
                 matrix_sdk::ruma::html::RemoveReplyFallback::No,
             )
         })
-        .filter(|html| !html.trim().is_empty());
+        .filter(|html| sanitized_html_has_visible_content(html));
     let mut content = if let Some(formatted_body) = formatted_body {
         matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_html(
             message.body,

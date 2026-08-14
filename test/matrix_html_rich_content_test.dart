@@ -1,21 +1,26 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:matter/features/matrix_html/matrix_html_renderer.dart';
+import 'package:matter/widgets/app_avatar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  Widget app(String html) => ProviderScope(
-    child: MaterialApp(
-      home: Scaffold(
-        body: MatrixHtmlMessage(
-          html: html,
-          style: const TextStyle(fontSize: 15, color: Colors.white),
-          accentColor: Colors.cyan,
+  Widget app(String html, {MatrixHtmlImageResolver? imageResolver}) =>
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MatrixHtmlMessage(
+              html: html,
+              style: const TextStyle(fontSize: 15, color: Colors.white),
+              accentColor: Colors.cyan,
+              imageResolver: imageResolver,
+            ),
+          ),
         ),
-      ),
-    ),
-  );
+      );
 
   group('code blocks', () {
     testWidgets('code block fills the available width', (tester) async {
@@ -95,6 +100,21 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('Matrix-compatible text markers render as checkboxes', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        app('<ul><li>[x] done</li><li>[ ] todo</li></ul>'),
+      );
+
+      expect(find.byIcon(Icons.check_box_rounded), findsOneWidget);
+      expect(
+        find.byIcon(Icons.check_box_outline_blank_rounded),
+        findsOneWidget,
+      );
+      expect(find.text('•', findRichText: true), findsNothing);
+    });
   });
 
   group('math', () {
@@ -171,6 +191,43 @@ void main() {
             .textAlign,
         TextAlign.right,
       );
+    });
+
+    testWidgets('table frame hugs the content in a stretched bubble column', (
+      tester,
+    ) async {
+      // The trailing-metadata path renders blocks in a full-width stretch
+      // column; the bordered frame must still wrap the table's intrinsic
+      // width instead of spanning the column.
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: const Scaffold(
+              body: MatrixHtmlMessage(
+                html:
+                    '<table><thead><tr><th>能力</th><th>状态</th></tr></thead>'
+                    '<tbody><tr><td>Shell</td><td>ok</td></tr></tbody></table>',
+                style: TextStyle(fontSize: 15, color: Colors.white),
+                accentColor: Colors.cyan,
+                trailingMetadata: Text('12:34'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      final frame = tester
+          .widgetList<Container>(find.byType(Container))
+          .firstWhere(
+            (container) =>
+                container.decoration is BoxDecoration &&
+                (container.decoration! as BoxDecoration).border != null,
+          );
+      final frameWidth = tester.getSize(find.byWidget(frame)).width;
+      final tableWidth = tester.getSize(find.byType(Table)).width;
+      // The frame adds exactly its 1px border on each side.
+      expect(frameWidth, closeTo(tableWidth + 2, 1));
     });
   });
 
@@ -249,6 +306,53 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('the title', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('stale image resolution cannot overwrite a newer source', (
+      tester,
+    ) async {
+      final oldResolution = Completer<String?>();
+      final newResolution = Completer<String?>();
+      Future<String?> resolver(WidgetRef _, String src) =>
+          src.endsWith('/old') ? oldResolution.future : newResolution.future;
+
+      await tester.pumpWidget(
+        app(
+          '<p><img src="mxc://example.org/old" alt="old"></p>',
+          imageResolver: resolver,
+        ),
+      );
+      await tester.pump();
+      await tester.pumpWidget(
+        app(
+          '<p><img src="mxc://example.org/new" alt="new"></p>',
+          imageResolver: resolver,
+        ),
+      );
+
+      newResolution.complete('https://example.org/new.png');
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester
+            .widget<AuthenticatedImageMessage>(
+              find.byType(AuthenticatedImageMessage),
+            )
+            .imageUrl,
+        'https://example.org/new.png',
+      );
+
+      oldResolution.complete('https://example.org/old.png');
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester
+            .widget<AuthenticatedImageMessage>(
+              find.byType(AuthenticatedImageMessage),
+            )
+            .imageUrl,
+        'https://example.org/new.png',
+      );
     });
   });
 }

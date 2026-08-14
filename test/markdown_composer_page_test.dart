@@ -475,6 +475,13 @@ void main() {
       totalMembers: 2,
     );
 
+    Future<void> openInputComposer(WidgetTester tester) async {
+      await tester.longPress(find.byIcon(Icons.add_rounded));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Markdown 编辑器'));
+      await tester.pumpAndSettle();
+    }
+
     testWidgets('composer edits flow back into the input draft', (
       tester,
     ) async {
@@ -487,8 +494,7 @@ void main() {
 
       await tester.pumpWidget(messageInput(container, roomId));
       await tester.enterText(find.byType(TextField), 'hello');
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
 
       expect(find.byType(MarkdownComposerPage), findsOneWidget);
       expect(
@@ -508,13 +514,9 @@ void main() {
       expect(container.read(messageDraftProvider(key)), 'hello **markdown**');
     });
 
-    testWidgets('editor entry hides on narrow screens until the draft grows', (
+    testWidgets('attachment tools remain available while the draft changes', (
       tester,
     ) async {
-      tester.view.physicalSize = const Size(400, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-
       const roomId = '!composer-entry:example.org';
       final container = ProviderContainer();
       addTearDown(container.dispose);
@@ -523,21 +525,26 @@ void main() {
 
       await tester.pumpWidget(messageInput(container, roomId));
       expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
+      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.mic_none_rounded), findsOneWidget);
 
       await tester.enterText(find.byType(TextField), 'short');
       await tester.pump();
       expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
+      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.send_rounded), findsOneWidget);
 
       await tester.enterText(find.byType(TextField), 'a' * 81);
       await tester.pump();
-      expect(find.byIcon(Icons.open_in_full_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
+      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
 
       // Let the typing timers (idle stop + keep-alive) run out so none are
       // left pending at the end of the test.
       await tester.pump(const Duration(seconds: 4));
     });
 
-    testWidgets('editor entry is always visible on wide layouts', (
+    testWidgets('wide layouts do not add a dedicated editor icon', (
       tester,
     ) async {
       tester.view.physicalSize = const Size(1200, 800);
@@ -551,10 +558,11 @@ void main() {
           '@alice:example.org';
 
       await tester.pumpWidget(messageInput(container, roomId));
-      expect(find.byIcon(Icons.open_in_full_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
+      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
     });
 
-    testWidgets('long-pressing the attachment button offers the composer', (
+    testWidgets('long-pressing attachment opens the composer with a draft', (
       tester,
     ) async {
       const roomId = '!composer-menu:example.org';
@@ -564,6 +572,8 @@ void main() {
           '@alice:example.org';
 
       await tester.pumpWidget(messageInput(container, roomId));
+      await tester.enterText(find.byType(TextField), 'draft');
+      await tester.pump();
       await tester.longPress(find.byIcon(Icons.add_rounded));
       await tester.pumpAndSettle();
 
@@ -585,8 +595,7 @@ void main() {
           '@alice:example.org';
 
       await tester.pumpWidget(messageInput(container, roomId));
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
 
       await tester.enterText(composerField(), 'live synced');
       await tester.pump();
@@ -606,8 +615,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'hello');
       await tester.pump();
       expect(container.read(messageDraftProvider(key)), 'hello');
@@ -654,8 +662,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'once only');
       await tester.pump();
 
@@ -702,8 +709,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'once only');
       await tester.pump();
 
@@ -749,8 +755,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'first draft');
       await tester.pump();
 
@@ -801,8 +806,7 @@ void main() {
       container.read(sessionReadyProvider.notifier).value = true;
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'refresh me');
       await tester.pump();
 
@@ -834,8 +838,7 @@ void main() {
       container.read(sessionReadyProvider.notifier).value = true;
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'refresh after disposal');
       await tester.pump();
       await tester.tap(find.byIcon(Icons.send_rounded));
@@ -869,8 +872,7 @@ void main() {
       container.read(sessionReadyProvider.notifier).value = true;
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'send as alice');
       await tester.pump();
 
@@ -904,8 +906,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'alice draft');
       await tester.pump();
 
@@ -981,8 +982,7 @@ void main() {
         'orig text',
       );
 
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'edited via composer');
       await tester.pump();
 
@@ -1027,8 +1027,7 @@ void main() {
 
         final showInput = await pumpSwitchableHost(tester, container, roomId);
         await tester.pumpAndSettle();
-        await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-        await tester.pumpAndSettle();
+        await openInputComposer(tester);
         await tester.enterText(composerField(), 'unsaved edit');
         await tester.pump();
 
@@ -1247,8 +1246,7 @@ void main() {
         'original',
       );
 
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'edited better');
       await tester.pump();
       await tester.tap(find.byIcon(Icons.send_rounded));
@@ -1443,10 +1441,13 @@ void main() {
       );
       expect(
         tester
-            .widget<IconButton>(
-              find.widgetWithIcon(IconButton, Icons.open_in_full_rounded),
+            .widget<InkWell>(
+              find.ancestor(
+                of: find.byIcon(Icons.add_rounded),
+                matching: find.byType(InkWell),
+              ),
             )
-            .onPressed,
+            .onLongPress,
         isNull,
       );
 
@@ -1465,6 +1466,17 @@ void main() {
               find.widgetWithIcon(IconButton, Icons.send_rounded),
             )
             .onPressed,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<InkWell>(
+              find.ancestor(
+                of: find.byIcon(Icons.add_rounded),
+                matching: find.byType(InkWell),
+              ),
+            )
+            .onLongPress,
         isNotNull,
       );
     });
@@ -1491,8 +1503,7 @@ void main() {
         'original text',
       );
 
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'edited v2');
       await tester.pump();
 
@@ -1532,8 +1543,7 @@ void main() {
       );
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'keep me');
       await tester.pump();
       await tester.tap(find.byIcon(Icons.send_rounded));
@@ -1613,8 +1623,7 @@ void main() {
           '@alice:example.org';
 
       final showInput = await pumpSwitchableHost(tester, container, roomId);
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
       await tester.enterText(composerField(), 'v1');
       await tester.pump();
 
@@ -1652,8 +1661,7 @@ void main() {
           '@alice:example.org';
 
       await tester.pumpWidget(messageInput(container, roomId));
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
 
       await tester.enterText(composerField(), 'typing away');
       await tester.pump();
@@ -1718,8 +1726,7 @@ void main() {
       container.read(replyingToProvider(key).notifier).value = original;
 
       await tester.pumpWidget(messageInput(container, roomId));
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
 
       await tester.enterText(composerField(), 'retry me');
       await tester.pump();
@@ -1766,8 +1773,7 @@ void main() {
           '@alice:example.org';
 
       await tester.pumpWidget(messageInput(container, roomId));
-      await tester.tap(find.byIcon(Icons.open_in_full_rounded));
-      await tester.pumpAndSettle();
+      await openInputComposer(tester);
 
       await tester.enterText(composerField(), '**bold** move');
       await tester.pump();

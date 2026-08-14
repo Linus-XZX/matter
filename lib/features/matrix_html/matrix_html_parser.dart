@@ -177,8 +177,17 @@ class MatrixHtmlParser {
       final attributes = <String, String>{};
       final align = safeMatrixHtmlAlign(node.attributes['align']);
       if (align != null &&
-          const {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'th', 'td'}
-              .contains(tag)) {
+          const {
+            'p',
+            'h1',
+            'h2',
+            'h3',
+            'h4',
+            'h5',
+            'h6',
+            'th',
+            'td',
+          }.contains(tag)) {
         attributes['align'] = align;
       }
       if (tag == 'a') {

@@ -752,47 +752,15 @@ class MessageGroupWidget extends ConsumerWidget {
         if (replyContent != null)
           _buildReplyPreview(context, replyContent, isMe),
         if (readerHtml != null)
-          CollapsibleMessageContent(
-            maxCollapsedHeight: 320,
+          MatrixHtmlMessage(
+            key: ValueKey('formatted-body:${message.id}'),
+            html: readerHtml,
+            style: textStyle,
             accentColor: isMe ? Colors.white : AppColors.secondary,
-            backgroundColor: isMe
-                ? AppColors.primary
-                : AppColors.surfaceElevated,
-            contentKey: Object.hash(
-              readerHtml,
-              Object.hashAllUnordered(
-                mentionDisplayNames.entries.map(
-                  (entry) => Object.hash(entry.key, entry.value),
-                ),
-              ),
-            ),
-            onExpand: () => _openReaderFullScreen(
-              context,
-              html: readerHtml,
-              mentionDisplayNames: mentionDisplayNames,
-            ),
-            // While collapsed, the metadata shows once in the overlay row
-            // and the clipped content is the metadata-less variant, so it
-            // is never mounted twice or half-clipped.
-            overflowChild: MatrixHtmlMessage(
-              key: ValueKey('formatted-body-collapsed:${message.id}'),
-              html: readerHtml,
-              style: textStyle,
-              accentColor: isMe ? Colors.white : AppColors.secondary,
-              mentionDisplayNames: mentionDisplayNames,
-              onMentionTap: onMentionTap,
-            ),
-            overflowMetadata: metadata,
-            child: MatrixHtmlMessage(
-              key: ValueKey('formatted-body-metadata:${message.id}'),
-              html: readerHtml,
-              style: textStyle,
-              accentColor: isMe ? Colors.white : AppColors.secondary,
-              mentionDisplayNames: mentionDisplayNames,
-              onMentionTap: onMentionTap,
-              trailingMetadata: metadata,
-              minWidth: replyPreviewWidth,
-            ),
+            mentionDisplayNames: mentionDisplayNames,
+            onMentionTap: onMentionTap,
+            trailingMetadata: metadata,
+            minWidth: replyPreviewWidth,
           )
         else
           _AdaptiveTextMetadata(

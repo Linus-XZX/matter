@@ -70,28 +70,31 @@ void main() {
     expect(nodes.map((node) => node.textContent).join(), 'after');
   });
 
-  test('task lists compile to checkboxes', () {
+  test('task lists use Matrix-compatible text markers', () {
     final result = composer.compile('- [ ] todo\n- [x] done');
 
     expect(result.body, '- [ ] todo\n- [x] done');
-    expect(result.formattedBody, contains('<input type="checkbox" disabled>'));
-    expect(
-      result.formattedBody,
-      contains('<input type="checkbox" disabled checked>'),
-    );
+    expect(result.formattedBody, isNot(contains('<input')));
+    expect(result.formattedBody, contains('<li>[ ] todo</li>'));
+    expect(result.formattedBody, contains('<li>[x] done</li>'));
   });
 
-  test('images compile to img tags with alt and title', () {
+  test('external images degrade to visible alt text', () {
     final result = composer.compile(
       '![a cat](https://example.org/cat.png "my cat")',
     );
 
     expect(result.body, 'a cat');
+    expect(result.formattedBody, '<p>a cat</p>');
+    expect(result.formattedBody, isNot(contains('<img')));
+  });
+
+  test('mxc images compile to Matrix-compatible img tags', () {
+    final result = composer.compile('![a cat](mxc://example.org/cat "my cat")');
+
     expect(
       result.formattedBody,
-      contains(
-        '<img src="https://example.org/cat.png" alt="a cat" title="my cat">',
-      ),
+      '<p><img alt="a cat" src="mxc://example.org/cat" title="my cat"></p>',
     );
   });
 
@@ -115,13 +118,16 @@ void main() {
     expect(result.formattedBody, contains('<div data-mx-maths="x^2 + y^2">'));
   });
 
-  test('table column alignment survives compile', () {
-    final result = composer.compile('| a | b | c |\n|:---|:---:|---:|\n| 1 | 2 | 3 |');
+  test('tables omit attributes stripped by the Matrix sanitizer', () {
+    final result = composer.compile(
+      '| a | b | c |\n|:---|:---:|---:|\n| 1 | 2 | 3 |',
+    );
 
-    expect(result.formattedBody, contains('<th align="left">a</th>'));
-    expect(result.formattedBody, contains('<th align="center">b</th>'));
-    expect(result.formattedBody, contains('<th align="right">c</th>'));
-    expect(result.formattedBody, contains('<td align="center">2</td>'));
+    expect(result.formattedBody, contains('<th>a</th>'));
+    expect(result.formattedBody, contains('<th>b</th>'));
+    expect(result.formattedBody, contains('<th>c</th>'));
+    expect(result.formattedBody, contains('<td>2</td>'));
+    expect(result.formattedBody, isNot(contains(' align=')));
   });
 
   test('currency amounts are not math', () {
@@ -150,6 +156,18 @@ void main() {
     expect(result.mentionsRoom, isFalse);
   });
 
+  test('raw HTML code and math do not create mentions', () {
+    for (final source in [
+      '<pre>@room @alice:example.org</pre>',
+      '<code>@room @alice:example.org</code>',
+      r'$@room @alice:example.org$',
+    ]) {
+      final result = composer.compile(source);
+      expect(result.mentionsRoom, isFalse, reason: source);
+      expect(result.mentionedUserIds, isEmpty, reason: source);
+    }
+  });
+
   test('turns full Matrix user IDs into intentional mentions', () {
     final result = composer.compile('hello @alice:example.org');
 
@@ -158,5 +176,15 @@ void main() {
       result.formattedBody,
       contains('https://matrix.to/#/%40alice%3Aexample.org'),
     );
+  });
+
+  test('collects mentions from supported Matrix user permalinks', () {
+    final matrixUri = composer.compile('[Alice](matrix:u/alice:example.org)');
+    final matrixTo = composer.compile(
+      '[Alice](https://matrix.to/#/@alice:example.org?via=example.org)',
+    );
+
+    expect(matrixUri.mentionedUserIds, ['@alice:example.org']);
+    expect(matrixTo.mentionedUserIds, ['@alice:example.org']);
   });
 }

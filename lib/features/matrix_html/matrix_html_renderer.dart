@@ -37,6 +37,9 @@ import 'matrix_html_node.dart';
 import 'matrix_html_parser.dart';
 import 'matrix_link_router.dart';
 
+typedef MatrixHtmlImageResolver =
+    Future<String?> Function(WidgetRef ref, String src);
+
 class MatrixHtmlMessage extends StatefulWidget {
   final String html;
   final TextStyle style;
@@ -46,6 +49,7 @@ class MatrixHtmlMessage extends StatefulWidget {
   final ValueChanged<String>? onMentionTap;
   final Widget? trailingMetadata;
   final double minWidth;
+  final MatrixHtmlImageResolver? imageResolver;
 
   const MatrixHtmlMessage({
     super.key,
@@ -57,6 +61,7 @@ class MatrixHtmlMessage extends StatefulWidget {
     this.onMentionTap,
     this.trailingMetadata,
     this.minWidth = 0,
+    this.imageResolver,
   });
 
   @override
@@ -102,6 +107,7 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
       mentionDisplayNames: widget.mentionDisplayNames,
       onMentionTap: widget.onMentionTap,
       gestureRecognizers: recognizers,
+      imageResolver: widget.imageResolver,
     );
     _recognizers = recognizers;
     if (previousRecognizers.isNotEmpty) {
@@ -172,6 +178,7 @@ class _MatrixNodeRenderer {
   final Map<String, String> mentionDisplayNames;
   final ValueChanged<String>? onMentionTap;
   final List<TapGestureRecognizer> gestureRecognizers;
+  final MatrixHtmlImageResolver? imageResolver;
 
   /// Alignment inherited from a container (e.g. a table cell's `align`),
   /// applied to rich text that doesn't carry its own `align`.
@@ -185,6 +192,7 @@ class _MatrixNodeRenderer {
     required this.mentionDisplayNames,
     required this.onMentionTap,
     required this.gestureRecognizers,
+    required this.imageResolver,
     this.textAlign,
   });
 
@@ -557,7 +565,15 @@ class _MatrixNodeRenderer {
         ],
       );
     }
-    if (captions.isEmpty) return grid;
+    // The bordered container must hug the table's intrinsic width; inside a
+    // stretched bubble column it would otherwise span the full maxWidth and
+    // detach the frame from the content.
+    final fittedGrid = Align(
+      alignment: Alignment.centerLeft,
+      widthFactor: 1,
+      child: grid,
+    );
+    if (captions.isEmpty) return fittedGrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -570,7 +586,7 @@ class _MatrixNodeRenderer {
               baseStyle.copyWith(fontWeight: FontWeight.w700),
             ),
           ),
-        grid,
+        fittedGrid,
       ],
     );
   }
@@ -586,6 +602,7 @@ class _MatrixNodeRenderer {
       mentionDisplayNames: mentionDisplayNames,
       onMentionTap: onMentionTap,
       gestureRecognizers: gestureRecognizers,
+      imageResolver: imageResolver,
       textAlign: _textAlignOf(cell),
     );
     final blocks = renderer.renderBlocks(cell.children);
@@ -635,6 +652,7 @@ class _MatrixNodeRenderer {
             cacheWidth: (width * MediaQuery.devicePixelRatioOf(context))
                 .round(),
             fallbackStyle: baseStyle,
+            resolver: imageResolver,
           ),
         );
       },
@@ -734,6 +752,21 @@ class _MatrixNodeRenderer {
   /// the first paragraph) and returns the checked state plus the item's
   /// content with the checkbox removed. Null for plain list items.
   (bool, List<MatrixHtmlNode>)? _taskCheckboxItem(MatrixElementNode item) {
+    (bool, List<MatrixHtmlNode>)? textMarker(List<MatrixHtmlNode> source) {
+      if (source.isEmpty || source.first is! MatrixTextNode) return null;
+      final first = source.first as MatrixTextNode;
+      final match = RegExp(r'^\[([ xX])\](?=\s|$)').firstMatch(first.text);
+      if (match == null) return null;
+      final remaining = first.text.substring(match.end);
+      return (
+        match.group(1)!.toLowerCase() == 'x',
+        <MatrixHtmlNode>[
+          if (remaining.isNotEmpty) MatrixTextNode(remaining),
+          ...source.skip(1),
+        ],
+      );
+    }
+
     bool? checked;
     final children = List<MatrixHtmlNode>.of(item.children);
     if (children.isEmpty) return null;
@@ -752,7 +785,19 @@ class _MatrixNodeRenderer {
           children: first.children.sublist(1),
           attributes: first.attributes,
         );
+      } else {
+        final task = textMarker(first.children);
+        if (task != null) {
+          children[0] = MatrixElementNode(
+            tag: 'p',
+            children: task.$2,
+            attributes: first.attributes,
+          );
+          return (task.$1, children);
+        }
       }
+    } else if (first is MatrixTextNode) {
+      return textMarker(children);
     }
     if (checked == null) return null;
     return (checked, children);
@@ -987,6 +1032,7 @@ class _MatrixNodeRenderer {
                 src: src,
                 alt: element.attributes['alt'],
                 fallbackStyle: style,
+                resolver: imageResolver,
               ),
             ),
           );
@@ -1135,6 +1181,7 @@ class _MatrixHtmlImage extends ConsumerStatefulWidget {
   final double? width;
   final int? cacheWidth;
   final TextStyle fallbackStyle;
+  final MatrixHtmlImageResolver? resolver;
 
   const _MatrixHtmlImage({
     required this.src,
@@ -1142,6 +1189,7 @@ class _MatrixHtmlImage extends ConsumerStatefulWidget {
     this.width,
     this.cacheWidth,
     required this.fallbackStyle,
+    this.resolver,
   });
 
   @override
@@ -1151,6 +1199,7 @@ class _MatrixHtmlImage extends ConsumerStatefulWidget {
 class _MatrixHtmlImageState extends ConsumerState<_MatrixHtmlImage> {
   String? _resolvedUrl;
   bool _failed = false;
+  int _resolveGeneration = 0;
 
   bool get _isMxc => widget.src.startsWith('mxc://');
 
@@ -1176,7 +1225,8 @@ class _MatrixHtmlImageState extends ConsumerState<_MatrixHtmlImage> {
   @override
   void didUpdateWidget(covariant _MatrixHtmlImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.src != widget.src) {
+    if (oldWidget.src != widget.src || oldWidget.resolver != widget.resolver) {
+      _resolveGeneration++;
       setState(() {
         _failed = false;
         _resolvedUrl = _isMxc ? null : widget.src;
@@ -1186,8 +1236,10 @@ class _MatrixHtmlImageState extends ConsumerState<_MatrixHtmlImage> {
   }
 
   Future<void> _resolve() async {
-    final url = await resolveMxcUrl(ref, widget.src);
-    if (!mounted) return;
+    final generation = ++_resolveGeneration;
+    final src = widget.src;
+    final url = await (widget.resolver ?? resolveMxcUrl)(ref, src);
+    if (!mounted || generation != _resolveGeneration) return;
     setState(() {
       if (url == null) {
         _failed = true;
@@ -1212,7 +1264,9 @@ class _MatrixHtmlImageState extends ConsumerState<_MatrixHtmlImage> {
       fit: widget.width == null ? BoxFit.contain : BoxFit.fitWidth,
       cacheWidth: widget.cacheWidth,
       onError: () {
-        if (mounted) setState(() => _failed = true);
+        if (mounted && _resolvedUrl == url) {
+          setState(() => _failed = true);
+        }
       },
     );
     final width = widget.width;

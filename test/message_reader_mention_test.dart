@@ -13,12 +13,12 @@ void main() {
       senderId: '@bob:example.org',
       senderName: 'Bob',
       content: 'check this out',
-      // A tall body so the bubble collapses behind the "展开阅读" button,
-      // whose expand path is the real _openReaderFullScreen wiring.
+      // A formatted (markdown) body, entered through the real
+      // _openReaderFullScreen wiring (long-press menu → 全屏阅读).
       formattedBody:
           '<p><a href="https://matrix.to/#/@alice:akass.cn">'
           '@alice:akass.cn</a></p>'
-          '${List.generate(30, (_) => '<p>padding line</p>').join()}',
+          '${List.generate(3, (_) => '<p>padding line</p>').join()}',
       mentionedUserIds: [],
       mentionsRoom: false,
       timestamp: '100',
@@ -61,9 +61,15 @@ void main() {
 
     await tester.pumpWidget(app());
     await tester.pumpAndSettle();
-    expect(find.text('展开阅读'), findsOneWidget);
 
-    await tester.tap(find.text('展开阅读'));
+    // Long-press lands on the bubble's top padding: pressing the text itself
+    // starts SelectionArea word selection instead of opening the menu.
+    final bubble = find.byKey(const ValueKey(r'text-bubble:$read-mention'));
+    await tester.longPressAt(tester.getTopLeft(bubble) + const Offset(40, 6));
+    await tester.pumpAndSettle();
+    expect(find.text('全屏阅读'), findsOneWidget);
+
+    await tester.tap(find.text('全屏阅读'));
     await tester.pumpAndSettle();
     expect(find.byType(MessageReaderPage), findsOneWidget);
 
