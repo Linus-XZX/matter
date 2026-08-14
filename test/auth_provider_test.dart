@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,10 +9,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/features/markdown/markdown_source_store.dart';
+import 'package:matter/providers/session_credential_store.dart';
+import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 
 class _FakeRustApi implements RustLibApi {
   final sdkCleanupCalls = <({String userId, String dataDir})>[];
+  final appLogs = <({String level, String tag, String message})>[];
+  rust.StoredSession? currentSession;
+  Object? logoutError;
+  String? logoutCleanupError;
+  bool logoutRemotePending = false;
+  int logoutCalls = 0;
 
   @override
   Future<void> crateApiMatrixCleanupRemovedAccountStore({
@@ -19,6 +28,30 @@ class _FakeRustApi implements RustLibApi {
     required String dataDir,
   }) async {
     sdkCleanupCalls.add((userId: userId, dataDir: dataDir));
+  }
+
+  @override
+  void crateApiMatrixLogAppMessage({
+    required String level,
+    required String tag,
+    required String message,
+  }) {
+    appLogs.add((level: level, tag: tag, message: message));
+  }
+
+  @override
+  Future<rust.StoredSession?> crateApiMatrixGetSession() async =>
+      currentSession;
+
+  @override
+  Future<rust.AccountRemovalResult> crateApiMatrixLogout() async {
+    logoutCalls++;
+    if (logoutError case final error?) throw error;
+    currentSession = null;
+    return rust.AccountRemovalResult(
+      cleanupError: logoutCleanupError,
+      remoteLogoutPending: logoutRemotePending,
+    );
   }
 
   @override
@@ -55,6 +88,12 @@ void main() {
           return null;
         });
     rustApi.sdkCleanupCalls.clear();
+    rustApi.appLogs.clear();
+    rustApi.currentSession = null;
+    rustApi.logoutError = null;
+    rustApi.logoutCleanupError = null;
+    rustApi.logoutRemotePending = false;
+    rustApi.logoutCalls = 0;
   });
 
   group('active user id persistence', () {
@@ -91,6 +130,67 @@ void main() {
   });
 
   group('session persistence', () {
+    test('credential store failures are detected only on Android', () {
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const error =
+          'InvalidKeyException: Failed to unwrap key: OAEP_DECODING_ERROR';
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      expect(detectSessionCredentialStoreFailure(error), error);
+      expect(
+        detectSessionCredentialStoreFailure(
+          const SessionCredentialStoreException('verification failed'),
+        ),
+        contains('verification failed'),
+      );
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      expect(detectSessionCredentialStoreFailure(error), isNull);
+    });
+
+    test(
+      'compatibility recovery refuses to reset non-Android storage',
+      () async {
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final secure = FlutterSecureStorage();
+        await secure.write(key: 'unrelated-keychain-value', value: 'keep-me');
+
+        await expectLater(
+          enableSessionCredentialCompatibilityModeAfterFailure(),
+          throwsStateError,
+        );
+        expect(await secure.read(key: 'unrelated-keychain-value'), 'keep-me');
+      },
+    );
+
+    test(
+      'incomplete compatibility recovery preserves existing secure values',
+      () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() async {
+          await disableSessionCredentialCompatibilityMode();
+          debugDefaultTargetPlatformOverride = null;
+        });
+        SharedPreferences.setMockInitialValues({
+          'multi_sessions': jsonEncode([
+            {
+              'homeserver_url': 'https://example.org',
+              'user_id': '@alice:example.org',
+              'device_id': 'DEVICE_A',
+            },
+          ]),
+        });
+        final secure = FlutterSecureStorage();
+        await secure.write(key: 'unrelated-secure-value', value: 'keep-me');
+
+        await enableSessionCredentialCompatibilityModeAfterFailure();
+
+        expect(await secure.read(key: 'unrelated-secure-value'), 'keep-me');
+        expect(await isSessionCredentialCompatibilityModeEnabled(), isTrue);
+      },
+    );
+
     test('addSession stores metadata and secure token', () async {
       await addSession(
         homeserver: 'https://example.org',
@@ -127,7 +227,106 @@ void main() {
             'matrix_refresh_token_${base64Url.encode(utf8.encode('@alice:example.org'))}',
       );
       expect(refreshToken, 'refresh-a');
+      final diagnostics = rustApi.appLogs
+          .map((entry) => entry.message)
+          .join('\n');
+      expect(diagnostics, contains('accessTokenMatches=true'));
+      expect(diagnostics, contains('metadataSaved=true'));
+      expect(diagnostics, isNot(contains('token-a')));
     });
+
+    test('discarding an unpersisted login revokes and removes it', () async {
+      const userId = '@alice:example.org';
+      await addSession(
+        homeserver: 'https://example.org',
+        accessToken: 'token-a',
+        refreshToken: 'refresh-a',
+        userId: userId,
+        deviceId: 'DEVICE_A',
+        displayName: 'Alice',
+      );
+      rustApi.currentSession = const rust.StoredSession(
+        homeserverUrl: 'https://example.org',
+        accessToken: 'token-a',
+        refreshToken: 'refresh-a',
+        userId: userId,
+        deviceId: 'DEVICE_A',
+      );
+
+      final result = await discardUnpersistedLoginSession();
+
+      expect(result.rustSessionDiscarded, isTrue);
+      expect(result.warning, isNull);
+      expect(rustApi.logoutCalls, 1);
+      expect(await loadAllSessions(), isEmpty);
+      final secure = FlutterSecureStorage();
+      expect(
+        await secure.read(
+          key: 'matrix_access_token_${base64Url.encode(utf8.encode(userId))}',
+        ),
+        isNull,
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(_removedSessionTestKey(userId)), isTrue);
+    });
+
+    test(
+      'discarding an unpersisted login reports logout failure and clears local credentials',
+      () async {
+        const userId = '@alice:example.org';
+        await addSession(
+          homeserver: 'https://example.org',
+          accessToken: 'token-a',
+          userId: userId,
+          deviceId: 'DEVICE_A',
+          displayName: 'Alice',
+        );
+        rustApi.currentSession = const rust.StoredSession(
+          homeserverUrl: 'https://example.org',
+          accessToken: 'token-a',
+          refreshToken: null,
+          userId: userId,
+          deviceId: 'DEVICE_A',
+        );
+        rustApi.logoutError = StateError('logout failed');
+
+        final result = await discardUnpersistedLoginSession();
+
+        expect(result.rustSessionDiscarded, isFalse);
+        expect(result.warning, contains('登录会话撤销失败'));
+        expect(rustApi.logoutCalls, 1);
+        expect(await loadAllSessions(), isEmpty);
+        final secure = FlutterSecureStorage();
+        expect(
+          await secure.read(
+            key: 'matrix_access_token_${base64Url.encode(utf8.encode(userId))}',
+          ),
+          isNull,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.containsKey(_removedSessionTestKey(userId)), isTrue);
+      },
+    );
+
+    test(
+      'discarding an unpersisted login reports a pending remote logout',
+      () async {
+        const userId = '@alice:example.org';
+        rustApi.currentSession = const rust.StoredSession(
+          homeserverUrl: 'https://example.org',
+          accessToken: 'token-a',
+          refreshToken: 'refresh-a',
+          userId: userId,
+          deviceId: 'DEVICE_A',
+        );
+        rustApi.logoutRemotePending = true;
+
+        final result = await discardUnpersistedLoginSession();
+
+        expect(result.rustSessionDiscarded, isTrue);
+        expect(result.warning, contains('服务器上的登录设备可能仍然有效'));
+      },
+    );
 
     test(
       'loadAllSessions restores sessions from metadata and secure storage',
@@ -264,7 +463,80 @@ void main() {
 
       final sessions = await loadAllSessions();
       expect(sessions, isEmpty);
+      expect(
+        rustApi.appLogs.map((entry) => entry.message),
+        contains(
+          'Skipping saved session for @alice:example.org: '
+          'secure access token is missing',
+        ),
+      );
     });
+
+    test(
+      'startup clears an interrupted compatibility recovery without sessions',
+      () async {
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        SharedPreferences.setMockInitialValues({
+          'session_credential_compatibility_mode_pending_v1': true,
+        });
+        final supportDirectory = Directory('/tmp/matter_auth_provider_test');
+        await supportDirectory.create(recursive: true);
+        final credentialFile = File(
+          '${supportDirectory.path}/session_credentials_compatibility_v1.json',
+        );
+        await credentialFile.writeAsString(
+          '{"@alice:example.org":{"access_token":"token-a"}}',
+        );
+
+        expect(await loadAllSessions(), isEmpty);
+
+        expect(await credentialFile.exists(), isFalse);
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.containsKey('session_credential_compatibility_mode_pending_v1'),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'corrupt compatibility credentials never expose tokens in diagnostics',
+      () async {
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        SharedPreferences.setMockInitialValues({
+          'session_credential_compatibility_mode_v1': true,
+          'multi_sessions': jsonEncode([
+            {
+              'homeserver_url': 'https://example.org',
+              'user_id': '@alice:example.org',
+              'device_id': 'DEVICE_A',
+            },
+          ]),
+        });
+        final supportDirectory = Directory('/tmp/matter_auth_provider_test');
+        await supportDirectory.create(recursive: true);
+        final credentialFile = File(
+          '${supportDirectory.path}/session_credentials_compatibility_v1.json',
+        );
+        await credentialFile.writeAsString(
+          '{"@a:b":{"access_token":"SECRET_ACCESS",'
+          '"refresh_token":"SECRET_REFRESH"},BROKEN',
+        );
+        addTearDown(() async {
+          if (await credentialFile.exists()) await credentialFile.delete();
+        });
+
+        expect(await loadAllSessions(), isEmpty);
+
+        final diagnostics = rustApi.appLogs
+            .map((entry) => entry.message)
+            .join('\n');
+        expect(diagnostics, isNot(contains('SECRET_ACCESS')));
+        expect(diagnostics, isNot(contains('SECRET_REFRESH')));
+      },
+    );
 
     test(
       'loadAllSessions keeps valid sessions after a malformed entry',
@@ -332,6 +604,34 @@ void main() {
         isNull,
       );
     });
+
+    test(
+      'corrupt compatibility credentials do not block secure token deletion',
+      () async {
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        const userId = '@alice:example.org';
+        final secure = FlutterSecureStorage();
+        final accessKey =
+            'matrix_access_token_${base64Url.encode(utf8.encode(userId))}';
+        final refreshKey =
+            'matrix_refresh_token_${base64Url.encode(utf8.encode(userId))}';
+        await secure.write(key: accessKey, value: 'token-a');
+        await secure.write(key: refreshKey, value: 'refresh-a');
+        final supportDirectory = Directory('/tmp/matter_auth_provider_test');
+        await supportDirectory.create(recursive: true);
+        final credentialFile = File(
+          '${supportDirectory.path}/session_credentials_compatibility_v1.json',
+        );
+        await credentialFile.writeAsString('{not valid json');
+
+        await deletePersistedSessionCredentials(userId);
+
+        expect(await credentialFile.exists(), isFalse);
+        expect(await secure.read(key: accessKey), isNull);
+        expect(await secure.read(key: refreshKey), isNull);
+      },
+    );
 
     test('removeSession switches active user when another exists', () async {
       await addSession(
