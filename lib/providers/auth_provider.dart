@@ -12,6 +12,7 @@ import 'authenticated_media_cache.dart';
 import 'ignored_users_persistence.dart';
 import 'message_cache_persistence.dart';
 import 'mutable_state.dart';
+import 'session_credential_store.dart';
 
 class CurrentUser {
   final String id;
@@ -63,6 +64,23 @@ final authErrorProvider = NotifierProvider<MutableState<String?>, String?>(
   () => MutableState(null),
 );
 
+final sessionCredentialStoreFailureProvider =
+    NotifierProvider<MutableState<String?>, String?>(() => MutableState(null));
+
+String? _startupSessionCredentialStoreFailure;
+
+String? get startupSessionCredentialStoreFailure =>
+    _startupSessionCredentialStoreFailure;
+
+String? detectSessionCredentialStoreFailure(Object error) {
+  if (defaultTargetPlatform != TargetPlatform.android ||
+      (error is! SessionCredentialStoreException &&
+          !isKeystoreFailure(error))) {
+    return null;
+  }
+  return '$error';
+}
+
 // ── Multi-account session persistence ─────────────────────────────────
 
 const _kSessions = 'multi_sessions'; // JSON list of StoredSession
@@ -76,7 +94,34 @@ final _secureStorage = defaultTargetPlatform == TargetPlatform.macOS
           usesDataProtectionKeychain: false,
         ),
       )
+    : defaultTargetPlatform == TargetPlatform.android
+    ? const FlutterSecureStorage(aOptions: AndroidOptions(resetOnError: false))
     : const FlutterSecureStorage();
+const _androidSecureStorageReset = FlutterSecureStorage(
+  aOptions: AndroidOptions(resetOnError: true),
+);
+
+void _logSessionStorage(String level, String message) {
+  debugPrint(message);
+  try {
+    rust.logAppMessage(level: level, tag: 'auth-storage', message: message);
+  } catch (error) {
+    // Provider unit tests use partial Rust API fakes. Runtime logging is
+    // initialized before session discovery, so this fallback is test-only.
+    debugPrint('Failed to persist auth-storage diagnostic: $error');
+  }
+}
+
+String _sessionStorageErrorSummary(Object error) {
+  if (error is FormatException) return 'malformed persisted session data';
+  if (error is SessionCredentialStoreException) {
+    return 'credential persistence verification failed';
+  }
+  if (isKeystoreFailure(error)) {
+    return 'Android Keystore operation failed (${error.runtimeType})';
+  }
+  return error.runtimeType.toString();
+}
 
 String _tokenKey(String userId) =>
     'matrix_access_token_${base64Url.encode(utf8.encode(userId))}';
@@ -117,6 +162,11 @@ Future<void> addSession({
 
   // Remove any existing session for the same user_id (re-login)
   sessions.removeWhere((s) => s.userId == userId);
+  _logSessionStorage(
+    'info',
+    'Persisting session for $userId: existingSessions=${sessions.length}, '
+        'refreshTokenProvided=${refreshToken != null && refreshToken.isNotEmpty}',
+  );
 
   // Add new session
   final newSession = rust.StoredSession(
@@ -128,20 +178,16 @@ Future<void> addSession({
   );
   sessions.add(newSession);
 
-  await _secureStorage.write(key: _tokenKey(userId), value: accessToken);
-  if (refreshToken != null && refreshToken.isNotEmpty) {
-    await _secureStorage.write(
-      key: _refreshTokenKey(userId),
-      value: refreshToken,
-    );
-  } else {
-    await _secureStorage.delete(key: _refreshTokenKey(userId));
-  }
+  await persistSessionTokens(
+    userId: userId,
+    accessToken: accessToken,
+    refreshToken: refreshToken,
+  );
 
   await unmarkSessionRemoved(userId);
 
   // Save
-  await prefs.setString(
+  final metadataSaved = await prefs.setString(
     _kSessions,
     jsonEncode(
       sessions
@@ -159,35 +205,67 @@ Future<void> addSession({
   // Save display name
   final namesMap = await _loadDisplayNames();
   namesMap[userId] = displayName;
-  await prefs.setString(_kSessionDisplayNames, jsonEncode(namesMap));
+  final displayNameSaved = await prefs.setString(
+    _kSessionDisplayNames,
+    jsonEncode(namesMap),
+  );
 
   // Set as active
-  await prefs.setString(_kActiveUserId, userId);
+  final activeUserSaved = await prefs.setString(_kActiveUserId, userId);
+  _logSessionStorage(
+    metadataSaved && displayNameSaved && activeUserSaved ? 'info' : 'error',
+    'Session metadata write for $userId: metadataSaved=$metadataSaved, '
+    'displayNameSaved=$displayNameSaved, '
+    'activeUserSaved=$activeUserSaved, '
+    'storedSessions=${sessions.length}',
+  );
+  if (!metadataSaved || !displayNameSaved || !activeUserSaved) {
+    throw StateError('本地会话元数据写入失败');
+  }
 }
 
 /// Load all saved sessions.
 Future<List<rust.StoredSession>> loadAllSessions() async {
+  _startupSessionCredentialStoreFailure = null;
   final prefs = await SharedPreferences.getInstance();
+  await isSessionCredentialCompatibilityModeEnabled();
   await MarkdownSourceStore.clearLegacyEntries();
   final raw = prefs.getString(_kSessions);
-  if (raw == null) return [];
+  if (raw == null) {
+    _logSessionStorage(
+      'warn',
+      'No session metadata found: '
+          'activeUserPresent=${prefs.containsKey(_kActiveUserId)}, '
+          'preferenceKeyCount=${prefs.getKeys().length}',
+    );
+    return [];
+  }
 
   try {
     final List<dynamic> list = jsonDecode(raw);
+    _logSessionStorage(
+      'info',
+      'Decoded session metadata: entries=${list.length}, '
+          'activeUserPresent=${prefs.containsKey(_kActiveUserId)}',
+    );
     final sessions = <rust.StoredSession>[];
     var migratedPlaintextTokens = false;
-    for (final item in list) {
+    for (var index = 0; index < list.length; index++) {
+      final item = list[index];
       String? userId;
       try {
         final e = item as Map<String, dynamic>;
         userId = e['user_id'] as String;
         if (prefs.containsKey(_removedSessionKey(userId))) {
+          _logSessionStorage(
+            'info',
+            'Skipping removed session metadata for $userId at index $index',
+          );
           continue;
         }
-        var accessToken = await _secureStorage.read(key: _tokenKey(userId));
-        var refreshToken = await _secureStorage.read(
-          key: _refreshTokenKey(userId),
-        );
+        final credentials = await _readSessionCredentials(userId, index);
+        var accessToken = credentials?.accessToken;
+        var refreshToken = credentials?.refreshToken;
 
         // Migrate sessions written by older versions, then remove the token
         // from SharedPreferences when the sanitized metadata is saved below.
@@ -196,9 +274,10 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
           migratedPlaintextTokens = true;
           if (accessToken == null && legacyToken.isNotEmpty) {
             accessToken = legacyToken;
-            await _secureStorage.write(
-              key: _tokenKey(userId),
-              value: legacyToken,
+            await persistSessionTokens(
+              userId: userId,
+              accessToken: legacyToken,
+              refreshToken: refreshToken,
             );
           }
         }
@@ -208,14 +287,18 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
           if ((refreshToken == null || refreshToken.isEmpty) &&
               legacyRefreshToken.isNotEmpty) {
             refreshToken = legacyRefreshToken;
-            await _secureStorage.write(
-              key: _refreshTokenKey(userId),
-              value: legacyRefreshToken,
+            await persistSessionTokens(
+              userId: userId,
+              accessToken: accessToken ?? '',
+              refreshToken: legacyRefreshToken,
             );
           }
         }
         if (accessToken == null || accessToken.isEmpty) {
-          debugPrint('Saved session has no secure token for $userId');
+          _logSessionStorage(
+            'warn',
+            'Skipping saved session for $userId: secure access token is missing',
+          );
           continue;
         }
 
@@ -230,9 +313,23 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
             deviceId: e['device_id'] as String,
           ),
         );
+        _logSessionStorage(
+          'info',
+          'Loaded saved session for $userId: '
+              'refreshTokenPresent=${refreshToken != null && refreshToken.isNotEmpty}',
+        );
       } catch (error) {
-        debugPrint(
-          'Failed to load saved session${userId == null ? '' : ' for $userId'}: $error',
+        final credentialStoreFailure = detectSessionCredentialStoreFailure(
+          error,
+        );
+        if (credentialStoreFailure != null) {
+          _startupSessionCredentialStoreFailure = credentialStoreFailure;
+        }
+        _logSessionStorage(
+          'error',
+          'Failed to load saved session at index $index'
+              '${userId == null ? '' : ' for $userId'}: '
+              '${_sessionStorageErrorSummary(error)}',
         );
       }
     }
@@ -240,9 +337,19 @@ Future<List<rust.StoredSession>> loadAllSessions() async {
     if (migratedPlaintextTokens) {
       await _saveSessionMetadata(prefs, sessions);
     }
+    _logSessionStorage(
+      'info',
+      'Session discovery completed: usableSessions=${sessions.length}, '
+          'metadataEntries=${list.length}, '
+          'migratedPlaintextTokens=$migratedPlaintextTokens',
+    );
     return sessions;
   } catch (error) {
-    debugPrint('Failed to decode saved sessions: $error');
+    _logSessionStorage(
+      'error',
+      'Failed to decode saved sessions: '
+          '${_sessionStorageErrorSummary(error)}',
+    );
     return [];
   }
 }
@@ -264,15 +371,252 @@ Future<void> persistSessionTokens({
   required String accessToken,
   String? refreshToken,
 }) async {
-  await _secureStorage.write(key: _tokenKey(userId), value: accessToken);
-  if (refreshToken != null && refreshToken.isNotEmpty) {
-    await _secureStorage.write(
-      key: _refreshTokenKey(userId),
-      value: refreshToken,
+  try {
+    final compatibilityMode = await storeSessionCredentials(
+      userId: userId,
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      writeSecureCredentials: () async {
+        await _secureStorage.write(key: _tokenKey(userId), value: accessToken);
+        if (refreshToken != null && refreshToken.isNotEmpty) {
+          await _secureStorage.write(
+            key: _refreshTokenKey(userId),
+            value: refreshToken,
+          );
+        } else {
+          await _secureStorage.delete(key: _refreshTokenKey(userId));
+        }
+        final accessTokenReadback = await _secureStorage.read(
+          key: _tokenKey(userId),
+        );
+        final refreshTokenReadback = await _secureStorage.read(
+          key: _refreshTokenKey(userId),
+        );
+        final accessKeyPresent = await _secureStorage.containsKey(
+          key: _tokenKey(userId),
+        );
+        final refreshKeyPresent = await _secureStorage.containsKey(
+          key: _refreshTokenKey(userId),
+        );
+        final expectedRefreshToken =
+            refreshToken != null && refreshToken.isNotEmpty
+            ? refreshToken
+            : null;
+        final verified =
+            accessKeyPresent &&
+            accessTokenReadback == accessToken &&
+            refreshTokenReadback == expectedRefreshToken &&
+            refreshKeyPresent == (expectedRefreshToken != null);
+        _logSessionStorage(
+          verified ? 'info' : 'error',
+          'Secure token write verification for $userId: '
+          'accessKeyPresent=$accessKeyPresent, '
+          'accessTokenMatches=${accessTokenReadback == accessToken}, '
+          'refreshKeyPresent=$refreshKeyPresent, '
+          'refreshTokenMatches=${refreshTokenReadback == expectedRefreshToken}',
+        );
+        if (!verified) {
+          throw const SessionCredentialStoreException('系统密钥库未能持久化登录凭据');
+        }
+      },
     );
-  } else {
-    await _secureStorage.delete(key: _refreshTokenKey(userId));
+    if (compatibilityMode) {
+      _logSessionStorage(
+        'warn',
+        'Session credentials persisted in compatibility mode for $userId',
+      );
+    }
+  } catch (error) {
+    _logSessionStorage(
+      'error',
+      'Session credential write failed for $userId: '
+          '${_sessionStorageErrorSummary(error)}',
+    );
+    rethrow;
   }
+}
+
+Future<SessionCredentials?> _readSessionCredentials(
+  String userId,
+  int index,
+) async {
+  final result = await readSessionCredentials(
+    userId: userId,
+    readSecureCredentials: () async {
+      final accessKeyPresent = await _secureStorage.containsKey(
+        key: _tokenKey(userId),
+      );
+      final refreshKeyPresent = await _secureStorage.containsKey(
+        key: _refreshTokenKey(userId),
+      );
+      _logSessionStorage(
+        'info',
+        'Reading secure tokens for $userId at index $index: '
+            'accessKeyPresent=$accessKeyPresent, '
+            'refreshKeyPresent=$refreshKeyPresent',
+      );
+      return SessionCredentials(
+        accessToken: await _secureStorage.read(key: _tokenKey(userId)) ?? '',
+        refreshToken: await _secureStorage.read(key: _refreshTokenKey(userId)),
+      );
+    },
+  );
+  final credentials = result.credentials;
+  if (result.compatibilityMode) {
+    _logSessionStorage(
+      credentials == null ? 'warn' : 'info',
+      'Reading compatibility credentials for $userId at index $index: '
+      'credentialsPresent=${credentials != null}',
+    );
+  }
+  return credentials;
+}
+
+Future<void> deletePersistedSessionCredentials(String userId) async {
+  await removeSessionCredentials(
+    userId: userId,
+    deleteSecureCredentials: () async {
+      await _secureStorage.delete(key: _tokenKey(userId));
+      await _secureStorage.delete(key: _refreshTokenKey(userId));
+    },
+  );
+}
+
+Future<({Set<String> userIds, bool complete})>
+_loadSessionCredentialInventory() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString(_kSessions);
+  if (raw == null) return (userIds: <String>{}, complete: true);
+
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) {
+      return (userIds: <String>{}, complete: false);
+    }
+    final userIds = <String>{};
+    var complete = true;
+    for (final item in decoded) {
+      if (item is! Map) {
+        complete = false;
+        continue;
+      }
+      final userId = item['user_id'];
+      if (userId is! String) {
+        complete = false;
+        continue;
+      }
+      if (!prefs.containsKey(_removedSessionKey(userId))) {
+        userIds.add(userId);
+      }
+    }
+    return (userIds: userIds, complete: complete);
+  } catch (error) {
+    _logSessionStorage(
+      'error',
+      'Failed to inventory saved sessions before credential recovery: '
+          '${_sessionStorageErrorSummary(error)}',
+    );
+    return (userIds: <String>{}, complete: false);
+  }
+}
+
+Future<void> enableSessionCredentialCompatibilityModeAfterFailure() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    throw StateError('凭据兼容模式故障恢复仅适用于 Android');
+  }
+  final inventory = await _loadSessionCredentialInventory();
+  final recoveredCredentials = <String, SessionCredentials>{};
+  for (final session in await loadAllSessions()) {
+    recoveredCredentials[session.userId] = SessionCredentials(
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+    );
+  }
+  final resetError = await recoverSessionCredentialStore(
+    recoveredCredentials: recoveredCredentials,
+    loadLatestCredentials: () async {
+      final currentSession = await rust.getSession();
+      if (currentSession == null) return const {};
+      return {
+        currentSession.userId: SessionCredentials(
+          accessToken: currentSession.accessToken,
+          refreshToken: currentSession.refreshToken,
+        ),
+      };
+    },
+    shouldResetSecureValues: (recoveredUserIds) {
+      final complete =
+          inventory.complete &&
+          inventory.userIds.every(recoveredUserIds.contains);
+      if (!complete) {
+        _logSessionStorage(
+          'warn',
+          'Secure storage reset skipped because not every saved account '
+              'credential could be copied',
+        );
+      }
+      return complete;
+    },
+    resetSecureValues: _androidSecureStorageReset.deleteAll,
+  );
+  if (resetError != null) {
+    _logSessionStorage(
+      'warn',
+      'Compatibility mode enabled, but secure storage reset failed: '
+          '${_sessionStorageErrorSummary(resetError)}',
+    );
+  }
+  _startupSessionCredentialStoreFailure = null;
+  _logSessionStorage(
+    'warn',
+    'Session credential compatibility mode enabled after Keystore failure',
+  );
+}
+
+Future<({bool rustSessionDiscarded, String? warning})>
+discardUnpersistedLoginSession() async {
+  final warnings = <String>[];
+  String? userId;
+  try {
+    userId = (await rust.getSession())?.userId;
+  } catch (error) {
+    warnings.add('无法读取待撤销会话：$error');
+  }
+
+  if (userId != null) {
+    try {
+      await markSessionRemoved(userId);
+    } catch (error) {
+      warnings.add('无法记录本地清理状态：$error');
+    }
+  }
+
+  var rustSessionDiscarded = false;
+  try {
+    final result = await rust.logout();
+    rustSessionDiscarded = true;
+    if (result.cleanupError case final cleanupError?) {
+      warnings.add('SDK 数据清理失败：$cleanupError');
+    }
+    if (result.remoteLogoutPending) {
+      warnings.add('远端会话撤销失败，服务器上的登录设备可能仍然有效，请从其他已登录客户端删除该设备');
+    }
+  } catch (error) {
+    warnings.add('登录会话撤销失败：$error');
+  }
+
+  if (userId != null) {
+    try {
+      await removeSession(userId);
+    } catch (error) {
+      warnings.add('本地登录凭据清理失败：$error');
+    }
+  }
+
+  return (
+    rustSessionDiscarded: rustSessionDiscarded,
+    warning: warnings.isEmpty ? null : warnings.join('；'),
+  );
 }
 
 Future<void> syncStoredSessionTokens(String userId) async {
@@ -381,8 +725,8 @@ Future<void> removeSession(String userId) async {
         // Skip accounts whose secure token is gone; loadAllSessions would
         // skip them too, and activating one would strand the app at the
         // login page after the next restart.
-        final token = await _secureStorage.read(key: _tokenKey(candidate));
-        if (token == null || token.isEmpty) continue;
+        final credentials = await _readSessionCredentials(candidate, -1);
+        if (credentials == null || credentials.accessToken.isEmpty) continue;
         nextUserId = candidate;
         break;
       }
@@ -394,8 +738,7 @@ Future<void> removeSession(String userId) async {
     }
   }
 
-  await _secureStorage.delete(key: _tokenKey(userId));
-  await _secureStorage.delete(key: _refreshTokenKey(userId));
+  await deletePersistedSessionCredentials(userId);
   await clearCachedMessagesForNamespace(userId);
   await prefs.remove(ignoredUsersCacheKey(userId));
   await const MarkdownSourceStore().clearForUser(userId);
@@ -513,8 +856,7 @@ Future<void> clearAllSessions() async {
   final prefs = await SharedPreferences.getInstance();
   final sessions = await loadAllSessions();
   for (final session in sessions) {
-    await _secureStorage.delete(key: _tokenKey(session.userId));
-    await _secureStorage.delete(key: _refreshTokenKey(session.userId));
+    await deletePersistedSessionCredentials(session.userId);
     await clearCachedMessagesForNamespace(session.userId);
     await const MarkdownSourceStore().clearForUser(session.userId);
     await clearAuthenticatedMediaCacheForSession(
@@ -542,8 +884,7 @@ Future<void> clearAllSessions() async {
       final userId = utf8.decode(
         base64Url.decode(key.substring(_removedSessionKeyPrefix.length)),
       );
-      await _secureStorage.delete(key: _tokenKey(userId));
-      await _secureStorage.delete(key: _refreshTokenKey(userId));
+      await deletePersistedSessionCredentials(userId);
       await clearCachedMessagesForNamespace(userId);
       await const MarkdownSourceStore().clearForUser(userId);
       for (final homeserver in _removedHomeservers(prefs, userId)) {
@@ -557,6 +898,7 @@ Future<void> clearAllSessions() async {
     }
     await prefs.remove(key);
   }
+  await clearAllCompatibilitySessionCredentials();
 }
 
 // ── Legacy single-session compat (migration) ───────────────────────────

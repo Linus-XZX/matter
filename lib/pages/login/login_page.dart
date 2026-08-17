@@ -10,6 +10,33 @@ import '../../widgets/max_content_width.dart';
 import 'homeserver_list.dart';
 import 'homeserver_resolver.dart';
 
+Future<bool> showSessionCredentialCompatibilityDialog(
+  BuildContext context, {
+  required bool loginAlreadyCompleted,
+}) => showDialog<bool>(
+  context: context,
+  barrierDismissible: false,
+  builder: (dialogContext) => AlertDialog(
+    title: const Text('设备安全存储不可用'),
+    content: Text(
+      '系统密钥库无法读取登录凭据，因此应用重启后会退出登录。\n\n'
+      '可以启用兼容模式：登录凭据将改存到应用私有目录。普通应用无法访问，'
+      '但 Root 权限、系统备份或取得设备文件访问权的人可能读取凭据。\n\n'
+      '${loginAlreadyCompleted ? '启用后将继续当前登录。' : '启用后需要重新登录一次。'}',
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogContext, false),
+        child: const Text('保持安全模式'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(dialogContext, true),
+        child: const Text('启用兼容模式'),
+      ),
+    ],
+  ),
+).then((enabled) => enabled ?? false);
+
 class LoginPage extends ConsumerStatefulWidget {
   const LoginPage({super.key});
 
@@ -36,6 +63,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   bool _isPasswordVisible = false;
   bool _isLoading = false;
+  bool _compatibilityDialogShown = false;
+  bool _hasCompletedRustLogin = false;
   String? _error;
 
   // Homeserver inputs that the user has already accepted as insecure (HTTP)
@@ -124,18 +153,106 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     return fallbackMessage;
   }
 
+  Future<void> _handleAuthFailure(String fallbackMessage, Object error) async {
+    final credentialStoreFailure = _hasCompletedRustLogin
+        ? detectSessionCredentialStoreFailure(error)
+        : null;
+    if (credentialStoreFailure != null) {
+      ref.read(sessionCredentialStoreFailureProvider.notifier).value =
+          credentialStoreFailure;
+      await _offerCredentialCompatibilityMode();
+      return;
+    }
+    if (_hasCompletedRustLogin) {
+      debugPrint('Post-login session persistence failed: $error');
+      final message = await _discardCompletedRustLogin('认证已成功，但本地会话保存失败');
+      if (mounted) {
+        setState(() => _error = message);
+      }
+      return;
+    }
+    _setFriendlyError(fallbackMessage, error);
+  }
+
+  Future<String> _discardCompletedRustLogin(String reason) async {
+    final result = await discardUnpersistedLoginSession();
+    if (result.rustSessionDiscarded) {
+      _hasCompletedRustLogin = false;
+      if (mounted) {
+        ref.read(sessionReadyProvider.notifier).value = true;
+      }
+    }
+    final warning = result.warning;
+    if (!result.rustSessionDiscarded) {
+      return warning == null
+          ? '$reason。无法撤销本次登录，请重启应用'
+          : '$reason。无法完整撤销本次登录，请重启应用：$warning';
+    }
+    return warning == null
+        ? '$reason。本次登录已撤销，请重试'
+        : '$reason。本地登录状态已清理，但操作未完整完成：$warning';
+  }
+
+  Future<void> _offerCredentialCompatibilityMode() async {
+    if (_compatibilityDialogShown || !mounted) return;
+    final failure = ref.read(sessionCredentialStoreFailureProvider);
+    if (failure == null) return;
+    _compatibilityDialogShown = true;
+
+    final enabled = await showSessionCredentialCompatibilityDialog(
+      context,
+      loginAlreadyCompleted: _hasCompletedRustLogin,
+    );
+    if (!mounted) {
+      if (_hasCompletedRustLogin) {
+        await discardUnpersistedLoginSession();
+      }
+      return;
+    }
+    if (!enabled) {
+      _compatibilityDialogShown = false;
+      final message = _hasCompletedRustLogin
+          ? await _discardCompletedRustLogin('未启用兼容模式')
+          : '设备安全存储不可用，关闭应用后可能需要重新登录';
+      if (mounted) {
+        setState(() => _error = message);
+      }
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      await enableSessionCredentialCompatibilityModeAfterFailure();
+      ref.read(sessionCredentialStoreFailureProvider.notifier).value = null;
+      if (_hasCompletedRustLogin) {
+        final session = await rust.getSession();
+        if (session == null) {
+          throw StateError('无法获取已完成的登录会话');
+        }
+        final displayName = _tabIndex == 2
+            ? session.userId.split(':').first.replaceFirst('@', '')
+            : _usernameController.text;
+        await _onAuthSuccess(session.userId, displayName);
+      } else if (mounted) {
+        setState(() => _error = '兼容模式已启用，请重新登录');
+      }
+    } catch (error) {
+      _compatibilityDialogShown = false;
+      final message = _hasCompletedRustLogin
+          ? await _discardCompletedRustLogin('启用兼容模式失败')
+          : '启用兼容模式失败';
+      debugPrint('Credential compatibility recovery failed: $error');
+      if (mounted) setState(() => _error = message);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _onAuthSuccess(String userId, String displayName) async {
     // Keep API-backed providers gated until the new crypto store has completed
     // its first sync. Querying rooms while that sync initializes can leave the
     // first room-list request waiting on the store until the app is restarted.
     ref.read(sessionReadyProvider.notifier).value = false;
-    await applyActiveSessionState(
-      ref,
-      userId: userId,
-      displayName: displayName,
-      homeserver: _effectiveHomeserver,
-      markLoggedIn: false,
-    );
 
     try {
       await _persistAndSync(userId, displayName);
@@ -150,24 +267,25 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   Future<void> _persistAndSync(String userId, String displayName) async {
     // Persist session
     final session = await rust.getSession();
-    if (session != null) {
-      await persistSession(
-        homeserver: _effectiveHomeserver,
-        accessToken: session.accessToken,
-        refreshToken: session.refreshToken,
-        userId: session.userId,
-        deviceId: session.deviceId,
-        displayName: displayName,
-      );
-      await applyActiveSessionState(
-        ref,
-        userId: session.userId,
-        displayName: displayName,
-        homeserver: _effectiveHomeserver,
-        refreshStoredSessions: true,
-        markLoggedIn: false,
-      );
+    if (session == null) {
+      throw StateError('登录成功后无法获取最终会话');
     }
+    await persistSession(
+      homeserver: _effectiveHomeserver,
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+      userId: session.userId,
+      deviceId: session.deviceId,
+      displayName: displayName,
+    );
+    await applyActiveSessionState(
+      ref,
+      userId: session.userId,
+      displayName: displayName,
+      homeserver: _effectiveHomeserver,
+      refreshStoredSessions: true,
+      markLoggedIn: false,
+    );
     try {
       await bootstrapActiveSessionSync(
         ref,
@@ -242,6 +360,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     try {
       final homeserverUrl = await _resolveHomeserverUrl();
       if (homeserverUrl == null) return;
+      if (_hasCompletedRustLogin) {
+        throw StateError('登录已成功，但本地凭据保存失败；请重启应用后再试');
+      }
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
@@ -251,12 +372,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         password: _passwordController.text,
       );
       if (result.success) {
+        _hasCompletedRustLogin = true;
         await _onAuthSuccess(result.userId ?? '', _usernameController.text);
       } else if (mounted) {
         _setFriendlyError('登录失败，请稍后重试', result.error);
       }
     } catch (e) {
-      _setFriendlyError('登录失败，请稍后重试', e);
+      await _handleAuthFailure('登录失败，请稍后重试', e);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -280,6 +402,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     try {
       final homeserverUrl = await _resolveHomeserverUrl();
       if (homeserverUrl == null) return;
+      if (_hasCompletedRustLogin) {
+        throw StateError('注册已成功，但本地凭据保存失败；请重启应用后再试');
+      }
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
@@ -313,12 +438,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       }
 
       if (result.success) {
+        _hasCompletedRustLogin = true;
         await _onAuthSuccess(result.userId ?? '', _usernameController.text);
       } else if (mounted) {
         _setFriendlyError('注册失败，请稍后重试', result.error);
       }
     } catch (e) {
-      _setFriendlyError('注册失败，请稍后重试', e);
+      await _handleAuthFailure('注册失败，请稍后重试', e);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -335,6 +461,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     try {
       final homeserverUrl = await _resolveHomeserverUrl();
       if (homeserverUrl == null) return;
+      if (_hasCompletedRustLogin) {
+        throw StateError('登录已成功，但本地凭据保存失败；请重启应用后再试');
+      }
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
@@ -348,6 +477,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         refreshToken: null,
       );
       if (result.success) {
+        _hasCompletedRustLogin = true;
         final userId = result.userId ?? _userIdController.text;
         await _onAuthSuccess(
           userId,
@@ -357,7 +487,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         _setFriendlyError('Token 登录失败，请检查输入信息', result.error);
       }
     } catch (e) {
-      _setFriendlyError('Token 登录失败，请检查输入信息', e);
+      await _handleAuthFailure('Token 登录失败，请检查输入信息', e);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
