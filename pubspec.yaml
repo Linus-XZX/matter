@@ -67,6 +67,8 @@ dependencies:
   latlong2: ^0.10.1
   device_info_plus: ^13.2.0
   archive: ^4.0.7
+  flutter_math_fork: ^0.7.4
+  re_highlight: ^0.0.3
 dev_dependencies:
   flutter_test:
     sdk: flutter

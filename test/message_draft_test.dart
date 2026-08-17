@@ -29,6 +29,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<String> crateApiMatrixSendMessage({
+    required String accountUserId,
     required String roomId,
     required rust.FormattedMessageInput message,
   }) {
@@ -42,6 +43,7 @@ class _FakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixSendTypingNotice({
+    required String accountUserId,
     required String roomId,
     required bool typing,
   }) async {}
