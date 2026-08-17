@@ -22,6 +22,15 @@ Future<String> downloadAndroidApk({
   File? partialFile;
 
   try {
+    final tempDirectory = await getTemporaryDirectory();
+    final updateDirectory = Directory('${tempDirectory.path}/updates');
+    await updateDirectory.create(recursive: true);
+    final targetFile = File('${updateDirectory.path}/$fileName');
+    if (await _isValidCachedApk(targetFile, expectedSize, digest)) {
+      return targetFile.path;
+    }
+    if (await targetFile.exists()) await targetFile.delete();
+
     final request = http.Request('GET', uri)
       ..headers['Accept'] = 'application/octet-stream'
       ..headers['User-Agent'] = 'Matter-Android-Updater';
@@ -35,10 +44,6 @@ Future<String> downloadAndroidApk({
       throw AppUpdateException('下载失败（HTTP ${response.statusCode}）');
     }
 
-    final tempDirectory = await getTemporaryDirectory();
-    final updateDirectory = Directory('${tempDirectory.path}/updates');
-    await updateDirectory.create(recursive: true);
-    final targetFile = File('${updateDirectory.path}/$fileName');
     partialFile = File('${targetFile.path}.download');
     if (await partialFile.exists()) await partialFile.delete();
     fileSink = partialFile.openWrite();
@@ -67,7 +72,6 @@ Future<String> downloadAndroidApk({
       throw const AppUpdateException('安装包完整性校验失败，请重试');
     }
 
-    if (await targetFile.exists()) await targetFile.delete();
     return (await partialFile.rename(targetFile.path)).path;
   } on AppUpdateException {
     rethrow;
@@ -85,6 +89,26 @@ Future<String> downloadAndroidApk({
       await partialFile.delete();
     }
     client.close();
+  }
+}
+
+Future<bool> _isValidCachedApk(
+  File file,
+  int expectedSize,
+  String? digest,
+) async {
+  final expectedDigest = _parseSha256Digest(digest);
+  if (expectedSize <= 0 && expectedDigest == null) return false;
+
+  try {
+    if (!await file.exists()) return false;
+    if (expectedSize > 0 && await file.length() != expectedSize) return false;
+    if (expectedDigest == null) return true;
+
+    final actualDigest = await sha256.bind(file.openRead()).first;
+    return actualDigest.toString() == expectedDigest;
+  } on FileSystemException {
+    return false;
   }
 }
 
