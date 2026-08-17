@@ -209,6 +209,8 @@ class MatrixHtmlParser {
       } else if (tag == 'span') {
         final maths = node.attributes['data-mx-maths'];
         if (maths != null) attributes['data-mx-maths'] = maths;
+        final spoiler = node.attributes['data-mx-spoiler'];
+        if (spoiler != null) attributes['data-mx-spoiler'] = spoiler;
       } else if (tag == 'ol') {
         final start = int.tryParse(node.attributes['start'] ?? '');
         if (start != null) attributes['start'] = '$start';

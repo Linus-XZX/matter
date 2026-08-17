@@ -82,6 +82,7 @@ class MarkdownComposer {
       const md.ParagraphSyntax(),
     ],
     inlineSyntaxes: [
+      _SpoilerInlineSyntax(),
       md.StrikethroughSyntax(),
       md.AutolinkExtensionSyntax(),
       _RawHtmlInlineSyntax(),
@@ -151,6 +152,49 @@ class _MathInlineSyntax extends md.InlineSyntax {
   }
 }
 
+/// FluffyChat-compatible spoilers: `||hidden||` or
+/// `||reason|hidden||`.
+class _SpoilerInlineSyntax extends md.InlineSyntax {
+  _SpoilerInlineSyntax()
+    : super(
+        r'(?<!\\)\|\|((?:\\.|[^|\\\n]|\|(?!\|))+)\|\|',
+        startCharacter: 0x7c, // |
+      );
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final source = match[1] ?? '';
+    final separator = _firstUnescapedPipe(source);
+    final reason = separator < 0
+        ? null
+        : _unescapeSpoilerText(source.substring(0, separator)).trim();
+    final content = _unescapeSpoilerText(
+      separator < 0 ? source : source.substring(separator + 1),
+    );
+    if (content.trim().isEmpty) return false;
+    parser.addNode(
+      md.Element('span', parser.document.parseInline(content))
+        ..attributes['data-mx-spoiler'] = reason ?? '',
+    );
+    return true;
+  }
+
+  static int _firstUnescapedPipe(String source) {
+    for (var i = 0; i < source.length; i++) {
+      if (source.codeUnitAt(i) != 0x7c) continue;
+      var slashes = 0;
+      for (var j = i - 1; j >= 0 && source.codeUnitAt(j) == 0x5c; j--) {
+        slashes++;
+      }
+      if (slashes.isEven) return i;
+    }
+    return -1;
+  }
+
+  static String _unescapeSpoilerText(String source) =>
+      source.replaceAllMapped(RegExp(r'\\([\\|])'), (match) => match[1]!);
+}
+
 /// Block math: lines wrapped in `$$` fences, either a single line
 /// (`$$x^2$$`) or a multi-line block.
 class _MathBlockSyntax extends md.BlockSyntax {
@@ -195,7 +239,8 @@ bool _hasRichInline(List<md.Node> nodes) {
         tag == rawHtmlBlockTag ||
         tag == 'img' ||
         tag == 'input' ||
-        node.attributes.containsKey('data-mx-maths')) {
+        node.attributes.containsKey('data-mx-maths') ||
+        node.attributes.containsKey('data-mx-spoiler')) {
       return true;
     }
     if (_hasRichInline(node.children ?? const [])) return true;
@@ -327,6 +372,11 @@ class _MatrixMarkdownHtmlRenderer {
       case 'hr':
         return '<hr>';
       case 'span':
+        final spoilerReason = node.attributes['data-mx-spoiler'];
+        if (spoilerReason != null) {
+          return '<span data-mx-spoiler="${_escapeAttribute(spoilerReason)}">'
+              '$children</span>';
+        }
         if (node.attributes.containsKey('data-mx-maths')) {
           return '<span data-mx-maths="${_escapeAttribute(node.textContent)}">'
               '</span>';
@@ -569,6 +619,10 @@ String _visibleMarkdownText(List<md.Node>? nodes) {
       } else if (isMath) {
         final fence = node.tag == 'div' ? '\$\$' : '\$';
         buffer.write('$fence${node.textContent}$fence');
+      } else if (node.tag == 'span' &&
+          node.attributes.containsKey('data-mx-spoiler')) {
+        final reason = node.attributes['data-mx-spoiler']!.trim();
+        buffer.write(reason.isEmpty ? '[Spoiler]' : '[Spoiler for $reason]');
       } else if (node.tag == 'img') {
         buffer.write(node.attributes['alt'] ?? '');
       } else if (node.tag == 'br') {

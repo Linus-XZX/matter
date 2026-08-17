@@ -106,6 +106,18 @@ void main() {
     expect(plain.single, isA<MatrixTextNode>());
   });
 
+  test('keeps spoiler reasons on spans and drops unsafe attributes', () {
+    final nodes = parser.parse(
+      '<span data-mx-spoiler="plot twist" onclick="evil()">secret</span>'
+      '<span data-mx-spoiler>hidden</span>',
+    );
+
+    final reasoned = nodes[0] as MatrixElementNode;
+    expect(reasoned.attributes, {'data-mx-spoiler': 'plot twist'});
+    final unreasoned = nodes[1] as MatrixElementNode;
+    expect(unreasoned.attributes, {'data-mx-spoiler': ''});
+  });
+
   test('keeps whitelisted align attributes', () {
     final nodes = parser.parse(
       '<p align="center">c</p><h1 align="right">h</h1>'
