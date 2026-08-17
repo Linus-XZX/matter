@@ -7075,6 +7075,26 @@ mod formatted_message_tests {
     }
 
     #[test]
+    fn spoilers_survive_outgoing_sanitization() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "[Spoiler for plot twist]".to_string(),
+            formatted_body: Some(
+                r#"<span data-mx-spoiler="plot twist" onclick="bad()">Alice wins</span>"#
+                    .to_string(),
+            ),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+        let formatted = json["formatted_body"].as_str().unwrap();
+
+        assert!(formatted.contains(r#"data-mx-spoiler="plot twist""#));
+        assert!(formatted.contains("Alice wins"));
+        assert!(!formatted.contains("onclick"));
+    }
+
+    #[test]
     fn formatting_without_visible_content_falls_back_to_plain_text() {
         let content = build_text_content(FormattedMessageInput {
             body: "image".to_string(),

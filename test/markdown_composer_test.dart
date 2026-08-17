@@ -47,6 +47,26 @@ void main() {
     expect(result.formattedBody, isNull);
   });
 
+  test('spoilers compile to Matrix HTML without leaking into the fallback', () {
+    final result = composer.compile('before ||secret ending|| after');
+
+    expect(result.body, 'before [Spoiler] after');
+    expect(
+      result.formattedBody,
+      '<p>before <span data-mx-spoiler="">secret ending</span> after</p>',
+    );
+  });
+
+  test('spoiler reasons are preserved in HTML and the fallback', () {
+    final result = composer.compile('||plot twist|**Alice** wins||');
+
+    expect(result.body, '[Spoiler for plot twist]');
+    expect(
+      result.formattedBody,
+      '<p><span data-mx-spoiler="plot twist"><strong>Alice</strong> wins</span></p>',
+    );
+  });
+
   test('raw HTML passes through to formatted body', () {
     final result = composer.compile('mix <b>bold</b> html');
 

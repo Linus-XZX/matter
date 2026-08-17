@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -137,6 +138,44 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text(r'$$x^$$', findRichText: true), findsOneWidget);
+    });
+  });
+
+  group('spoilers', () {
+    TextSpan spanWithText(WidgetTester tester, String text) {
+      TextSpan? result;
+      void visit(InlineSpan span) {
+        if (span is! TextSpan) return;
+        if (span.text == text) result = span;
+        span.children?.forEach(visit);
+      }
+
+      for (final richText in tester.widgetList<RichText>(
+        find.byType(RichText),
+      )) {
+        visit(richText.text);
+      }
+      return result!;
+    }
+
+    testWidgets('spoiler text stays concealed until tapped', (tester) async {
+      await tester.pumpWidget(
+        app('<p>Plot: <span data-mx-spoiler="ending">Alice wins</span>.</p>'),
+      );
+
+      final concealed = spanWithText(tester, 'Alice wins');
+      expect(concealed.style?.color?.a, 0);
+      expect(concealed.style?.backgroundColor, isNotNull);
+      expect(concealed.recognizer, isA<TapGestureRecognizer>());
+      expect(spanWithText(tester, 'ending ').style?.color?.a, greaterThan(0));
+
+      (concealed.recognizer! as TapGestureRecognizer).onTap!();
+      await tester.pump();
+
+      final revealed = spanWithText(tester, 'Alice wins');
+      expect(revealed.style?.color, Colors.white);
+      expect(revealed.style?.backgroundColor, isNull);
+      expect(revealed.recognizer, isNull);
     });
   });
 

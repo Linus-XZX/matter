@@ -71,6 +71,7 @@ class MatrixHtmlMessage extends StatefulWidget {
 class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
   static const _parser = MatrixHtmlParser();
   late List<MatrixHtmlNode> _nodes;
+  final Set<MatrixElementNode> _revealedSpoilers = {};
   List<TapGestureRecognizer> _recognizers = [];
 
   @override
@@ -84,6 +85,7 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.html != widget.html) {
       _nodes = _parser.parse(widget.html);
+      _revealedSpoilers.clear();
     }
   }
 
@@ -108,6 +110,10 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
       onMentionTap: widget.onMentionTap,
       gestureRecognizers: recognizers,
       imageResolver: widget.imageResolver,
+      revealedSpoilers: _revealedSpoilers,
+      revealSpoiler: (spoiler) {
+        if (_revealedSpoilers.add(spoiler)) setState(() {});
+      },
     );
     _recognizers = recognizers;
     if (previousRecognizers.isNotEmpty) {
@@ -179,6 +185,8 @@ class _MatrixNodeRenderer {
   final ValueChanged<String>? onMentionTap;
   final List<TapGestureRecognizer> gestureRecognizers;
   final MatrixHtmlImageResolver? imageResolver;
+  final Set<MatrixElementNode> revealedSpoilers;
+  final ValueChanged<MatrixElementNode> revealSpoiler;
 
   /// Alignment inherited from a container (e.g. a table cell's `align`),
   /// applied to rich text that doesn't carry its own `align`.
@@ -193,6 +201,8 @@ class _MatrixNodeRenderer {
     required this.onMentionTap,
     required this.gestureRecognizers,
     required this.imageResolver,
+    required this.revealedSpoilers,
+    required this.revealSpoiler,
     this.textAlign,
   });
 
@@ -603,6 +613,8 @@ class _MatrixNodeRenderer {
       onMentionTap: onMentionTap,
       gestureRecognizers: gestureRecognizers,
       imageResolver: imageResolver,
+      revealedSpoilers: revealedSpoilers,
+      revealSpoiler: revealSpoiler,
       textAlign: _textAlignOf(cell),
     );
     final blocks = renderer.renderBlocks(cell.children);
@@ -1009,6 +1021,44 @@ class _MatrixNodeRenderer {
           fontFamily: 'monospace',
           backgroundColor: Colors.black.withValues(alpha: 0.14),
         );
+      } else if (element.tag == 'span' &&
+          element.attributes.containsKey('data-mx-spoiler')) {
+        final reason = element.attributes['data-mx-spoiler']!.trim();
+        if (reason.isNotEmpty) {
+          final reasonColor = style.color;
+          spans.add(
+            TextSpan(
+              text: '$reason ',
+              style: style.copyWith(
+                color: reasonColor?.withValues(alpha: 0.72),
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          );
+        }
+        if (revealedSpoilers.contains(element)) {
+          spans.addAll(_inlineSpans(element.children, style));
+        } else {
+          final concealedColor =
+              style.color ?? Theme.of(context).colorScheme.onSurface;
+          final recognizer = TapGestureRecognizer()
+            ..onTap = () => revealSpoiler(element);
+          gestureRecognizers.add(recognizer);
+          spans.add(
+            TextSpan(
+              text: element.textContent,
+              semanticsLabel: reason.isEmpty ? 'Spoiler' : 'Spoiler: $reason',
+              style: style.copyWith(
+                color: concealedColor.withValues(alpha: 0),
+                backgroundColor: concealedColor.withValues(alpha: 0.28),
+                decoration: TextDecoration.none,
+                shadows: const [],
+              ),
+              recognizer: recognizer,
+            ),
+          );
+        }
+        continue;
       } else if (element.tag == 'span' &&
           element.attributes.containsKey('data-mx-maths')) {
         final tex = element.attributes['data-mx-maths']!;
