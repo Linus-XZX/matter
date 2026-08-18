@@ -418,10 +418,10 @@ class MessageInput extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<MessageInput> createState() => _MessageInputState();
+  ConsumerState<MessageInput> createState() => MessageInputState();
 }
 
-class _MessageInputState extends ConsumerState<MessageInput> {
+class MessageInputState extends ConsumerState<MessageInput> {
   static const _toolbarAnimationDuration = Duration(milliseconds: 180);
   static const _toolbarAnimationCurve = Curves.easeOutCubic;
   static const _markdownComposer = MarkdownComposer();
@@ -683,6 +683,22 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       text: inserted,
       selection: TextSelection.collapsed(offset: start + value.length),
     );
+  }
+
+  void insertMention(String userId) {
+    final selection = _controller.selection;
+    final current = _controller.text;
+    final start = selection.start >= 0 ? selection.start : current.length;
+    final end = selection.end >= 0 ? selection.end : current.length;
+    final needsLeadingSpace =
+        start > 0 && current.substring(start - 1, start).trim().isNotEmpty;
+    final needsTrailingSpace =
+        end == current.length ||
+        current.substring(end, end + 1).trim().isNotEmpty;
+    _insertComposerText(
+      '${needsLeadingSpace ? ' ' : ''}$userId${needsTrailingSpace ? ' ' : ''}',
+    );
+    _showKeyboard();
   }
 
   Future<void> _sendMessage() => _sendMessageText(_controller.text);

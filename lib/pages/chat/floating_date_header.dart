@@ -35,6 +35,7 @@ class FloatingDateHeader extends StatefulWidget {
   /// to read on-screen positions. May be empty before first layout; the chip
   /// just hides in that case.
   final List<GlobalKey> separatorKeys;
+  final double topInset;
 
   const FloatingDateHeader({
     super.key,
@@ -42,6 +43,7 @@ class FloatingDateHeader extends StatefulWidget {
     required this.scrollViewportKey,
     required this.boundaries,
     required this.separatorKeys,
+    this.topInset = 0,
   });
 
   @override
@@ -167,7 +169,7 @@ class _FloatingDateHeaderState extends State<FloatingDateHeader> {
         (widget.boundaries.isEmpty ? null : widget.boundaries.last.label);
     final show = _visible && label != null;
     return Positioned(
-      top: 10,
+      top: 10 + widget.topInset,
       left: 0,
       right: 0,
       child: Center(

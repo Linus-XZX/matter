@@ -753,6 +753,35 @@ async fn focused_messages_before(
     Ok(before[before.len().saturating_sub(limit)..].to_vec())
 }
 
+pub(super) async fn get_messages_around(
+    room: &Room,
+    event_id: &str,
+    limit: usize,
+) -> Result<Vec<ChatMessage>, String> {
+    let target = matrix_sdk::ruma::EventId::parse(event_id)
+        .map_err(|error| api_err("rooms", format!("无效的目标事件 ID: {error}")))?;
+    let timeline = tokio::time::timeout(
+        Duration::from_secs(25),
+        TimelineBuilder::new(room)
+            .with_focus(TimelineFocus::Event {
+                target,
+                num_context_events: limit.clamp(20, 100) as u16,
+                thread_mode: TimelineEventFocusThreadMode::Automatic {
+                    hide_threaded_events: false,
+                },
+            })
+            .build(),
+    )
+    .await
+    .map_err(|_| api_err("rooms", "加载目标消息超时，请重试。".to_owned()))?
+    .map_err(|error| api_err("rooms", format!("加载目标消息失败: {error}")))?;
+    let messages = convert_snapshot(room, &snapshot(&timeline).await).await;
+    if !messages.iter().any(|message| message.id == event_id) {
+        return Err(api_err("rooms", "目标消息不可用或已被删除。".to_owned()));
+    }
+    Ok(messages)
+}
+
 async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatMessage> {
     let my_user_id = room.client().user_id().map(ToString::to_string);
     let event_items: Vec<&EventTimelineItem> =

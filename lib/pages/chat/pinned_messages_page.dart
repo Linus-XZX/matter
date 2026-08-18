@@ -466,10 +466,14 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
               ? (message.filename ?? '媒体消息')
               : message.content;
           return ListTile(
+            key: ValueKey('pinned-message:${message.id}'),
             contentPadding: const EdgeInsets.symmetric(
               horizontal: 4,
               vertical: 6,
             ),
+            onTap: ignoredSender
+                ? null
+                : () => Navigator.of(context).pop(message.id),
             leading: const Icon(
               Icons.push_pin_rounded,
               color: AppColors.primary,

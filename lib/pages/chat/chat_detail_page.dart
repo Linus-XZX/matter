@@ -23,6 +23,7 @@ import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
 import 'message_input.dart';
 import 'pinned_messages_page.dart';
+import 'pinned_messages_stack.dart';
 import 'room_management_page.dart';
 import 'room_metadata_patch.dart';
 import 'room_state_edit_tracker.dart';
@@ -141,6 +142,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
+  final _messageInputKey = GlobalKey<MessageInputState>();
+  final Map<String, GlobalKey> _messageAnchorKeys = {};
+  final Map<String, GlobalKey> _stableMessageAnchorKeys = {};
   late final MutableState<String?> _currentRoomIdNotifier;
 
   /// Latest live notifier, retained only for the deferred dispose cleanup.
@@ -211,6 +215,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   ChatRoom? _forwardNoticeRoom;
   final Set<String> _insertionAnimationIds = {};
   final Set<String> _lateralInsertionAnimationIds = {};
+  int _messageJumpGeneration = 0;
+  int _pinnedStackVisibleCount = 0;
+
+  /// True while the timeline shows a detached history slice loaded by
+  /// [_loadMessageContext] instead of the live window. The slice does not
+  /// connect to the live window (pagination only walks backwards, so the gap
+  /// between them could never be filled), therefore the live window stays
+  /// hidden until [_exitFocusedBrowsing] runs.
+  bool _focusedBrowsing = false;
 
   /// Remote event ids that have already been matched with a local outgoing
   /// message. Keeps duplicate sends of the same payload from being incorrectly
@@ -316,6 +329,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       } else if (next != null) {
         // Switched to another account: drop the view ownership so no
         // auto-read or subscription runs under the new account.
+        _exitFocusedBrowsing(scrollToLatest: false);
         if (_currentRoomIdNotifier.value == widget.roomId) {
           _currentRoomIdNotifier.value = null;
           _setRoomViewOwner(null);
@@ -323,6 +337,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         _setSubscriptionsDesired(false);
       } else {
         // Logged out entirely: same teardown as switching away.
+        _exitFocusedBrowsing(scrollToLatest: false);
         if (_currentRoomIdNotifier.value == widget.roomId) {
           _currentRoomIdNotifier.value = null;
           _setRoomViewOwner(null);
@@ -798,6 +813,222 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     });
   }
 
+  void _mentionUser(String userId) {
+    _messageInputKey.currentState?.insertMention(userId);
+    _setInputPanelMode(InputPanelMode.keyboard);
+  }
+
+  int? _timelineEntryIndexForMessage(String messageId) {
+    for (var index = 0; index < _timelineEntries.length; index++) {
+      if (_timelineEntries[index].group?.messages.any(
+            (message) => message.id == messageId,
+          ) ??
+          false) {
+        return index;
+      }
+    }
+    return null;
+  }
+
+  List<int> _builtMessageEntryIndices() {
+    final indices = <int>[];
+    for (var index = 0; index < _timelineEntries.length; index++) {
+      final group = _timelineEntries[index].group;
+      if (group == null) continue;
+      if (group.messages.any(
+        (message) => _messageAnchorKeys[message.id]?.currentContext != null,
+      )) {
+        indices.add(index);
+      }
+    }
+    return indices;
+  }
+
+  Future<bool> _loadMessageContext(String messageId, int generation) async {
+    final contextMessages = await getMessagesAround(
+      roomId: widget.roomId,
+      eventId: messageId,
+      limit: 60,
+    );
+    if (!contextMessages.any((message) => message.id == messageId)) {
+      return false;
+    }
+    if (!mounted || generation != _messageJumpGeneration) return false;
+    final knownIds = {
+      ..._displayedMessages.map((message) => message.id),
+      ..._olderMessages.map((message) => message.id),
+    };
+    final connected = contextMessages.any(
+      (message) => knownIds.contains(message.id),
+    );
+    if (connected) {
+      final additions = contextMessages
+          .where((message) => !knownIds.contains(message.id))
+          .toList();
+      if (additions.isNotEmpty) {
+        setState(() {
+          _olderMessages.addAll(additions);
+          _olderMessages.sort(compareChatMessages);
+          _olderMessagesRevision++;
+        });
+        await WidgetsBinding.instance.endOfFrame;
+      }
+    } else {
+      // The slice does not touch the loaded window. Merging it in would leave
+      // a permanent gap between the slice and the live messages (pagination
+      // only walks backwards), so detach into a focused history view: the
+      // live window stays hidden until _exitFocusedBrowsing.
+      setState(() {
+        _focusedBrowsing = true;
+        _olderMessages
+          ..clear()
+          ..addAll(contextMessages);
+        _olderMessages.sort(compareChatMessages);
+        _olderMessagesRevision++;
+        // The pagination anchor moves to the slice's oldest message; blocks
+        // decided against the old window do not apply to it.
+        _hasMoreMessages = true;
+        _automaticOlderLoadBlocked = false;
+        _olderLoadBlockedByError = false;
+        _olderLoadArmed = true;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    return mounted && generation == _messageJumpGeneration;
+  }
+
+  void _exitFocusedBrowsing({
+    bool scrollToLatest = true,
+    bool cancelPendingJump = true,
+  }) {
+    if (cancelPendingJump) _messageJumpGeneration++;
+    if (!_focusedBrowsing) return;
+    setState(() {
+      _focusedBrowsing = false;
+      // Drop the detached slice so the merged timeline is the pure live
+      // window again — keeping it would re-expose the gap below the slice.
+      _olderMessages.clear();
+      _olderMessagesRevision++;
+      _automaticOlderLoadBlocked = false;
+      _olderLoadBlockedByError = false;
+    });
+    if (scrollToLatest) _scrollToLatest();
+  }
+
+  Future<void> _jumpToMessage(String messageId) async {
+    final generation = ++_messageJumpGeneration;
+    try {
+      if (!_messageIndex.containsKey(messageId)) {
+        if (_focusedBrowsing &&
+            ref
+                .read(messageCacheProvider(widget.roomId))
+                .any((message) => message.id == messageId)) {
+          // The target lives in the live window that focused browsing hides:
+          // return to the live timeline instead of detaching again.
+          _exitFocusedBrowsing(scrollToLatest: false, cancelPendingJump: false);
+          await WidgetsBinding.instance.endOfFrame;
+          if (!mounted || generation != _messageJumpGeneration) return;
+        }
+        if (!_messageIndex.containsKey(messageId)) {
+          final loaded = await _loadMessageContext(messageId, generation);
+          if (!loaded || !mounted || generation != _messageJumpGeneration) {
+            return;
+          }
+        }
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || generation != _messageJumpGeneration) return;
+      final targetIndex = _timelineEntryIndexForMessage(messageId);
+      if (targetIndex == null || !_scrollController.hasClients) {
+        throw StateError('目标消息不可用或已被删除');
+      }
+
+      BuildContext? targetContext =
+          _messageAnchorKeys[messageId]?.currentContext;
+      if (targetContext == null) {
+        final position = _scrollController.position;
+        final denominator = math.max(1, _timelineEntries.length - 1);
+        final estimatedOffset =
+            position.maxScrollExtent * targetIndex / denominator;
+        _scrollController.jumpTo(
+          estimatedOffset.clamp(
+            position.minScrollExtent,
+            position.maxScrollExtent,
+          ),
+        );
+        var previousOffset = double.nan;
+        var previousMaxExtent = double.nan;
+        for (var attempt = 0; attempt < 24; attempt++) {
+          await WidgetsBinding.instance.endOfFrame;
+          if (!mounted || generation != _messageJumpGeneration) return;
+          targetContext = _messageAnchorKeys[messageId]?.currentContext;
+          if (targetContext != null) break;
+          final builtIndices = _builtMessageEntryIndices();
+          if (builtIndices.isEmpty) continue;
+          final firstBuilt = builtIndices.first;
+          final lastBuilt = builtIndices.last;
+          final direction = targetIndex < firstBuilt
+              ? -1.0
+              : targetIndex > lastBuilt
+              ? 1.0
+              : 0.0;
+          // The target's group is built but its row is not laid out yet —
+          // give the next frame a chance instead of failing immediately.
+          if (direction == 0) continue;
+          final offset = _scrollController.offset;
+          // Stuck at a scroll edge with no extent growth: further jumps move
+          // nothing, so stop instead of burning the remaining attempts.
+          if (offset == previousOffset &&
+              position.maxScrollExtent == previousMaxExtent) {
+            break;
+          }
+          previousOffset = offset;
+          previousMaxExtent = position.maxScrollExtent;
+          final distance = direction < 0
+              ? firstBuilt - targetIndex
+              : targetIndex - lastBuilt;
+          final builtSpan = math.max(1, lastBuilt - firstBuilt + 1);
+          final viewportSteps = (distance / builtSpan).clamp(0.75, 4.0);
+          final nextOffset =
+              offset + direction * position.viewportDimension * viewportSteps;
+          _scrollController.jumpTo(
+            nextOffset.clamp(
+              position.minScrollExtent,
+              position.maxScrollExtent,
+            ),
+          );
+        }
+      }
+      if (targetContext == null) {
+        throw StateError('无法定位目标消息');
+      }
+      if (!targetContext.mounted) {
+        throw StateError('目标消息已离开时间线');
+      }
+      await Scrollable.ensureVisible(
+        targetContext,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+      if (!mounted || generation != _messageJumpGeneration) return;
+      HapticFeedback.selectionClick();
+      if (_focusedBrowsing) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('正在浏览历史消息，点右下角按钮回到最新'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted || generation != _messageJumpGeneration) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('无法跳转到该消息: $error')));
+    }
+  }
+
   MessageSendPresentation _resolveSendPresentation() {
     final presentation = !_scrollController.hasClients
         ? MessageSendPresentation.flight
@@ -825,6 +1056,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     String stableMessageId,
     MessageSendPresentation presentation,
   ) {
+    // A send commits to the live timeline: leave focused history browsing so
+    // the optimistic bubble and its echo are actually visible.
+    _exitFocusedBrowsing();
     if (presentation == MessageSendPresentation.quiet) return;
     setState(() {
       _insertionAnimationIds.add(stableMessageId);
@@ -920,6 +1154,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
     final fromEventId = _paginationAnchorId();
     if (fromEventId == null) return;
+    final revisionAtStart = _olderMessagesRevision;
+    final accountAtStart = ref.read(activeUserIdProvider);
     setState(() => _isLoadingOlder = true);
     try {
       final older = await getMessagesBefore(
@@ -928,6 +1164,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         limit: 100,
       );
       if (!mounted) return;
+      if (_olderMessagesRevision != revisionAtStart ||
+          ref.read(activeUserIdProvider) != accountAtStart) {
+        // A jump entered/exited focused browsing mid-flight and replaced the
+        // window: this page is relative to the old anchor and would not
+        // connect to the new one. Drop it; the next trigger refetches.
+        setState(() => _isLoadingOlder = false);
+        return;
+      }
 
       final knownIds = {
         ..._displayedMessages.map((message) => message.id),
@@ -958,8 +1202,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       } catch (_) {
         allowDiskCache = false;
       }
+      if (!mounted) return;
+      if (_olderMessagesRevision != revisionAtStart ||
+          ref.read(activeUserIdProvider) != accountAtStart) {
+        setState(() => _isLoadingOlder = false);
+        return;
+      }
       final currentCache = ref.read(messageCacheProvider(widget.roomId));
-      final mergedCache = mergeMessageSnapshotAdditions(currentCache, older);
+      // Pages fetched while focused-browsing are relative to the detached
+      // slice, not the live window: persisting them into the live cache would
+      // leave them stranded (with a gap up to the live edge) once the slice
+      // is dropped on exit. Keep them local to _olderMessages instead.
+      final mergedCache = _focusedBrowsing
+          ? currentCache
+          : mergeMessageSnapshotAdditions(currentCache, older);
       if (!identical(mergedCache, currentCache)) {
         ref.read(messageCacheOwnerProvider(widget.roomId).notifier).value =
             namespace;
@@ -1044,9 +1300,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       for (final message in _olderMessages)
         if (message.isMe || !ignoredUserIds.contains(message.senderId))
           message.id: message,
-      for (final message in latestMessages)
-        if (message.isMe || !ignoredUserIds.contains(message.senderId))
-          message.id: message,
+      // Focused history browsing hides the live window: merging it back in
+      // would show the unfillable gap between the slice and the live edge.
+      if (!_focusedBrowsing)
+        for (final message in latestMessages)
+          if (message.isMe || !ignoredUserIds.contains(message.senderId))
+            message.id: message,
     };
     final messages = byId.values.toList()
       ..sort(
@@ -1182,6 +1441,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       ..write(_olderMessages.length)
       ..write(';latest=')
       ..write(latestMessages.length)
+      ..write(';focused=')
+      ..write(_focusedBrowsing ? 1 : 0)
       ..write(';ignored=')
       ..writeAll(sortedIgnoredUserIds, ',');
     for (final message in _olderMessages) {
@@ -1264,6 +1525,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       ..addEntries(
         displayedMessages.map((message) => MapEntry(message.id, message)),
       );
+    final activeAnchorIds = <String>{};
+    _messageAnchorKeys.clear();
+    for (final message in displayedMessages) {
+      final anchorId =
+          messageSendFlightId(message.id, _remoteToLocalFlightId) ?? message.id;
+      activeAnchorIds.add(anchorId);
+      _messageAnchorKeys[message.id] = _stableMessageAnchorKeys.putIfAbsent(
+        anchorId,
+        GlobalKey.new,
+      );
+    }
+    _stableMessageAnchorKeys.removeWhere(
+      (anchorId, _) => !activeAnchorIds.contains(anchorId),
+    );
     // Drop flight-id mappings for remote messages that are no longer on screen.
     _remoteToLocalFlightId.removeWhere(
       (remoteId, _) => !_messageIndex.containsKey(remoteId),
@@ -1377,6 +1652,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           group: group,
           roomId: widget.roomId,
           messageIndex: messageIndex,
+          messageAnchorKeys: _messageAnchorKeys,
           remoteToLocalFlightId: _remoteToLocalFlightId,
           insertionAnimationIds: _insertionAnimationIds,
           lateralInsertionAnimationIds: _lateralInsertionAnimationIds,
@@ -1389,6 +1665,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           stickyBottomInset: stickyBottomInset,
           onImageLoaded: null,
           onReplyRequested: () => _setInputPanelMode(InputPanelMode.keyboard),
+          onMentionRequested: _mentionUser,
+          onMessageJumpRequested: (messageId) =>
+              unawaited(_jumpToMessage(messageId)),
           onMessageForwarded: _showForwardNotice,
         );
       case _TimelineEntryType.date:
@@ -1536,6 +1815,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         : (_inputPanelMode == InputPanelMode.keyboard ? keyboardHeight : 0.0);
     final messageBottomPadding = inputChromeHeight + panelReservedHeight;
     final animatePanelChange = !keyboardVisible && !_isPickerResizing;
+    final pinnedStackHeight =
+        kPinnedMessageRowHeight * _pinnedStackVisibleCount;
 
     if (_keepPickerDuringKeyboardOpen &&
         keyboardHeight >= pickerFullHeight - 1) {
@@ -1634,11 +1915,16 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 Icons.push_pin_outlined,
                 color: AppColors.onBackground,
               ),
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => PinnedMessagesPage(roomId: widget.roomId),
-                ),
-              ),
+              onPressed: () async {
+                final messageId = await Navigator.of(context).push<String>(
+                  MaterialPageRoute(
+                    builder: (_) => PinnedMessagesPage(roomId: widget.roomId),
+                  ),
+                );
+                if (messageId != null && mounted) {
+                  await _jumpToMessage(messageId);
+                }
+              },
             ),
             if (widget.embedded && widget.onToggleDetailsPanel != null)
               IconButton(
@@ -1669,6 +1955,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               child: ColoredBox(color: AppColors.background),
             ),
             Positioned.fill(
+              top: pinnedStackHeight,
               child: Builder(
                 builder: (context) {
                   final messages = messageCacheOwner == activeUserId
@@ -1839,6 +2126,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 },
               ),
             ),
+            Positioned(
+              left: 0,
+              top: 0,
+              right: 0,
+              child: PinnedMessagesStack(
+                roomId: widget.roomId,
+                onMessageTap: (messageId) =>
+                    unawaited(_jumpToMessage(messageId)),
+                onVisibleCountChanged: (count) {
+                  if (mounted && _pinnedStackVisibleCount != count) {
+                    setState(() => _pinnedStackVisibleCount = count);
+                  }
+                },
+              ),
+            ),
             // Telegram-style floating date that tracks the day at the top edge
             // of the viewport while scrolling, then fades out.
             if (_hasTimelineGroups)
@@ -1847,6 +2149,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                 scrollViewportKey: _scrollViewportKey,
                 boundaries: _floatingDateBoundariesCache,
                 separatorKeys: _floatingDateSeparatorKeysCache,
+                topInset: pinnedStackHeight,
               ),
             AnimatedPositioned(
               right: 16,
@@ -1855,9 +2158,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               curve: Curves.easeOutCubic,
               child: LatestMessageControl(
                 visible:
-                    _showLatestMessageControl && _forwardNoticeRoom == null,
+                    (_showLatestMessageControl || _focusedBrowsing) &&
+                    _forwardNoticeRoom == null,
                 showSentNotice: _showSentNotice,
-                onPressed: _scrollToLatest,
+                onPressed: _focusedBrowsing
+                    ? () => _exitFocusedBrowsing()
+                    : _scrollToLatest,
               ),
             ),
             if (_forwardNoticeRoom case final room?)
@@ -1902,7 +2208,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                     if (_subscriptionsAccount == null ||
                         activeUserId == _subscriptionsAccount)
                       MessageInput(
-                        key: ValueKey('msg_input_${widget.roomId}'),
+                        key: _messageInputKey,
                         roomId: widget.roomId,
                         totalMembers: totalMembers,
                         panelMode: _inputPanelMode,

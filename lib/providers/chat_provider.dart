@@ -2118,6 +2118,12 @@ final roomMembersProvider = FutureProvider.family<List<rust.Contact>, String>((
   return members;
 });
 
+final pinnedMessagesProvider = FutureProvider.autoDispose
+    .family<List<rust.ChatMessage>, RoomAccountKey>((ref, key) async {
+      if (ref.watch(activeUserIdProvider) != key.userId) return [];
+      return rust.getPinnedMessages(roomId: key.roomId);
+    });
+
 final roomKnockRequestsProvider =
     FutureProvider.family<List<rust.KnockRequest>, String>((ref, roomId) async {
       if (!ref.watch(sessionReadyProvider)) return [];
@@ -2613,6 +2619,7 @@ final syncStreamProvider =
               refreshMembersAndKnocks: true,
               markCurrentRoomRead: true,
             );
+            ref.invalidate(pinnedMessagesProvider);
             revalidateIgnoredUsers();
           case rust.SyncEvent_RoomListChanged():
             // A real room-list change (e.g. a cross-device marked-unread
@@ -2624,8 +2631,13 @@ final syncStreamProvider =
               scheduleMessageRefresh(roomId, markReadAfterRefresh: true);
             }
             scheduleRoomRefresh();
-          case rust.SyncEvent_PinnedMessagesChanged():
-            break;
+          case rust.SyncEvent_PinnedMessagesChanged(:final roomId):
+            final activeUserId = ref.read(activeUserIdProvider);
+            if (activeUserId != null) {
+              ref.invalidate(
+                pinnedMessagesProvider((roomId: roomId, userId: activeUserId)),
+              );
+            }
           case rust.SyncEvent_RoomMembersChanged(:final roomId):
             // Member state changed: refresh this room's member and knock
             // lists (each provider refetches only when watched — the chat
