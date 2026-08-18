@@ -14,7 +14,7 @@ const Map<String, List<String>> kEmojiKeywords = {
   '🔥': ['火', '赞', '热门', 'fire', 'lit'],
   '🎉': ['庆祝', '派对', 'party', 'celebrate'],
   '👏': ['鼓掌', 'clap', 'applause'],
-  '🤔': ['思考', '想', 'think', 'hmm'],
+  '🤔': ['思考', '想', 'think', 'thinking', 'hmm'],
   '😎': ['酷', '墨镜', 'cool', 'sunglasses'],
   '🥰': ['喜爱', '心动', 'love', 'adore'],
   '😅': ['尴尬', '汗', '笑', 'sweat', 'phew'],

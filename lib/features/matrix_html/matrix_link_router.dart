@@ -2,6 +2,19 @@ import 'package:url_launcher/url_launcher.dart';
 
 typedef MatrixLinkHandler = Future<void> Function(Uri uri);
 
+const matrixUserIdPatternSource =
+    r'@[!-9;-~]+:(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?';
+
+final _matrixUserIdPattern = RegExp('^$matrixUserIdPatternSource\$');
+final _matrixUserIdPort = RegExp(r':([0-9]{1,5})$');
+
+bool isMatrixUserId(String value) {
+  if (!_matrixUserIdPattern.hasMatch(value)) return false;
+  final serverName = value.substring(value.indexOf(':') + 1);
+  final port = _matrixUserIdPort.firstMatch(serverName)?.group(1);
+  return port == null || int.parse(port) <= 65535;
+}
+
 class MatrixLinkRouter {
   const MatrixLinkRouter();
 
@@ -31,7 +44,7 @@ String? matrixUserIdFromUri(Uri uri) {
       candidate = '@${uri.pathSegments[1]}';
     }
   }
-  if (candidate == null || !RegExp(r'^@[^\s:]+:[^\s:]+$').hasMatch(candidate)) {
+  if (candidate == null || !isMatrixUserId(candidate)) {
     return null;
   }
   return candidate;

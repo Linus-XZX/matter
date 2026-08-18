@@ -416,12 +416,13 @@ class _MatrixMarkdownHtmlRenderer {
   }
 
   String _renderTextWithMentions(String text) {
-    final pattern = RegExp(r'(?<![\w@])@[A-Za-z0-9._=\-/]+:[A-Za-z0-9.-]+');
+    final pattern = RegExp('(?<![\\w@])$matrixUserIdPatternSource(?![0-9:])');
     final buffer = StringBuffer();
     var offset = 0;
     for (final match in pattern.allMatches(text)) {
-      buffer.write(_escape.convert(text.substring(offset, match.start)));
       final userId = match.group(0)!;
+      if (!isMatrixUserId(userId)) continue;
+      buffer.write(_escape.convert(text.substring(offset, match.start)));
       mentions.add(userId);
       final href = 'https://matrix.to/#/${Uri.encodeComponent(userId)}';
       buffer

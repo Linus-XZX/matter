@@ -11,8 +11,10 @@ import '../../providers/chat_provider.dart';
 import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
+import '../../widgets/app_avatar.dart';
 import '../../widgets/liquid_glass.dart';
 import 'attachment_picker.dart';
+import 'composer_autocomplete.dart';
 import 'composer_picker_panel.dart';
 import 'latest_message_control.dart';
 import 'markdown_composer_page.dart';
@@ -104,6 +106,27 @@ class _DetachedTypingNoticeSender {
 }
 
 enum InputPanelMode { none, keyboard, emoji, attachment }
+
+class _ComposerAutocompleteOption {
+  final String title;
+  final String? subtitle;
+  final String insertion;
+  final String? avatarUrl;
+  final String? emoji;
+
+  const _ComposerAutocompleteOption({
+    required this.title,
+    this.subtitle,
+    required this.insertion,
+    this.avatarUrl,
+    this.emoji,
+  });
+}
+
+const _maxComposerAutocompleteOptions = 50;
+
+String _escapeMarkdownLinkLabel(String value) =>
+    value.replaceAll(r'\', r'\\').replaceAll('[', r'\[').replaceAll(']', r'\]');
 
 /// Sends [rawText] through the normal pipeline (optimistic local bubble,
 /// reply/edit handling, failure retry). Returns true once the server has
@@ -429,10 +452,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
+  final _autocompleteScrollController = ScrollController();
   final _textFieldKey = GlobalKey();
   late final RoomAccountKey _draftKey;
   bool _hasText = false;
   bool _isSending = false;
+  bool _wasComposingText = false;
+  ComposerAutocompleteMatch? _autocompleteMatch;
+  int _autocompleteIndex = 0;
 
   /// Tracks the full-screen markdown composer: while it is open, a failed
   /// send must drop the optimistic entry (the composer still holds the
@@ -467,14 +494,16 @@ class _MessageInputState extends ConsumerState<MessageInput> {
       selection: TextSelection.collapsed(offset: draft.length),
     );
     _hasText = draft.trim().isNotEmpty;
+    _wasComposingText = _isComposingText;
+    _autocompleteMatch = composerAutocompleteMatch(_controller.value);
     _controller.addListener(_onTextChanged);
-    if (defaultTargetPlatform != TargetPlatform.linux) {
-      _focusNode.onKeyEvent = _handleKeyEvent;
-    }
+    _focusNode.onKeyEvent = _handleKeyEvent;
     _focusNode.addListener(() {
-      if (_focusNode.hasFocus && mounted) {
+      if (!mounted) return;
+      if (_focusNode.hasFocus) {
         widget.onPanelModeChanged(InputPanelMode.keyboard);
       }
+      setState(() {});
     });
   }
 
@@ -507,6 +536,7 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
+    _autocompleteScrollController.dispose();
     // Stop typing notice when leaving
     _stopTyping();
     super.dispose();
@@ -514,6 +544,10 @@ class _MessageInputState extends ConsumerState<MessageInput> {
 
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
+    final isComposingText = _isComposingText;
+    final composingChanged = isComposingText != _wasComposingText;
+    final autocompleteMatch = composerAutocompleteMatch(_controller.value);
+    final autocompleteChanged = autocompleteMatch != _autocompleteMatch;
     final editing = ref.read(editingMessageProvider(_draftKey));
     if (editing == null) {
       ref.read(messageDraftProvider(_draftKey).notifier).value =
@@ -527,9 +561,19 @@ class _MessageInputState extends ConsumerState<MessageInput> {
         text: _controller.text,
       );
     }
-    if (_hasText != hasText) {
+    if (_hasText != hasText || autocompleteChanged || composingChanged) {
       setState(() {
         _hasText = hasText;
+        _wasComposingText = isComposingText;
+        if (autocompleteChanged) {
+          _autocompleteMatch = autocompleteMatch;
+          _autocompleteIndex = 0;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _autocompleteScrollController.hasClients) {
+              _autocompleteScrollController.jumpTo(0);
+            }
+          });
+        }
       });
     }
     if (hasText) {
@@ -623,6 +667,14 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   }
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_isComposingText && _handleAutocompleteKey(event)) {
+      return KeyEventResult.handled;
+    }
+    // Keep Linux's existing multiline Enter behavior. The handler is still
+    // installed there so Tab and arrow-key autocomplete remain available.
+    if (defaultTargetPlatform == TargetPlatform.linux) {
+      return KeyEventResult.ignored;
+    }
     if (!_isEnterKey(event) ||
         HardwareKeyboard.instance.isShiftPressed ||
         _isComposingText) {
@@ -643,6 +695,182 @@ class _MessageInputState extends ConsumerState<MessageInput> {
   bool _isEnterKey(KeyEvent event) =>
       event.logicalKey == LogicalKeyboardKey.enter ||
       event.logicalKey == LogicalKeyboardKey.numpadEnter;
+
+  bool _handleAutocompleteKey(KeyEvent event) {
+    final match = _focusNode.hasFocus ? _autocompleteMatch : null;
+    if (match == null) return false;
+    final options = _autocompleteOptions(match);
+    if (options.isEmpty) return false;
+    final key = event.logicalKey;
+    final selects = key == LogicalKeyboardKey.tab || _isEnterKey(event);
+    final moves =
+        key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.arrowUp;
+    if (!selects && !moves) return false;
+    if (event is! KeyDownEvent) return true;
+
+    if (selects) {
+      _selectAutocomplete(
+        match,
+        options[_autocompleteIndex.clamp(0, options.length - 1)],
+      );
+      return true;
+    }
+    final direction = key == LogicalKeyboardKey.arrowDown ? 1 : -1;
+    late final int nextIndex;
+    setState(() {
+      nextIndex =
+          (_autocompleteIndex + direction + options.length) % options.length;
+      _autocompleteIndex = nextIndex;
+    });
+    _scrollAutocompleteToIndex(nextIndex);
+    return true;
+  }
+
+  int _autocompleteViewportCount(BuildContext context) =>
+      MediaQuery.sizeOf(context).width < 600 ? 4 : 8;
+
+  void _scrollAutocompleteToIndex(int index) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_autocompleteScrollController.hasClients) return;
+      final position = _autocompleteScrollController.position;
+      final itemTop = index * 52.0;
+      final itemBottom = itemTop + 52;
+      final visibleTop = position.pixels;
+      final visibleBottom = visibleTop + position.viewportDimension;
+      final target = itemTop < visibleTop
+          ? itemTop
+          : itemBottom > visibleBottom
+          ? itemBottom - position.viewportDimension
+          : null;
+      if (target != null) {
+        _autocompleteScrollController.jumpTo(
+          target.clamp(position.minScrollExtent, position.maxScrollExtent),
+        );
+      }
+    });
+  }
+
+  List<_ComposerAutocompleteOption> _autocompleteOptions(
+    ComposerAutocompleteMatch match, {
+    List<rust.Contact>? members,
+    List<rust.ChatRoom>? rooms,
+  }) {
+    final query = match.query.toLowerCase();
+    switch (match.kind) {
+      case ComposerAutocompleteKind.mention:
+        final source =
+            members ??
+            ref.read(roomMembersProvider(widget.roomId)).asData?.value ??
+            const <rust.Contact>[];
+        final matches = _boundedAutocompleteMatches(
+          source,
+          matches: (member) {
+            return member.name.toLowerCase().contains(query) ||
+                member.id.toLowerCase().contains(query);
+          },
+          starts: (member) {
+            return member.name.toLowerCase().startsWith(query) ||
+                member.id.toLowerCase().startsWith('@$query');
+          },
+          compare: (left, right) {
+            final byName = left.name.toLowerCase().compareTo(
+              right.name.toLowerCase(),
+            );
+            return byName != 0 ? byName : left.id.compareTo(right.id);
+          },
+        );
+        return matches
+            .map(
+              (member) => _ComposerAutocompleteOption(
+                title: member.name,
+                subtitle: member.id,
+                insertion: '${member.id} ',
+                avatarUrl: member.avatarUrl,
+              ),
+            )
+            .toList();
+      case ComposerAutocompleteKind.room:
+        final source =
+            rooms ??
+            ref.read(chatRoomsProvider).asData?.value ??
+            const <rust.ChatRoom>[];
+        final matches = _boundedAutocompleteMatches(
+          source,
+          matches: (room) {
+            if (room.roomType == 'space' || room.roomState != 'joined') {
+              return false;
+            }
+            return room.name.toLowerCase().contains(query) ||
+                room.id.toLowerCase().contains(query);
+          },
+          starts: (room) => room.name.toLowerCase().startsWith(query),
+          compare: (left, right) {
+            final byName = left.name.toLowerCase().compareTo(
+              right.name.toLowerCase(),
+            );
+            return byName != 0 ? byName : left.id.compareTo(right.id);
+          },
+        );
+        return matches.map((room) {
+          final label = _escapeMarkdownLinkLabel('#${room.name}');
+          final roomId = Uri.encodeComponent(room.id);
+          return _ComposerAutocompleteOption(
+            title: '#${room.name}',
+            subtitle: room.id,
+            insertion: '[$label](https://matrix.to/#/$roomId) ',
+            avatarUrl: room.avatarUrl,
+          );
+        }).toList();
+      case ComposerAutocompleteKind.emoji:
+        return emojiAutocompleteOptions(match.query)
+            .map(
+              (option) => _ComposerAutocompleteOption(
+                title: ':${option.name}:',
+                insertion: option.emoji,
+                emoji: option.emoji,
+              ),
+            )
+            .toList();
+    }
+  }
+
+  List<T> _boundedAutocompleteMatches<T>(
+    Iterable<T> source, {
+    required bool Function(T value) matches,
+    required bool Function(T value) starts,
+    required int Function(T left, T right) compare,
+  }) {
+    final leading = <T>[];
+    final remaining = <T>[];
+    for (final value in source) {
+      if (!matches(value)) continue;
+      final bucket = starts(value) ? leading : remaining;
+      if (bucket.length < _maxComposerAutocompleteOptions) {
+        bucket.add(value);
+      }
+      if (leading.length == _maxComposerAutocompleteOptions) break;
+    }
+    leading.sort(compare);
+    remaining.sort(compare);
+    return [
+      ...leading,
+      ...remaining.take(_maxComposerAutocompleteOptions - leading.length),
+    ];
+  }
+
+  void _selectAutocomplete(
+    ComposerAutocompleteMatch match,
+    _ComposerAutocompleteOption option,
+  ) {
+    if (match != _autocompleteMatch) return;
+    _controller.value = applyComposerAutocomplete(
+      _controller.value,
+      match,
+      option.insertion,
+    );
+    _focusNode.requestFocus();
+  }
 
   void _togglePicker([ComposerPickerTab? tab]) {
     final nextTab = tab ?? _pickerTab;
@@ -1254,6 +1482,126 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     }
   }
 
+  Widget _buildAutocompletePanel({
+    required List<_ComposerAutocompleteOption> options,
+    required bool loading,
+    required int viewportItemCount,
+  }) {
+    final selectedIndex = options.isEmpty
+        ? 0
+        : _autocompleteIndex.clamp(0, options.length - 1);
+    final visibleItems = options.length.clamp(1, viewportItemCount);
+    final height = loading && options.isEmpty ? 52.0 : visibleItems * 52.0;
+    return TextFieldTapRegion(
+      child: Container(
+        key: const ValueKey('composer-autocomplete-panel'),
+        height: height,
+        margin: const EdgeInsets.fromLTRB(10, 4, 10, 0),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: AppColors.surfaceElevated,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.glassBorder),
+        ),
+        child: loading && options.isEmpty
+            ? const Center(
+                child: SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppColors.primary,
+                  ),
+                ),
+              )
+            : Scrollbar(
+                controller: _autocompleteScrollController,
+                thumbVisibility: options.length > viewportItemCount,
+                child: ListView.builder(
+                  controller: _autocompleteScrollController,
+                  padding: EdgeInsets.zero,
+                  physics: const ClampingScrollPhysics(),
+                  itemExtent: 52,
+                  itemCount: options.length,
+                  itemBuilder: (context, index) {
+                    final option = options[index];
+                    final selected = index == selectedIndex;
+                    return Material(
+                      key: ValueKey('composer-autocomplete-option-$index'),
+                      color: selected
+                          ? AppColors.primary.withValues(alpha: 0.16)
+                          : Colors.transparent,
+                      child: InkWell(
+                        onHover: (hovering) {
+                          if (hovering && _autocompleteIndex != index) {
+                            setState(() => _autocompleteIndex = index);
+                          }
+                        },
+                        onTap: () {
+                          final match = _autocompleteMatch;
+                          if (match != null) {
+                            _selectAutocomplete(match, option);
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Row(
+                            children: [
+                              if (option.emoji case final emoji?)
+                                SizedBox(
+                                  width: 34,
+                                  child: Text(
+                                    emoji,
+                                    style: const TextStyle(fontSize: 24),
+                                  ),
+                                )
+                              else
+                                AppAvatar(
+                                  fallback: option.title,
+                                  size: 32,
+                                  radius: 16,
+                                  url: option.avatarUrl,
+                                ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      option.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: AppColors.onBackground,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    if (option.subtitle case final subtitle?)
+                                      Text(
+                                        subtitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: AppColors.onSurfaceVariant,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final replyTo = ref.watch(replyingToProvider(_draftKey));
@@ -1276,6 +1624,25 @@ class _MessageInputState extends ConsumerState<MessageInput> {
     final editingSourceLoading =
         editing != null && _editingSourceLoadingId == editing.id;
     final sendBusy = _isSending || editingSendInFlight || editingSourceLoading;
+    final autocompleteMatch = _focusNode.hasFocus && !_isComposingText
+        ? _autocompleteMatch
+        : null;
+    AsyncValue<List<rust.Contact>>? membersAsync;
+    AsyncValue<List<rust.ChatRoom>>? roomsAsync;
+    if (autocompleteMatch?.kind == ComposerAutocompleteKind.mention) {
+      membersAsync = ref.watch(roomMembersProvider(widget.roomId));
+    } else if (autocompleteMatch?.kind == ComposerAutocompleteKind.room) {
+      roomsAsync = ref.watch(chatRoomsProvider);
+    }
+    final autocompleteOptions = autocompleteMatch == null
+        ? const <_ComposerAutocompleteOption>[]
+        : _autocompleteOptions(
+            autocompleteMatch,
+            members: membersAsync?.asData?.value,
+            rooms: roomsAsync?.asData?.value,
+          );
+    final autocompleteLoading =
+        membersAsync?.isLoading == true || roomsAsync?.isLoading == true;
     // Follow external text writes: the full-screen composer syncs its text
     // into these providers live, and a layout switch may mount a fresh
     // input while the composer is still open. Our own writes echo back
@@ -1322,6 +1689,16 @@ class _MessageInputState extends ConsumerState<MessageInput> {
               _buildEditingBar(editing, sendInFlight: editingSendInFlight)
             else if (replyTo != null)
               _buildReplyBar(replyTo),
+            if (autocompleteMatch != null &&
+                (autocompleteOptions.isNotEmpty || autocompleteLoading))
+              Flexible(
+                fit: FlexFit.loose,
+                child: _buildAutocompletePanel(
+                  options: autocompleteOptions,
+                  loading: autocompleteLoading,
+                  viewportItemCount: _autocompleteViewportCount(context),
+                ),
+              ),
             LiquidGlassContainer(
               key: const ValueKey('message-input-surface'),
               margin: const EdgeInsets.fromLTRB(10, 4, 10, 12),
