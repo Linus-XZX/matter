@@ -1595,11 +1595,14 @@ class _SwipeToReply extends StatefulWidget {
 
 class _SwipeToReplyState extends State<_SwipeToReply>
     with SingleTickerProviderStateMixin {
+  // 与系统返回手势区对齐：Android CDD 规定侧滑返回触发区最大为 40dp。
+  static const double _edgeExclusionWidth = 40;
   static const double _triggerDistance = 56;
   static const double _maxDistance = 72;
   static const Duration _settleDuration = Duration(milliseconds: 180);
 
   late final AnimationController _dragController;
+  bool _dragStartedInReplyRegion = false;
   bool _thresholdFeedbackSent = false;
 
   @override
@@ -1633,12 +1636,20 @@ class _SwipeToReplyState extends State<_SwipeToReply>
     widget.linkedOffset?.value = _dragController.value;
   }
 
+  void _handleDragDown(DragDownDetails details) {
+    final width = context.size?.width;
+    _dragStartedInReplyRegion =
+        width != null && details.localPosition.dx < width - _edgeExclusionWidth;
+  }
+
   void _handleDragStart(DragStartDetails details) {
+    if (!_dragStartedInReplyRegion) return;
     _dragController.stop();
     _thresholdFeedbackSent = _dragController.value >= _triggerDistance;
   }
 
   void _handleDragUpdate(DragUpdateDetails details) {
+    if (!_dragStartedInReplyRegion) return;
     final distance = (_dragController.value - details.delta.dx).clamp(
       0.0,
       _maxDistance,
@@ -1655,9 +1666,17 @@ class _SwipeToReplyState extends State<_SwipeToReply>
   }
 
   void _handleDragEnd(DragEndDetails details) {
+    if (!_dragStartedInReplyRegion) return;
+    _dragStartedInReplyRegion = false;
     final shouldReply = _dragController.value >= _triggerDistance;
     _settle();
     if (shouldReply) widget.onReply?.call();
+  }
+
+  void _handleDragCancel() {
+    if (!_dragStartedInReplyRegion) return;
+    _dragStartedInReplyRegion = false;
+    _settle();
   }
 
   void _settle() {
@@ -1675,10 +1694,11 @@ class _SwipeToReplyState extends State<_SwipeToReply>
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       dragStartBehavior: DragStartBehavior.down,
+      onHorizontalDragDown: enabled ? _handleDragDown : null,
       onHorizontalDragStart: enabled ? _handleDragStart : null,
       onHorizontalDragUpdate: enabled ? _handleDragUpdate : null,
       onHorizontalDragEnd: enabled ? _handleDragEnd : null,
-      onHorizontalDragCancel: enabled ? _settle : null,
+      onHorizontalDragCancel: enabled ? _handleDragCancel : null,
       child: AnimatedBuilder(
         animation: _dragController,
         child: widget.child,
