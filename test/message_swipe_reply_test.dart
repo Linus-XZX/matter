@@ -286,7 +286,7 @@ void main() {
     final bubbleRect = tester.getRect(
       find.byKey(const ValueKey(r'text-bubble:$full-row')),
     );
-    final emptySpaceStart = Offset(targetRect.right - 12, targetRect.center.dy);
+    final emptySpaceStart = Offset(targetRect.right - 48, targetRect.center.dy);
 
     expect(targetRect.width, greaterThan(bubbleRect.width + 100));
     expect(emptySpaceStart.dx, greaterThan(bubbleRect.right));
@@ -297,6 +297,33 @@ void main() {
     await tester.pump();
 
     expect(container.read(replyingToProvider(_roomAccountKey)), message);
+  });
+
+  testWidgets('left swipe cannot start from the rightmost 40dp', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$right-edge', isMe: false);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+
+    final swipeTarget = find.byKey(const ValueKey(r'swipe-reply:$right-edge'));
+    final targetRect = tester.getRect(swipeTarget);
+    final gesture = await tester.startGesture(
+      Offset(targetRect.right - 20, targetRect.center.dy),
+    );
+    await gesture.moveBy(const Offset(-70, 0));
+    await gesture.up();
+    await tester.pump();
+
+    expect(container.read(replyingToProvider(_roomAccountKey)), isNull);
+    final contentTransform = tester.widget<Transform>(
+      find.byKey(const ValueKey('swipe-reply-content')),
+    );
+    expect(contentTransform.transform.storage[12], 0);
   });
 
   testWidgets('own synced messages can also be swiped to reply', (
