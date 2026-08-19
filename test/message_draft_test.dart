@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -283,6 +284,282 @@ void main() {
     });
   });
 
+  testWidgets('Tab replaces a named emoji without sending', (tester) async {
+    await _runWithTargetPlatform(TargetPlatform.macOS, () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(_messageInput(container, '!emoji:example.org'));
+      await tester.enterText(find.byType(TextField), ':thinking:');
+      await tester.pump();
+
+      expect(find.text(':thinking:'), findsWidgets);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+
+      expect(_inputText(tester), '🤔');
+      expect(rustApi.pendingSend, isNull);
+      expect(_autocompleteOptions(), findsNothing);
+    });
+  });
+
+  testWidgets('desktop mouse click selects an autocomplete option', (
+    tester,
+  ) async {
+    await _runWithTargetPlatform(TargetPlatform.macOS, () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value =
+          '@alice:example.org';
+
+      await tester.pumpWidget(
+        _messageInput(container, '!mouse-emoji:example.org'),
+      );
+      await tester.enterText(find.byType(TextField), ':thinking:');
+      await tester.pump();
+      final option = find.byKey(
+        const ValueKey('composer-autocomplete-option-0'),
+      );
+
+      final mouse = await tester.startGesture(
+        tester.getCenter(option),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump();
+      await mouse.up();
+      await tester.pump();
+
+      expect(_inputText(tester), '🤔');
+    });
+  });
+
+  testWidgets('autocomplete follows input method composing state', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, '!ime:example.org'));
+    await tester.enterText(find.byType(TextField), ':thinking:');
+    await tester.pump();
+    expect(_autocompleteOptions(), findsWidgets);
+
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    controller.value = const TextEditingValue(
+      text: ':thinking:',
+      selection: TextSelection.collapsed(offset: 10),
+      composing: TextRange(start: 1, end: 9),
+    );
+    await tester.pump();
+    expect(_autocompleteOptions(), findsNothing);
+
+    controller.value = const TextEditingValue(
+      text: ':thinking:',
+      selection: TextSelection.collapsed(offset: 10),
+    );
+    await tester.pump();
+    expect(_autocompleteOptions(), findsWidgets);
+  });
+
+  testWidgets('an unselected emoji name is sent as plain text', (tester) async {
+    const roomId = '!plain-emoji:example.org';
+    const key = (roomId: roomId, userId: '@alice:example.org');
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    await tester.enterText(find.byType(TextField), ':thinking:');
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+
+    expect(
+      container.read(localOutgoingMessagesProvider(key)).single.message.content,
+      ':thinking:',
+    );
+    await tester.pumpWidget(_home(container));
+    rustApi.pendingSend!.complete(r'$plain-emoji');
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('selecting a member inserts a Matrix user id', (tester) async {
+    const roomId = '!mentions:example.org';
+    final container = ProviderContainer(
+      overrides: [
+        roomMembersProvider(roomId).overrideWith(
+          (ref) async => const [
+            rust.Contact(
+              id: '@alice:example.org',
+              name: 'Alice',
+              status: '@alice:example.org',
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    await tester.enterText(find.byType(TextField), '@ali');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Alice'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('composer-autocomplete-option-0')),
+    );
+    await tester.pump();
+
+    expect(_inputText(tester), '@alice:example.org ');
+  });
+
+  testWidgets('selecting a room inserts its stable Matrix permalink', (
+    tester,
+  ) async {
+    const roomId = '!room:example.org';
+    const selectedRoomId = '!general-b:example.org';
+    final container = ProviderContainer(
+      overrides: [
+        chatRoomsProvider.overrideWith(
+          (ref) async => [
+            _room(id: '!general-a:example.org', name: 'General'),
+            _room(id: selectedRoomId, name: 'General'),
+          ],
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    await tester.enterText(find.byType(TextField), 'see #gen');
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('composer-autocomplete-option-1')),
+    );
+    await tester.pump();
+
+    expect(
+      _inputText(tester),
+      'see [#General](https://matrix.to/#/${Uri.encodeComponent(selectedRoomId)}) ',
+    );
+
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+    final message = container
+        .read(
+          localOutgoingMessagesProvider((
+            roomId: roomId,
+            userId: '@alice:example.org',
+          )),
+        )
+        .single
+        .message;
+    expect(message.content, 'see #General');
+    expect(
+      message.formattedBody,
+      contains(Uri.encodeComponent(selectedRoomId)),
+    );
+
+    await tester.pumpWidget(_home(container));
+    rustApi.pendingSend!.complete(r'$room-link');
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('autocomplete caps large member result sets', (tester) async {
+    const roomId = '!large:example.org';
+    final members = List.generate(
+      80,
+      (index) => rust.Contact(
+        id: '@member$index:example.org',
+        name: 'Member $index',
+        status: '@member$index:example.org',
+      ),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        roomMembersProvider(roomId).overrideWith((ref) async => members),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(_messageInput(container, roomId));
+    await tester.enterText(find.byType(TextField), '@');
+    await tester.pumpAndSettle();
+
+    final list = tester.widget<ListView>(
+      find.descendant(
+        of: find.byKey(const ValueKey('composer-autocomplete-panel')),
+        matching: find.byType(ListView),
+      ),
+    );
+    expect(
+      (list.childrenDelegate as SliverChildBuilderDelegate).childCount,
+      50,
+    );
+  });
+
+  testWidgets('autocomplete list scrolls with a shorter narrow viewport', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    tester.view.physicalSize = const Size(390, 700);
+    await tester.pumpWidget(_messageInput(container, '!narrow:example.org'));
+    await tester.enterText(find.byType(TextField), ':');
+    await tester.pump();
+    final panel = find.byKey(const ValueKey('composer-autocomplete-panel'));
+    final list = find.descendant(of: panel, matching: find.byType(ListView));
+    expect(tester.getSize(list).height, 4 * 52 - 2);
+    final narrowList = tester.widget<ListView>(list);
+    expect(narrowList.controller!.position.maxScrollExtent, greaterThan(0));
+    await tester.drag(panel, const Offset(0, -104));
+    await tester.pumpAndSettle();
+    expect(narrowList.controller!.offset, greaterThan(0));
+
+    tester.view.physicalSize = const Size(1000, 700);
+    await tester.pumpWidget(_messageInput(container, '!wide:example.org'));
+    await tester.enterText(find.byType(TextField), ':');
+    await tester.pump();
+    final wideList = find.descendant(
+      of: panel,
+      matching: find.byType(ListView),
+    );
+    expect(tester.getSize(wideList).height, 8 * 52 - 2);
+  });
+
+  testWidgets('autocomplete panel stays inside a short viewport', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    tester.view.physicalSize = const Size(390, 150);
+    await tester.pumpWidget(_messageInput(container, '!short:example.org'));
+    await tester.enterText(find.byType(TextField), ':');
+    await tester.pump();
+
+    final panel = find.byKey(const ValueKey('composer-autocomplete-panel'));
+    expect(tester.getTopLeft(panel).dy, greaterThanOrEqualTo(0));
+    expect(tester.getBottomRight(panel).dy, lessThanOrEqualTo(150));
+  });
+
   testWidgets('tool buttons do not overflow while shrinking for send', (
     tester,
   ) async {
@@ -355,6 +632,22 @@ rust.ChatMessage _messageToEdit() {
   );
 }
 
+rust.ChatRoom _room({required String id, required String name}) {
+  return rust.ChatRoom(
+    id: id,
+    name: name,
+    lastMessage: '',
+    lastMessageTime: '',
+    lastEventId: '',
+    unreadCount: 0,
+    isMarkedUnread: false,
+    roomType: 'group',
+    isEncrypted: false,
+    isMuted: false,
+    roomState: 'joined',
+  );
+}
+
 Widget _messageInput(ProviderContainer container, String roomId) {
   return UncontrolledProviderScope(
     container: container,
@@ -394,6 +687,14 @@ Widget _home(ProviderContainer container) {
 String _inputText(WidgetTester tester) {
   return tester.widget<TextField>(find.byType(TextField)).controller!.text;
 }
+
+Finder _autocompleteOptions() => find.byWidgetPredicate(
+  (widget) =>
+      widget.key is ValueKey<String> &&
+      (widget.key! as ValueKey<String>).value.startsWith(
+        'composer-autocomplete-option-',
+      ),
+);
 
 Future<void> _runWithTargetPlatform(
   TargetPlatform platform,
