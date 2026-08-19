@@ -915,6 +915,17 @@ Future<List<ChatRoom>> searchRooms({
   authoritative: authoritative,
 );
 
+/// Load a focused slice of the room timeline around one event.
+Future<List<ChatMessage>> getMessagesAround({
+  required String roomId,
+  required String eventId,
+  required int limit,
+}) => RustLib.instance.api.crateApiMatrixGetMessagesAround(
+  roomId: roomId,
+  eventId: eventId,
+  limit: limit,
+);
+
 /// Load more messages (paginated) from before a given event.
 Future<List<ChatMessage>> getMessagesBefore({
   required String roomId,

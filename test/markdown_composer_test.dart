@@ -198,13 +198,35 @@ void main() {
     );
   });
 
+  test('keeps server ports and IPv6 literals in Matrix user mentions', () {
+    for (final userId in [
+      '@alice:example.org:8448',
+      '@bob:[2001:db8::1]:8448',
+      '@numeric:99999',
+    ]) {
+      final result = composer.compile('hello $userId');
+
+      expect(result.mentionedUserIds, [userId], reason: userId);
+      expect(
+        result.formattedBody,
+        contains(Uri.encodeComponent(userId)),
+        reason: userId,
+      );
+    }
+  });
+
   test('collects mentions from supported Matrix user permalinks', () {
     final matrixUri = composer.compile('[Alice](matrix:u/alice:example.org)');
     final matrixTo = composer.compile(
       '[Alice](https://matrix.to/#/@alice:example.org?via=example.org)',
     );
+    const portUserId = '@carol:example.org:8448';
+    final portMatrixTo = composer.compile(
+      '[Carol](https://matrix.to/#/${Uri.encodeComponent(portUserId)})',
+    );
 
     expect(matrixUri.mentionedUserIds, ['@alice:example.org']);
     expect(matrixTo.mentionedUserIds, ['@alice:example.org']);
+    expect(portMatrixTo.mentionedUserIds, [portUserId]);
   });
 }

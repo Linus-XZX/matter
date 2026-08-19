@@ -11323,6 +11323,23 @@ pub async fn search_rooms(
     Ok(filtered)
 }
 
+/// Load a focused slice of the room timeline around one event.
+#[frb]
+pub async fn get_messages_around(
+    room_id: String,
+    event_id: String,
+    limit: u32,
+) -> Result<Vec<ChatMessage>, String> {
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    let room = get_room_by_id(&client, &room_id)?;
+    run_bounded(
+        async move { sdk_timeline::get_messages_around(&room, &event_id, limit as usize).await },
+    )
+    .await
+}
+
 /// Load more messages (paginated) from before a given event.
 #[frb]
 pub async fn get_messages_before(

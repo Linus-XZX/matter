@@ -65,6 +65,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final bool showAvatar;
   final String roomId;
   final Map<String, ChatMessage> messageIndex;
+  final Map<String, GlobalKey> messageAnchorKeys;
   final Map<String, String> remoteToLocalFlightId;
   final Set<String> insertionAnimationIds;
   final Set<String> lateralInsertionAnimationIds;
@@ -76,6 +77,8 @@ class MessageGroupWidget extends ConsumerWidget {
   final double stickyBottomInset;
   final VoidCallback? onImageLoaded;
   final VoidCallback? onReplyRequested;
+  final ValueChanged<String>? onMentionRequested;
+  final ValueChanged<String>? onMessageJumpRequested;
   final ValueChanged<ChatRoom>? onMessageForwarded;
 
   const MessageGroupWidget({
@@ -83,6 +86,7 @@ class MessageGroupWidget extends ConsumerWidget {
     required this.group,
     required this.roomId,
     required this.messageIndex,
+    this.messageAnchorKeys = const {},
     this.remoteToLocalFlightId = const {},
     this.insertionAnimationIds = const {},
     this.lateralInsertionAnimationIds = const {},
@@ -95,6 +99,8 @@ class MessageGroupWidget extends ConsumerWidget {
     this.stickyBottomInset = 0,
     this.onImageLoaded,
     this.onReplyRequested,
+    this.onMentionRequested,
+    this.onMessageJumpRequested,
     this.onMessageForwarded,
   });
 
@@ -117,6 +123,16 @@ class MessageGroupWidget extends ConsumerWidget {
     final flightId = _messageFlightId(message);
     if (flightId != null) return 'message-row:$flightId';
     return 'message-row:${message.id}';
+  }
+
+  Widget _anchoredMessage(ChatMessage message, Widget child) {
+    final anchorKey = messageAnchorKeys[message.id];
+    return KeyedSubtree(
+      key: ValueKey(_messageRowKey(message)),
+      child: anchorKey == null
+          ? child
+          : KeyedSubtree(key: anchorKey, child: child),
+    );
   }
 
   @override
@@ -142,9 +158,9 @@ class MessageGroupWidget extends ConsumerWidget {
               .asMap()
               .entries
               .map(
-                (e) => KeyedSubtree(
-                  key: ValueKey(_messageRowKey(e.value)),
-                  child: _buildMessage(
+                (e) => _anchoredMessage(
+                  e.value,
+                  _buildMessage(
                     context,
                     ref,
                     e.value,
@@ -175,9 +191,9 @@ class MessageGroupWidget extends ConsumerWidget {
               .asMap()
               .entries
               .map(
-                (e) => KeyedSubtree(
-                  key: ValueKey(_messageRowKey(e.value)),
-                  child: _buildMessage(
+                (e) => _anchoredMessage(
+                  e.value,
+                  _buildMessage(
                     context,
                     ref,
                     e.value,
@@ -201,9 +217,9 @@ class MessageGroupWidget extends ConsumerWidget {
           .asMap()
           .entries
           .map(
-            (e) => KeyedSubtree(
-              key: ValueKey(_messageRowKey(e.value)),
-              child: _buildMessage(
+            (e) => _anchoredMessage(
+              e.value,
+              _buildMessage(
                 context,
                 ref,
                 e.value,
@@ -244,15 +260,18 @@ class MessageGroupWidget extends ConsumerWidget {
         avatarSize: _avatarSize,
         avatarSlotWidth: _avatarSlotWidth,
         bottomInset: stickyBottomInset,
+        onAvatarLongPress: onMentionRequested == null
+            ? null
+            : () => onMentionRequested!(group.senderId),
         messagesBuilder: (avatarSwipeOffset) => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: group.messages
               .asMap()
               .entries
               .map(
-                (e) => KeyedSubtree(
-                  key: ValueKey(_messageRowKey(e.value)),
-                  child: _buildMessage(
+                (e) => _anchoredMessage(
+                  e.value,
+                  _buildMessage(
                     context,
                     ref,
                     e.value,
@@ -750,7 +769,7 @@ class MessageGroupWidget extends ConsumerWidget {
       children: [
         ?senderHeader,
         if (replyContent != null)
-          _buildReplyPreview(context, replyContent, isMe),
+          _buildReplyPreview(context, message.inReplyTo!, replyContent, isMe),
         if (readerHtml != null)
           MatrixHtmlMessage(
             key: ValueKey('formatted-body:${message.id}'),
@@ -946,27 +965,41 @@ class MessageGroupWidget extends ConsumerWidget {
 
   Widget _buildReplyPreview(
     BuildContext context,
+    String replyToId,
     String replyContent,
     bool isMe,
   ) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: (isMe ? Colors.white : AppColors.primary).withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(AppRadii.tag),
-        border: Border(
-          left: BorderSide(
-            color: isMe ? Colors.white : AppColors.primary,
-            width: 2,
+    return Semantics(
+      button: true,
+      label: '跳转到被回复的消息',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onMessageJumpRequested == null
+            ? null
+            : () => onMessageJumpRequested!(replyToId),
+        child: Container(
+          key: ValueKey('reply-preview:$replyToId'),
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: (isMe ? Colors.white : AppColors.primary).withValues(
+              alpha: 0.1,
+            ),
+            borderRadius: BorderRadius.circular(AppRadii.tag),
+            border: Border(
+              left: BorderSide(
+                color: isMe ? Colors.white : AppColors.primary,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Text(
+            replyContent,
+            style: _replyPreviewTextStyle(isMe),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
         ),
-      ),
-      child: Text(
-        replyContent,
-        style: _replyPreviewTextStyle(isMe),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
       ),
     );
   }
@@ -1294,22 +1327,31 @@ class MessageGroupWidget extends ConsumerWidget {
     );
   }
 
-  void _showContextMenu(
+  Future<void> _showContextMenu(
     BuildContext context,
     WidgetRef ref,
     ChatMessage message, {
     VoidCallback? onReadFullScreen,
-  }) {
+  }) async {
     final overlay = Overlay.of(context, rootOverlay: true);
     final overlayContext = overlay.context;
+    final container = ProviderScope.containerOf(context, listen: false);
     // Geometry of the long-pressed bubble, for popover positioning.
     final renderObject = context.findRenderObject();
     final Rect? bubbleRect = renderObject is RenderBox && renderObject.hasSize
         ? (renderObject.localToGlobal(Offset.zero) & renderObject.size)
         : null;
+    final menuAccount = ref.read(activeUserIdProvider) ?? '';
+    final canPin =
+        message.msgType != MessageType.event &&
+        !isLocalOutgoingMessage(message.id);
+    bool? isPinned;
+    var pinStateLoading = canPin;
+    var menuOpen = true;
 
     late OverlayEntry entry;
     void close() {
+      menuOpen = false;
       entry.remove();
     }
 
@@ -1373,100 +1415,63 @@ class MessageGroupWidget extends ConsumerWidget {
             }
           }
         },
-        onPin: () async {
-          // Local (not yet echoed) messages have no server event id: pinning
-          // them would write a bogus id into m.room.pinned_events, leaving a
-          // permanent "不可用" placeholder in the pinned list.
-          if (!message.id.startsWith(r'$')) {
-            if (overlayContext.mounted) {
-              ScaffoldMessenger.of(overlayContext).showSnackBar(
-                const SnackBar(
-                  // `local_outgoing_sent:` messages are already on the
-                  // server but not yet echoed back as a remote event — the
-                  // local id still has no server meaning, so pinning stays
-                  // blocked, but "尚未发送" would be wrong for them.
-                  content: Text('消息同步中，请稍后置顶'),
-                  duration: Duration(seconds: 2),
-                ),
-              );
-            }
-            return;
-          }
-          // The account snapshot is captured once, before any await: the
-          // write below must target the account the menu was opened for. If
-          // the account switched mid-menu, the Rust guard rejects the
-          // stale-account write with a clear message instead of a confusing
-          // "room not joined" error against the new account.
-          final menuAccount = ref.read(activeUserIdProvider) ?? '';
-          // Decide pin vs unpin from the server state: the menu shows the
-          // same entry for both, and an idempotent set must not guess.
-          final List<String> pinnedIds;
-          try {
-            pinnedIds = await getPinnedEventIds(
-              accountUserId: menuAccount,
-              roomId: roomId,
-            );
-          } catch (error) {
-            // The decision read failed: nothing was written, so the
-            // timeout-aware "state may have changed" wording of the write
-            // path would be misleading here. Map the raw error through the
-            // shared wording (Chinese) — reads never raise the
-            // mutation-timeout wording, so this stays a plain failure with
-            // the SDK detail prefixed correctly.
-            if (overlayContext.mounted) {
-              ScaffoldMessenger.of(overlayContext).showSnackBar(
-                SnackBar(
-                  content: Text('无法获取置顶状态，请重试: ${actionFailureMessage(error)}'),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            }
-            return;
-          }
-          try {
-            final target = !pinnedIds.contains(message.id);
-            final pinned = await setPinnedMessage(
-              accountUserId: menuAccount,
-              roomId: roomId,
-              eventId: message.id,
-              pinned: target,
-            );
-            if (overlayContext.mounted) {
-              ScaffoldMessenger.of(overlayContext).showSnackBar(
-                SnackBar(
-                  content: Text(pinned ? '消息已置顶' : '已取消置顶'),
-                  duration: const Duration(seconds: 1),
-                ),
-              );
-            }
-          } catch (error) {
-            if (!overlayContext.mounted) {
-              return;
-            }
-            final timedOut = isMutationTimeout(error);
-            if (timedOut) {
-              // A timeout may still land server-side: the queued operation
-              // keeps running in the background, and setPinnedMessage
-              // returns the request value, not the final state. Tell the
-              // user to confirm instead of claiming a failed pin.
-              ScaffoldMessenger.of(overlayContext).showSnackBar(
-                const SnackBar(
-                  content: Text('置顶操作超时，状态可能已更新，请刷新确认'),
-                  duration: Duration(seconds: 2),
-                ),
-              );
-              return;
-            }
-            // Non-timeout failures go through the shared wording (Chinese,
-            // partial-success passthrough) — one source for all pages.
-            ScaffoldMessenger.of(overlayContext).showSnackBar(
-              SnackBar(
-                content: Text(actionFailureMessage(error)),
-                duration: const Duration(seconds: 2),
-              ),
-            );
-          }
-        },
+        isPinned: isPinned,
+        pinStateLoading: pinStateLoading,
+        onPin: isPinned == null
+            ? null
+            : () async {
+                try {
+                  final target = !isPinned!;
+                  final pinned = await setPinnedMessage(
+                    accountUserId: menuAccount,
+                    roomId: roomId,
+                    eventId: message.id,
+                    pinned: target,
+                  );
+                  if (overlayContext.mounted) {
+                    ScaffoldMessenger.of(overlayContext).showSnackBar(
+                      SnackBar(
+                        content: Text(pinned ? '消息已置顶' : '已取消置顶'),
+                        duration: const Duration(seconds: 1),
+                      ),
+                    );
+                  }
+                  if (overlayContext.mounted) {
+                    container.invalidate(
+                      pinnedMessagesProvider((
+                        roomId: roomId,
+                        userId: menuAccount,
+                      )),
+                    );
+                  }
+                } catch (error) {
+                  if (!overlayContext.mounted) {
+                    return;
+                  }
+                  final timedOut = isMutationTimeout(error);
+                  if (timedOut) {
+                    // A timeout may still land server-side: the queued operation
+                    // keeps running in the background, and setPinnedMessage
+                    // returns the request value, not the final state. Tell the
+                    // user to confirm instead of claiming a failed pin.
+                    ScaffoldMessenger.of(overlayContext).showSnackBar(
+                      const SnackBar(
+                        content: Text('置顶操作超时，状态可能已更新，请刷新确认'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                    return;
+                  }
+                  // Non-timeout failures go through the shared wording (Chinese,
+                  // partial-success passthrough) — one source for all pages.
+                  ScaffoldMessenger.of(overlayContext).showSnackBar(
+                    SnackBar(
+                      content: Text(actionFailureMessage(error)),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                }
+              },
         onReact: (emoji) =>
             _sendReactionAndRefresh(overlayContext, ref, message.id, emoji),
         onShowFullEmojiPicker: () =>
@@ -1476,6 +1481,30 @@ class MessageGroupWidget extends ConsumerWidget {
     // Confirm the menu appeared with a light haptic.
     HapticFeedback.selectionClick();
     overlay.insert(entry);
+    if (!canPin) return;
+    try {
+      final pinnedIds = await getPinnedEventIds(
+        accountUserId: menuAccount,
+        roomId: roomId,
+      );
+      if (!menuOpen || !overlayContext.mounted) return;
+      isPinned = pinnedIds.contains(message.id);
+      pinStateLoading = false;
+      entry.markNeedsBuild();
+    } catch (error) {
+      if (!menuOpen || !overlayContext.mounted) return;
+      pinStateLoading = false;
+      entry.markNeedsBuild();
+      debugPrint('Unable to load pinned state: $error');
+      // Without the state read the menu cannot offer pin/unpin at all — say
+      // so instead of silently dropping the entry.
+      ScaffoldMessenger.of(overlayContext).showSnackBar(
+        SnackBar(
+          content: Text('无法获取置顶状态，请重试: ${actionFailureMessage(error)}'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   bool _blockEditingTransition(
@@ -1912,7 +1941,9 @@ class _FloatingMessageMenu extends StatefulWidget {
   final VoidCallback onForward;
   final VoidCallback onEdit;
   final VoidCallback onRecall;
-  final VoidCallback onPin;
+  final bool? isPinned;
+  final bool pinStateLoading;
+  final VoidCallback? onPin;
   final void Function(String emoji) onReact;
   final VoidCallback onShowFullEmojiPicker;
   final VoidCallback? onReadFullScreen;
@@ -1927,6 +1958,8 @@ class _FloatingMessageMenu extends StatefulWidget {
     required this.onForward,
     required this.onEdit,
     required this.onRecall,
+    required this.isPinned,
+    required this.pinStateLoading,
     required this.onPin,
     required this.onReact,
     required this.onShowFullEmojiPicker,
@@ -1950,6 +1983,16 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _measureAndPosition());
+  }
+
+  @override
+  void didUpdateWidget(covariant _FloatingMessageMenu oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.pinStateLoading != widget.pinStateLoading) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _measureAndPosition(),
+      );
+    }
   }
 
   void _measureAndPosition() {
@@ -2077,11 +2120,27 @@ class _FloatingMessageMenuState extends State<_FloatingMessageMenu> {
                 label: '转发',
                 onTap: () => _select(widget.onForward),
               ),
-            if (!isEvent && !isLocalOutgoingMessage(msg.id))
+            if (!isEvent && widget.onPin != null)
               _IconTextAction(
-                icon: Icons.push_pin_outlined,
-                label: '置顶/取消置顶',
-                onTap: () => _select(widget.onPin),
+                icon: widget.isPinned!
+                    ? Icons.push_pin_rounded
+                    : Icons.push_pin_outlined,
+                label: widget.isPinned! ? '取消置顶' : '置顶',
+                onTap: () => _select(widget.onPin!),
+              ),
+            if (!isEvent && widget.pinStateLoading)
+              const SizedBox(
+                width: 56,
+                height: 48,
+                child: Center(
+                  child: SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.6,
+                      color: AppColors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
               ),
             if (widget.isMe && isText)
               _IconTextAction(
@@ -2321,6 +2380,7 @@ class _StickyAvatarMessageGroup extends StatefulWidget {
   final double avatarSize;
   final double avatarSlotWidth;
   final double bottomInset;
+  final VoidCallback? onAvatarLongPress;
   final Widget Function(ValueNotifier<double>? avatarSwipeOffset)
   messagesBuilder;
 
@@ -2333,6 +2393,7 @@ class _StickyAvatarMessageGroup extends StatefulWidget {
     required this.avatarSize,
     required this.avatarSlotWidth,
     required this.bottomInset,
+    required this.onAvatarLongPress,
     required this.messagesBuilder,
   });
 
@@ -2370,6 +2431,7 @@ class _StickyAvatarMessageGroupState extends State<_StickyAvatarMessageGroup> {
               avatarSize: widget.avatarSize,
               bottomInset: widget.bottomInset,
               swipeOffset: _avatarSwipeOffset,
+              onLongPress: widget.onAvatarLongPress,
             ),
           ),
         Padding(
@@ -2397,6 +2459,7 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
   final double avatarSize;
   final double bottomInset;
   final ValueNotifier<double> swipeOffset;
+  final VoidCallback? onLongPress;
 
   _StickyGroupAvatar({
     super.key,
@@ -2407,12 +2470,18 @@ class _StickyGroupAvatar extends SingleChildRenderObjectWidget {
     required this.avatarSize,
     required this.bottomInset,
     required this.swipeOffset,
+    required this.onLongPress,
   }) : super(
-         child: AppAvatar(
-           fallback: fallback,
-           size: avatarSize,
-           radius: AppRadii.content,
-           url: avatarUrl,
+         child: GestureDetector(
+           key: const ValueKey('message-sender-avatar'),
+           behavior: HitTestBehavior.opaque,
+           onLongPress: onLongPress,
+           child: AppAvatar(
+             fallback: fallback,
+             size: avatarSize,
+             radius: AppRadii.content,
+             url: avatarUrl,
+           ),
          ),
        );
 
