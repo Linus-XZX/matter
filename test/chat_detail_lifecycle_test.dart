@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/chat_detail_page.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
+import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/message_insert_animation.dart';
 import 'package:matter/pages/chat/pinned_messages_page.dart';
 import 'package:matter/pages/chat/room_metadata_patch.dart';
@@ -30,6 +31,9 @@ class _FakeRustApi implements RustLibApi {
   final messagesBeforeEventIds = <String>[];
   List<rust.ChatMessage> messagesBefore = const [];
   Object? messagesBeforeError;
+  int getMessagesAroundCalls = 0;
+  List<rust.ChatMessage> messagesAround = const [];
+  final pendingMessagesAround = <String, Completer<List<rust.ChatMessage>>>{};
   Completer<String>? pendingSend;
   Completer<bool>? pendingRoomEncryption;
   List<rust.ChatRoom> chatRooms = const [];
@@ -142,6 +146,18 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
+  Future<List<rust.ChatMessage>> crateApiMatrixGetMessagesAround({
+    required String roomId,
+    required String eventId,
+    required int limit,
+  }) async {
+    getMessagesAroundCalls++;
+    final pending = pendingMessagesAround[eventId];
+    if (pending != null) return pending.future;
+    return messagesAround;
+  }
+
+  @override
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
     required String subscriptionId,
@@ -172,7 +188,11 @@ class _FakeRustApi implements RustLibApi {
   }
 }
 
-rust.ChatMessage _message(String id) {
+rust.ChatMessage _message(
+  String id, {
+  String timestamp = '1',
+  String? inReplyTo,
+}) {
   return rust.ChatMessage(
     id: id,
     senderId: '@alice:example.org',
@@ -180,9 +200,10 @@ rust.ChatMessage _message(String id) {
     content: 'hello',
     mentionedUserIds: const [],
     mentionsRoom: false,
-    timestamp: '1',
+    timestamp: timestamp,
     isMe: false,
     msgType: rust.MessageType.text,
+    inReplyTo: inReplyTo,
     isEdited: false,
     editHistory: const [],
     reactions: const [],
@@ -247,10 +268,15 @@ void main() {
     rustApi.messagesBeforeEventIds.clear();
     rustApi.messagesBefore = const [];
     rustApi.messagesBeforeError = null;
+    rustApi.getMessagesAroundCalls = 0;
+    rustApi.messagesAround = const [];
+    rustApi.pendingMessagesAround.clear();
     rustApi.pendingSend = null;
     rustApi.sentMessages.clear();
     rustApi.pendingRoomEncryption = null;
     rustApi.chatRooms = const [];
+    rustApi.pinnedMessagesCalls = 0;
+    rustApi.pinnedMessages = const [];
     rustApi.activeTypingRoom = null;
     rustApi.activeReceiptRooms.clear();
     rustApi.typingSubscribeBarrier = null;
@@ -339,11 +365,373 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(PinnedMessagesPage), findsOneWidget);
-    expect(rustApi.pinnedMessagesCalls, 1);
+    // One load feeds the chat's stacked pin strip; the pushed page performs
+    // its own authoritative load.
+    expect(rustApi.pinnedMessagesCalls, 2);
     expect(find.text('暂无置顶消息'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+
+  testWidgets('long-pressing a message avatar inserts a Matrix mention', (
+    tester,
+  ) async {
+    const roomId = '!mention:example.org';
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith(
+          (ref) async => const [
+            rust.Contact(
+              id: '@alice:example.org',
+              name: 'Alice',
+              status: '@alice:example.org',
+            ),
+          ],
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$mention-source'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    await tester.longPress(find.byKey(const ValueKey('message-sender-avatar')));
+    await tester.pump();
+
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '@alice:example.org ',
+    );
+  });
+
+  testWidgets('reply preview loads and jumps to an unloaded target', (
+    tester,
+  ) async {
+    const roomId = '!reply-jump:example.org';
+    final target = _message(r'$reply-target', timestamp: '1');
+    final reply = _message(r'$reply', timestamp: '100', inReplyTo: target.id);
+    rustApi.messagesAround = [target, reply];
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [reply];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey(r'reply-preview:$reply-target')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.getMessagesAroundCalls, 1);
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$reply-target')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a stale jump response cannot replace the latest target', (
+    tester,
+  ) async {
+    const roomId = '!jump-generation:example.org';
+    final firstTarget = _message(r'$first-target', timestamp: '1');
+    final secondTarget = _message(r'$second-target', timestamp: '2');
+    final firstReply = _message(
+      r'$first-reply',
+      timestamp: '100',
+      inReplyTo: firstTarget.id,
+    );
+    final secondReply = _message(
+      r'$second-reply',
+      timestamp: '101',
+      inReplyTo: secondTarget.id,
+    );
+    final firstLoad = Completer<List<rust.ChatMessage>>();
+    final secondLoad = Completer<List<rust.ChatMessage>>();
+    rustApi.pendingMessagesAround[firstTarget.id] = firstLoad;
+    rustApi.pendingMessagesAround[secondTarget.id] = secondLoad;
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      firstReply,
+      secondReply,
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey(r'reply-preview:$first-target')),
+    );
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const ValueKey(r'reply-preview:$second-target')),
+    );
+    await tester.pump();
+
+    secondLoad.complete([secondTarget]);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$second-target')),
+      findsOneWidget,
+    );
+
+    firstLoad.complete([firstTarget]);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$second-target')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$first-target')),
+      findsNothing,
+    );
+  });
+
+  testWidgets(
+    'jumping to a detached message hides the live window until the latest control is tapped',
+    (tester) async {
+      const roomId = '!focused-jump:example.org';
+      final target = _message(r'$far-target', timestamp: '1');
+      // The slice around the far target does not touch the live window.
+      rustApi.messagesAround = [
+        target,
+        _message(r'$far-neighbor', timestamp: '2'),
+      ];
+      final reply = _message(
+        r'$live-reply',
+        timestamp: '100',
+        inReplyTo: target.id,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+          roomMembersProvider(roomId).overrideWith((ref) async => const []),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(roomMembersProvider(roomId).future);
+      container.read(messageCacheProvider(roomId).notifier).value = [reply];
+      container.read(messageCacheOwnerProvider(roomId).notifier).value =
+          'anonymous';
+      container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(
+        find.byKey(const ValueKey(r'reply-preview:$far-target')),
+      );
+      await tester.pumpAndSettle();
+
+      // Focused browsing: the detached slice renders, the live window hides.
+      expect(
+        find.byKey(const ValueKey(r'text-bubble:$far-target')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey(r'text-bubble:$live-reply')),
+        findsNothing,
+      );
+
+      // Let the hint snackbar clear the bottom-right control, then leave the
+      // focused view through it.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(LatestMessageControl));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey(r'text-bubble:$live-reply')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey(r'text-bubble:$far-target')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets('account switching clears a detached history slice', (
+    tester,
+  ) async {
+    const roomId = '!focused-account:example.org';
+    const alice = '@alice:example.org';
+    final target = _message(r'$account-target', timestamp: '1');
+    final reply = _message(
+      r'$account-live-reply',
+      timestamp: '100',
+      inReplyTo: target.id,
+    );
+    rustApi.messagesAround = [target];
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = alice;
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [reply];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value = alice;
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const ValueKey(r'reply-preview:$account-target')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$account-target')),
+      findsOneWidget,
+    );
+
+    container.read(activeUserIdProvider.notifier).value = '@bob:example.org';
+    await tester.pump();
+    expect(find.text('账号已切换'), findsOneWidget);
+
+    container.read(activeUserIdProvider.notifier).value = alice;
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$account-live-reply')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$account-target')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('reply preview jumps to an offscreen loaded target', (
+    tester,
+  ) async {
+    const roomId = '!reply-scroll:example.org';
+    await tester.binding.setSurfaceSize(const Size(800, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final target = _message(r'$loaded-target', timestamp: '0');
+    final reply = _message(
+      r'$loaded-reply',
+      timestamp: '101',
+      inReplyTo: target.id,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      target,
+      ...List.generate(
+        100,
+        (index) => _message('\$middle-$index', timestamp: '${index + 1}'),
+      ),
+      reply,
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$loaded-target')),
+      findsNothing,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey(r'reply-preview:$loaded-target')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.getMessagesAroundCalls, 0);
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$loaded-target')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('leaving a chat clears its active room without using ref', (
@@ -1123,6 +1511,78 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('a jump invalidates pagination during the encryption check', (
+    tester,
+  ) async {
+    const roomId = '!pagination-jump-race:example.org';
+    const userId = '@me:example.org';
+    final stalePage = _ownMessage(
+      r'$stale-page',
+      content: 'stale page',
+      timestamp: '0',
+    );
+    final jumpTarget = _ownMessage(
+      r'$pagination-jump-target',
+      content: 'jump target',
+      timestamp: '50',
+    );
+    rustApi.messagesBefore = [stalePage];
+    rustApi.messagesAround = [jumpTarget];
+    rustApi.pinnedMessages = [jumpTarget];
+    final encryptionCheck = Completer<bool>();
+    rustApi.pendingRoomEncryption = encryptionCheck;
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith(
+          (ref) async => const {'@alice:example.org'},
+        ),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = userId;
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      _message(r'$ignored-pagination-anchor'),
+    ];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value = userId;
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(rustApi.getMessagesBeforeCalls, greaterThanOrEqualTo(1));
+
+    await tester.tap(
+      find.byKey(const ValueKey(r'pinned-message:$pagination-jump-target')),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$pagination-jump-target')),
+      findsOneWidget,
+    );
+
+    encryptionCheck.complete(false);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$pagination-jump-target')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$stale-page')),
+      findsNothing,
+    );
+  });
+
   testWidgets(
     'stops automatic back-pagination when every older page is ignored',
     (tester) async {
@@ -1716,6 +2176,78 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+
+  testWidgets('sticker state survives local-to-remote reconciliation in chat', (
+    tester,
+  ) async {
+    const roomId = '!sticker-reconcile:example.org';
+    const flightId = 'sticker-anchor';
+    const sourceImageUrl = 'https://example.org/remote-sticker.png';
+    final localSticker = _ownMessage(
+      '$localOutgoingSentPrefix$flightId',
+      content: 'sticker',
+      timestamp: '100',
+      msgType: rust.MessageType.sticker,
+      imageUrl: 'https://example.org/local-sticker.png',
+      imageWidth: 512,
+      imageHeight: 512,
+    );
+    final remoteSticker = _ownMessage(
+      r'$remote-sticker-anchor',
+      content: 'sticker',
+      timestamp: '101',
+      msgType: rust.MessageType.sticker,
+      imageUrl: sourceImageUrl,
+      imageWidth: 512,
+      imageHeight: 512,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheProvider(roomId).notifier).value = const [];
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+    container
+        .read(
+          localOutgoingMessagesProvider((
+            roomId: roomId,
+            userId: 'anonymous',
+          )).notifier,
+        )
+        .value = [
+      LocalOutgoingMessage(
+        message: localSticker,
+        sourceImageUrl: sourceImageUrl,
+      ),
+    ];
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final localState = tester.state(find.byType(ImageMessageBubble));
+
+    container.read(messageCacheProvider(roomId).notifier).value = [
+      remoteSticker,
+    ];
+    await tester.pump();
+
+    expect(tester.state(find.byType(ImageMessageBubble)), same(localState));
+    await tester.pump();
+    expect(tester.state(find.byType(ImageMessageBubble)), same(localState));
   });
 
   testWidgets('a rapid bottom send cancels flight and inserts smoothly', (

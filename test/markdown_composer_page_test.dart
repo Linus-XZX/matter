@@ -99,6 +99,12 @@ class _FakeRustApi implements RustLibApi {
   }
 
   @override
+  Future<List<String>> crateApiMatrixGetPinnedEventIds({
+    required String accountUserId,
+    required String roomId,
+  }) async => const [];
+
+  @override
   dynamic noSuchMethod(Invocation invocation) {
     throw UnsupportedError('Unexpected Rust call: ${invocation.memberName}');
   }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,9 +14,11 @@ class _FakeRustApi implements RustLibApi {
   String? lastToggleEventId;
   bool toggleResult = false;
   Object? toggleError;
+  Completer<bool>? pendingToggle;
   int pinnedIdsCalls = 0;
   List<String> pinnedIds = const [];
   Object? pinnedIdsError;
+  Completer<List<String>>? pendingPinnedIds;
 
   @override
   Future<List<String>> crateApiMatrixGetPinnedEventIds({
@@ -23,6 +27,7 @@ class _FakeRustApi implements RustLibApi {
   }) async {
     pinnedIdsCalls++;
     if (pinnedIdsError case final error?) throw error;
+    if (pendingPinnedIds case final pending?) return pending.future;
     return pinnedIds;
   }
 
@@ -37,6 +42,7 @@ class _FakeRustApi implements RustLibApi {
     lastToggleRoomId = roomId;
     lastToggleEventId = eventId;
     if (toggleError case final error?) throw error;
+    if (pendingToggle case final pending?) return pending.future;
     return toggleResult;
   }
 
@@ -49,7 +55,11 @@ class _FakeRustApi implements RustLibApi {
 const _roomId = '!room:example.org';
 const _roomAccountKey = (roomId: _roomId, userId: 'anonymous');
 
-ChatMessage _message({required String id, required bool isMe}) => ChatMessage(
+ChatMessage _message({
+  required String id,
+  required bool isMe,
+  String? inReplyTo,
+}) => ChatMessage(
   id: id,
   senderId: isMe ? '@me:example.org' : '@alice:example.org',
   senderName: isMe ? '我' : 'Alice',
@@ -59,6 +69,7 @@ ChatMessage _message({required String id, required bool isMe}) => ChatMessage(
   timestamp: '100',
   isMe: isMe,
   msgType: MessageType.text,
+  inReplyTo: inReplyTo,
   isEdited: false,
   editHistory: const [],
   reactions: const [],
@@ -70,6 +81,8 @@ Widget _buildSubject({
   required ProviderContainer container,
   required ChatMessage message,
   VoidCallback? onReplyRequested,
+  ValueChanged<String>? onMentionRequested,
+  ValueChanged<String>? onMessageJumpRequested,
   bool showAvatar = false,
 }) {
   return UncontrolledProviderScope(
@@ -87,6 +100,8 @@ Widget _buildSubject({
           messageIndex: {message.id: message},
           showAvatar: showAvatar,
           onReplyRequested: onReplyRequested,
+          onMentionRequested: onMentionRequested,
+          onMessageJumpRequested: onMessageJumpRequested,
         ),
       ),
     ),
@@ -103,10 +118,13 @@ void main() {
 
   tearDownAll(RustLib.dispose);
 
-  testWidgets('message menu describes pinning as a toggle', (tester) async {
+  testWidgets('message menu only shows pin for an unpinned message', (
+    tester,
+  ) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final message = _message(id: r'$pin-toggle', isMe: false);
+    api.pinnedIds = const [];
 
     await tester.pumpWidget(
       _buildSubject(container: container, message: message),
@@ -117,7 +135,37 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('置顶/取消置顶'), findsOneWidget);
+    expect(find.text('置顶'), findsOneWidget);
+    expect(find.text('取消置顶'), findsNothing);
+  });
+
+  testWidgets('message menu stays usable while pin state is loading', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-loading', isMe: false);
+    api.pendingPinnedIds = Completer<List<String>>();
+    addTearDown(() => api.pendingPinnedIds = null);
+
+    await tester.pumpWidget(
+      _buildSubject(container: container, message: message),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-loading')),
+    );
+    await tester.pump();
+
+    expect(find.text('回复'), findsOneWidget);
+    expect(find.text('置顶'), findsNothing);
+    expect(find.text('取消置顶'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    api.pendingPinnedIds!.complete(const []);
+    await tester.pumpAndSettle();
+
+    expect(find.text('置顶'), findsOneWidget);
+    expect(find.text('取消置顶'), findsNothing);
   });
 
   testWidgets('pinning from the message menu calls the toggle', (tester) async {
@@ -127,6 +175,7 @@ void main() {
     api.togglePinnedCalls = 0;
     api.toggleError = null;
     api.toggleResult = true;
+    api.pinnedIds = const [];
 
     await tester.pumpWidget(
       _buildSubject(container: container, message: message),
@@ -136,7 +185,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.tap(find.text('置顶'));
     await tester.pumpAndSettle();
 
     expect(api.togglePinnedCalls, 1);
@@ -165,7 +214,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('置顶/取消置顶'));
+    expect(find.text('置顶'), findsNothing);
+    await tester.tap(find.text('取消置顶'));
     await tester.pumpAndSettle();
 
     // The server state decides the target: pinned -> unpin, reported as such.
@@ -193,11 +243,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('置顶/取消置顶'));
-    await tester.pumpAndSettle();
-
     expect(api.togglePinnedCalls, 0);
-    expect(find.textContaining('无法获取置顶状态，请重试'), findsOneWidget);
+    expect(find.text('置顶'), findsNothing);
+    expect(find.text('取消置顶'), findsNothing);
   });
 
   testWidgets('a failed pin action surfaces the error', (tester) async {
@@ -206,6 +254,7 @@ void main() {
     final message = _message(id: r'$pin-fail', isMe: false);
     api.togglePinnedCalls = 0;
     api.toggleError = StateError('offline');
+    api.pinnedIds = const [];
 
     await tester.pumpWidget(
       _buildSubject(container: container, message: message),
@@ -215,13 +264,132 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('置顶/取消置顶'));
+    await tester.tap(find.text('置顶'));
     await tester.pumpAndSettle();
 
     expect(api.togglePinnedCalls, 1);
     // Non-timeout failures go through the shared actionFailureMessage
     // wording.
     expect(find.textContaining('操作失败:'), findsOneWidget);
+  });
+
+  testWidgets('pin completion does not use a disposed message ref', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$pin-after-dispose', isMe: false);
+    api.toggleError = null;
+    api.toggleResult = true;
+    api.pinnedIds = const [];
+    api.pendingToggle = Completer<bool>();
+    addTearDown(() => api.pendingToggle = null);
+    var showMessage = true;
+    late StateSetter updateHost;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                updateHost = setState;
+                if (!showMessage) return const SizedBox.shrink();
+                return MessageGroupWidget(
+                  group: MessageGroup(
+                    senderId: message.senderId,
+                    senderName: message.senderName,
+                    isMe: false,
+                    messages: [message],
+                  ),
+                  roomId: _roomId,
+                  messageIndex: {message.id: message},
+                  showAvatar: false,
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.longPress(
+      find.byKey(const ValueKey(r'text-bubble:$pin-after-dispose')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('置顶'));
+    await tester.pump();
+
+    updateHost(() => showMessage = false);
+    await tester.pump();
+    api.pendingToggle!.complete(true);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('操作失败:'), findsNothing);
+    expect(find.text('消息已置顶'), findsOneWidget);
+  });
+
+  testWidgets('long-pressing a sender avatar requests a mention', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final message = _message(id: r'$avatar-mention', isMe: false);
+    String? mentionedUserId;
+
+    await tester.pumpWidget(
+      _buildSubject(
+        container: container,
+        message: message,
+        showAvatar: true,
+        onMentionRequested: (userId) => mentionedUserId = userId,
+      ),
+    );
+
+    await tester.longPress(find.byKey(const ValueKey('message-sender-avatar')));
+
+    expect(mentionedUserId, '@alice:example.org');
+  });
+
+  testWidgets('tapping a reply preview requests its original message', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final original = _message(id: r'$original', isMe: false);
+    final reply = _message(
+      id: r'$reply-preview',
+      isMe: false,
+      inReplyTo: original.id,
+    );
+    String? targetMessageId;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageGroupWidget(
+              group: MessageGroup(
+                senderId: reply.senderId,
+                senderName: reply.senderName,
+                isMe: false,
+                messages: [reply],
+              ),
+              roomId: _roomId,
+              messageIndex: {original.id: original, reply.id: reply},
+              showAvatar: false,
+              onMessageJumpRequested: (messageId) =>
+                  targetMessageId = messageId,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const ValueKey(r'reply-preview:$original')));
+
+    expect(targetMessageId, original.id);
   });
 
   testWidgets('left swipe past threshold starts a reply to another user', (

@@ -138,6 +138,49 @@ void main() {
     expect(find.text('Blocked message'), findsNothing);
   });
 
+  testWidgets('tapping a pinned row returns its event id to the chat', (
+    tester,
+  ) async {
+    api.reset([
+      () async => [
+        _message(r'$jump-target', '@alice:example.org', 'Jump target'),
+      ],
+    ]);
+    String? selectedMessageId;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        ],
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  selectedMessageId = await Navigator.of(context).push<String>(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          const PinnedMessagesPage(roomId: '!room:example.org'),
+                    ),
+                  );
+                },
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Jump target'));
+    await tester.pumpAndSettle();
+
+    expect(selectedMessageId, r'$jump-target');
+    expect(find.byType(PinnedMessagesPage), findsNothing);
+  });
+
   testWidgets('ignored senders keep their pinned row with hidden content', (
     tester,
   ) async {
