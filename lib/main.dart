@@ -24,19 +24,40 @@ Future<void> main() async {
   await RustLib.init();
   _installDartErrorLogging();
 
+  String? dataDir;
+  try {
+    dataDir = (await getApplicationSupportDirectory()).path;
+    rust.initializeLogStore(dataDir: dataDir);
+    rust.logAppMessage(
+      level: 'info',
+      tag: 'startup',
+      message: 'Persistent log store initialized before session discovery',
+    );
+  } catch (e) {
+    _logDartError('startup', 'Persistent log initialization failed: $e');
+  }
+
   var hasSessions = false;
   try {
     await migrateLegacySession();
     try {
-      final dataDir = (await getApplicationSupportDirectory()).path;
-      await completePendingSessionRemovals(dataDir: dataDir);
+      final cleanupDataDir =
+          dataDir ?? (await getApplicationSupportDirectory()).path;
+      await completePendingSessionRemovals(dataDir: cleanupDataDir);
     } catch (e) {
       _logDartError('startup', 'Pending account cleanup failed: $e');
     }
-    hasSessions = (await loadAllSessions()).isNotEmpty;
+    final sessions = await loadAllSessions();
+    hasSessions = sessions.isNotEmpty;
+    rust.logAppMessage(
+      level: 'info',
+      tag: 'startup',
+      message: 'Session discovery found ${sessions.length} usable session(s)',
+    );
   } catch (e) {
     _logDartError('startup', 'Bootstrap check failed: $e');
   }
+  final credentialStoreFailure = startupSessionCredentialStoreFailure;
 
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -58,6 +79,10 @@ Future<void> main() async {
       overrides: [
         if (!hasSessions)
           sessionReadyProvider.overrideWith(() => MutableState(true)),
+        if (credentialStoreFailure != null)
+          sessionCredentialStoreFailureProvider.overrideWith(
+            () => MutableState(credentialStoreFailure),
+          ),
       ],
       child: _AppRoot(hasSessions: hasSessions),
     ),
@@ -100,6 +125,7 @@ class _AppRoot extends ConsumerStatefulWidget {
 
 class _AppRootState extends ConsumerState<_AppRoot> {
   final _navigatorKey = GlobalKey<NavigatorState>();
+  bool _credentialCompatibilityDialogShown = false;
 
   /// True only while the startup session-restore is in flight. Keeps the main
   /// app on screen during restore so the login page doesn't flash, then drops
@@ -113,9 +139,48 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       _restoring = true;
       _restoreSessionsInBackground();
     }
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _checkForUpdatesAtStartup(),
+    WidgetsBinding.instance.addPostFrameCallback((_) => _runStartupPrompts());
+  }
+
+  Future<void> _runStartupPrompts() async {
+    await _offerCredentialCompatibilityMode();
+    await _checkForUpdatesAtStartup();
+  }
+
+  Future<void> _offerCredentialCompatibilityMode() async {
+    if (_credentialCompatibilityDialogShown || !mounted) return;
+    final failure = ref.read(sessionCredentialStoreFailureProvider);
+    final dialogContext = _navigatorKey.currentContext;
+    if (failure == null || dialogContext == null) return;
+    _credentialCompatibilityDialogShown = true;
+
+    final enabled = await showSessionCredentialCompatibilityDialog(
+      dialogContext,
+      loginAlreadyCompleted: false,
     );
+    if (!mounted || !enabled) return;
+
+    try {
+      await enableSessionCredentialCompatibilityModeAfterFailure();
+      ref.read(sessionCredentialStoreFailureProvider.notifier).value = null;
+      ref.read(sessionsProvider.notifier).value = await loadAllSessions();
+      if (!mounted) return;
+      final messageContext = _navigatorKey.currentContext;
+      if (messageContext != null && messageContext.mounted) {
+        ScaffoldMessenger.maybeOf(
+          messageContext,
+        )?.showSnackBar(const SnackBar(content: Text('兼容模式已启用')));
+      }
+    } catch (error) {
+      _credentialCompatibilityDialogShown = false;
+      if (!mounted) return;
+      final messageContext = _navigatorKey.currentContext;
+      if (messageContext != null && messageContext.mounted) {
+        ScaffoldMessenger.maybeOf(
+          messageContext,
+        )?.showSnackBar(SnackBar(content: Text('启用兼容模式失败：$error')));
+      }
+    }
   }
 
   Future<void> _checkForUpdatesAtStartup() async {

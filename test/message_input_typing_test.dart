@@ -17,6 +17,7 @@ class _TypingFakeRustApi implements RustLibApi {
 
   @override
   Future<void> crateApiMatrixSendTypingNotice({
+    required String accountUserId,
     required String roomId,
     required bool typing,
   }) {

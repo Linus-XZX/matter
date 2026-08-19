@@ -119,6 +119,12 @@ fn init_log_store(data_dir: &str) {
     }
 }
 
+/// Initialize persisted logging before startup session discovery begins.
+#[frb(sync)]
+pub fn initialize_log_store(data_dir: String) {
+    init_log_store(&data_dir);
+}
+
 /// Format epoch milliseconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC) without pulling
 /// in a date library.
 fn format_utc(millis: i64) -> String {
@@ -3880,6 +3886,20 @@ fn friendly_auth_error(raw: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
+#[cfg(test)]
+mod auth_error_tests {
+    use super::friendly_auth_error;
+
+    #[test]
+    fn password_login_errors_do_not_expose_server_response_text() {
+        let raw = "[403 / M_FORBIDDEN] password was secret-value";
+        let safe = friendly_auth_error(raw, "登录失败，请稍后重试");
+
+        assert_eq!(safe, "认证失败，请检查账号、密码或 Token");
+        assert!(!safe.contains("secret-value"));
+    }
+}
+
 // ── Auth functions ───────────────────────────────────────────────────
 
 /// Create a Matrix client for the given homeserver URL.
@@ -4110,23 +4130,47 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
         )
     })?;
 
-    match client
+    let started = std::time::Instant::now();
+    let login_result = client
         .matrix_auth()
         .login_username(&username, &password)
         .request_refresh_token()
         .initial_device_display_name("Matter")
-        .await
-    {
+        .await;
+    match login_result {
         Ok(response) => {
-            // Auto-finalize: migrate pending client to per-user store
-            drop(client);
-            let finalized = finalize_pending()
-                .await
-                .map_err(|e| api_err("auth", format!("Finalization failed: {e}")))?;
+            let request_elapsed_ms = started.elapsed().as_millis();
             app_log(
                 "info",
                 "auth",
-                format!("Account finalized after password login: {}", finalized),
+                format!(
+                    "Password login response accepted for {} after {} ms; \
+                     device={}, starting local finalization",
+                    response.user_id, request_elapsed_ms, response.device_id,
+                ),
+            );
+            // Auto-finalize: migrate pending client to per-user store
+            drop(client);
+            let finalization_started = std::time::Instant::now();
+            let finalized = finalize_pending().await.map_err(|e| {
+                api_err(
+                    "auth",
+                    format!(
+                        "Password login local finalization failed after {} ms: {e}",
+                        finalization_started.elapsed().as_millis(),
+                    ),
+                )
+            })?;
+            app_log(
+                "info",
+                "auth",
+                format!(
+                    "Account finalized after password login: {} \
+                     (request={} ms, finalization={} ms)",
+                    finalized,
+                    request_elapsed_ms,
+                    finalization_started.elapsed().as_millis(),
+                ),
             );
             info!("Account finalized after password login: {}", finalized);
             Ok(AuthResult {
@@ -4141,17 +4185,30 @@ pub async fn login_with_password(username: String, password: String) -> Result<A
                 flows: None,
             })
         }
-        Err(e) => Ok(AuthResult {
-            success: false,
-            user_id: None,
-            device_id: None,
-            access_token: None,
-            refresh_token: None,
-            error: Some(friendly_auth_error(&format!("{e}"), "登录失败，请稍后重试")),
-            needs_uiaa: false,
-            session: None,
-            flows: None,
-        }),
+        Err(e) => {
+            let raw_error = format!("{e}");
+            let friendly_error = friendly_auth_error(&raw_error, "登录失败，请稍后重试");
+            app_log(
+                "error",
+                "auth",
+                format!(
+                    "Password login request or local SDK activation failed after {} ms: {}",
+                    started.elapsed().as_millis(),
+                    friendly_error,
+                ),
+            );
+            Ok(AuthResult {
+                success: false,
+                user_id: None,
+                device_id: None,
+                access_token: None,
+                refresh_token: None,
+                error: Some(friendly_error),
+                needs_uiaa: false,
+                session: None,
+                flows: None,
+            })
+        }
     }
 }
 
@@ -4422,6 +4479,9 @@ pub struct AccountRemovalResult {
     /// The account is already removed when this is set; only stale local SDK
     /// files may remain and can be cleaned on a later app start.
     pub cleanup_error: Option<String>,
+    /// Local removal completed, but the homeserver did not confirm logout.
+    /// The server-side device session may still be valid.
+    pub remote_logout_pending: bool,
 }
 
 #[frb]
@@ -4447,6 +4507,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
+    let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bound the remote logout: the server may be unreachable and the SDK
         // has no HTTP timeout, which would otherwise freeze account removal
@@ -4461,6 +4522,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
+                remote_logout_pending = true;
                 // The token may still be valid on the server: remember it so
                 // the next login of this account can retry the remote logout
                 // (see finalize_pending) instead of leaving a ghost session.
@@ -4481,6 +4543,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
                 warn!("Remote logout failed for {}: {e}", user_id);
             }
             Err(_) => {
+                remote_logout_pending = true;
                 if let Some(session) = client.matrix_auth().session() {
                     PENDING_REMOTE_LOGOUTS.write().await.insert(
                         user_id.clone(),
@@ -4542,6 +4605,7 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
 
     Ok(AccountRemovalResult {
         cleanup_error: store_delete_result.err(),
+        remote_logout_pending,
     })
 }
 
@@ -4576,6 +4640,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
     };
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
+    let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bounded remote logout: see logout() — an unreachable server must
         // not freeze account removal, which runs under the write lock.
@@ -4587,6 +4652,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
+                remote_logout_pending = true;
                 // The token may still be valid on the server: remember it so
                 // the next login of this account can retry the remote logout
                 // (see finalize_pending) instead of leaving a ghost session.
@@ -4607,6 +4673,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
                 warn!("Remote logout failed while removing {}: {e}", user_id);
             }
             Err(_) => {
+                remote_logout_pending = true;
                 if let Some(session) = client.matrix_auth().session() {
                     PENDING_REMOTE_LOGOUTS.write().await.insert(
                         user_id.clone(),
@@ -4654,6 +4721,7 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
 
     Ok(AccountRemovalResult {
         cleanup_error: store_delete_result.err(),
+        remote_logout_pending,
     })
 }
 
@@ -6872,7 +6940,7 @@ fn sanitized_formatted_body(
     }
     let html = matrix_sdk::ruma::html::sanitize_html(
         &formatted.body,
-        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
         matrix_sdk::ruma::html::RemoveReplyFallback::No,
     );
     (!html.trim().is_empty()).then_some(html)
@@ -6890,7 +6958,7 @@ fn sanitized_reply_formatted_body(
     }
     let html = matrix_sdk::ruma::html::sanitize_html(
         &formatted.body,
-        matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+        matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
         matrix_sdk::ruma::html::RemoveReplyFallback::Yes,
     );
     (!html.trim().is_empty()).then_some(html)
@@ -6980,6 +7048,97 @@ mod formatted_message_tests {
             .contains("<strong>"));
         assert!(!json["formatted_body"].as_str().unwrap().contains("<script"));
         assert_eq!(json["m.mentions"]["user_ids"][0], "@alice:example.org");
+    }
+
+    #[test]
+    fn matrix_links_survive_outgoing_and_incoming_sanitization() {
+        let html = r#"<a href="matrix:u/alice:example.org">Alice</a>"#;
+        let content = build_text_content(FormattedMessageInput {
+            body: "Alice".to_string(),
+            formatted_body: Some(html.to_string()),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json["formatted_body"]
+            .as_str()
+            .unwrap()
+            .contains(r#"href="matrix:u/alice:example.org""#));
+
+        let formatted = FormattedBody::html(html.to_string());
+        let (_, incoming_html, _, _) = text_message_parts("Alice", Some(&formatted), None, false);
+        assert!(incoming_html
+            .as_deref()
+            .unwrap()
+            .contains(r#"href="matrix:u/alice:example.org""#));
+    }
+
+    #[test]
+    fn spoilers_survive_outgoing_sanitization() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "[Spoiler for plot twist]".to_string(),
+            formatted_body: Some(
+                r#"<span data-mx-spoiler="plot twist" onclick="bad()">Alice wins</span>"#
+                    .to_string(),
+            ),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+        let formatted = json["formatted_body"].as_str().unwrap();
+
+        assert!(formatted.contains(r#"data-mx-spoiler="plot twist""#));
+        assert!(formatted.contains("Alice wins"));
+        assert!(!formatted.contains("onclick"));
+    }
+
+    #[test]
+    fn formatting_without_visible_content_falls_back_to_plain_text() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "image".to_string(),
+            formatted_body: Some(r#"<p><img src="https://example.org/cat.png"></p>"#.to_string()),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+
+        assert_eq!(json["body"], "image");
+        assert!(json.get("formatted_body").is_none(), "{json}");
+    }
+
+    #[test]
+    fn mxc_images_remain_visible_formatted_content() {
+        let content = build_text_content(FormattedMessageInput {
+            body: "a cat".to_string(),
+            formatted_body: Some(
+                r#"<p><img src="mxc://example.org/cat" alt="a cat"></p>"#.to_string(),
+            ),
+            mentioned_user_ids: vec![],
+            mentions_room: false,
+        })
+        .unwrap();
+        let json = serde_json::to_value(&content).unwrap();
+
+        assert_eq!(
+            json["formatted_body"],
+            r#"<p><img alt="a cat" src="mxc://example.org/cat"></p>"#
+        );
+    }
+
+    #[test]
+    fn matrix_links_survive_reply_fallback_removal() {
+        let formatted = FormattedBody::html(
+            r#"<mx-reply><blockquote>Earlier</blockquote></mx-reply><a href="matrix:u/alice:example.org">Alice</a>"#
+                .to_string(),
+        );
+        let (_, html, _, _) = text_message_parts("Alice", Some(&formatted), None, true);
+
+        let html = html.unwrap();
+        assert!(!html.contains("mx-reply"));
+        assert!(html.contains(r#"href="matrix:u/alice:example.org""#));
     }
 
     #[test]
@@ -7172,6 +7331,34 @@ fn build_mentions(
     Ok(mentions)
 }
 
+fn sanitized_html_has_visible_content(html: &str) -> bool {
+    fn node_has_visible_content(node: matrix_sdk::ruma::html::NodeRef) -> bool {
+        match node.data() {
+            matrix_sdk::ruma::html::NodeData::Text(text) if !text.borrow().trim().is_empty() => {
+                return true;
+            }
+            matrix_sdk::ruma::html::NodeData::Element(element) => {
+                let name = element.name.local.as_ref();
+                let attrs = element.attrs.borrow();
+                if name == "hr"
+                    || (name == "img" && attrs.iter().any(|attr| attr.name.local.as_ref() == "src"))
+                    || attrs.iter().any(|attr| {
+                        attr.name.local.as_ref() == "data-mx-maths" && !attr.value.trim().is_empty()
+                    })
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        node.children().any(node_has_visible_content)
+    }
+
+    matrix_sdk::ruma::html::Html::parse(html)
+        .children()
+        .any(node_has_visible_content)
+}
+
 fn build_text_content(
     message: FormattedMessageInput,
 ) -> Result<matrix_sdk::ruma::events::room::message::RoomMessageEventContent, String> {
@@ -7181,11 +7368,11 @@ fn build_text_content(
         .map(|html| {
             matrix_sdk::ruma::html::sanitize_html(
                 &html,
-                matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+                matrix_sdk::ruma::html::HtmlSanitizerMode::Compat,
                 matrix_sdk::ruma::html::RemoveReplyFallback::No,
             )
         })
-        .filter(|html| !html.trim().is_empty());
+        .filter(|html| sanitized_html_has_visible_content(html));
     let mut content = if let Some(formatted_body) = formatted_body {
         matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_html(
             message.body,
@@ -7202,6 +7389,7 @@ fn build_text_content(
 
 #[frb]
 pub async fn send_message(
+    account_user_id: String,
     room_id: String,
     message: FormattedMessageInput,
 ) -> Result<String, String> {
@@ -7210,6 +7398,7 @@ pub async fn send_message(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let content = build_text_content(message)?;
@@ -10866,6 +11055,7 @@ pub async fn get_contacts() -> Result<Vec<Contact>, String> {
 /// Send a reply to a specific message in a room.
 #[frb]
 pub async fn send_reply(
+    account_user_id: String,
     room_id: String,
     message: FormattedMessageInput,
     reply_to_event_id: String,
@@ -10876,6 +11066,7 @@ pub async fn send_reply(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     // Parse the event ID we're replying to
@@ -10924,6 +11115,7 @@ pub async fn send_reply(
 /// client-side by `get_messages` (see `Relation::Replacement` parsing).
 #[frb]
 pub async fn edit_message(
+    account_user_id: String,
     room_id: String,
     event_id: String,
     message: FormattedMessageInput,
@@ -10935,6 +11127,7 @@ pub async fn edit_message(
     let client = get_client()
         .await
         .ok_or_else(|| api_err("rooms", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     let parsed_event_id = matrix_sdk::ruma::EventId::parse(&event_id)
@@ -11042,10 +11235,15 @@ pub async fn redact_message(
 
 /// Send a typing notice to a room.
 #[frb]
-pub async fn send_typing_notice(room_id: String, typing: bool) -> Result<(), String> {
+pub async fn send_typing_notice(
+    account_user_id: String,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
     let client = get_client()
         .await
         .ok_or_else(|| api_err("typing", "No client created.".to_string()))?;
+    ensure_account_matches(&client, &account_user_id)?;
     let room = get_room_by_id(&client, &room_id)?;
 
     room.typing_notice(typing)

@@ -3,10 +3,42 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter_math_fork/flutter_math.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:re_highlight/languages/bash.dart';
+import 'package:re_highlight/languages/c.dart';
+import 'package:re_highlight/languages/cpp.dart';
+import 'package:re_highlight/languages/css.dart';
+import 'package:re_highlight/languages/dart.dart';
+import 'package:re_highlight/languages/diff.dart';
+import 'package:re_highlight/languages/go.dart';
+import 'package:re_highlight/languages/java.dart';
+import 'package:re_highlight/languages/javascript.dart';
+import 'package:re_highlight/languages/json.dart';
+import 'package:re_highlight/languages/kotlin.dart';
+import 'package:re_highlight/languages/lua.dart';
+import 'package:re_highlight/languages/markdown.dart';
+import 'package:re_highlight/languages/php.dart';
+import 'package:re_highlight/languages/python.dart';
+import 'package:re_highlight/languages/ruby.dart';
+import 'package:re_highlight/languages/rust.dart';
+import 'package:re_highlight/languages/shell.dart';
+import 'package:re_highlight/languages/sql.dart';
+import 'package:re_highlight/languages/swift.dart';
+import 'package:re_highlight/languages/typescript.dart';
+import 'package:re_highlight/languages/xml.dart';
+import 'package:re_highlight/languages/yaml.dart';
+import 'package:re_highlight/re_highlight.dart';
+import 'package:re_highlight/styles/atom-one-dark.dart';
 
+import '../../providers/chat_provider.dart';
+import '../../widgets/app_avatar.dart';
 import 'matrix_html_node.dart';
 import 'matrix_html_parser.dart';
 import 'matrix_link_router.dart';
+
+typedef MatrixHtmlImageResolver =
+    Future<String?> Function(WidgetRef ref, String src);
 
 class MatrixHtmlMessage extends StatefulWidget {
   final String html;
@@ -17,6 +49,7 @@ class MatrixHtmlMessage extends StatefulWidget {
   final ValueChanged<String>? onMentionTap;
   final Widget? trailingMetadata;
   final double minWidth;
+  final MatrixHtmlImageResolver? imageResolver;
 
   const MatrixHtmlMessage({
     super.key,
@@ -28,6 +61,7 @@ class MatrixHtmlMessage extends StatefulWidget {
     this.onMentionTap,
     this.trailingMetadata,
     this.minWidth = 0,
+    this.imageResolver,
   });
 
   @override
@@ -37,6 +71,7 @@ class MatrixHtmlMessage extends StatefulWidget {
 class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
   static const _parser = MatrixHtmlParser();
   late List<MatrixHtmlNode> _nodes;
+  final Set<MatrixElementNode> _revealedSpoilers = {};
   List<TapGestureRecognizer> _recognizers = [];
 
   @override
@@ -50,6 +85,7 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.html != widget.html) {
       _nodes = _parser.parse(widget.html);
+      _revealedSpoilers.clear();
     }
   }
 
@@ -73,6 +109,11 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
       mentionDisplayNames: widget.mentionDisplayNames,
       onMentionTap: widget.onMentionTap,
       gestureRecognizers: recognizers,
+      imageResolver: widget.imageResolver,
+      revealedSpoilers: _revealedSpoilers,
+      revealSpoiler: (spoiler) {
+        if (_revealedSpoilers.add(spoiler)) setState(() {});
+      },
     );
     _recognizers = recognizers;
     if (previousRecognizers.isNotEmpty) {
@@ -132,6 +173,10 @@ class _MatrixHtmlMessageState extends State<MatrixHtmlMessage> {
 }
 
 class _MatrixNodeRenderer {
+  static const _maxRichTableRows = 200;
+  static const _maxRichTableColumns = 32;
+  static const _maxRichTableGridCells = 1024;
+
   final BuildContext context;
   final TextStyle baseStyle;
   final Color accentColor;
@@ -139,6 +184,13 @@ class _MatrixNodeRenderer {
   final Map<String, String> mentionDisplayNames;
   final ValueChanged<String>? onMentionTap;
   final List<TapGestureRecognizer> gestureRecognizers;
+  final MatrixHtmlImageResolver? imageResolver;
+  final Set<MatrixElementNode> revealedSpoilers;
+  final ValueChanged<MatrixElementNode> revealSpoiler;
+
+  /// Alignment inherited from a container (e.g. a table cell's `align`),
+  /// applied to rich text that doesn't carry its own `align`.
+  final TextAlign? textAlign;
 
   const _MatrixNodeRenderer({
     required this.context,
@@ -148,6 +200,10 @@ class _MatrixNodeRenderer {
     required this.mentionDisplayNames,
     required this.onMentionTap,
     required this.gestureRecognizers,
+    required this.imageResolver,
+    required this.revealedSpoilers,
+    required this.revealSpoiler,
+    this.textAlign,
   });
 
   List<Widget> renderBlocks(List<MatrixHtmlNode> nodes) {
@@ -212,6 +268,10 @@ class _MatrixNodeRenderer {
       'li',
       'pre',
       'hr',
+      'img',
+      'figure',
+      'div',
+      'table',
     }.contains(tag);
   }
 
@@ -287,6 +347,12 @@ class _MatrixNodeRenderer {
     final element = node as MatrixElementNode;
     switch (element.tag) {
       case 'p':
+        final loneImage = _loneImageChild(element);
+        if (loneImage != null) return _renderBlock(loneImage);
+        final paragraphAlign = _textAlignOf(element);
+        if (paragraphAlign != null) {
+          return _alignedText(element.children, baseStyle, paragraphAlign);
+        }
         return _richText(element.children, baseStyle);
       case 'h1':
       case 'h2':
@@ -295,14 +361,16 @@ class _MatrixNodeRenderer {
       case 'h5':
       case 'h6':
         final level = int.parse(element.tag.substring(1));
-        return _richText(
-          element.children,
-          baseStyle.copyWith(
-            fontSize: (22 - level * 1.5).clamp(15, 21).toDouble(),
-            fontWeight: FontWeight.w800,
-            height: 1.25,
-          ),
+        final headerStyle = baseStyle.copyWith(
+          fontSize: (22 - level * 1.5).clamp(15, 21).toDouble(),
+          fontWeight: FontWeight.w800,
+          height: 1.25,
         );
+        final headerAlign = _textAlignOf(element);
+        if (headerAlign != null) {
+          return _alignedText(element.children, headerStyle, headerAlign);
+        }
+        return _richText(element.children, headerStyle);
       case 'blockquote':
         return Container(
           padding: const EdgeInsets.only(left: 10, top: 3, bottom: 3),
@@ -318,31 +386,433 @@ class _MatrixNodeRenderer {
       case 'ol':
         return _renderList(element, ordered: element.tag == 'ol');
       case 'pre':
-        return Container(
-          constraints: const BoxConstraints(maxWidth: 520),
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.18),
-            borderRadius: BorderRadius.circular(8),
+        final codeStyle = baseStyle.copyWith(
+          fontFamily: 'monospace',
+          fontSize: baseStyle.fontSize == null ? 13 : baseStyle.fontSize! - 1,
+        );
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth.isFinite
+                ? constraints.maxWidth
+                : 520.0;
+            return Container(
+              width: width,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Text.rich(
+                  _codeSpan(element, codeStyle),
+                  softWrap: false,
+                ),
+              ),
+            );
+          },
+        );
+      case 'hr':
+        // The app-wide DividerTheme carries indent: 72 for settings-style
+        // list separators; a markdown rule must not inherit it.
+        return Divider(
+          color: baseStyle.color?.withValues(alpha: 0.3),
+          thickness: 1,
+          indent: 0,
+          endIndent: 0,
+        );
+      case 'img':
+        return _imageBlock(
+          element.attributes['src'],
+          alt: element.attributes['alt'],
+          caption: element.attributes['title'] == null
+              ? null
+              : Text(element.attributes['title']!, style: _captionStyle()),
+        );
+      case 'figure':
+        return _figureBlock(element);
+      case 'div':
+        final maths = element.attributes['data-mx-maths'];
+        if (maths != null) {
+          return _mathBlock(maths.isNotEmpty ? maths : element.textContent);
+        }
+        final divAlign = _textAlignOf(element);
+        if (divAlign != null) {
+          return _alignedText(element.children, baseStyle, divAlign);
+        }
+        return _richText(element.children, baseStyle);
+      case 'table':
+        return _renderTable(element);
+      default:
+        return _richText([element], baseStyle);
+    }
+  }
+
+  Widget? _renderTable(MatrixElementNode table) {
+    final rows = <(bool, List<MatrixElementNode>)>[];
+    final captions = <MatrixElementNode>[];
+    void collectRows(MatrixHtmlNode node, bool inHeader) {
+      if (node is! MatrixElementNode) return;
+      if (node.tag == 'caption') {
+        captions.add(node);
+        return;
+      }
+      if (node.tag == 'tr') {
+        final cells = node.children
+            .whereType<MatrixElementNode>()
+            .where((cell) => cell.tag == 'th' || cell.tag == 'td')
+            .toList();
+        if (cells.isNotEmpty) {
+          rows.add((inHeader, cells));
+        }
+        return;
+      }
+      final header = inHeader || node.tag == 'thead';
+      for (final child in node.children) {
+        collectRows(child, header);
+      }
+    }
+
+    for (final child in table.children) {
+      collectRows(child, false);
+    }
+    if (rows.isEmpty && captions.isEmpty) return null;
+
+    // Remote HTML is not guaranteed to be regular (ragged rows, colspan):
+    // pad rows to a uniform column count so Table never sees irregular
+    // row lengths.
+    final columnCount = rows.fold<int>(
+      1,
+      (max, row) => math.max(max, row.$2.length),
+    );
+
+    final borderColor = (baseStyle.color ?? Colors.white).withValues(
+      alpha: 0.25,
+    );
+    final exceedsRichTableBudget =
+        rows.length > _maxRichTableRows ||
+        columnCount > _maxRichTableColumns ||
+        rows.length * columnCount > _maxRichTableGridCells;
+    final grid = rows.isEmpty
+        ? null
+        : exceedsRichTableBudget
+        ? Container(
+            constraints: const BoxConstraints(maxWidth: 520),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              border: Border.all(color: borderColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                rows
+                    .map(
+                      (row) => row.$2
+                          .map((cell) => cell.textContent.trim())
+                          .join(' | '),
+                    )
+                    .join(' / '),
+                style: baseStyle,
+                maxLines: 1,
+              ),
+            ),
+          )
+        : Container(
+            constraints: const BoxConstraints(maxWidth: 520),
+            decoration: BoxDecoration(
+              border: Border.all(color: borderColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Table(
+                  defaultColumnWidth: const IntrinsicColumnWidth(),
+                  border: TableBorder.symmetric(
+                    inside: BorderSide(color: borderColor),
+                  ),
+                  children: [
+                    for (final (isHeader, cells) in rows)
+                      TableRow(
+                        decoration: isHeader
+                            ? BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.14),
+                              )
+                            : null,
+                        children: [
+                          for (final cell in cells)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              child: _renderTableCell(
+                                cell,
+                                isHeader || cell.tag == 'th',
+                              ),
+                            ),
+                          for (var i = cells.length; i < columnCount; i++)
+                            const SizedBox.shrink(),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+    if (grid == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final caption in captions)
+            _richText(
+              caption.children,
+              baseStyle.copyWith(fontWeight: FontWeight.w700),
+            ),
+        ],
+      );
+    }
+    // The bordered container must hug the table's intrinsic width; inside a
+    // stretched bubble column it would otherwise span the full maxWidth and
+    // detach the frame from the content.
+    final fittedGrid = Align(
+      alignment: Alignment.centerLeft,
+      widthFactor: 1,
+      child: grid,
+    );
+    if (captions.isEmpty) return fittedGrid;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final caption in captions)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: _richText(
+              caption.children,
+              baseStyle.copyWith(fontWeight: FontWeight.w700),
+            ),
           ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Text(
-              element.textContent,
-              style: baseStyle.copyWith(
-                fontFamily: 'monospace',
-                fontSize: baseStyle.fontSize == null
-                    ? 13
-                    : baseStyle.fontSize! - 1,
+        fittedGrid,
+      ],
+    );
+  }
+
+  Widget _renderTableCell(MatrixElementNode cell, bool isHeader) {
+    final renderer = _MatrixNodeRenderer(
+      context: context,
+      baseStyle: isHeader
+          ? baseStyle.copyWith(fontWeight: FontWeight.w800)
+          : baseStyle,
+      accentColor: accentColor,
+      onLinkTap: onLinkTap,
+      mentionDisplayNames: mentionDisplayNames,
+      onMentionTap: onMentionTap,
+      gestureRecognizers: gestureRecognizers,
+      imageResolver: imageResolver,
+      revealedSpoilers: revealedSpoilers,
+      revealSpoiler: revealSpoiler,
+      textAlign: _textAlignOf(cell),
+    );
+    final blocks = renderer.renderBlocks(cell.children);
+    if (blocks.isEmpty) return const SizedBox.shrink();
+    if (blocks.length == 1) return blocks.single;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: blocks,
+    );
+  }
+
+  /// The single meaningful child of [element] when it is just an image
+  /// (markdown `![alt](src)` produces `<p><img></p>`). Such paragraphs
+  /// render as block images instead of inline text.
+  MatrixElementNode? _loneImageChild(MatrixElementNode element) {
+    final meaningful = element.children
+        .where((node) => node is! MatrixTextNode || node.text.trim().isNotEmpty)
+        .toList();
+    if (meaningful.length != 1) return null;
+    final only = meaningful.single;
+    if (only is MatrixElementNode && only.tag == 'img') return only;
+    return null;
+  }
+
+  TextStyle _captionStyle() => baseStyle.copyWith(
+    fontSize: (baseStyle.fontSize ?? 15) - 1.5,
+    color: baseStyle.color?.withValues(alpha: 0.75),
+  );
+
+  Widget _imageBlock(String? src, {String? alt, Widget? caption}) {
+    if (src == null) {
+      if (alt == null || alt.isEmpty) return const SizedBox.shrink();
+      return Text(alt, style: baseStyle);
+    }
+    final image = LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : 320.0;
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: _MatrixHtmlImage(
+            src: src,
+            alt: alt,
+            width: width,
+            cacheWidth: (width * MediaQuery.devicePixelRatioOf(context))
+                .round(),
+            fallbackStyle: baseStyle,
+            resolver: imageResolver,
+          ),
+        );
+      },
+    );
+    if (caption == null) return image;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [image, const SizedBox(height: 4), caption],
+    );
+  }
+
+  Widget _figureBlock(MatrixElementNode figure) {
+    MatrixElementNode? img;
+    MatrixElementNode? captionNode;
+    for (final child in figure.children) {
+      if (child is! MatrixElementNode) continue;
+      if (child.tag == 'img') img ??= child;
+      if (child.tag == 'figcaption') captionNode ??= child;
+    }
+    final title = img?.attributes['title'];
+    final caption = captionNode != null
+        ? _richText(captionNode.children, _captionStyle())
+        : (title != null && title.isNotEmpty
+              ? Text(title, style: _captionStyle())
+              : null);
+    return _imageBlock(
+      img?.attributes['src'],
+      alt: img?.attributes['alt'],
+      caption: caption,
+    );
+  }
+
+  Widget _mathBlock(String tex) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : 520.0;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: width),
+            child: Center(
+              child: Math.tex(
+                tex,
+                mathStyle: MathStyle.display,
+                textStyle: _mathTextStyle(),
+                onErrorFallback: (_) => Text('\$\$$tex\$\$', style: baseStyle),
               ),
             ),
           ),
         );
-      case 'hr':
-        return Divider(color: baseStyle.color?.withValues(alpha: 0.3));
-      default:
-        return _richText([element], baseStyle);
+      },
+    );
+  }
+
+  Widget _inlineMath(String tex, TextStyle style) {
+    return Math.tex(
+      tex,
+      mathStyle: MathStyle.text,
+      textStyle: _mathTextStyle(),
+      onErrorFallback: (_) => Text('\$$tex\$', style: style),
+    );
+  }
+
+  // flutter_math_fork dereferences fontSize/color unconditionally, so make
+  // sure both are concrete before handing the style over.
+  TextStyle _mathTextStyle() {
+    var style = baseStyle;
+    if (style.inherit) {
+      style = DefaultTextStyle.of(context).style.merge(style);
     }
+    return style.copyWith(
+      fontSize: style.fontSize ?? 15,
+      color: style.color ?? Colors.black87,
+    );
+  }
+
+  TextSpan _codeSpan(MatrixElementNode pre, TextStyle style) {
+    return _highlightedCodeSpan(pre.textContent, _preLanguage(pre), style);
+  }
+
+  String? _preLanguage(MatrixElementNode pre) {
+    for (final child in pre.children) {
+      if (child is MatrixElementNode && child.tag == 'code') {
+        final className = child.attributes['class'];
+        if (className != null && className.startsWith('language-')) {
+          return className.substring('language-'.length);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Detects a task-list checkbox leading the item (direct child, or inside
+  /// the first paragraph) and returns the checked state plus the item's
+  /// content with the checkbox removed. Null for plain list items.
+  (bool, List<MatrixHtmlNode>)? _taskCheckboxItem(MatrixElementNode item) {
+    (bool, List<MatrixHtmlNode>)? textMarker(List<MatrixHtmlNode> source) {
+      if (source.isEmpty || source.first is! MatrixTextNode) return null;
+      final first = source.first as MatrixTextNode;
+      final match = RegExp(r'^\[([ xX])\](?=\s|$)').firstMatch(first.text);
+      if (match == null) return null;
+      final remaining = first.text.substring(match.end);
+      return (
+        match.group(1)!.toLowerCase() == 'x',
+        <MatrixHtmlNode>[
+          if (remaining.isNotEmpty) MatrixTextNode(remaining),
+          ...source.skip(1),
+        ],
+      );
+    }
+
+    bool? checked;
+    final children = List<MatrixHtmlNode>.of(item.children);
+    if (children.isEmpty) return null;
+    final first = children.first;
+    if (first is MatrixElementNode && first.tag == 'input') {
+      checked = first.attributes.containsKey('checked');
+      children.removeAt(0);
+    } else if (first is MatrixElementNode &&
+        first.tag == 'p' &&
+        first.children.isNotEmpty) {
+      final nested = first.children.first;
+      if (nested is MatrixElementNode && nested.tag == 'input') {
+        checked = nested.attributes.containsKey('checked');
+        children[0] = MatrixElementNode(
+          tag: 'p',
+          children: first.children.sublist(1),
+          attributes: first.attributes,
+        );
+      } else {
+        final task = textMarker(first.children);
+        if (task != null) {
+          children[0] = MatrixElementNode(
+            tag: 'p',
+            children: task.$2,
+            attributes: first.attributes,
+          );
+          return (task.$1, children);
+        }
+      }
+    } else if (first is MatrixTextNode) {
+      return textMarker(children);
+    }
+    if (checked == null) return null;
+    return (checked, children);
   }
 
   Widget _renderList(
@@ -362,49 +832,111 @@ class _MatrixNodeRenderer {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (final entry in items.indexed)
-          Padding(
-            padding: EdgeInsets.only(
-              top: 2,
-              bottom: trailingMetadata != null && entry.$1 == items.length - 1
-                  ? 0
-                  : 2,
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: 24,
-                  child: Text(
-                    ordered ? '${start + entry.$1}.' : '•',
-                    textAlign: TextAlign.right,
-                    style: baseStyle.copyWith(fontWeight: FontWeight.w700),
-                  ),
+          Builder(
+            builder: (context) {
+              final task = _taskCheckboxItem(entry.$2);
+              final content = task?.$2 ?? entry.$2.children;
+              return Padding(
+                padding: EdgeInsets.only(
+                  top: 2,
+                  bottom:
+                      trailingMetadata != null && entry.$1 == items.length - 1
+                      ? 0
+                      : 2,
                 ),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: trailingMetadata != null
-                        ? CrossAxisAlignment.stretch
-                        : CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children:
-                        trailingMetadata != null && entry.$1 == items.length - 1
-                        ? renderBlocksWithTrailing(
-                            entry.$2.children,
-                            trailingMetadata,
-                          )
-                        : renderBlocks(entry.$2.children),
-                  ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      child: task == null
+                          ? Text(
+                              ordered ? '${start + entry.$1}.' : '•',
+                              textAlign: TextAlign.right,
+                              style: baseStyle.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          : Align(
+                              alignment: Alignment.topRight,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 1),
+                                child: Icon(
+                                  task.$1
+                                      ? Icons.check_box_rounded
+                                      : Icons.check_box_outline_blank_rounded,
+                                  size: 16,
+                                  color: task.$1
+                                      ? accentColor
+                                      : baseStyle.color?.withValues(alpha: 0.6),
+                                ),
+                              ),
+                            ),
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: trailingMetadata != null
+                            ? CrossAxisAlignment.stretch
+                            : CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children:
+                            trailingMetadata != null &&
+                                entry.$1 == items.length - 1
+                            ? renderBlocksWithTrailing(
+                                content,
+                                trailingMetadata,
+                              )
+                            : renderBlocks(content),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              );
+            },
           ),
       ],
     );
   }
 
   Widget _richText(List<MatrixHtmlNode> nodes, TextStyle style) {
-    return Text.rich(_inlineBlock(nodes, style).span, softWrap: true);
+    return Text.rich(
+      _inlineBlock(nodes, style).span,
+      softWrap: true,
+      textAlign: textAlign,
+    );
+  }
+
+  /// The element's whitelisted `align` attribute as a [TextAlign].
+  TextAlign? _textAlignOf(MatrixElementNode element) {
+    return switch (element.attributes['align']) {
+      'left' => TextAlign.left,
+      'center' => TextAlign.center,
+      'right' => TextAlign.right,
+      'justify' => TextAlign.justify,
+      _ => null,
+    };
+  }
+
+  /// Aligned text needs the paragraph to span the full width, otherwise a
+  /// shrink-wrapped one-liner has no visible alignment. Inside unbounded
+  /// contexts (intrinsic table cells) the width expansion is skipped.
+  Widget _alignedText(
+    List<MatrixHtmlNode> nodes,
+    TextStyle style,
+    TextAlign align,
+  ) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final text = Text.rich(
+          _inlineBlock(nodes, style).span,
+          softWrap: true,
+          textAlign: align,
+        );
+        if (!constraints.maxWidth.isFinite) return text;
+        return SizedBox(width: constraints.maxWidth, child: text);
+      },
+    );
   }
 
   _InlineBlock? _inlineBlockForNode(MatrixHtmlNode node) {
@@ -416,6 +948,10 @@ class _MatrixNodeRenderer {
     final element = node as MatrixElementNode;
     switch (element.tag) {
       case 'p':
+        if (_loneImageChild(element) != null) return null;
+        // Aligned paragraphs need the block path: alignment only shows when
+        // the paragraph spans the full width.
+        if (_textAlignOf(element) != null) return null;
         return _inlineBlock(element.children, baseStyle);
       case 'h1':
       case 'h2':
@@ -423,6 +959,7 @@ class _MatrixNodeRenderer {
       case 'h4':
       case 'h5':
       case 'h6':
+        if (_textAlignOf(element) != null) return null;
         final level = int.parse(element.tag.substring(1));
         return _inlineBlock(
           element.children,
@@ -437,6 +974,9 @@ class _MatrixNodeRenderer {
       case 'ol':
       case 'pre':
       case 'hr':
+      case 'figure':
+      case 'div':
+      case 'table':
         return null;
       default:
         return _inlineBlock([element], baseStyle);
@@ -449,6 +989,10 @@ class _MatrixNodeRenderer {
     );
   }
 
+  // Some senders emit HTML source with blank-line runs between stripped
+  // structures; rendering them literally produces huge vertical gaps.
+  static final _blankLineRun = RegExp(r'[ \t]*\n[ \t\n]*');
+
   List<InlineSpan> _inlineSpans(
     List<MatrixHtmlNode> nodes,
     TextStyle inherited,
@@ -456,7 +1000,12 @@ class _MatrixNodeRenderer {
     final spans = <InlineSpan>[];
     for (final node in nodes) {
       if (node is MatrixTextNode) {
-        spans.add(TextSpan(text: node.text, style: inherited));
+        spans.add(
+          TextSpan(
+            text: node.text.replaceAll(_blankLineRun, '\n'),
+            style: inherited,
+          ),
+        );
         continue;
       }
       final element = node as MatrixElementNode;
@@ -472,6 +1021,73 @@ class _MatrixNodeRenderer {
           fontFamily: 'monospace',
           backgroundColor: Colors.black.withValues(alpha: 0.14),
         );
+      } else if (element.tag == 'span' &&
+          element.attributes.containsKey('data-mx-spoiler')) {
+        final reason = element.attributes['data-mx-spoiler']!.trim();
+        if (reason.isNotEmpty) {
+          final reasonColor = style.color;
+          spans.add(
+            TextSpan(
+              text: '$reason ',
+              style: style.copyWith(
+                color: reasonColor?.withValues(alpha: 0.72),
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          );
+        }
+        if (revealedSpoilers.contains(element)) {
+          spans.addAll(_inlineSpans(element.children, style));
+        } else {
+          final concealedColor =
+              style.color ?? Theme.of(context).colorScheme.onSurface;
+          final recognizer = TapGestureRecognizer()
+            ..onTap = () => revealSpoiler(element);
+          gestureRecognizers.add(recognizer);
+          spans.add(
+            TextSpan(
+              text: element.textContent,
+              semanticsLabel: reason.isEmpty ? 'Spoiler' : 'Spoiler: $reason',
+              style: style.copyWith(
+                color: concealedColor.withValues(alpha: 0),
+                backgroundColor: concealedColor.withValues(alpha: 0.28),
+                decoration: TextDecoration.none,
+                shadows: const [],
+              ),
+              recognizer: recognizer,
+            ),
+          );
+        }
+        continue;
+      } else if (element.tag == 'span' &&
+          element.attributes.containsKey('data-mx-maths')) {
+        final tex = element.attributes['data-mx-maths']!;
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _inlineMath(
+              tex.isNotEmpty ? tex : element.textContent,
+              style,
+            ),
+          ),
+        );
+        continue;
+      } else if (element.tag == 'img') {
+        final src = element.attributes['src'];
+        if (src != null) {
+          spans.add(
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: _MatrixHtmlImage(
+                src: src,
+                alt: element.attributes['alt'],
+                fallbackStyle: style,
+                resolver: imageResolver,
+              ),
+            ),
+          );
+        }
+        continue;
       } else if (element.tag == 'br') {
         spans.add(const TextSpan(text: '\n'));
         continue;
@@ -516,6 +1132,231 @@ class _MatrixNodeRenderer {
       spans.addAll(_inlineSpans(element.children, style));
     }
     return spans;
+  }
+}
+
+const _codeLanguageAliases = {
+  'js': 'javascript',
+  'jsx': 'javascript',
+  'mjs': 'javascript',
+  'ts': 'typescript',
+  'tsx': 'typescript',
+  'py': 'python',
+  'rb': 'ruby',
+  'sh': 'bash',
+  'zsh': 'bash',
+  'c++': 'cpp',
+  'kt': 'kotlin',
+  'rs': 'rust',
+  'golang': 'go',
+  'yml': 'yaml',
+  'html': 'xml',
+  'md': 'markdown',
+};
+
+final _highlightLanguages = <String, Mode>{
+  'bash': langBash,
+  'c': langC,
+  'cpp': langCpp,
+  'css': langCss,
+  'dart': langDart,
+  'diff': langDiff,
+  'go': langGo,
+  'java': langJava,
+  'javascript': langJavascript,
+  'json': langJson,
+  'kotlin': langKotlin,
+  'lua': langLua,
+  'markdown': langMarkdown,
+  'php': langPhp,
+  'python': langPython,
+  'ruby': langRuby,
+  'rust': langRust,
+  'shell': langShell,
+  'sql': langSql,
+  'swift': langSwift,
+  'typescript': langTypescript,
+  'xml': langXml,
+  'yaml': langYaml,
+};
+
+Highlight? _codeHighlighter;
+final _highlightCache = <String, TextSpan>{};
+
+/// Highlighted [code] as a span tree, or a plain span when the language is
+/// unknown or highlighting fails. The atom-one-dark token styles only carry
+/// colors, so each is merged over [base] to keep the monospace family and
+/// size; the root background is dropped (the block has its own backdrop).
+TextSpan _highlightedCodeSpan(String code, String? language, TextStyle base) {
+  if (language == null) return TextSpan(text: code, style: base);
+  final normalized =
+      _codeLanguageAliases[language.toLowerCase()] ?? language.toLowerCase();
+  if (!_highlightLanguages.containsKey(normalized)) {
+    return TextSpan(text: code, style: base);
+  }
+  final cacheKey = '$normalized\u0000$base\u0000$code';
+  final cached = _highlightCache[cacheKey];
+  if (cached != null) return cached;
+  var span = TextSpan(text: code, style: base);
+  try {
+    final highlighter = _codeHighlighter ??= Highlight()
+      ..registerLanguages(_highlightLanguages);
+    final result = highlighter.highlight(code: code, language: normalized);
+    final theme = <String, TextStyle>{
+      for (final entry in atomOneDarkTheme.entries)
+        entry.key: entry.key == 'root'
+            ? base.merge(entry.value.copyWith(backgroundColor: null))
+            : base.merge(entry.value),
+    };
+    final renderer = TextSpanRenderer(base, theme);
+    result.render(renderer);
+    span = renderer.span ?? span;
+  } catch (_) {
+    // Unknown or unparseable code: fall back to unhighlighted text.
+  }
+  if (_highlightCache.length > 200) _highlightCache.clear();
+  _highlightCache[cacheKey] = span;
+  return span;
+}
+
+/// An image referenced by message HTML. `mxc://` sources are resolved to
+/// authenticated media URLs first; plain http(s) sources load directly.
+///
+/// With [width] set the image renders as a block at that width (height from
+/// the image's aspect ratio). Without it the image is an inline span child
+/// capped to a small box.
+class _MatrixHtmlImage extends ConsumerStatefulWidget {
+  final String src;
+  final String? alt;
+  final double? width;
+  final int? cacheWidth;
+  final TextStyle fallbackStyle;
+  final MatrixHtmlImageResolver? resolver;
+
+  const _MatrixHtmlImage({
+    required this.src,
+    this.alt,
+    this.width,
+    this.cacheWidth,
+    required this.fallbackStyle,
+    this.resolver,
+  });
+
+  @override
+  ConsumerState<_MatrixHtmlImage> createState() => _MatrixHtmlImageState();
+}
+
+class _MatrixHtmlImageState extends ConsumerState<_MatrixHtmlImage> {
+  String? _resolvedUrl;
+  bool _failed = false;
+  int _resolveGeneration = 0;
+
+  bool get _isMxc => widget.src.startsWith('mxc://');
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_isMxc) _resolvedUrl = widget.src;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_isMxc && _resolvedUrl == null && !_failed) {
+      final cached = cachedResolvedMxcUrl(ref, widget.src);
+      if (cached != null) {
+        _resolvedUrl = cached;
+      } else {
+        _resolve();
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _MatrixHtmlImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.src != widget.src || oldWidget.resolver != widget.resolver) {
+      _resolveGeneration++;
+      setState(() {
+        _failed = false;
+        _resolvedUrl = _isMxc ? null : widget.src;
+      });
+      if (_isMxc) _resolve();
+    }
+  }
+
+  Future<void> _resolve() async {
+    final generation = ++_resolveGeneration;
+    final src = widget.src;
+    final url = await (widget.resolver ?? resolveMxcUrl)(ref, src);
+    if (!mounted || generation != _resolveGeneration) return;
+    setState(() {
+      if (url == null) {
+        _failed = true;
+      } else {
+        _resolvedUrl = url;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final url = _resolvedUrl;
+    if (url == null || _failed) {
+      final alt = widget.alt;
+      if (_failed && alt != null && alt.isNotEmpty) {
+        return Text(alt, style: widget.fallbackStyle);
+      }
+      return _MatrixHtmlImagePlaceholder(width: widget.width, failed: _failed);
+    }
+    final image = AuthenticatedImageMessage(
+      imageUrl: url,
+      fit: widget.width == null ? BoxFit.contain : BoxFit.fitWidth,
+      cacheWidth: widget.cacheWidth,
+      onError: () {
+        if (mounted && _resolvedUrl == url) {
+          setState(() => _failed = true);
+        }
+      },
+    );
+    final width = widget.width;
+    if (width != null) {
+      return SizedBox(width: width, child: image);
+    }
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 240, maxHeight: 160),
+      child: image,
+    );
+  }
+}
+
+class _MatrixHtmlImagePlaceholder extends StatelessWidget {
+  final double? width;
+  final bool failed;
+
+  const _MatrixHtmlImagePlaceholder({this.width, required this.failed});
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = Icon(
+      failed ? Icons.broken_image_outlined : Icons.image_outlined,
+      size: 22,
+      color: Colors.white.withValues(alpha: 0.5),
+    );
+    final width = this.width;
+    if (width == null) {
+      return Padding(padding: const EdgeInsets.all(4), child: icon);
+    }
+    return Container(
+      width: width,
+      height: 120,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: icon,
+    );
   }
 }
 

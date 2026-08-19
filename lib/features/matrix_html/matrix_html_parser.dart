@@ -50,6 +50,16 @@ const _blockLevelTags = {
   'li',
   'br',
   'hr',
+  'figure',
+  'figcaption',
+  'div',
+  'table',
+  'thead',
+  'tbody',
+  'tr',
+  'th',
+  'td',
+  'caption',
 };
 
 class MatrixHtmlParser {
@@ -78,6 +88,17 @@ class MatrixHtmlParser {
     'h5',
     'h6',
     'span',
+    'img',
+    'figure',
+    'figcaption',
+    'input',
+    'table',
+    'thead',
+    'tbody',
+    'tr',
+    'th',
+    'td',
+    'caption',
   };
   static const _discardWithContents = {'script', 'style', 'iframe', 'object'};
 
@@ -100,19 +121,96 @@ class MatrixHtmlParser {
       final tag = node.localName?.toLowerCase() ?? '';
       if (_discardWithContents.contains(tag)) continue;
       final children = _parseChildren(node.nodes, depth + 1);
-      if (!_allowedTags.contains(tag)) {
-        if (tag == 'img') {
-          final alt = node.attributes['alt'];
-          if (alt != null && alt.isNotEmpty) result.add(MatrixTextNode(alt));
+      // `div` survives as a math block carrier or an alignment container;
+      // any other div is unwrapped so existing layout behavior is unchanged.
+      if (tag == 'div') {
+        final attributes = <String, String>{};
+        final maths = node.attributes['data-mx-maths'];
+        if (maths != null) attributes['data-mx-maths'] = maths;
+        final align = safeMatrixHtmlAlign(node.attributes['align']);
+        if (align != null) attributes['align'] = align;
+        if (attributes.isNotEmpty) {
+          result.add(
+            MatrixElementNode(
+              tag: tag,
+              children: children,
+              attributes: attributes,
+            ),
+          );
         } else {
           result.addAll(children);
         }
         continue;
       }
+      // Deprecated but still common in the wild: `<center>` is just a
+      // centered div.
+      if (tag == 'center') {
+        result.add(
+          MatrixElementNode(
+            tag: 'div',
+            children: children,
+            attributes: const {'align': 'center'},
+          ),
+        );
+        continue;
+      }
+      if (tag == 'input') {
+        // Only task-list checkboxes carry meaning; everything else is dropped.
+        if (node.attributes['type'] == 'checkbox') {
+          result.add(
+            MatrixElementNode(
+              tag: tag,
+              children: const [],
+              attributes: {
+                'type': 'checkbox',
+                if (node.attributes.containsKey('checked')) 'checked': 'true',
+              },
+            ),
+          );
+        }
+        continue;
+      }
+      if (!_allowedTags.contains(tag)) {
+        result.addAll(children);
+        continue;
+      }
       final attributes = <String, String>{};
+      final align = safeMatrixHtmlAlign(node.attributes['align']);
+      if (align != null &&
+          const {
+            'p',
+            'h1',
+            'h2',
+            'h3',
+            'h4',
+            'h5',
+            'h6',
+            'th',
+            'td',
+          }.contains(tag)) {
+        attributes['align'] = align;
+      }
       if (tag == 'a') {
         final href = safeMatrixHtmlHref(node.attributes['href']);
         if (href != null) attributes['href'] = href;
+      } else if (tag == 'img') {
+        final src = safeMatrixHtmlImgSrc(node.attributes['src']);
+        if (src == null) {
+          // Unusable source: fall back to the alt text, as before.
+          final alt = node.attributes['alt'];
+          if (alt != null && alt.isNotEmpty) result.add(MatrixTextNode(alt));
+          continue;
+        }
+        attributes['src'] = src;
+        final alt = node.attributes['alt'];
+        if (alt != null) attributes['alt'] = alt;
+        final title = node.attributes['title'];
+        if (title != null) attributes['title'] = title;
+      } else if (tag == 'span') {
+        final maths = node.attributes['data-mx-maths'];
+        if (maths != null) attributes['data-mx-maths'] = maths;
+        final spoiler = node.attributes['data-mx-spoiler'];
+        if (spoiler != null) attributes['data-mx-spoiler'] = spoiler;
       } else if (tag == 'ol') {
         final start = int.tryParse(node.attributes['start'] ?? '');
         if (start != null) attributes['start'] = '$start';
