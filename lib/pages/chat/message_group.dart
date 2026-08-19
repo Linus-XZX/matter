@@ -731,7 +731,6 @@ class MessageGroupWidget extends ConsumerWidget {
     }
     const linkRouter = MatrixLinkRouter();
     final metadata = _buildMessageMetadata(context, ref, message);
-    final metadataWidth = _messageMetadataWidth(context, message);
     final hasReply = message.inReplyTo != null;
     final hasFormattedBody = formattedBody?.isNotEmpty == true;
     final readerHtml = hasFormattedBody ? formattedBody : null;
@@ -787,7 +786,6 @@ class MessageGroupWidget extends ConsumerWidget {
             text: message.content,
             textStyle: textStyle,
             metadata: metadata,
-            metadataWidth: metadataWidth,
             maxWidth: maxBubbleWidth - 28,
             minWidth: replyPreviewWidth,
             linkColor: isMe ? Colors.white : AppColors.secondary,
@@ -1199,29 +1197,6 @@ class MessageGroupWidget extends ConsumerWidget {
         child: Icon(icon, size: 15, color: color),
       ),
     );
-  }
-
-  double _messageMetadataWidth(BuildContext context, ChatMessage message) {
-    double textWidth(String text, double fontSize) {
-      final painter = TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(fontSize: fontSize),
-        ),
-        textDirection: Directionality.of(context),
-        textScaler: MediaQuery.textScalerOf(context),
-      )..layout();
-      return painter.width;
-    }
-
-    var width = textWidth(formatMessageTime(message.timestamp), 10.5);
-    if (message.isEdited) {
-      width += 5 + textWidth('已编辑', 10);
-    }
-    if (message.isMe) {
-      width += 4 + 15;
-    }
-    return width;
   }
 
   /// Bottom sheet listing the members who read a message and when.
@@ -1783,7 +1758,6 @@ class _AdaptiveTextMetadata extends StatelessWidget {
   final String text;
   final TextStyle textStyle;
   final Widget metadata;
-  final double metadataWidth;
   final double maxWidth;
   final double minWidth;
   final Color linkColor;
@@ -1797,7 +1771,6 @@ class _AdaptiveTextMetadata extends StatelessWidget {
     required this.text,
     required this.textStyle,
     required this.metadata,
-    required this.metadataWidth,
     required this.maxWidth,
     this.minWidth = 0,
     required this.linkColor,
@@ -1809,78 +1782,125 @@ class _AdaptiveTextMetadata extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final availableWidth = constraints.maxWidth.isFinite
-            ? math.min(constraints.maxWidth, maxWidth)
-            : maxWidth;
-        final textScaler = MediaQuery.textScalerOf(context);
-        final span = messageTextSpan(
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: _AdaptiveTextMetadataRenderWidget(
+        minWidth: minWidth,
+        text: MessageText(
           text,
           style: textStyle,
           mentionColor: AppColors.secondary,
+          linkColor: linkColor,
+          onUrlTap: onUrlTap,
           mentionDisplayNames: mentionDisplayNames,
           mentionedUserIds: mentionedUserIds,
-        );
-        final textPainter = TextPainter(
-          text: span,
-          textDirection: Directionality.of(context),
-          textScaler: textScaler,
-        )..layout(maxWidth: availableWidth);
-        final lines = textPainter.computeLineMetrics();
-        final lastLineWidth = lines.isEmpty ? 0.0 : lines.last.width;
-        final widestLine = lines.fold<double>(
-          0,
-          (width, line) => math.max(width, line.width),
-        );
-        const gap = 8.0;
-        final inline = lastLineWidth + gap + metadataWidth <= availableWidth;
-        final naturalWidth = lines.length > 1
-            ? availableWidth
-            : math.min(
-                availableWidth,
-                math.max(widestLine, lastLineWidth + gap + metadataWidth),
-              );
-        final width = math.min(
-          availableWidth,
-          math.max(minWidth, naturalWidth),
-        );
-        final metadataHeight = math.max(15.0, textScaler.scale(10.5));
-        final height = inline
-            ? math.max(textPainter.height, metadataHeight)
-            : textPainter.height + 3 + metadataHeight;
-
-        return SizedBox(
-          width: width,
-          height: height,
-          child: Stack(
-            children: [
-              Positioned(
-                left: 0,
-                top: 0,
-                width: width,
-                child: MessageText(
-                  text,
-                  style: textStyle,
-                  mentionColor: AppColors.secondary,
-                  linkColor: linkColor,
-                  onUrlTap: onUrlTap,
-                  mentionDisplayNames: mentionDisplayNames,
-                  mentionedUserIds: mentionedUserIds,
-                  onMentionTap: onMentionTap,
-                ),
-              ),
-              Positioned(
-                key: ValueKey(inline ? 'metadata-inline' : 'metadata-below'),
-                right: 0,
-                bottom: 0,
-                child: metadata,
-              ),
-            ],
-          ),
-        );
-      },
+          onMentionTap: onMentionTap,
+        ),
+        metadata: metadata,
+      ),
     );
+  }
+}
+
+class _AdaptiveTextMetadataRenderWidget extends MultiChildRenderObjectWidget {
+  final double minWidth;
+
+  _AdaptiveTextMetadataRenderWidget({
+    required Widget text,
+    required Widget metadata,
+    required this.minWidth,
+  }) : super(children: [text, metadata]);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderAdaptiveTextMetadata(minWidth: minWidth);
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderAdaptiveTextMetadata renderObject,
+  ) {
+    renderObject.minWidth = minWidth;
+  }
+}
+
+class _AdaptiveTextMetadataParentData
+    extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderAdaptiveTextMetadata extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _AdaptiveTextMetadataParentData>,
+        RenderBoxContainerDefaultsMixin<
+          RenderBox,
+          _AdaptiveTextMetadataParentData
+        > {
+  static const _horizontalGap = 8.0;
+  static const _verticalGap = 3.0;
+
+  _RenderAdaptiveTextMetadata({required this._minWidth});
+
+  double _minWidth;
+
+  set minWidth(double value) {
+    if (_minWidth == value) return;
+    _minWidth = value;
+    markNeedsLayout();
+  }
+
+  RenderParagraph get _text => firstChild! as RenderParagraph;
+
+  RenderBox get _metadata => childAfter(_text)!;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _AdaptiveTextMetadataParentData) {
+      child.parentData = _AdaptiveTextMetadataParentData();
+    }
+  }
+
+  @override
+  void performLayout() {
+    final childConstraints = constraints.loosen();
+    _metadata.layout(childConstraints, parentUsesSize: true);
+    _text.layout(childConstraints, parentUsesSize: true);
+
+    final textLength = _text.text.toPlainText().length;
+    final trailingOffset = _text.getOffsetForCaret(
+      TextPosition(offset: textLength),
+      Rect.zero,
+    );
+    final trailingWidth =
+        trailingOffset.dx + _horizontalGap + _metadata.size.width;
+    final width = constraints.constrainWidth(
+      math.max(_minWidth, math.max(_text.size.width, trailingWidth)),
+    );
+    final inline = trailingWidth <= width + 0.001;
+    final height = inline
+        ? math.max(_text.size.height, _metadata.size.height)
+        : _text.size.height + _verticalGap + _metadata.size.height;
+    size = constraints.constrain(Size(width, height));
+
+    final textParentData = _text.parentData! as _AdaptiveTextMetadataParentData;
+    textParentData.offset = Offset.zero;
+    final metadataParentData =
+        _metadata.parentData! as _AdaptiveTextMetadataParentData;
+    metadataParentData.offset = Offset(
+      math.max(0, size.width - _metadata.size.width),
+      inline
+          ? math.max(0, size.height - _metadata.size.height)
+          : _text.size.height + _verticalGap,
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    defaultPaint(context, offset);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return defaultHitTestChildren(result, position: position);
   }
 }
 
