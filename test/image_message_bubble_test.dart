@@ -1,5 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
@@ -441,9 +442,14 @@ void main() {
       final metadataRect = tester.getRect(
         find.byKey(const ValueKey(r'message-metadata:$reply')),
       );
+      final textRect = tester.getRect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText && widget.text.toPlainText() == reply.content,
+        ),
+      );
 
-      expect(find.byKey(const ValueKey('metadata-inline')), findsOneWidget);
-      expect(find.byKey(const ValueKey('metadata-below')), findsNothing);
+      expect(metadataRect.top, lessThan(textRect.bottom));
       expect(bubbleRect.right - metadataRect.right, closeTo(14, 0.1));
       expect(bubbleRect.bottom - metadataRect.bottom, closeTo(10, 0.1));
     },
@@ -892,7 +898,97 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byKey(const ValueKey('metadata-inline')), findsOneWidget);
-    expect(find.byKey(const ValueKey('metadata-below')), findsNothing);
+    final textRect = tester.getRect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is RichText && widget.text.toPlainText() == message.content,
+      ),
+    );
+    final metadataRect = tester.getRect(
+      find.byKey(const ValueKey(r'message-metadata:$wrapped')),
+    );
+
+    expect(metadataRect.top, lessThan(textRect.bottom));
+  });
+
+  testWidgets('narrow edited bubble keeps the end of a long message visible', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(470, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    const content =
+        'BERT，GPT，Sora，- ACM-ICPC，CCPC，蓝桥杯，CCF CCSP，CCF BDCI，'
+        'GOAI，NOAI，CTF，RoboMaster，Apple WWDC Students Scholarship，'
+        'NOC，CSP-J，CSP-S，NOIP，NOI，ClassIsland，ClassWidgets，'
+        'ExamAware，阿里云，腾讯云，雨云，华为云，天翼云，移动云，百度云，'
+        '火山引擎，亚马逊AWS，谷歌云，微软云的，我家这孩子的臭几把算是废了'
+        ' END';
+    const message = ChatMessage(
+      id: r'$narrow-long',
+      senderId: '@alice:example.org',
+      senderName: 'Alice',
+      content: content,
+      mentionedUserIds: [],
+      mentionsRoom: false,
+      timestamp: '100',
+      isMe: false,
+      msgType: MessageType.text,
+      isEdited: true,
+      editHistory: [],
+      reactions: [],
+      readers: [],
+      totalMembers: 2,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: DefaultTextStyle.merge(
+              // Reproduce system/fallback metrics that differ from the
+              // bubble's explicitly supplied text style.
+              style: const TextStyle(letterSpacing: 1.2),
+              child: MessageGroupWidget(
+                group: MessageGroup(
+                  senderId: message.senderId,
+                  senderName: message.senderName,
+                  isMe: false,
+                  messages: const [message],
+                ),
+                roomId: '!room:example.org',
+                messageIndex: const {r'$narrow-long': message},
+                showAvatar: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final paragraph = find.byWidgetPredicate(
+      (widget) => widget is RichText && widget.text.toPlainText() == content,
+    );
+    final renderParagraph = tester.renderObject<RenderParagraph>(paragraph);
+    final endBox = renderParagraph
+        .getBoxesForSelection(
+          const TextSelection(
+            baseOffset: content.length - 3,
+            extentOffset: content.length,
+          ),
+        )
+        .last;
+    final endRect = endBox.toRect().shift(
+      renderParagraph.localToGlobal(Offset.zero),
+    );
+    final bubbleRect = tester.getRect(
+      find.byKey(const ValueKey(r'text-bubble:$narrow-long')),
+    );
+    final metadataRect = tester.getRect(
+      find.byKey(const ValueKey(r'message-metadata:$narrow-long')),
+    );
+
+    expect(endRect.bottom, lessThanOrEqualTo(bubbleRect.bottom - 10));
+    expect(endRect.overlaps(metadataRect), isFalse);
   });
 }
