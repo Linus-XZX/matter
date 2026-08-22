@@ -210,7 +210,11 @@ TextSpan messageTextSpan(
   List<TapGestureRecognizer>? gestureRecognizers,
 }) {
   final children = <InlineSpan>[];
-  final tokens = _messageTextTokens(text);
+  final tokens = _messageTextTokens(
+    text,
+    mentionDisplayNames: mentionDisplayNames,
+    mentionedUserIds: mentionedUserIds,
+  );
   final mentionCount = tokens.whereType<_MentionToken>().length;
   var offset = 0;
   for (final token in tokens) {
@@ -218,24 +222,29 @@ TextSpan messageTextSpan(
       children.add(TextSpan(text: text.substring(offset, token.start)));
     }
     if (token is _MentionToken) {
-      final userId = _mentionUserId(
-        token,
-        mentionCount: mentionCount,
-        mentionDisplayNames: mentionDisplayNames,
-        mentionedUserIds: mentionedUserIds,
-      );
+      final userId =
+          token.resolvedUserId ??
+          _mentionUserId(
+            token,
+            mentionCount: mentionCount,
+            mentionDisplayNames: mentionDisplayNames,
+            mentionedUserIds: mentionedUserIds,
+          );
+      if (userId == null) {
+        // Not an actual mention (no matching entry in m.mentions): keep the
+        // raw text unstyled instead of painting a misleading highlight.
+        children.add(TextSpan(text: token.text));
+        offset = token.end;
+        continue;
+      }
       TapGestureRecognizer? recognizer;
-      if (userId != null &&
-          onMentionTap != null &&
-          gestureRecognizers != null) {
+      if (onMentionTap != null && gestureRecognizers != null) {
         recognizer = TapGestureRecognizer()..onTap = () => onMentionTap(userId);
         gestureRecognizers.add(recognizer);
       }
       children.add(
         TextSpan(
-          text: userId == null
-              ? token.text
-              : matrixMentionLabel(userId, mentionDisplayNames[userId]),
+          text: matrixMentionLabel(userId, mentionDisplayNames[userId]),
           style: style.copyWith(
             color: mentionColor,
             fontWeight: FontWeight.w800,
@@ -306,8 +315,9 @@ String? _mentionUserId(
   required Map<String, String> mentionDisplayNames,
   required List<String> mentionedUserIds,
 }) {
-  if (mentionedUserIds.contains(token.text) ||
-      mentionDisplayNames.containsKey(token.text)) {
+  // Only m.mentions entries count: the room member list alone must not turn
+  // arbitrary "@user:server" text into a mention.
+  if (mentionedUserIds.contains(token.text)) {
     return token.text;
   }
   final partialName = token.text.substring(1).toLowerCase();
@@ -358,14 +368,62 @@ Uri? normalizeMessageUrl(String raw) {
   return uri.replace(scheme: scheme, host: host);
 }
 
-List<_MessageTextToken> _messageTextTokens(String text) {
+List<_MessageTextToken> _messageTextTokens(
+  String text, {
+  Map<String, String> mentionDisplayNames = const {},
+  List<String> mentionedUserIds = const [],
+}) {
   final urlTokens = detectMessageUrls(text)
       .map((match) => _UrlToken(match.start, match.end, match.text, match.uri))
       .toList();
   final tokens = <_MessageTextToken>[...urlTokens];
+  // The regex below cannot capture display names containing spaces, so match
+  // the full "@Display Name" of every mentioned member first (longest name
+  // wins) and resolve those tokens directly to their user id. A normalized
+  // name shared by multiple mentioned users is ambiguous: leave it to the
+  // regex path, which declines to resolve it, instead of binding the mention
+  // to whichever user happened to be scanned first.
+  final nameOwners = <String, String?>{};
+  final namesByKey = <String, String>{};
+  for (final userId in mentionedUserIds) {
+    final name = mentionDisplayNames[userId]?.trim();
+    if (name == null || name.isEmpty) continue;
+    final plain = name.startsWith('@') ? name.substring(1) : name;
+    if (plain.isEmpty) continue;
+    final key = plain.toLowerCase();
+    namesByKey.putIfAbsent(key, () => plain);
+    if (!nameOwners.containsKey(key)) {
+      nameOwners[key] = userId;
+    } else if (nameOwners[key] != userId) {
+      nameOwners[key] = null;
+    }
+  }
+  final mentionNames = [
+    for (final entry in namesByKey.entries)
+      if (nameOwners[entry.key] != null)
+        (userId: nameOwners[entry.key]!, name: entry.value),
+  ]..sort((a, b) => b.name.length.compareTo(a.name.length));
+  for (final entry in mentionNames) {
+    final pattern = RegExp(
+      '(?<![\\w@])@${RegExp.escape(entry.name)}'
+      r'(?![\w:\u3400-\u9FFF])',
+      caseSensitive: false,
+      unicode: true,
+    );
+    for (final match in pattern.allMatches(text)) {
+      final token = _MentionToken(
+        match.start,
+        match.end,
+        match.group(0)!,
+        resolvedUserId: entry.userId,
+      );
+      if (tokens.any((other) => _rangesOverlap(other, token))) continue;
+      tokens.add(token);
+    }
+  }
   for (final match in _mentionPattern.allMatches(text)) {
     final token = _MentionToken(match.start, match.end, match.group(0)!);
-    if (urlTokens.any((url) => _rangesOverlap(url, token))) continue;
+    if (tokens.any((other) => _rangesOverlap(other, token))) continue;
     tokens.add(token);
   }
   tokens.sort((a, b) {
@@ -414,7 +472,14 @@ sealed class _MessageTextToken {
 }
 
 class _MentionToken extends _MessageTextToken {
-  const _MentionToken(super.start, super.end, super.text);
+  final String? resolvedUserId;
+
+  const _MentionToken(
+    super.start,
+    super.end,
+    super.text, {
+    this.resolvedUserId,
+  });
 }
 
 class _UrlToken extends _MessageTextToken {

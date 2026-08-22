@@ -1789,7 +1789,7 @@ class _AdaptiveTextMetadata extends StatelessWidget {
         text: MessageText(
           text,
           style: textStyle,
-          mentionColor: AppColors.secondary,
+          mentionColor: linkColor,
           linkColor: linkColor,
           onUrlTap: onUrlTap,
           mentionDisplayNames: mentionDisplayNames,

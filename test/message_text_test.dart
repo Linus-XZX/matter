@@ -10,6 +10,15 @@ void main() {
       '你好 @alice:example.org、@bob 和 @小明',
       style: base,
       mentionColor: Colors.cyan,
+      mentionDisplayNames: const {
+        '@bob:example.org': 'Bob',
+        '@xiaoming:example.org': '小明',
+      },
+      mentionedUserIds: const [
+        '@alice:example.org',
+        '@bob:example.org',
+        '@xiaoming:example.org',
+      ],
     );
     final mentions = span.children!
         .whereType<TextSpan>()
@@ -18,7 +27,7 @@ void main() {
 
     expect(mentions.map((span) => span.text), [
       '@alice:example.org',
-      '@bob',
+      '@Bob',
       '@小明',
     ]);
     expect(mentions.every((span) => span.style?.color == Colors.cyan), isTrue);
@@ -26,6 +35,78 @@ void main() {
       mentions.every((span) => span.style?.fontWeight == FontWeight.w800),
       isTrue,
     );
+  });
+
+  test('@ text that mentions nobody is rendered without highlight', () {
+    const base = TextStyle(color: Colors.white, fontSize: 15);
+    final span = messageTextSpan(
+      '邮箱 alice@example.com,还有 @alice:example.org 和 @bob',
+      style: base,
+      mentionColor: Colors.cyan,
+      // The room member list alone must not turn text into a mention: only
+      // m.mentions (mentionedUserIds) entries are resolved.
+      mentionDisplayNames: const {'@alice:example.org': 'Alice'},
+    );
+
+    final highlighted = span.children!
+        .whereType<TextSpan>()
+        .where((child) => child.style?.color == Colors.cyan)
+        .toList();
+
+    expect(highlighted, isEmpty);
+    expect(
+      span.toPlainText(),
+      '邮箱 alice@example.com,还有 @alice:example.org 和 @bob',
+    );
+  });
+
+  test('mention with an ambiguous display name stays unresolved', () {
+    final recognizers = <TapGestureRecognizer>[];
+    final span = messageTextSpan(
+      '@Sam 你好',
+      style: const TextStyle(color: Colors.white, fontSize: 15),
+      mentionColor: Colors.cyan,
+      mentionDisplayNames: const {
+        '@sam-one:example.org': 'Sam',
+        '@sam-two:example.org': 'sam',
+      },
+      mentionedUserIds: const ['@sam-one:example.org', '@sam-two:example.org'],
+      onMentionTap: (_) {},
+      gestureRecognizers: recognizers,
+    );
+
+    expect(
+      span.children!.whereType<TextSpan>().where(
+        (child) => child.style?.color == Colors.cyan,
+      ),
+      isEmpty,
+    );
+    expect(recognizers, isEmpty);
+    expect(span.toPlainText(), '@Sam 你好');
+  });
+
+  test('mention with spaces in the display name is highlighted in full', () {
+    final recognizers = <TapGestureRecognizer>[];
+    String? tappedUserId;
+    final span = messageTextSpan(
+      '@Alice Wonderland 你好',
+      style: const TextStyle(color: Colors.white, fontSize: 15),
+      mentionColor: Colors.cyan,
+      mentionDisplayNames: const {'@alice:example.org': 'Alice Wonderland'},
+      mentionedUserIds: const ['@alice:example.org'],
+      onMentionTap: (userId) => tappedUserId = userId,
+      gestureRecognizers: recognizers,
+    );
+    final mention = span.children!.whereType<TextSpan>().singleWhere(
+      (child) => child.text == '@Alice Wonderland',
+    );
+
+    expect(mention.style?.color, Colors.cyan);
+    (mention.recognizer! as TapGestureRecognizer).onTap!();
+    expect(tappedUserId, '@alice:example.org');
+    for (final recognizer in recognizers) {
+      recognizer.dispose();
+    }
   });
 
   test('message mention uses the room member name and profile target', () {
