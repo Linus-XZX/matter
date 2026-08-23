@@ -27,7 +27,7 @@ val configuredNdkVersion =
 
 android {
     namespace = "moe.aks.matter"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = configuredNdkVersion
 
     compileOptions {
