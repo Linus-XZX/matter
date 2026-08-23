@@ -296,7 +296,7 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
           format: CompressFormat.jpeg,
         );
         if (compressed != null && compressed.isNotEmpty) {
-          return _jpegImage(
+          return await _jpegImage(
             compressed,
             filename: filename,
             expectedSize: target,
@@ -354,7 +354,11 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         format: CompressFormat.jpeg,
       );
       if (compressed.isNotEmpty) {
-        return _jpegImage(compressed, filename: filename, expectedSize: target);
+        return await _jpegImage(
+          compressed,
+          filename: filename,
+          expectedSize: target,
+        );
       }
     } catch (_) {
       // Preserve a correctly typed original only when it is already bounded.
