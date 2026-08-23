@@ -109,6 +109,21 @@ void main() {
     }
   });
 
+  test('display-name prefix does not truncate a Matrix user id', () {
+    for (final separator in ['-', '.', '=', '/']) {
+      final userId = '@alice${separator}smith:example.org';
+      final span = messageTextSpan(
+        userId,
+        style: const TextStyle(color: Colors.white, fontSize: 15),
+        mentionColor: Colors.cyan,
+        mentionDisplayNames: {userId: 'Alice'},
+        mentionedUserIds: [userId],
+      );
+
+      expect(span.toPlainText(), '@Alice', reason: 'separator: $separator');
+    }
+  });
+
   test('message mention uses the room member name and profile target', () {
     final recognizers = <TapGestureRecognizer>[];
     String? tappedUserId;

@@ -406,7 +406,7 @@ List<_MessageTextToken> _messageTextTokens(
   for (final entry in mentionNames) {
     final pattern = RegExp(
       '(?<![\\w@])@${RegExp.escape(entry.name)}'
-      r'(?![\w:\u3400-\u9FFF])',
+      r'(?![A-Za-z0-9\u3400-\u9FFF._=\-/:])',
       caseSensitive: false,
       unicode: true,
     );
