@@ -11,6 +11,7 @@ flutter_rust_bridge = "=2.13.0"
 matrix-sdk = { version = "0.18", default-features = false, features = [
   "e2e-encryption",
   "bundled-sqlite",
+  "experimental-search",
 ] }
 matrix-sdk-base = { version = "0.18", default-features = false, features = ["e2e-encryption"] }
 matrix-sdk-ui = { version = "0.18", default-features = false }
@@ -38,6 +39,12 @@ log = "0.4"
 dirs = "6"
 futures-util = "0.3"
 mime = "0.3"
+
+[dev-dependencies]
+tantivy = "0.26.1"
+
+[patch.crates-io]
+matrix-sdk-search = { path = "vendor/matrix-sdk-search" }
 
 [profile.release]
 opt-level = "z"

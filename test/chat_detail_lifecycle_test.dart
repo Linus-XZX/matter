@@ -374,6 +374,45 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('an initial search result opens around the target message', (
+    tester,
+  ) async {
+    const roomId = '!search-jump:example.org';
+    final target = _message(r'$search-target');
+    rustApi.messagesAround = [target];
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(
+            roomId: roomId,
+            roomName: 'Room',
+            initialMessageId: r'$search-target',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.getMessagesAroundCalls, 1);
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$search-target')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('long-pressing a message avatar inserts a Matrix mention', (
     tester,
   ) async {

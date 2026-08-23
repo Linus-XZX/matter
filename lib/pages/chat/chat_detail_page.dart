@@ -27,6 +27,7 @@ import 'pinned_messages_stack.dart';
 import 'room_management_page.dart';
 import 'room_metadata_patch.dart';
 import 'room_state_edit_tracker.dart';
+import 'search_page.dart';
 import 'send_flight.dart';
 
 final chatRouteObserver = _ChatRouteObserver();
@@ -93,6 +94,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final String? avatarEventId;
   final String subtitle;
   final bool isDm;
+  final String? initialMessageId;
   final bool embedded;
   final bool detailsPanelOpen;
   final VoidCallback? onToggleDetailsPanel;
@@ -116,6 +118,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     this.avatarEventId,
     this.subtitle = '在线',
     this.isDm = false,
+    this.initialMessageId,
     this.embedded = false,
     this.detailsPanelOpen = false,
     this.onToggleDetailsPanel,
@@ -292,6 +295,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       if (!mounted) return;
       ref.read(replyingToProvider(roomAccountKey).notifier).value = null;
       _activateRoom(resetAutoReadSuppression: true);
+      if (widget.initialMessageId case final messageId?) {
+        unawaited(_jumpToMessage(messageId));
+      }
     });
     // Switching away clears the Rust-side room/typing subscriptions; coming
     // back to the original account must re-subscribe (and re-mark the room
@@ -1902,12 +1908,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           ),
           actions: [
             IconButton(
-              tooltip: '搜索暂未提供',
+              tooltip: '搜索消息',
               icon: const Icon(
                 Icons.search_rounded,
                 color: AppColors.onBackground,
               ),
-              onPressed: null,
+              onPressed: () async {
+                final messageId = await Navigator.of(context).push<String>(
+                  MaterialPageRoute(
+                    builder: (_) => ChatSearchPage(roomId: widget.roomId),
+                  ),
+                );
+                if (messageId != null && mounted) {
+                  await _jumpToMessage(messageId);
+                }
+              },
             ),
             IconButton(
               tooltip: '置顶消息',

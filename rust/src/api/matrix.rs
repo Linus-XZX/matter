@@ -547,6 +547,10 @@ async fn clear_account_runtime_state(user_id: &str) {
         let mut overrides = IGNORED_USER_OVERRIDES.write().await;
         overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
     }
+    {
+        let mut backfills = SEARCH_INDEX_BACKFILLS.lock().await;
+        backfills.retain(|key, _| !key.starts_with(&format!("{user_id}\n")));
+    }
     // Queued mutations for this account (keys are `{kind}:{user_id}:...`,
     // `ignored:{user_id}`, or the room-scoped `pinned:{room_id}` shared
     // across accounts) are deliberately NOT dropped. Their background tails
@@ -1916,6 +1920,11 @@ static CLIENTS: Lazy<Arc<RwLock<HashMap<String, ClientEntry>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 static NEXT_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Per-client search backfills. The SDK indexes new EventCache updates, while
+/// this one-shot pass makes history cached before search was enabled visible.
+static SEARCH_INDEX_BACKFILLS: Lazy<Mutex<HashMap<String, Arc<tokio::sync::OnceCell<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Currently active account.
 static ACTIVE_USER: Lazy<Arc<RwLock<Option<String>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
@@ -2875,6 +2884,11 @@ async fn finalize_pending() -> Result<String, String> {
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .request_config(bounded_request_config())
+        .search_index_store(
+            matrix_sdk::search_index::SearchIndexStoreKind::UnencryptedDirectory(
+                sdk_dir.join("search_index"),
+            ),
+        )
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -3942,6 +3956,11 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .request_config(bounded_request_config())
+        .search_index_store(
+            matrix_sdk::search_index::SearchIndexStoreKind::UnencryptedDirectory(
+                sdk_dir.join("search_index"),
+            ),
+        )
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -4792,6 +4811,11 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .request_config(bounded_request_config())
+        .search_index_store(
+            matrix_sdk::search_index::SearchIndexStoreKind::UnencryptedDirectory(
+                sdk_dir.join("search_index"),
+            ),
+        )
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -11321,6 +11345,354 @@ pub async fn search_rooms(
         .filter(|r| r.name.to_lowercase().contains(&q))
         .collect();
     Ok(filtered)
+}
+
+/// A lightweight message-search row. Full timeline events stay on the Rust
+/// side; Flutter loads the surrounding timeline only after a result is tapped.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageSearchResult {
+    pub room_id: String,
+    pub room_name: String,
+    pub room_avatar_url: Option<String>,
+    pub event_id: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub body: String,
+    pub timestamp: String,
+    pub is_dm: bool,
+    pub is_edited: bool,
+}
+
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageSearchPage {
+    pub results: Vec<MessageSearchResult>,
+    pub has_more: bool,
+}
+
+fn message_search_terms(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn escape_tantivy_regex(term: &str) -> String {
+    let mut escaped = String::with_capacity(term.len());
+    for character in term.chars() {
+        if matches!(
+            character,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Tantivy's default tokenizer keeps an uninterrupted CJK sentence as one
+/// term. Regex term queries provide literal substring matching for CJK and
+/// also make Latin search useful before a whole word has been typed. Joining
+/// the terms with AND keeps the user input literal instead of exposing the
+/// Tantivy query language.
+fn message_search_index_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("body:/.*{}.*/", escape_tantivy_regex(term)))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn message_matches_search_terms(body: &str, terms: &[String]) -> bool {
+    let normalized = body.to_lowercase();
+    terms.iter().all(|term| normalized.contains(term))
+}
+
+async fn ensure_search_index_backfilled(client: &Client, room: &Room) -> Result<(), String> {
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("search", "No logged-in account.".to_string()))?;
+    let key = format!("{user_id}\n{}", room.room_id());
+    let cell = {
+        let mut backfills = SEARCH_INDEX_BACKFILLS.lock().await;
+        backfills
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+            .clone()
+    };
+
+    cell.get_or_try_init(|| async {
+        let (room_cache, _drop_handles) = room.event_cache().await.map_err(|error| {
+            api_err(
+                "search",
+                format!("Failed to open the room search cache: {error}"),
+            )
+        })?;
+        let events = room_cache.events().await.map_err(|error| {
+            api_err(
+                "search",
+                format!("Failed to read cached messages for search: {error}"),
+            )
+        })?;
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
+        client
+            .search_index()
+            .lock()
+            .await
+            .bulk_handle_timeline_event(
+                events.into_iter(),
+                &room_cache,
+                room.room_id(),
+                &redaction_rules,
+            )
+            .await
+            .map_err(|error| {
+                api_err(
+                    "search",
+                    format!("Failed to index cached messages: {error}"),
+                )
+            })?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map(|_| ())
+}
+
+async fn search_result_from_event(
+    client: &Client,
+    room: &Room,
+    event: matrix_sdk::deserialized_responses::TimelineEvent,
+    terms: &[String],
+    ignored_user_ids: Option<&HashSet<String>>,
+    is_dm: bool,
+) -> Option<MessageSearchResult> {
+    if event.kind.is_utd() {
+        return None;
+    }
+    let event = event.raw().deserialize().ok()?;
+    let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+        matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(message),
+    ) = event
+    else {
+        return None;
+    };
+    let original = message.as_original()?;
+    let sender_id = original.sender.to_string();
+    let sender_is_ignored = match ignored_user_ids {
+        Some(ignored_user_ids) => ignored_user_ids.contains(&sender_id),
+        None => effective_is_user_ignored(client, &original.sender).await,
+    };
+    if sender_is_ignored {
+        return None;
+    }
+
+    let body = room_message_preview(&original.content)?;
+    if !message_matches_search_terms(&body, terms) {
+        return None;
+    }
+
+    let mut target_event_id = original.event_id.clone();
+    let mut timestamp = original.origin_server_ts;
+    let mut is_edited = false;
+    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) =
+        &original.content.relates_to
+    {
+        is_edited = true;
+        target_event_id = replacement.event_id.clone();
+        if let Ok(target) = room.event(&target_event_id, None).await {
+            if let Ok(target) = target.raw().deserialize() {
+                timestamp = target.origin_server_ts();
+            }
+        }
+    }
+
+    let sender_name = if client
+        .user_id()
+        .is_some_and(|user_id| user_id.as_str() == sender_id)
+    {
+        "我".to_string()
+    } else {
+        room.get_member_no_sync(&original.sender)
+            .await
+            .ok()
+            .flatten()
+            .map(|member| member.name().to_string())
+            .unwrap_or_else(|| original.sender.localpart().to_owned())
+    };
+
+    Some(MessageSearchResult {
+        room_id: room.room_id().to_string(),
+        room_name: room_display_name(room),
+        room_avatar_url: room.avatar_url().map(|url| url.to_string()),
+        event_id: target_event_id.to_string(),
+        sender_id,
+        sender_name,
+        body,
+        timestamp: u64::from(timestamp.0).to_string(),
+        is_dm,
+        is_edited,
+    })
+}
+
+/// Search text messages already present in this device's EventCache. The SDK
+/// keeps the persistent index updated for edits, redactions, back-pagination,
+/// and decrypted events.
+#[frb]
+pub async fn search_messages(
+    query: String,
+    room_id: Option<String>,
+    limit: u32,
+    offset: u32,
+    ignored_user_ids: Option<Vec<String>>,
+) -> Result<MessageSearchPage, String> {
+    let terms = message_search_terms(query.trim());
+    if terms.is_empty() {
+        return Ok(MessageSearchPage {
+            results: Vec::new(),
+            has_more: false,
+        });
+    }
+
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("search", "No client created.".to_string()))?;
+    let rooms = if let Some(room_id) = room_id {
+        vec![get_room_by_id(&client, &room_id)?]
+    } else {
+        client
+            .rooms()
+            .into_iter()
+            .filter(|room| room.state() == matrix_sdk::RoomState::Joined && !room.is_space())
+            .collect()
+    };
+    let ignored_user_ids = ignored_user_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    let index_query = message_search_index_query(&terms);
+    let limit = limit.clamp(1, 500) as usize;
+    let offset = offset as usize;
+    let wanted = offset.saturating_add(limit).saturating_add(1).min(501);
+    let mut results = Vec::new();
+    let mut may_have_more = false;
+
+    for room in rooms {
+        ensure_search_index_backfilled(&client, &room).await?;
+        let is_dm = match room.is_direct().await {
+            Ok(true) => true,
+            Ok(false) | Err(_) => is_dm_by_members(&room).await,
+        };
+        let event_ids = room
+            .search(&index_query, wanted, None)
+            .await
+            .map_err(|error| api_err("search", format!("Message search failed: {error}")))?;
+        if event_ids.len() == wanted {
+            may_have_more = true;
+        }
+        for event_id in event_ids {
+            let event = match room.event(&event_id, None).await {
+                Ok(event) => event,
+                Err(error) => {
+                    app_log(
+                        "warn",
+                        "search",
+                        format!("Skipping unavailable search result {event_id}: {error}"),
+                    );
+                    continue;
+                }
+            };
+            if let Some(result) = search_result_from_event(
+                &client,
+                &room,
+                event,
+                &terms,
+                ignored_user_ids.as_ref(),
+                is_dm,
+            )
+            .await
+            {
+                results.push(result);
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    results.retain(|result| seen.insert((result.room_id.clone(), result.event_id.clone())));
+    results.sort_by(|left, right| {
+        right
+            .timestamp
+            .parse::<u64>()
+            .unwrap_or_default()
+            .cmp(&left.timestamp.parse::<u64>().unwrap_or_default())
+            .then_with(|| right.event_id.cmp(&left.event_id))
+    });
+
+    let has_more = may_have_more || results.len() > offset.saturating_add(limit);
+    let page = results.into_iter().skip(offset).take(limit).collect();
+    Ok(MessageSearchPage {
+        results: page,
+        has_more,
+    })
+}
+
+#[cfg(test)]
+mod message_search_tests {
+    use super::{message_matches_search_terms, message_search_index_query, message_search_terms};
+    use tantivy::{
+        collector::TopDocs,
+        doc,
+        query::QueryParser,
+        schema::{Schema, TEXT},
+        Index,
+    };
+
+    fn search_count(body: &str, query: &str) -> usize {
+        let mut schema = Schema::builder();
+        let body_field = schema.add_text_field("body", TEXT);
+        let schema = schema.build();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        writer.add_document(doc!(body_field => body)).unwrap();
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        let mut parser = QueryParser::for_index(&index, vec![body_field]);
+        parser.allow_regexes();
+        let terms = message_search_terms(query);
+        let query = parser
+            .parse_query(&message_search_index_query(&terms))
+            .unwrap();
+        reader
+            .searcher()
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn substring_query_matches_unsegmented_cjk_terms() {
+        assert_eq!(search_count("今晚八点开会", "八点开会"), 1);
+        assert_eq!(search_count("検索機能を確認する", "機能"), 1);
+        assert_eq!(search_count("메시지 검색 기능", "검색"), 1);
+    }
+
+    #[test]
+    fn query_is_literal_case_insensitive_and_requires_every_term() {
+        assert_eq!(
+            search_count("ReleasePlanning starts today", "PLANNING TOD"),
+            1
+        );
+        assert_eq!(search_count("明天在北京见", "明天 北京"), 1);
+        assert_eq!(search_count("明天再说", "明天 北京"), 0);
+        assert!(message_matches_search_terms(
+            "混合 Matrix 消息",
+            &message_search_terms("matrix 消息")
+        ));
+    }
 }
 
 /// Load a focused slice of the room timeline around one event.

@@ -2145,6 +2145,47 @@ final searchRoomsProvider = FutureProvider.family<List<rust.ChatRoom>, String>((
   );
 });
 
+class MessageSearchRequest {
+  final String query;
+  final String? roomId;
+  final int limit;
+  final int offset;
+
+  const MessageSearchRequest({
+    required this.query,
+    this.roomId,
+    this.limit = 30,
+    this.offset = 0,
+  });
+
+  @override
+  int get hashCode => Object.hash(query, roomId, limit, offset);
+
+  @override
+  bool operator ==(Object other) =>
+      other is MessageSearchRequest &&
+      query == other.query &&
+      roomId == other.roomId &&
+      limit == other.limit &&
+      offset == other.offset;
+}
+
+final messageSearchProvider = FutureProvider.autoDispose
+    .family<rust.MessageSearchPage, MessageSearchRequest>((ref, request) async {
+      if (!ref.watch(sessionReadyProvider) || request.query.trim().isEmpty) {
+        return const rust.MessageSearchPage(results: [], hasMore: false);
+      }
+      ref.watch(activeUserIdProvider);
+      final filter = await _previewIgnoreFilter(ref);
+      return rust.searchMessages(
+        query: request.query.trim(),
+        roomId: request.roomId,
+        limit: request.limit,
+        offset: request.offset,
+        ignoredUserIds: filter.ids?.toList(),
+      );
+    });
+
 /// Send a reply to a message
 Future<void> sendReply(
   Ref ref,

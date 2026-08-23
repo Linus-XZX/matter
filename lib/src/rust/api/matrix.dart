@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'matrix.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_generation_for_client`, `active_session_meta`, `add_desired`, `advance_sync_generation`, `api_err`, `app_log`, `append_media_chunk`, `bounded_request_config`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_active_for_generation`, `clear_published_sync`, `clear_timeline_cache_for`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `degrade_to_traditional_sync`, `delete_account_sdk_store`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation_inner`, `ensure_account_matches`, `ensure_media_content_length`, `extract_edit_content`, `failures_after_stream_end`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_override_expired`, `ignored_user_override_key`, `image_info_dimensions`, `image_message_content`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `interruptible_retry_sleep`, `into_client_and_data_dir`, `is_dm_by_members`, `joined_non_space_room`, `knock_member_events_request`, `knock_state_read_failure`, `lagged_sync_event`, `lifecycle_protection`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `lock_subscription_state`, `marked_unread_override_key`, `media_caption_parts`, `media_client_identity`, `media_download_limit`, `media_download_url`, `mentions_parts`, `merge_current_account_ignored_user_overrides`, `merge_ignored_user_overrides`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event_for_client`, `notify_sync_event_for_generation`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `reacquire_media_client`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides_inner`, `reconcile_ignored_user_overrides`, `reconcile_marked_unread_override`, `remote_logout_retry_settles`, `remove_desired`, `remove_dir_all_if_exists`, `reset`, `resolve_ignored_user`, `resolve_marked_unread`, `retry_pending_remote_logout`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `room_topic_event_id`, `run_bounded_mutation_inner`, `run_bounded_mutation_undroppable`, `run_bounded_mutation`, `run_bounded`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_html_has_visible_content`, `sanitized_reply_formatted_body`, `set_connection_status_for_generation`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `set_subscription_user`, `space_child_room_id`, `start_sync_internal`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `subscription_user_matches`, `sync_generation_is_active`, `sync_publication_lock`, `synced_marked_unread`, `take_typing_task_for_owner`, `text_message_parts`, `truncate_utf8`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `upload_media_source`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_message_content`, `video_mime_type`, `wait_for_e2ee_initialization`
+// These functions are ignored because they are not marked as `pub`: `account_image_pack_to_sticker_pack`, `active_generation_for_client`, `active_session_meta`, `add_desired`, `advance_sync_generation`, `api_err`, `app_log`, `append_media_chunk`, `bounded_request_config`, `build_mentions`, `build_sdk_data_dir`, `build_text_content`, `civil_from_days`, `clear_account_runtime_state`, `clear_active_for_generation`, `clear_published_sync`, `clear_timeline_cache_for`, `clear_verification_session_if`, `clear_verification_session`, `current_verification_session`, `decrypt_media_bytes`, `degrade_to_traditional_sync`, `delete_account_sdk_store`, `effective_is_user_ignored`, `effective_marked_unread`, `encryption_settings`, `enqueue_mutation_inner`, `ensure_account_matches`, `ensure_media_content_length`, `ensure_search_index_backfilled`, `escape_tantivy_regex`, `extract_edit_content`, `failures_after_stream_end`, `file_message_content`, `finalize_pending`, `format_utc`, `friendly_auth_error`, `get_client`, `get_last_message_info`, `get_room_by_id`, `ignored_override_expired`, `ignored_user_override_key`, `image_info_dimensions`, `image_message_content`, `image_mime_type`, `init_log_store`, `install_live_update_event_handlers`, `install_room_key_event_handler`, `install_session_token_callback`, `install_verification_event_handler`, `interruptible_retry_sleep`, `into_client_and_data_dir`, `is_dm_by_members`, `joined_non_space_room`, `knock_member_events_request`, `knock_state_read_failure`, `lagged_sync_event`, `lifecycle_protection`, `live_room_subscription`, `load_room_sticker_packs`, `location_message_content`, `lock_subscription_state`, `marked_unread_override_key`, `media_caption_parts`, `media_client_identity`, `media_download_limit`, `media_download_url`, `mentions_parts`, `merge_current_account_ignored_user_overrides`, `merge_ignored_user_overrides`, `message_matches_search_terms`, `message_search_index_query`, `message_search_terms`, `mxc_to_thumbnail_http`, `notification_settings_for`, `notify_sync_event_for_client`, `notify_sync_event_for_generation`, `notify_sync_event`, `pack_image_to_sticker`, `parse_supplied_mime_type`, `poll_start_content`, `poll_start_for_forward`, `reacquire_media_client`, `receipt_extension_for_subscribed_rooms`, `reconcile_ignored_user_overrides_inner`, `reconcile_ignored_user_overrides`, `reconcile_marked_unread_override`, `remote_logout_retry_settles`, `remove_desired`, `remove_dir_all_if_exists`, `reset`, `resolve_ignored_user`, `resolve_marked_unread`, `retry_pending_remote_logout`, `room_avatar_event_id`, `room_display_name`, `room_image_pack_to_sticker_pack`, `room_message_preview`, `room_name_event_id`, `room_state_label`, `room_to_chat_room`, `room_topic_event_id`, `run_bounded_mutation_inner`, `run_bounded_mutation_undroppable`, `run_bounded_mutation`, `run_bounded`, `sanitize_for_path`, `sanitized_formatted_body`, `sanitized_html_has_visible_content`, `sanitized_reply_formatted_body`, `search_result_from_event`, `set_connection_status_for_generation`, `set_connection_status`, `set_ignored_user_override`, `set_marked_unread_override`, `set_subscription_user`, `space_child_room_id`, `start_sync_internal`, `sticker_info_dimensions`, `stop_sync_task`, `strip_reply_fallback`, `subscription_user_matches`, `sync_generation_is_active`, `sync_publication_lock`, `synced_marked_unread`, `take_typing_task_for_owner`, `text_message_parts`, `truncate_utf8`, `try_extract_uiaa`, `try_parse_uiaa_from_string`, `try_start_sliding_sync`, `uiaa_to_auth_result`, `uint_to_i32`, `unable_to_decrypt_message`, `unstable_poll_preview`, `upload_media_source`, `usage_allows_sticker`, `validate_poll_answer_ids`, `validated_geo_uri`, `video_message_content`, `video_mime_type`, `wait_for_e2ee_initialization`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ActiveLogFile`, `ClientEntry`, `ClientIdentity`, `ClientLease`, `EditedTextContent`, `IgnoredUserOverride`, `MarkedUnreadOverride`, `MediaClientIdentity`, `MutationTail`, `PendingEntry`, `PendingSyncTask`, `RoomSubscriptionState`, `SyncNotification`, `SyncTask`, `TypingTask`, `VerificationSession`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Initialize persisted logging before startup session discovery begins.
 void initializeLogStore({required String dataDir}) =>
@@ -915,6 +915,23 @@ Future<List<ChatRoom>> searchRooms({
   authoritative: authoritative,
 );
 
+/// Search text messages already present in this device's EventCache. The SDK
+/// keeps the persistent index updated for edits, redactions, back-pagination,
+/// and decrypted events.
+Future<MessageSearchPage> searchMessages({
+  required String query,
+  String? roomId,
+  required int limit,
+  required int offset,
+  List<String>? ignoredUserIds,
+}) => RustLib.instance.api.crateApiMatrixSearchMessages(
+  query: query,
+  roomId: roomId,
+  limit: limit,
+  offset: offset,
+  ignoredUserIds: ignoredUserIds,
+);
+
 /// Load a focused slice of the room timeline around one event.
 Future<List<ChatMessage>> getMessagesAround({
   required String roomId,
@@ -1547,6 +1564,81 @@ class MessageReader {
           userId == other.userId &&
           displayName == other.displayName &&
           avatarUrl == other.avatarUrl;
+}
+
+class MessageSearchPage {
+  final List<MessageSearchResult> results;
+  final bool hasMore;
+
+  const MessageSearchPage({required this.results, required this.hasMore});
+
+  @override
+  int get hashCode => results.hashCode ^ hasMore.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MessageSearchPage &&
+          runtimeType == other.runtimeType &&
+          results == other.results &&
+          hasMore == other.hasMore;
+}
+
+/// A lightweight message-search row. Full timeline events stay on the Rust
+/// side; Flutter loads the surrounding timeline only after a result is tapped.
+class MessageSearchResult {
+  final String roomId;
+  final String roomName;
+  final String? roomAvatarUrl;
+  final String eventId;
+  final String senderId;
+  final String senderName;
+  final String body;
+  final String timestamp;
+  final bool isDm;
+  final bool isEdited;
+
+  const MessageSearchResult({
+    required this.roomId,
+    required this.roomName,
+    this.roomAvatarUrl,
+    required this.eventId,
+    required this.senderId,
+    required this.senderName,
+    required this.body,
+    required this.timestamp,
+    required this.isDm,
+    required this.isEdited,
+  });
+
+  @override
+  int get hashCode =>
+      roomId.hashCode ^
+      roomName.hashCode ^
+      roomAvatarUrl.hashCode ^
+      eventId.hashCode ^
+      senderId.hashCode ^
+      senderName.hashCode ^
+      body.hashCode ^
+      timestamp.hashCode ^
+      isDm.hashCode ^
+      isEdited.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MessageSearchResult &&
+          runtimeType == other.runtimeType &&
+          roomId == other.roomId &&
+          roomName == other.roomName &&
+          roomAvatarUrl == other.roomAvatarUrl &&
+          eventId == other.eventId &&
+          senderId == other.senderId &&
+          senderName == other.senderName &&
+          body == other.body &&
+          timestamp == other.timestamp &&
+          isDm == other.isDm &&
+          isEdited == other.isEdited;
 }
 
 enum MessageType {
