@@ -82,6 +82,33 @@ Bug fixes must preserve intended behavior. Do not remove, bypass, disable, or si
 - The Rust toolchain is managed via `rustup`; build targets include mobile (Android/iOS) native libraries.
 - Use the `flutter` CLI as the main entry point; do not run the Flutter project with the `dart` CLI alone.
 
+# Version and Release Checklist
+
+Version and toolchain changes span the whole repository. Before editing, inspect the latest release commit and search all tracked files for the old version (e.g. `git grep <old-version>`). Do not assume `pubspec.yaml` is the only version source.
+
+For an application release:
+
+- Update both parts of `pubspec.yaml`'s `version: x.y.z+build` value. The build number must increase.
+- Sync `x.y.z` to the package version in `rust/Cargo.toml` and the `rust_lib_matter` entry in `rust/Cargo.lock`.
+- Sync every `MARKETING_VERSION` build configuration in `ios/Runner.xcodeproj/project.pbxproj` and `macos/Runner.xcodeproj/project.pbxproj`.
+- Do not hard-code generated/inherited versions: Android uses `flutter.versionName` / `flutter.versionCode`; the Apple app `Info.plist` files use `FLUTTER_BUILD_NAME` / `FLUTTER_BUILD_NUMBER`; Windows uses generated `FLUTTER_VERSION` macros.
+- iOS and macOS use Swift Package Manager. Their `Podfile`, `Podfile.lock`, and `rust_lib_matter.podspec` files were intentionally removed; do not recreate them during a version bump. `Package.resolved` locks dependency versions and is not an application version source.
+- After editing, `git grep <old-version>` should return nothing. Compare the final file set with the previous release commit and explain any difference before tagging.
+
+For toolchain or bridge upgrades:
+
+- When the minimum Flutter version changes, update every pinned Flutter SDK version in `.github/workflows/` in the same commit. Confirm the CI SDK satisfies the `pubspec.yaml` constraint and search the repository for the old SDK version.
+- When `flutter_rust_bridge` changes, check the Dart dependency, Rust crate, CI-installed `flutter_rust_bridge_codegen` version, and generated bindings together. Keep compatible versions and regenerate bindings when required.
+
+Before creating a release tag:
+
+1. Run `flutter pub get`, `cd rust && cargo check --locked`, `git diff --check`, and `git diff --cached --check`.
+2. Inspect both staged and unstaged changes. Commit all release and CI configuration changes before tagging.
+3. Verify the tag version matches `pubspec.yaml` and the tag points to the intended release commit.
+4. Prefer one atomic push for the branch and tag: `git push --atomic origin <branch> <tag>`.
+
+Rerunning a tag-triggered workflow uses the workflow from the tagged commit, so a later fix on the branch will not repair that run. Never move or force-push a published tag without explicit user approval; when a release may already be consumed, prefer a new version and tag.
+
 # Background Dev Servers
 
 Do not start Flutter dev servers with `&` or detached processes. Instead use:
