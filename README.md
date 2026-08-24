@@ -8,7 +8,7 @@ First generate the bindings between Rust and Flutter. This will need to be rerun
 flutter_rust_bridge_codegen generate
 ```
 
-A `flutter build` for a platform supported by your Flutter toolchain should generally work afterwards. The bridge component as a build product should be automatically configured for Android, iOS, Linux, and macOS. Other platforms are not tested, but should most likely only require some form of manual copying.
+A `flutter build` for a platform supported by your Flutter toolchain should generally work afterwards. The bridge component as a build product should be automatically configured for Android, iOS, Linux, macOS, and Windows. Other platforms are not tested, but should most likely only require some form of manual copying.
 
 ### macOS/iOS Specific notes
 

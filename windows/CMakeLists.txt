@@ -57,6 +57,36 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# === Rust library build ===
+set(RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust")
+set(RUST_DLL_NAME "rust_lib_matter.dll")
+
+if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
+  set(CARGO_BUILD_CMD cargo build --release --target x86_64-pc-windows-msvc)
+  set(RUST_DLL_DIR "${RUST_DIR}/target/x86_64-pc-windows-msvc/release")
+else()
+  set(CARGO_BUILD_CMD cargo build --target x86_64-pc-windows-msvc)
+  set(RUST_DLL_DIR "${RUST_DIR}/target/x86_64-pc-windows-msvc/debug")
+endif()
+
+add_custom_target(build_rust_lib ALL
+  COMMAND cargo clean -p rust_lib_matter
+  COMMAND ${CARGO_BUILD_CMD}
+  WORKING_DIRECTORY "${RUST_DIR}"
+  COMMENT "Building Rust library (${CMAKE_BUILD_TYPE})"
+)
+
+# Cargo's release profile uses strip = "none" (see rust/Cargo.toml) to avoid an
+# upstream linker bug that corrupts chained-fixups libraries for a non-Windows build context,
+# so strip the Rust shared library manually on non-Debug builds manually here.
+# TODO: Either figure this out for Windows somehow, or just wait since I'm reverting
+# the profile change in the next PR anyways...
+# if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
+#   add_custom_command(TARGET build_rust_lib POST_BUILD
+#     COMMAND strip "${RUST_DLL_DIR}/${RUST_DLL_NAME}"
+#     COMMENT "Stripping Rust library"
+#   )
+# endif()
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
@@ -101,6 +131,11 @@ install(CODE "
   " COMPONENT Runtime)
 install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
+
+# Install the Rust shared library.
+install(FILES "${RUST_DLL_DIR}/${RUST_DLL_NAME}"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
 
 # Install the AOT library on non-Debug builds only.
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
