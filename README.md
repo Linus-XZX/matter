@@ -19,3 +19,7 @@ Building for macOS (release build only) or iOS (physical or simulator) from a ma
 For iOS, simulator builds (inherently Debug) are broken due to #56. Release build should work provided that you configure your own `DEVELOPMENT_TEAM` identifier.
 
 Note that currently the Rust component is only built for the current arch while the Xcode build is universal for release. This results in a supposedly universal app but with a framework that only runs on the same arch it is built on.
+
+### Windows specific notes
+
+As stated in a TODO under rust/src/api/matrix.rs#2838, the login can fail due to an "Access Denied" error on Windows (reports a generic error on GUI, only visible in logs). This appears to be a race condition that can be worked around by making the `sleep` longer. The correct value (without making the wait too long) is most likely hardware dependent, and more testing is needed.
