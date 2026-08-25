@@ -1,6 +1,7 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fmt::Write as _, fs, path::PathBuf, sync::Arc};
 
 use ruma::OwnedRoomId;
+use sha2::{Digest, Sha256};
 use tantivy::{
     Index,
     directory::{MmapDirectory, error::OpenDirectoryError},
@@ -13,6 +14,15 @@ use crate::{
     index::RoomIndex,
     schema::{MatrixSearchIndexSchema, RoomMessageSchema},
 };
+
+fn room_directory_name(room_id: &OwnedRoomId) -> String {
+    let digest = Sha256::digest(room_id.as_str().as_bytes());
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut name, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    name
+}
 
 /// Builder for [`RoomIndex`].
 pub struct RoomIndexBuilder {}
@@ -71,7 +81,7 @@ pub struct UnencryptedPhysicalRoomIndexBuilder {
 impl UnencryptedPhysicalRoomIndexBuilder {
     /// Build the [`RoomIndex`]
     pub fn build(&self) -> Result<RoomIndex, IndexError> {
-        let path = self.path.join(self.room_id.as_str());
+        let path = self.path.join(room_directory_name(&self.room_id));
         let mmap_dir = match MmapDirectory::open(path) {
             Ok(dir) => Ok(dir),
             Err(err) => match err {
@@ -103,7 +113,7 @@ pub struct EncryptedPhysicalRoomIndexBuilder {
 impl EncryptedPhysicalRoomIndexBuilder {
     /// Build the [`RoomIndex`]
     pub fn build(&self) -> Result<RoomIndex, IndexError> {
-        let path = self.path.join(self.room_id.as_str());
+        let path = self.path.join(room_directory_name(&self.room_id));
         let mmap_dir =
             match EncryptedMmapDirectory::open_or_create(path, &self.password, PBKDF_COUNT) {
                 Ok(dir) => Ok(dir),
@@ -142,5 +152,19 @@ impl MemoryRoomIndexBuilder {
         let schema = RoomMessageSchema::new();
         let index = Index::create_in_ram(schema.as_tantivy_schema());
         RoomIndex::new_with(index, schema, &self.room_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ruma::room_id;
+
+    use super::room_directory_name;
+
+    #[test]
+    fn room_directory_name_is_portable() {
+        let name = room_directory_name(&room_id!("!room:example.org").to_owned());
+        assert_eq!(name.len(), 64);
+        assert!(name.chars().all(|character| character.is_ascii_hexdigit()));
     }
 }

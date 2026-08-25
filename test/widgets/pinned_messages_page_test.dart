@@ -73,6 +73,7 @@ class _FakeRustApi implements RustLibApi {
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
     required String subscriptionId,
+    String? accountUserId,
   }) => unsubscribeHandler?.call(roomId) ?? Future.value();
 
   @override

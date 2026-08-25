@@ -29,7 +29,11 @@ pub(crate) struct SearchIndexWriter {
 
 impl SearchIndexWriter {
     pub(crate) fn new(writer: IndexWriter, schema: RoomMessageSchema) -> Self {
-        Self { last_commit_opstamp: writer.commit_opstamp(), inner: writer, schema }
+        Self {
+            last_commit_opstamp: writer.commit_opstamp(),
+            inner: writer,
+            schema,
+        }
     }
 
     pub(crate) fn add(&self, document: TantivyDocument) -> Result<OpStamp, IndexError> {
@@ -38,12 +42,18 @@ impl SearchIndexWriter {
     }
 
     pub(crate) fn remove(&self, event_id: &EventId) {
-        self.inner
-            .delete_term(Term::from_field_text(self.schema.deletion_key(), event_id.as_str()));
+        self.inner.delete_term(Term::from_field_text(
+            self.schema.deletion_key(),
+            event_id.as_str(),
+        ));
     }
 
     pub(crate) fn commit(&mut self) -> Result<OpStamp, TantivyError> {
         self.last_commit_opstamp = self.inner.commit()?; // TODO: This is blocking. Handle it.
         Ok(self.last_commit_opstamp)
+    }
+
+    pub(crate) fn wait_merging_threads(self) -> Result<(), TantivyError> {
+        self.inner.wait_merging_threads()
     }
 }

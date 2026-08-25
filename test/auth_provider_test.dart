@@ -63,6 +63,9 @@ class _FakeRustApi implements RustLibApi {
 String _removedSessionTestKey(String userId) =>
     'matrix_session_removed_${base64Url.encode(utf8.encode(userId))}';
 
+String _searchIndexTestKey(String userId) =>
+    'matrix_search_index_key_${base64Url.encode(utf8.encode(userId))}';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const pathProviderChannel = MethodChannel('plugins.flutter.io/path_provider');
@@ -95,6 +98,45 @@ void main() {
     rustApi.logoutRemotePending = false;
     rustApi.logoutCalls = 0;
   });
+
+  test(
+    'search index key is random, stable, and removed with credentials',
+    () async {
+      const userId = '@alice:example.org';
+
+      final first = await loadOrCreateSearchIndexKey(userId);
+      final second = await loadOrCreateSearchIndexKey(userId);
+
+      expect(first.created, isTrue);
+      expect(second.created, isFalse);
+      expect(second.key, first.key);
+      expect(base64Url.decode(first.key), hasLength(32));
+
+      await deletePersistedSessionCredentials(userId);
+      final secure = FlutterSecureStorage();
+      expect(await secure.read(key: _searchIndexTestKey(userId)), isNull);
+    },
+  );
+
+  test(
+    'search index key is empty and in-memory-only in compatibility mode',
+    () async {
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      SharedPreferences.setMockInitialValues({
+        'session_credential_compatibility_mode_v1': true,
+      });
+      const userId = '@alice:example.org';
+
+      final first = await loadOrCreateSearchIndexKey(userId);
+      final second = await loadOrCreateSearchIndexKey(userId);
+
+      expect(first.key, isEmpty);
+      expect(first.created, isFalse);
+      expect(second.key, isEmpty);
+      expect(second.created, isFalse);
+    },
+  );
 
   group('active user id persistence', () {
     test('saveActiveUserId writes the active user key', () async {

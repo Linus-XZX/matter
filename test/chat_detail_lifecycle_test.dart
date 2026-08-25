@@ -10,6 +10,7 @@ import 'package:matter/pages/chat/message_insert_animation.dart';
 import 'package:matter/pages/chat/pinned_messages_page.dart';
 import 'package:matter/pages/chat/room_metadata_patch.dart';
 import 'package:matter/pages/chat/room_management_page.dart';
+import 'package:matter/pages/chat/search_page.dart';
 import 'package:matter/pages/chat/send_flight.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -94,6 +95,7 @@ class _FakeRustApi implements RustLibApi {
   Future<void> crateApiMatrixUnsubscribeTyping({
     required String roomId,
     required String subscriptionId,
+    String? accountUserId,
   }) async {
     unsubscribeTypingCalls++;
     final barrier = typingUnsubscribeBarrier;
@@ -161,6 +163,7 @@ class _FakeRustApi implements RustLibApi {
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
     required String subscriptionId,
+    String? accountUserId,
   }) async {
     unsubscribeRoomCalls++;
     final barrier = roomUnsubscribeBarrier;
@@ -374,12 +377,41 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('repeated search taps open only one search route', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(activeUserIdProvider.notifier).value = '@alice:example.org';
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final searchButton = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.search_rounded),
+    );
+    searchButton.onPressed!();
+    searchButton.onPressed!();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ChatSearchPage), findsOneWidget);
+  });
+
   testWidgets('an initial search result opens around the target message', (
     tester,
   ) async {
     const roomId = '!search-jump:example.org';
     final target = _message(r'$search-target');
-    rustApi.messagesAround = [target];
+    final latest = _message(r'$latest-message');
+    final pendingContext = Completer<List<rust.ChatMessage>>();
+    rustApi.pendingMessagesAround[r'$search-target'] = pendingContext;
     final container = ProviderContainer(
       overrides: [
         ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
@@ -391,6 +423,7 @@ void main() {
     container.read(messageCacheOwnerProvider(roomId).notifier).value =
         'anonymous';
     container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+    container.read(messageCacheProvider(roomId).notifier).value = [latest];
 
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -404,11 +437,108 @@ void main() {
         ),
       ),
     );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsWidgets);
+
+    pendingContext.complete([target]);
     await tester.pumpAndSettle();
 
     expect(rustApi.getMessagesAroundCalls, 1);
     expect(
       find.byKey(const ValueKey(r'text-bubble:$search-target')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a connected initial search result keeps the live timeline', (
+    tester,
+  ) async {
+    const roomId = '!connected-search-jump:example.org';
+    final target = _message(r'$connected-target', timestamp: '1');
+    final latest = _message(r'$connected-latest', timestamp: '100');
+    rustApi.messagesAround = [target, latest];
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+    container.read(messageCacheProvider(roomId).notifier).value = [latest];
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(
+            roomId: roomId,
+            roomName: 'Room',
+            initialMessageId: r'$connected-target',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.getMessagesAroundCalls, 1);
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$connected-target')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$connected-latest')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<LatestMessageControl>(find.byType(LatestMessageControl))
+          .visible,
+      isFalse,
+    );
+    expect(find.textContaining('正在浏览历史消息'), findsNothing);
+  });
+
+  testWidgets('a missing initial search result restores the live timeline', (
+    tester,
+  ) async {
+    const roomId = '!missing-search-jump:example.org';
+    final latest = _message(r'$latest-message');
+    final container = ProviderContainer(
+      overrides: [
+        ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+        roomMembersProvider(roomId).overrideWith((ref) async => const []),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(roomMembersProvider(roomId).future);
+    container.read(messageCacheOwnerProvider(roomId).notifier).value =
+        'anonymous';
+    container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+    container.read(messageCacheProvider(roomId).notifier).value = [latest];
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: ChatDetailPage(
+            roomId: roomId,
+            roomName: 'Room',
+            initialMessageId: r'$missing-message',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rustApi.getMessagesAroundCalls, 1);
+    expect(
+      find.byKey(const ValueKey(r'text-bubble:$latest-message')),
       findsOneWidget,
     );
   });

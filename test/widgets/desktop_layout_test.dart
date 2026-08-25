@@ -45,12 +45,14 @@ class _FakeRustApi implements RustLibApi {
   Future<void> crateApiMatrixUnsubscribeRoomForReceipts({
     required String roomId,
     required String subscriptionId,
+    String? accountUserId,
   }) async {}
 
   @override
   Future<void> crateApiMatrixUnsubscribeTyping({
     required String roomId,
     required String subscriptionId,
+    String? accountUserId,
   }) async {}
 
   @override

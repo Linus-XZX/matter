@@ -74,15 +74,21 @@ impl<
     ) -> Result<AesWriter<E, M, W>> {
         let mut iv = vec![0u8; iv_size];
         let mut rng = rng();
-        rng.fill_bytes(&mut iv[0..iv_size / 2]);
+        rng.fill_bytes(&mut iv);
 
-        let mac = <M as Mac>::new_from_slice(mac_key)
+        let mut mac = <M as Mac>::new_from_slice(mac_key)
             .map_err(|e| Error::other(format!("error creating mac: {:?}", e)))?;
+        <M as Mac>::update(&mut mac, &iv);
 
         let enc = E::new_from_slices(key, &iv)
             .map_err(|e| Error::other(format!("error initializing cipher: {:?}", e)))?;
         writer.write_all(&iv)?;
-        Ok(AesWriter { writer, enc, mac, finalized: false })
+        Ok(AesWriter {
+            writer,
+            enc,
+            mac,
+            finalized: false,
+        })
     }
 
     /// Encrypts the passed buffer and writes all resulting encrypted blocks to
@@ -117,6 +123,7 @@ impl<
 
         // Mark the file as finalized and flush our underlying writer.
         self.finalized = true;
+        self.writer.flush()?;
 
         Ok(())
     }
@@ -149,18 +156,19 @@ impl<
     W: Write + Sync + Send,
 > Drop for AesWriter<E, M, W>
 {
-    /// Drop our AesWriter adding the MAC at the end of the file and flushing
-    /// our buffers.
+    /// Drop our AesWriter, attempting to finalize the file and write the MAC.
+    ///
+    /// Drop cannot report I/O errors, so a flush failure is silently ignored;
+    /// call [`AesWriter::finalize`] explicitly if you need to handle errors.
     fn drop(&mut self) {
         if self.finalized {
             return;
         }
 
-        if std::thread::panicking() {
-            let _ = self.finalize();
-        } else {
-            self.finalize().unwrap();
-        }
+        // Drop cannot report I/O errors; never turn a cleanup failure into a
+        // second panic while unwinding (or a process panic during ordinary
+        // cleanup). Explicit callers still receive errors from `finalize`.
+        let _ = self.finalize();
     }
 }
 
@@ -213,6 +221,7 @@ impl<D: StreamCipher + KeyIvInit, R: Read + Seek + Clone> AesReader<D, R> {
         let mut expected_mac = vec![0u8; mac_length];
 
         reader.read_exact(&mut iv)?;
+        <M as Mac>::update(&mut mac, &iv);
         let end = reader.seek(SeekFrom::End(0))?;
 
         if end < (u_iv_length + u_mac_length) {
@@ -246,7 +255,12 @@ impl<D: StreamCipher + KeyIvInit, R: Read + Seek + Clone> AesReader<D, R> {
         let dec = D::new_from_slices(key, &iv)
             .map_err(|e| Error::other(format!("couldn't initialize cipher {:?}", e)))?;
 
-        Ok(AesReader { reader, dec, length: end, mac_length: u_mac_length })
+        Ok(AesReader {
+            reader,
+            dec,
+            length: end,
+            mac_length: u_mac_length,
+        })
     }
 
     /// Read bytes from a reader and put them into the given buffer, make sure
@@ -392,5 +406,57 @@ mod tests {
             }
         }
         assert_eq!(dec, &orig);
+    }
+
+    #[test]
+    fn modified_iv_fails_authentication() {
+        let mut enc = encrypt(&[0u8; 16]);
+        enc[0] ^= 1;
+        let key = [0u8; 16];
+
+        let result =
+            AesReader::<Aes128Ctr, _>::new::<Hmac<Sha256>>(Cursor::new(enc), &key, &key, 16, 32);
+
+        assert!(result.is_err());
+    }
+
+    #[derive(Default)]
+    struct FlushTracker {
+        data: Vec<u8>,
+        flush_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Write for FlushTracker {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.data.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flush_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn finalize_flushes_underlying_writer() {
+        let key = [0u8; 16];
+        let hmac_key = [0u8; 16];
+
+        let mut writer = FlushTracker::default();
+        {
+            let mut aes =
+                AesWriter::<Aes128Ctr, Hmac<Sha256>, _>::new(&mut writer, &key, &hmac_key, 16)
+                    .unwrap();
+            aes.write_all(b"hello").unwrap();
+            aes.finalize().unwrap();
+        }
+
+        assert_eq!(
+            writer.flush_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "finalize should flush the underlying writer"
+        );
     }
 }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    fs::{File, create_dir_all},
+    fs::{File, OpenOptions, create_dir_all},
     io::{BufWriter, Cursor, Error as IoError, ErrorKind, Read, Write},
     path::Path,
     sync::Arc,
@@ -59,7 +59,7 @@ type KeyDerivationResult = (KeyBuffer, KeyBuffer);
 // key export format[1].
 // [1] https://spec.matrix.org/v1.15/client-server-api/#key-export-format
 const KEYFILE: &str = "seshat-index.key";
-// 16 byte random salt.
+
 const SALT_SIZE: usize = 16;
 // 16 byte random IV for the AES-CTR mode.
 const IV_SIZE: usize = 16;
@@ -188,7 +188,11 @@ impl EncryptedMmapDirectory {
         // Open our underlying bare Tantivy mmap based directory.
         let mmap_dir = tantivy::directory::MmapDirectory::open(path)?;
 
-        Ok(EncryptedMmapDirectory { mmap_dir, encryption_key, mac_key })
+        Ok(EncryptedMmapDirectory {
+            mmap_dir,
+            encryption_key,
+            mac_key,
+        })
     }
     /// Open a encrypted mmap directory. If the directory is empty a new
     ///   directory key will be generated and encrypted with the given
@@ -229,24 +233,47 @@ impl EncryptedMmapDirectory {
 
         // Either load a store key or create a new store key if the key file
         // doesn't exist.
-        let store_key = match key_file {
+        let (store_key, created_key_file) = match key_file {
             Ok(k) => {
                 let (_, key) = EncryptedMmapDirectory::load_store_key(k, passphrase)
                     .map_err(|err| err.into_tv_err(path.as_ref()))?;
-                key
+                (key, false)
             }
             Err(e) => {
                 if e.kind() != ErrorKind::NotFound {
                     return Err(e.into_tv_err(path.as_ref()));
                 }
-                EncryptedMmapDirectory::create_new_store(
+                match EncryptedMmapDirectory::create_new_store(
                     &key_path,
                     passphrase,
                     key_derivation_count,
-                )?
+                ) {
+                    Ok(key) => (key, true),
+                    Err(OpenDirectoryError::IoError {
+                        io_error,
+                        directory_path: _,
+                    }) if io_error.kind() == ErrorKind::AlreadyExists => {
+                        // Another caller created the key file concurrently;
+                        // load the existing key instead of failing.
+                        let key_file =
+                            File::open(&key_path).map_err(|err| err.into_tv_err(path.as_ref()))?;
+                        let (_, key) = EncryptedMmapDirectory::load_store_key(key_file, passphrase)
+                            .map_err(|err| err.into_tv_err(path.as_ref()))?;
+                        (key, false)
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         };
-        EncryptedMmapDirectory::new(store_key, path.as_ref())
+
+        let result = EncryptedMmapDirectory::new(store_key, path.as_ref());
+        if result.is_err() && created_key_file {
+            // We created a fresh key file but could not open the directory
+            // (e.g. the path is not a directory). Roll back so we do not leave
+            // a key file that does not match any existing encrypted index.
+            let _ = std::fs::remove_file(&key_path);
+        }
+        result
     }
 
     /// Open a encrypted mmap directory.
@@ -310,16 +337,35 @@ impl EncryptedMmapDirectory {
         let (key, hmac_key, salt) =
             EncryptedMmapDirectory::derive_key(new_passphrase, new_key_derivation_count)
                 .map_err(|err| err.into_tv_err(path.as_ref()))?;
-        // Re-encrypt our store key using the newly derived keys.
-        EncryptedMmapDirectory::encrypt_store_key(
-            &key,
-            &salt,
-            new_key_derivation_count,
-            &hmac_key,
-            &store_key,
-            &key_path,
-        )
-        .map_err(|err| err.into_tv_err(path.as_ref()))?;
+        // Re-encrypt our store key using the newly derived keys, writing to a
+        // temporary file and atomically renaming it into place so a crash cannot
+        // leave a partially written key file behind.
+        let temp_path = key_path.with_extension("key.new");
+        let write_result = (|| -> std::io::Result<()> {
+            let mut temp_file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            EncryptedMmapDirectory::write_encrypted_store_key(
+                &key,
+                &salt,
+                new_key_derivation_count,
+                &hmac_key,
+                &store_key,
+                &mut temp_file,
+            )?;
+            temp_file.flush()?;
+            temp_file.sync_all()?;
+            drop(temp_file);
+            std::fs::rename(&temp_path, &key_path)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        write_result.map_err(|err| err.into_tv_err(path.as_ref()))?;
 
         Ok(())
     }
@@ -332,7 +378,10 @@ impl EncryptedMmapDirectory {
         hkdf.expand(&[], &mut *hkdf_result)
             .map_err(|e| IoError::other(format!("unable to expand store key: {:?}", e)))?;
         let (key, hmac_key) = hkdf_result.split_at(KEY_SIZE);
-        Ok((Zeroizing::new(Vec::from(key)), Zeroizing::new(Vec::from(hmac_key))))
+        Ok((
+            Zeroizing::new(Vec::from(key)),
+            Zeroizing::new(Vec::from(hmac_key)),
+        ))
     }
 
     /// Load a store key from the given file and decrypt it using the given
@@ -355,7 +404,9 @@ impl EncryptedMmapDirectory {
         // will have the same size as the plaintext. Read at most KEY_SIZE
         // bytes here so we don't end up filling up memory unnecessarily if
         // someone modifies the file.
-        key_file.take(KEY_SIZE as u64).read_to_end(&mut encrypted_key)?;
+        key_file
+            .take(KEY_SIZE as u64)
+            .read_to_end(&mut encrypted_key)?;
 
         if version[0] != VERSION {
             return Err(IoError::other("invalid index store version"));
@@ -440,14 +491,14 @@ impl EncryptedMmapDirectory {
         Ok(store_key)
     }
 
-    /// Encrypt the given store key and save it in the given path.
-    fn encrypt_store_key(
+    /// Encrypt the given store key and write it to the given writer.
+    fn write_encrypted_store_key(
         key: &[u8],
         salt: &[u8],
         pbkdf_count: u32,
         hmac_key: &[u8],
         store_key: &[u8],
-        key_path: &Path,
+        writer: &mut dyn Write,
     ) -> Result<(), IoError> {
         // Generate a random initialization vector for our AES encryptor.
         let iv = EncryptedMmapDirectory::generate_iv()?;
@@ -457,14 +508,12 @@ impl EncryptedMmapDirectory {
         let mut encrypted_key = [0u8; KEY_SIZE];
         encrypted_key.copy_from_slice(store_key);
 
-        let mut key_file = File::create(key_path)?;
-
         // Write down our public salt and iv first, those will be needed to
         // decrypt the key again.
-        key_file.write_all(&[VERSION])?;
-        key_file.write_all(&iv)?;
-        key_file.write_all(salt)?;
-        key_file.write_u32::<BigEndian>(pbkdf_count)?;
+        writer.write_all(&[VERSION])?;
+        writer.write_all(&iv)?;
+        writer.write_all(salt)?;
+        writer.write_u32::<BigEndian>(pbkdf_count)?;
 
         // Encrypt our key.
         encryptor
@@ -477,12 +526,38 @@ impl EncryptedMmapDirectory {
             EncryptedMmapDirectory::calculate_hmac(VERSION, &iv, salt, &encrypted_key, hmac_key)?;
         let mac = mac.finalize();
         let mac = mac.into_bytes();
-        key_file.write_all(mac.as_slice())?;
+        writer.write_all(mac.as_slice())?;
 
         // Write down the encrypted key.
-        key_file.write_all(&encrypted_key)?;
+        writer.write_all(&encrypted_key)?;
 
         Ok(())
+    }
+
+    /// Encrypt the given store key and save it in the given path.
+    ///
+    /// The file must not already exist.
+    fn encrypt_store_key(
+        key: &[u8],
+        salt: &[u8],
+        pbkdf_count: u32,
+        hmac_key: &[u8],
+        store_key: &[u8],
+        key_path: &Path,
+    ) -> Result<(), IoError> {
+        let mut key_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(key_path)?;
+
+        EncryptedMmapDirectory::write_encrypted_store_key(
+            key,
+            salt,
+            pbkdf_count,
+            hmac_key,
+            store_key,
+            &mut key_file,
+        )
     }
 
     /// Generate a random IV.
@@ -514,7 +589,10 @@ impl EncryptedMmapDirectory {
 
         pbkdf2::<Hmac<Sha512>>(passphrase.as_bytes(), salt, pbkdf_count, &mut *pbkdf_result)?;
         let (key, hmac_key) = pbkdf_result.split_at(KEY_SIZE);
-        Ok((Zeroizing::new(Vec::from(key)), Zeroizing::new(Vec::from(hmac_key))))
+        Ok((
+            Zeroizing::new(Vec::from(key)),
+            Zeroizing::new(Vec::from(hmac_key)),
+        ))
     }
 
     /// Generate a random salt and derive two keys from the salt and the given
@@ -536,7 +614,7 @@ impl EncryptedMmapDirectory {
 /// The [`Directory`] trait implementation for our [`EncryptedMmapDirectory`].
 impl Directory for EncryptedMmapDirectory {
     fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
-        self.mmap_dir.get_file_handle(path)
+        Ok(Arc::new(self.open_read(path)?))
     }
 
     fn sync_directory(&self) -> std::io::Result<()> {
@@ -655,9 +733,12 @@ impl<
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
+    use tantivy::Directory;
     use tempfile::tempdir;
 
-    use crate::encrypted::encrypted_dir::{EncryptedMmapDirectory, PBKDF_COUNT};
+    use crate::encrypted::encrypted_dir::{EncryptedMmapDirectory, KEYFILE, PBKDF_COUNT};
 
     #[test]
     fn create_new_store_and_reopen() {
@@ -669,14 +750,20 @@ mod tests {
             .expect("Can't open the existing store");
         drop(dir);
         let dir = EncryptedMmapDirectory::open(tmpdir.path(), "password");
-        assert!(dir.is_err(), "Opened an existing store with the wrong passphrase");
+        assert!(
+            dir.is_err(),
+            "Opened an existing store with the wrong passphrase"
+        );
     }
 
     #[test]
     fn create_store_with_empty_passphrase() {
         let tmpdir = tempdir().unwrap();
         let dir = EncryptedMmapDirectory::open(tmpdir.path(), "");
-        assert!(dir.is_err(), "Opened an existing store with the wrong passphrase");
+        assert!(
+            dir.is_err(),
+            "Opened an existing store with the wrong passphrase"
+        );
     }
 
     #[test]
@@ -694,9 +781,33 @@ mod tests {
         )
         .expect("Can't change passphrase");
         let dir = EncryptedMmapDirectory::open(tmpdir.path(), "wordpass");
-        assert!(dir.is_err(), "Opened an existing store with the old passphrase");
+        assert!(
+            dir.is_err(),
+            "Opened an existing store with the old passphrase"
+        );
         let _ = EncryptedMmapDirectory::open(tmpdir.path(), "password")
             .expect("Can't open the store with the new passphrase");
+    }
+
+    #[test]
+    fn change_passphrase_does_not_leave_temp_file() {
+        let tmpdir = tempdir().unwrap();
+        let dir = EncryptedMmapDirectory::open_or_create(tmpdir.path(), "wordpass", PBKDF_COUNT)
+            .expect("Can't create a new store");
+        drop(dir);
+
+        EncryptedMmapDirectory::change_passphrase(
+            tmpdir.path(),
+            "wordpass",
+            "password",
+            PBKDF_COUNT,
+        )
+        .expect("Can't change passphrase");
+
+        assert!(
+            !tmpdir.path().join("seshat-index.key.new").exists(),
+            "Temporary key file was not cleaned up after passphrase change"
+        );
     }
 
     #[test]
@@ -706,5 +817,31 @@ mod tests {
         let dir = EncryptedMmapDirectory::open_or_create(&nested_path, "password", PBKDF_COUNT)
             .expect("Should create store in non-existent nested directory");
         drop(dir);
+    }
+
+    #[test]
+    fn creating_a_store_never_overwrites_an_existing_key_file() {
+        let tmpdir = tempdir().unwrap();
+        let key_path = tmpdir.path().join(KEYFILE);
+        fs::write(&key_path, b"existing-key").unwrap();
+
+        let result = EncryptedMmapDirectory::create_new_store(&key_path, "password", PBKDF_COUNT);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(key_path).unwrap(), b"existing-key");
+    }
+
+    #[test]
+    fn file_handles_expose_only_decrypted_content() {
+        let tmpdir = tempdir().unwrap();
+        let dir = EncryptedMmapDirectory::open_or_create(tmpdir.path(), "password", PBKDF_COUNT)
+            .expect("Can't create a new store");
+        let path = Path::new("data");
+        dir.atomic_write(path, b"secret").unwrap();
+
+        let bytes = dir.get_file_handle(path).unwrap().read_bytes(0..6).unwrap();
+
+        assert_eq!(bytes.as_slice(), b"secret");
+        assert_ne!(fs::read(tmpdir.path().join(path)).unwrap(), b"secret");
     }
 }

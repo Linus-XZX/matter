@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/session_credential_store.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/app_theme.dart';
 import '../../widgets/max_content_width.dart';
@@ -65,6 +66,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   bool _isLoading = false;
   bool _compatibilityDialogShown = false;
   bool _hasCompletedRustLogin = false;
+  late final String _pendingSearchIndexKey = createSearchIndexKey();
   String? _error;
 
   // Homeserver inputs that the user has already accepted as insecure (HTTP)
@@ -277,6 +279,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       userId: session.userId,
       deviceId: session.deviceId,
       displayName: displayName,
+      searchIndexKey: _pendingSearchIndexKey,
     );
     await applyActiveSessionState(
       ref,
@@ -363,9 +366,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       if (_hasCompletedRustLogin) {
         throw StateError('登录已成功，但本地凭据保存失败；请重启应用后再试');
       }
+      final useInMemorySearchIndex =
+          await isSessionCredentialCompatibilityModeEnabled();
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
+        searchIndexKey: useInMemorySearchIndex ? '' : _pendingSearchIndexKey,
+        useInMemorySearchIndex: useInMemorySearchIndex,
       );
       final result = await rust.loginWithPassword(
         username: _usernameController.text,
@@ -405,9 +412,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       if (_hasCompletedRustLogin) {
         throw StateError('注册已成功，但本地凭据保存失败；请重启应用后再试');
       }
+      final useInMemorySearchIndex =
+          await isSessionCredentialCompatibilityModeEnabled();
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
+        searchIndexKey: useInMemorySearchIndex ? '' : _pendingSearchIndexKey,
+        useInMemorySearchIndex: useInMemorySearchIndex,
       );
 
       rust.AuthResult result;
@@ -464,9 +475,13 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       if (_hasCompletedRustLogin) {
         throw StateError('登录已成功，但本地凭据保存失败；请重启应用后再试');
       }
+      final useInMemorySearchIndex =
+          await isSessionCredentialCompatibilityModeEnabled();
       await rust.createClient(
         homeserverUrl: homeserverUrl,
         dataDir: await _getDataDir(),
+        searchIndexKey: useInMemorySearchIndex ? '' : _pendingSearchIndexKey,
+        useInMemorySearchIndex: useInMemorySearchIndex,
       );
       final result = await rust.loginWithToken(
         accessToken: _accessTokenController.text,

@@ -47,7 +47,7 @@ app.*.map.json
 .metadata
 
 # Rust / flutter_rust_bridge related
-rust/target/
+target/
 rust_builder/
 
 # Generated code (flutter_rust_bridge)

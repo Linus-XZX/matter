@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent, Relation};
 use tantivy::{
     DateTime, TantivyDocument, doc,
@@ -20,11 +22,34 @@ use tantivy::{
 
 use crate::error::{IndexError, IndexSchemaError};
 
+const MAX_TANTIVY_MILLISECONDS: u64 = (i64::MAX / 1_000_000) as u64;
+
+fn safe_tantivy_timestamp_millis(timestamp: u64) -> i64 {
+    timestamp.min(MAX_TANTIVY_MILLISECONDS) as i64
+}
+
+fn body_ngrams(body: &str) -> HashSet<String> {
+    let normalized = body.to_lowercase();
+    let mut grams = HashSet::new();
+    for term in normalized.split(|character: char| !character.is_alphanumeric()) {
+        let characters = term.chars().collect::<Vec<_>>();
+        for size in 1..=characters.len().min(3) {
+            grams.extend(
+                characters
+                    .windows(size)
+                    .map(|window| window.iter().collect()),
+            );
+        }
+    }
+    grams
+}
+
 pub(crate) trait MatrixSearchIndexSchema {
     fn new() -> Self;
     fn default_search_fields(&self) -> Vec<Field>;
     fn primary_key(&self) -> Field;
     fn deletion_key(&self) -> Field;
+    fn date_field(&self) -> Field;
     fn get_field_name(&self, field: Field) -> &str;
     fn as_tantivy_schema(&self) -> Schema;
     fn make_doc(&self, event: OriginalSyncRoomMessageEvent) -> Result<TantivyDocument, IndexError>;
@@ -39,6 +64,7 @@ pub(crate) struct RoomMessageSchema {
     /// Used by edits to refer to the event they edited (deletion key).
     original_event_id_field: Field,
     body_field: Field,
+    body_ngram_field: Field,
     date_field: Field,
     sender_field: Field,
     default_search_fields: Vec<Field>,
@@ -50,9 +76,11 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
         let event_id_field = schema.add_text_field("event_id", STORED | STRING);
         let original_event_id_field = schema.add_text_field("original_event_id", STRING);
         let body_field = schema.add_text_field("body", TEXT);
+        let body_ngram_field = schema.add_text_field("body_ngram", STRING);
 
-        let date_options =
-            DateOptions::from(INDEXED).set_fast().set_precision(DateTimePrecision::Seconds);
+        let date_options = DateOptions::from(INDEXED)
+            .set_fast()
+            .set_precision(DateTimePrecision::Milliseconds);
 
         let date_field = schema.add_date_field("date", date_options);
         let sender_field = schema.add_text_field("sender", STRING);
@@ -66,6 +94,7 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
             event_id_field,
             original_event_id_field,
             body_field,
+            body_ngram_field,
             date_field,
             sender_field,
             default_search_fields,
@@ -82,6 +111,10 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
 
     fn deletion_key(&self) -> Field {
         self.original_event_id_field
+    }
+
+    fn date_field(&self) -> Field {
+        self.date_field
     }
 
     fn get_field_name(&self, field: Field) -> &str {
@@ -105,12 +138,18 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
             self.body_field => body,
             self.date_field =>
                 DateTime::from_timestamp_millis(
-                    event.origin_server_ts.get().into()),
+                    safe_tantivy_timestamp_millis(event.origin_server_ts.get().into())),
             self.sender_field => event.sender.to_string(),
         );
+        for gram in body_ngrams(&body) {
+            document.add_text(self.body_ngram_field, gram);
+        }
 
         if let Some(Relation::Replacement(replacement_data)) = &event.content.relates_to {
-            document.add_text(self.original_event_id_field, replacement_data.event_id.clone());
+            document.add_text(
+                self.original_event_id_field,
+                replacement_data.event_id.clone(),
+            );
         } else {
             document.add_text(self.original_event_id_field, event.event_id);
         }
@@ -126,6 +165,7 @@ impl TryFrom<Schema> for RoomMessageSchema {
         let event_id_field = schema.get_field("event_id")?;
         let original_event_id_field = schema.get_field("original_event_id")?;
         let body_field = schema.get_field("body")?;
+        let body_ngram_field = schema.get_field("body_ngram")?;
         let date_field = schema.get_field("date")?;
         let sender_field = schema.get_field("sender")?;
 
@@ -136,9 +176,31 @@ impl TryFrom<Schema> for RoomMessageSchema {
             event_id_field,
             original_event_id_field,
             body_field,
+            body_ngram_field,
             date_field,
             sender_field,
             default_search_fields,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_TANTIVY_MILLISECONDS, body_ngrams, safe_tantivy_timestamp_millis};
+
+    #[test]
+    fn body_ngrams_cover_cjk_and_lowercase_latin_substrings() {
+        let grams = body_ngrams("A中文");
+        assert!(grams.contains("a"));
+        assert!(grams.contains("中文"));
+        assert!(grams.contains("a中文"));
+    }
+
+    #[test]
+    fn timestamp_is_capped_before_tantivy_converts_it_to_nanoseconds() {
+        assert_eq!(
+            safe_tantivy_timestamp_millis(MAX_TANTIVY_MILLISECONDS + 42),
+            MAX_TANTIVY_MILLISECONDS as i64
+        );
     }
 }
