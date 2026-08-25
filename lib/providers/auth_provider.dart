@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -129,6 +130,49 @@ String _tokenKey(String userId) =>
 String _refreshTokenKey(String userId) =>
     'matrix_refresh_token_${base64Url.encode(utf8.encode(userId))}';
 
+String _searchIndexKey(String userId) =>
+    'matrix_search_index_key_${base64Url.encode(utf8.encode(userId))}';
+
+String createSearchIndexKey() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+  return base64Url.encode(bytes);
+}
+
+Future<void> persistSearchIndexKey(String userId, String key) async {
+  if (key.isEmpty) throw StateError('搜索索引密钥为空');
+  if (await isSessionCredentialCompatibilityModeEnabled()) {
+    _logSessionStorage(
+      'warn',
+      'Search index key is session-only for $userId because secure storage '
+          'compatibility mode is enabled',
+    );
+    return;
+  }
+  await _secureStorage.write(key: _searchIndexKey(userId), value: key);
+  if (await _secureStorage.read(key: _searchIndexKey(userId)) != key) {
+    throw StateError('搜索索引密钥写入校验失败');
+  }
+}
+
+Future<({String key, bool created})> loadOrCreateSearchIndexKey(
+  String userId,
+) async {
+  if (await isSessionCredentialCompatibilityModeEnabled()) {
+    // Compatibility mode cannot persist the index key securely, so use an
+    // in-memory index (empty key) and let the caller pass
+    // useInMemorySearchIndex: true to Rust.
+    return (key: '', created: false);
+  }
+  final stored = await _secureStorage.read(key: _searchIndexKey(userId));
+  if (stored != null && stored.isNotEmpty) {
+    return (key: stored, created: false);
+  }
+  final key = createSearchIndexKey();
+  await persistSearchIndexKey(userId, key);
+  return (key: key, created: true);
+}
+
 String _removedSessionKey(String userId) =>
     'matrix_session_removed_${base64Url.encode(utf8.encode(userId))}';
 
@@ -154,6 +198,7 @@ Future<void> addSession({
   required String userId,
   required String deviceId,
   required String displayName,
+  String? searchIndexKey,
 }) async {
   final prefs = await SharedPreferences.getInstance();
 
@@ -183,6 +228,9 @@ Future<void> addSession({
     accessToken: accessToken,
     refreshToken: refreshToken,
   );
+  if (searchIndexKey != null) {
+    await persistSearchIndexKey(userId, searchIndexKey);
+  }
 
   await unmarkSessionRemoved(userId);
 
@@ -473,11 +521,19 @@ Future<SessionCredentials?> _readSessionCredentials(
 }
 
 Future<void> deletePersistedSessionCredentials(String userId) async {
+  // This deletes the encrypted search index *key* from secure storage. The
+  // index directory itself lives in the SDK data dir and is removed by Rust
+  // during logout / remove_account (delete_account_sdk_store). If that cleanup
+  // fails, the orphaned directory is reset on the next login because the key
+  // is gone and restoreSession receives a fresh key with resetSearchIndex=true.
+  // Interruption retries call cleanupRemovedAccountStore, which also deletes
+  // the whole SDK dir.
   await removeSessionCredentials(
     userId: userId,
     deleteSecureCredentials: () async {
       await _secureStorage.delete(key: _tokenKey(userId));
       await _secureStorage.delete(key: _refreshTokenKey(userId));
+      await _secureStorage.delete(key: _searchIndexKey(userId));
     },
   );
 }
@@ -1004,6 +1060,7 @@ Future<void> persistSession({
   required String userId,
   required String deviceId,
   required String displayName,
+  required String searchIndexKey,
 }) async {
   await addSession(
     homeserver: homeserver,
@@ -1012,6 +1069,7 @@ Future<void> persistSession({
     userId: userId,
     deviceId: deviceId,
     displayName: displayName,
+    searchIndexKey: searchIndexKey,
   );
 }
 

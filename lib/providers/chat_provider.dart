@@ -2145,6 +2145,60 @@ final searchRoomsProvider = FutureProvider.family<List<rust.ChatRoom>, String>((
   );
 });
 
+class MessageSearchRequest {
+  final String query;
+  final String? roomId;
+  final int offset;
+  final int limit;
+
+  const MessageSearchRequest({
+    required this.query,
+    this.roomId,
+    this.offset = 0,
+    this.limit = 30,
+  });
+
+  @override
+  int get hashCode => Object.hash(query, roomId, offset, limit);
+
+  @override
+  bool operator ==(Object other) =>
+      other is MessageSearchRequest &&
+      query == other.query &&
+      roomId == other.roomId &&
+      offset == other.offset &&
+      limit == other.limit;
+}
+
+final messageSearchProvider = FutureProvider.autoDispose
+    .family<rust.MessageSearchPage, MessageSearchRequest>((ref, request) async {
+      if (request.query.trim().isEmpty) {
+        return const rust.MessageSearchPage(
+          results: [],
+          hasMore: false,
+          terms: [],
+          historyComplete: true,
+        );
+      }
+      if (!ref.watch(sessionReadyProvider)) {
+        throw StateError('消息搜索会话尚未就绪');
+      }
+      ref.watch(activeUserIdProvider);
+      final filter = await _previewIgnoreFilter(ref);
+      return rust.searchMessages(
+        query: request.query.trim(),
+        roomId: request.roomId,
+        offset: request.offset,
+        limit: request.limit,
+        ignoredUserIds: filter.ids?.toList(),
+      );
+    });
+
+final messageSearchHistoryBackfillProvider =
+    Provider<Future<rust.MessageSearchBackfill> Function(String?)>((ref) {
+      return (roomId) => rust.backfillMessageSearch(roomId: roomId);
+    });
+
 /// Send a reply to a message
 Future<void> sendReply(
   Ref ref,

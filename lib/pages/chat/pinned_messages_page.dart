@@ -217,6 +217,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       await rust.unsubscribeRoomForReceipts(
         roomId: widget.roomId,
         subscriptionId: subscriptionId,
+        accountUserId: _subscribedUserId,
       );
     } catch (error) {
       debugPrint('unsubscribe pinned room updates failed: $error');

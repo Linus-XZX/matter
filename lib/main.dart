@@ -240,7 +240,19 @@ class _AppRootState extends ConsumerState<_AppRoot> {
 
       for (final session in orderedSessions) {
         try {
-          await rust.restoreSession(session: session, dataDir: dataDir);
+          final searchIndexKey = await loadOrCreateSearchIndexKey(
+            session.userId,
+          );
+          final useInMemorySearchIndex = searchIndexKey.key.isEmpty;
+          await rust.restoreSession(
+            session: session,
+            dataDir: dataDir,
+            searchIndexKey: searchIndexKey.key,
+            useInMemorySearchIndex: useInMemorySearchIndex,
+            resetSearchIndex: useInMemorySearchIndex
+                ? false
+                : searchIndexKey.created,
+          );
           debugPrint('Restored session for ${session.userId}');
 
           if (restoredActiveId == null || session.userId == activeId) {

@@ -27,6 +27,7 @@ import 'pinned_messages_stack.dart';
 import 'room_management_page.dart';
 import 'room_metadata_patch.dart';
 import 'room_state_edit_tracker.dart';
+import 'search_page.dart';
 import 'send_flight.dart';
 
 final chatRouteObserver = _ChatRouteObserver();
@@ -93,6 +94,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final String? avatarEventId;
   final String subtitle;
   final bool isDm;
+  final String? initialMessageId;
   final bool embedded;
   final bool detailsPanelOpen;
   final VoidCallback? onToggleDetailsPanel;
@@ -116,6 +118,7 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     this.avatarEventId,
     this.subtitle = '在线',
     this.isDm = false,
+    this.initialMessageId,
     this.embedded = false,
     this.detailsPanelOpen = false,
     this.onToggleDetailsPanel,
@@ -224,6 +227,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   /// between them could never be filled), therefore the live window stays
   /// hidden until [_exitFocusedBrowsing] runs.
   bool _focusedBrowsing = false;
+  bool _initialMessageJumpPending = false;
+  bool _searchRouteOpen = false;
 
   /// Remote event ids that have already been matched with a local outgoing
   /// message. Keeps duplicate sends of the same payload from being incorrectly
@@ -287,11 +292,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     _nameEventId = widget.nameEventId;
     _avatarEventId = widget.avatarEventId;
     _currentRoomIdNotifier = ref.read(currentRoomIdProvider.notifier);
+    if (widget.initialMessageId != null) {
+      _initialMessageJumpPending = true;
+    }
     final roomAccountKey = activeRoomAccountKey(ref, widget.roomId);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(replyingToProvider(roomAccountKey).notifier).value = null;
       _activateRoom(resetAutoReadSuppression: true);
+      if (widget.initialMessageId case final messageId?) {
+        unawaited(_jumpToInitialMessage(messageId));
+      }
     });
     // Switching away clears the Rust-side room/typing subscriptions; coming
     // back to the original account must re-subscribe (and re-mark the room
@@ -586,6 +597,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           await unsubscribeTyping(
             roomId: roomId,
             subscriptionId: subscriptionId,
+            accountUserId: _subscriptionsAccount,
           );
         }
       }
@@ -614,6 +626,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           await unsubscribeRoomForReceipts(
             roomId: roomId,
             subscriptionId: subscriptionId,
+            accountUserId: _subscriptionsAccount,
           );
         }
       }
@@ -857,6 +870,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final knownIds = {
       ..._displayedMessages.map((message) => message.id),
       ..._olderMessages.map((message) => message.id),
+      ...ref
+          .read(messageCacheProvider(widget.roomId))
+          .map((message) => message.id),
     };
     final connected = contextMessages.any(
       (message) => knownIds.contains(message.id),
@@ -1026,6 +1042,36 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('无法跳转到该消息: $error')));
+    }
+  }
+
+  Future<void> _jumpToInitialMessage(String messageId) async {
+    try {
+      await _jumpToMessage(messageId);
+    } finally {
+      if (mounted) {
+        if (_focusedBrowsing && !_messageIndex.containsKey(messageId)) {
+          _exitFocusedBrowsing(scrollToLatest: false, cancelPendingJump: false);
+        }
+        setState(() => _initialMessageJumpPending = false);
+      }
+    }
+  }
+
+  Future<void> _openMessageSearch() async {
+    if (_searchRouteOpen) return;
+    _searchRouteOpen = true;
+    try {
+      final messageId = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (_) => ChatSearchPage(roomId: widget.roomId),
+        ),
+      );
+      if (messageId != null && mounted) {
+        await _jumpToMessage(messageId);
+      }
+    } finally {
+      _searchRouteOpen = false;
     }
   }
 
@@ -1902,12 +1948,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           ),
           actions: [
             IconButton(
-              tooltip: '搜索暂未提供',
+              tooltip: '搜索消息',
               icon: const Icon(
                 Icons.search_rounded,
                 color: AppColors.onBackground,
               ),
-              onPressed: null,
+              onPressed: _openMessageSearch,
             ),
             IconButton(
               tooltip: '置顶消息',
@@ -2033,6 +2079,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   );
                   _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
                   if (_displayedMessages.isEmpty &&
+                      !_initialMessageJumpPending &&
                       !_automaticOlderLoadBlocked &&
                       !_isLoadingOlder &&
                       _hasMoreMessages &&
@@ -2052,7 +2099,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                         in membersAsync.asData?.value ?? const <Contact>[])
                       member.id: member,
                   };
-                  return TweenAnimationBuilder<double>(
+                  final timeline = TweenAnimationBuilder<double>(
                     tween: Tween<double>(end: messageBottomPadding),
                     duration: animatePanelChange
                         ? const Duration(milliseconds: 180)
@@ -2123,6 +2170,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                     },
                     child: const SizedBox.shrink(),
                   );
+                  if (!_initialMessageJumpPending) return timeline;
+                  return Stack(
+                    children: [
+                      Positioned.fill(
+                        child: Opacity(opacity: 0, child: timeline),
+                      ),
+                      const Center(
+                        child: CircularProgressIndicator(
+                          color: AppColors.primary,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                    ],
+                  );
                 },
               ),
             ),
@@ -2158,6 +2219,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               curve: Curves.easeOutCubic,
               child: LatestMessageControl(
                 visible:
+                    !_initialMessageJumpPending &&
                     (_showLatestMessageControl || _focusedBrowsing) &&
                     _forwardNoticeRoom == null,
                 showSentNotice: _showSentNotice,

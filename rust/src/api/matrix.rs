@@ -29,7 +29,9 @@ use matrix_sdk::{
     store::RoomLoadSettings,
     Client, Room, SessionMeta, SessionTokens,
 };
+use matrix_sdk_base::linked_chunk::{ChunkContent, ChunkIdentifier, ChunkMetadata, LinkedChunkId};
 use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Cursor, Read};
@@ -546,6 +548,22 @@ async fn clear_account_runtime_state(user_id: &str) {
     {
         let mut overrides = IGNORED_USER_OVERRIDES.write().await;
         overrides.retain(|key, _| !key.starts_with(&format!("{user_id}:")));
+    }
+    {
+        let mut backfills = SEARCH_CACHE_BACKFILL_PROGRESS.lock().await;
+        backfills.retain(|key, _| !key.starts_with(&format!("{user_id}\n")));
+    }
+    {
+        let mut generations = SEARCH_QUERY_GENERATIONS.lock().await;
+        generations.retain(|key, _| !key.starts_with(&format!("{user_id}\n")));
+    }
+    {
+        let mut backfills = SEARCH_HISTORY_BACKFILLS.lock().await;
+        backfills.retain(|key, _| !key.starts_with(&format!("{user_id}\n")));
+    }
+    {
+        let mut complete = SEARCH_HISTORY_COMPLETE.lock().await;
+        complete.retain(|key| !key.starts_with(&format!("{user_id}\n")));
     }
     // Queued mutations for this account (keys are `{kind}:{user_id}:...`,
     // `ignored:{user_id}`, or the room-scoped `pinned:{room_id}` shared
@@ -1887,6 +1905,7 @@ mod remote_logout_retry_tests {
 struct ClientEntry {
     client: Client,
     data_dir: String,
+    search_index_dir: std::path::PathBuf,
     instance_id: u64,
     room_key_task: JoinHandle<()>,
 }
@@ -1909,12 +1928,30 @@ struct PendingEntry {
     client: Client,
     data_dir: String,
     homeserver_url: String,
+    search_index_key: String,
 }
 
 /// All logged-in accounts, keyed by user_id.
 static CLIENTS: Lazy<Arc<RwLock<HashMap<String, ClientEntry>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 static NEXT_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Next EventCache chunk to copy into a newly created persistent index. Each
+/// background step is bounded so opening search never waits for a huge cache.
+static SEARCH_CACHE_BACKFILL_PROGRESS: Lazy<Mutex<HashMap<String, usize>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Serializes on-demand history pagination per account and room. Searches stay
+/// responsive by reading the current index while this fills one remote page at
+/// a time.
+static SEARCH_HISTORY_BACKFILLS: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Rooms whose EventCache pagination has reached the beginning of history.
+static SEARCH_HISTORY_COMPLETE: Lazy<Mutex<HashSet<String>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+/// Latest search request for each account and room scope. Superseded searches
+/// stop between room/index batches instead of scanning the remaining rooms.
+static SEARCH_QUERY_GENERATIONS: Lazy<Mutex<HashMap<String, u64>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Currently active account.
 static ACTIVE_USER: Lazy<Arc<RwLock<Option<String>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
@@ -2623,6 +2660,88 @@ fn build_sdk_data_dir(base: &str, user_id: Option<&str>) -> std::path::PathBuf {
     }
 }
 
+async fn remove_legacy_plaintext_search_index(sdk_dir: &Path) -> Result<(), String> {
+    let index_dir = sdk_dir.join("search_index");
+    match tokio::fs::remove_dir_all(&index_dir).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            let message = format!(
+                "Refusing to continue because the legacy plaintext search index could not be removed from {}: {error}",
+                index_dir.display()
+            );
+            warn!("{message}");
+            Err(api_err("auth", message))
+        }
+    }
+}
+
+const ENCRYPTED_SEARCH_INDEX_MARKER: &str = ".matter-encrypted-v2";
+
+async fn prepare_encrypted_search_index(
+    sdk_dir: &Path,
+    reset_encrypted_index: bool,
+) -> Result<std::path::PathBuf, String> {
+    let index_dir = sdk_dir.join("search_index");
+    let marker = index_dir.join(ENCRYPTED_SEARCH_INDEX_MARKER);
+    let marker_exists = match tokio::fs::metadata(&marker).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(api_err(
+                "auth",
+                format!(
+                    "Failed to inspect encrypted search index marker at {}: {error}",
+                    marker.display()
+                ),
+            ));
+        }
+    };
+
+    if reset_encrypted_index {
+        remove_legacy_plaintext_search_index(sdk_dir).await?;
+    } else if !marker_exists {
+        // The marker can be lost in a crash while the encrypted index and its
+        // key file remain. Deleting the directory would destroy recoverable
+        // data, so refuse and let the caller decide.
+        let key_file = index_dir.join("seshat-index.key");
+        if key_file.exists() {
+            return Err(api_err(
+                "auth",
+                format!(
+                    "Encrypted search index marker is missing at {} but the key file {} still exists; refusing to delete a potentially recoverable index",
+                    marker.display(),
+                    key_file.display()
+                ),
+            ));
+        }
+        remove_legacy_plaintext_search_index(sdk_dir).await?;
+    }
+    tokio::fs::create_dir_all(&index_dir)
+        .await
+        .map_err(|error| {
+            api_err(
+                "auth",
+                format!(
+                    "Failed to create encrypted search index directory at {}: {error}",
+                    index_dir.display()
+                ),
+            )
+        })?;
+    tokio::fs::write(&marker, b"encrypted\n")
+        .await
+        .map_err(|error| {
+            api_err(
+                "auth",
+                format!(
+                    "Failed to mark encrypted search index at {}: {error}",
+                    marker.display()
+                ),
+            )
+        })?;
+    Ok(index_dir)
+}
+
 async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), String> {
     let sdk_dir = build_sdk_data_dir(data_dir, Some(user_id));
     if !sdk_dir.exists() {
@@ -2634,15 +2753,35 @@ async fn delete_account_sdk_store(data_dir: &str, user_id: &str) -> Result<(), S
         format!("Deleting SDK store for {user_id}: {}", sdk_dir.display()),
     );
     info!("Deleting SDK store for {user_id}: {}", sdk_dir.display());
-    remove_dir_all_if_exists(&sdk_dir)
-        .await
-        .map(|_| ())
-        .map_err(|error| {
-            api_err(
-                "auth",
-                format!("Failed to delete SDK store for {user_id}: {error}"),
-            )
-        })
+
+    // Give Windows time to release file handles between attempts. The caller
+    // already sleeps once after dropping the client; the retries here absorb
+    // the remaining lag on slower systems.
+    let mut delay = std::time::Duration::from_millis(100);
+    let mut last_error = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+        match remove_dir_all_if_exists(&sdk_dir).await {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                warn!(
+                    "Failed to delete SDK store for {user_id} (attempt {}): {error}",
+                    attempt + 1
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(api_err(
+        "auth",
+        format!(
+            "Failed to delete SDK store for {user_id}: {}",
+            last_error.unwrap_or_default()
+        ),
+    ))
 }
 
 /// Retry SDK-store cleanup for an account whose persisted removal transaction
@@ -2657,7 +2796,10 @@ pub async fn cleanup_removed_account_store(
 
 #[cfg(test)]
 mod account_store_cleanup_tests {
-    use super::{build_sdk_data_dir, cleanup_removed_account_store};
+    use super::{
+        build_sdk_data_dir, cleanup_removed_account_store, prepare_encrypted_search_index,
+        remove_legacy_plaintext_search_index, ENCRYPTED_SEARCH_INDEX_MARKER,
+    };
 
     #[tokio::test]
     async fn removed_account_store_cleanup_is_idempotent() {
@@ -2684,6 +2826,107 @@ mod account_store_cleanup_tests {
         cleanup_removed_account_store(user_id.to_string(), data_dir.to_str().unwrap().to_string())
             .await
             .unwrap();
+        let _ = tokio::fs::remove_dir_all(data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_index_cleanup_is_required_and_idempotent() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "matter-search-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index_dir = data_dir.join("search_index");
+        tokio::fs::create_dir_all(&index_dir).await.unwrap();
+        tokio::fs::write(index_dir.join("plaintext"), b"secret")
+            .await
+            .unwrap();
+
+        remove_legacy_plaintext_search_index(&data_dir)
+            .await
+            .unwrap();
+        assert!(!index_dir.exists());
+        remove_legacy_plaintext_search_index(&data_dir)
+            .await
+            .unwrap();
+
+        tokio::fs::remove_dir_all(&data_dir).await.unwrap();
+        tokio::fs::write(&data_dir, b"not a directory")
+            .await
+            .unwrap();
+        assert!(remove_legacy_plaintext_search_index(&data_dir)
+            .await
+            .is_err());
+        let _ = tokio::fs::remove_file(data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn encrypted_search_index_survives_restore_and_resets_with_a_new_key() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "matter-encrypted-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index_dir = prepare_encrypted_search_index(&data_dir, false)
+            .await
+            .unwrap();
+        let indexed_data = index_dir.join("room-segment");
+        tokio::fs::write(&indexed_data, b"encrypted data")
+            .await
+            .unwrap();
+
+        prepare_encrypted_search_index(&data_dir, false)
+            .await
+            .unwrap();
+        assert!(indexed_data.exists());
+        assert!(index_dir.join(ENCRYPTED_SEARCH_INDEX_MARKER).exists());
+
+        prepare_encrypted_search_index(&data_dir, true)
+            .await
+            .unwrap();
+        assert!(!indexed_data.exists());
+        assert!(index_dir.join(ENCRYPTED_SEARCH_INDEX_MARKER).exists());
+        let _ = tokio::fs::remove_dir_all(data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn encrypted_search_index_refuses_to_delete_when_marker_is_missing_but_key_exists() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "matter-encrypted-search-missing-marker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index_dir = data_dir.join("search_index");
+        tokio::fs::create_dir_all(&index_dir).await.unwrap();
+        tokio::fs::write(index_dir.join("seshat-index.key"), b"key-material")
+            .await
+            .unwrap();
+        tokio::fs::write(index_dir.join("room-segment"), b"encrypted data")
+            .await
+            .unwrap();
+
+        assert!(prepare_encrypted_search_index(&data_dir, false)
+            .await
+            .is_err());
+        assert!(index_dir.join("seshat-index.key").exists());
+        assert!(index_dir.join("room-segment").exists());
+
+        // Explicit reset still works.
+        prepare_encrypted_search_index(&data_dir, true)
+            .await
+            .unwrap();
+        assert!(!index_dir.join("seshat-index.key").exists());
+        assert!(!index_dir.join("room-segment").exists());
+        assert!(index_dir.join(ENCRYPTED_SEARCH_INDEX_MARKER).exists());
         let _ = tokio::fs::remove_dir_all(data_dir).await;
     }
 }
@@ -2727,245 +2970,351 @@ async fn get_client() -> Option<ClientLease> {
 
 /// After a successful auth on the pending client, migrate it to a per-user store.
 async fn finalize_pending() -> Result<String, String> {
-    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
-    let (pending_client, data_dir, homeserver_url) = {
-        let pending = PENDING.read().await;
-        let p = pending.as_ref().ok_or("No pending client to finalize")?;
-        (
-            p.client.clone(),
-            p.data_dir.clone(),
-            p.homeserver_url.clone(),
-        )
-    };
-
-    let auth = pending_client.matrix_auth();
-    if !auth.logged_in() {
-        return Err("Pending client is not logged in".into());
-    }
-    let session = auth.session().ok_or("No session in pending client")?;
-    let user_id = session.meta.user_id.to_string();
-    let matrix_session = MatrixSession {
-        meta: SessionMeta {
-            user_id: session.meta.user_id.clone(),
-            device_id: session.meta.device_id.clone(),
+    enum FinalizeStart {
+        Duplicate {
+            pending_client: Client,
+            user_id: String,
+            access_token: String,
+            homeserver_url: String,
         },
-        tokens: SessionTokens {
-            access_token: session.tokens.access_token.clone(),
-            refresh_token: session.tokens.refresh_token.clone(),
+        New {
+            pending_client: Client,
+            data_dir: String,
+            homeserver_url: String,
+            search_index_key: String,
+            user_id: String,
+            matrix_session: MatrixSession,
         },
-    };
-    drop(auth);
+    }
 
-    app_log(
-        "info",
-        "auth",
-        format!("finalize_pending: starting for user {}", user_id),
-    );
-    info!("finalize_pending: starting for user {}", user_id);
-    if CLIENTS.read().await.contains_key(&user_id) {
-        // This pending login will never be used — the account is already
-        // signed in. But the password/token login already created a session
-        // on the server: dropping the client here would leave a permanently
-        // valid ghost device session (with a refresh token) behind. Revoke
-        // it first, bounded like logout()/remove_account (this runs under
-        // the SYNC_LIFECYCLE write lock, so an unreachable server must not
-        // freeze the error path). On failure the token is remembered in
-        // PENDING_REMOTE_LOGOUTS so the next login of this account retries
-        // the remote logout (see retry_pending_remote_logout).
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            pending_client.matrix_auth().logout(),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                PENDING_REMOTE_LOGOUTS.write().await.insert(
-                    user_id.clone(),
-                    (
-                        matrix_session.tokens.access_token.clone(),
-                        homeserver_url.clone(),
-                    ),
-                );
-                app_log(
-                    "warn",
-                    "auth",
-                    format!("Remote logout of duplicate pending session failed for {user_id}: {e}"),
-                );
-                warn!("Remote logout of duplicate pending session failed for {user_id}: {e}");
+    // Phase 1: inspect the pending client and global state under the lifecycle
+    // write lock. For a duplicate login we clear PENDING immediately so no other
+    // call can use this pending client while we perform the remote logout
+    // outside the lock.
+    let start = {
+        let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+        let (pending_client, data_dir, homeserver_url, search_index_key, user_id, matrix_session) = {
+            let pending = PENDING.read().await;
+            let p = pending.as_ref().ok_or("No pending client to finalize")?;
+            let client = p.client.clone();
+            let auth = client.matrix_auth();
+            if !auth.logged_in() {
+                return Err("Pending client is not logged in".into());
             }
-            Err(_) => {
-                PENDING_REMOTE_LOGOUTS.write().await.insert(
-                    user_id.clone(),
-                    (
-                        matrix_session.tokens.access_token.clone(),
-                        homeserver_url.clone(),
-                    ),
-                );
-                app_log(
-                    "warn",
-                    "auth",
-                    format!("Remote logout of duplicate pending session timed out for {user_id}"),
-                );
-                warn!("Remote logout of duplicate pending session timed out for {user_id}");
-            }
-        }
-        // Clear PENDING and drop the freshly built client so its session is
-        // not retained as an orphan.
-        {
-            let mut pending = PENDING.write().await;
-            *pending = None;
-        }
-        drop(pending_client);
-        return Err("This account is already signed in.".to_string());
-    }
+            let session = auth.session().ok_or("No session in pending client")?;
+            let user_id = session.meta.user_id.to_string();
+            let matrix_session = MatrixSession {
+                meta: SessionMeta {
+                    user_id: session.meta.user_id.clone(),
+                    device_id: session.meta.device_id.clone(),
+                },
+                tokens: SessionTokens {
+                    access_token: session.tokens.access_token.clone(),
+                    refresh_token: session.tokens.refresh_token.clone(),
+                },
+            };
+            drop(auth);
+            (
+                client,
+                p.data_dir.clone(),
+                p.homeserver_url.clone(),
+                p.search_index_key.clone(),
+                user_id,
+                matrix_session,
+            )
+        };
 
-    // Build per-user directory
-    let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
-
-    // A password login creates the crypto identity in the pending store. Keep
-    // that exact store: rebuilding an empty store with the same Matrix device
-    // ID discards the Olm account and makes encrypted messages undecryptable.
-    stop_sync_task(Some(&user_id), false).await;
-    clear_account_runtime_state(&user_id).await;
-
-    // Release every reference before moving SQLite files (required on Windows
-    // and avoids moving a database while WAL writes are still in flight).
-    {
-        let mut pending = PENDING.write().await;
-        *pending = None;
-    }
-    drop(pending_client);
-    // TODO: Tweak this value to avoid "Access Denied" (OS error 5) errors on
-    // Windows on login (on `rename(&temp_dir, &sdk_dir)`).
-    // 20000 (20 seconds) worked for me but obviously butchered the waiting time.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    let temp_dir = build_sdk_data_dir(&data_dir, None);
-    let accounts_dir = sdk_dir
-        .parent()
-        .ok_or_else(|| "Invalid account store path".to_string())?;
-    tokio::fs::create_dir_all(accounts_dir)
-        .await
-        .map_err(|e| format!("Failed to create accounts directory: {e}"))?;
-    let previous_dir = sdk_dir.with_extension("previous");
-    remove_dir_all_if_exists(&previous_dir)
-        .await
-        .map_err(|e| format!("Failed to remove stale account store backup: {e}"))?;
-    let had_previous_store = sdk_dir.exists();
-    if had_previous_store {
-        tokio::fs::rename(&sdk_dir, &previous_dir)
-            .await
-            .map_err(|e| format!("Failed to preserve existing account store: {e}"))?;
-    }
-    if let Err(error) = tokio::fs::rename(&temp_dir, &sdk_dir).await {
-        if had_previous_store {
-            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
-        }
-        return Err(format!("Failed to migrate encryption store: {error}"));
-    }
-
-    // Create a new client in the per-user directory
-    let url = url::Url::parse(&homeserver_url).map_err(|e| format!("Invalid URL: {e}"))?;
-    app_log(
-        "info",
-        "auth",
-        format!("finalize_pending: creating client in {}", sdk_dir.display()),
-    );
-    info!("finalize_pending: creating client in {}", sdk_dir.display());
-    let new_client = match Client::builder()
-        .handle_refresh_tokens()
-        .homeserver_url(url)
-        .with_encryption_settings(encryption_settings())
-        .request_config(bounded_request_config())
-        .sqlite_store(&sdk_dir, None)
-        .build()
-        .await
-    {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = remove_dir_all_if_exists(&sdk_dir).await;
-            if had_previous_store {
-                let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
-            }
-            return Err(format!("Failed to create per-user client: {error}"));
-        }
-    };
-    install_session_token_callback(&new_client)?;
-
-    app_log(
-        "info",
-        "auth",
-        format!("finalize_pending: restoring session for {}", user_id),
-    );
-    info!("finalize_pending: restoring session for {}", user_id);
-    if let Err(error) = new_client
-        .matrix_auth()
-        .restore_session(matrix_session, RoomLoadSettings::default())
-        .await
-    {
-        drop(new_client);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = remove_dir_all_if_exists(&sdk_dir).await;
-        if had_previous_store {
-            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
-        }
-        return Err(format!("Restore session in per-user store: {error}"));
-    }
-    if had_previous_store {
-        if let Err(error) = remove_dir_all_if_exists(&previous_dir).await {
-            warn!("Failed to remove previous account store: {error}");
-        }
-    }
-    wait_for_e2ee_initialization(&new_client, "login finalization").await;
-    app_log(
-        "info",
-        "auth",
-        format!("finalize_pending: session restored for {}", user_id),
-    );
-    info!("finalize_pending: session restored for {}", user_id);
-    let instance_id = NEXT_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
-    let identity = ClientIdentity {
-        user_id: user_id.clone(),
-        instance_id,
-    };
-    install_verification_event_handler(&new_client, identity.clone());
-    install_live_update_event_handlers(&new_client, identity.clone());
-    let room_key_task = install_room_key_event_handler(&new_client, identity);
-
-    // Stop event publication before replacing the client entry. This orders
-    // callbacks from the old instance before the identity swap.
-    set_subscription_user(None).await;
-    stop_sync_task(None, false).await;
-    // A previous logout of this account may have failed to reach the
-    // server (dead network): its old token may still be valid there —
-    // retry the remote logout best-effort (fire-and-forget) with this
-    // client's transport.
-    retry_pending_remote_logout(&user_id, &new_client).await;
-    {
-        let mut clients = CLIENTS.write().await;
-        clients.insert(
-            user_id.clone(),
-            ClientEntry {
-                client: new_client,
-                data_dir: data_dir.clone(),
-                instance_id,
-                room_key_task,
-            },
+        app_log(
+            "info",
+            "auth",
+            format!("finalize_pending: starting for user {}", user_id),
         );
-    }
+        info!("finalize_pending: starting for user {}", user_id);
 
-    // Invalidate builders on both sides of the active-account write.
-    {
-        let mut active = ACTIVE_USER.write().await;
-        *active = Some(user_id.clone());
-    }
-    stop_sync_task(None, false).await;
-    set_subscription_user(Some(user_id.clone())).await;
+        if CLIENTS.read().await.contains_key(&user_id) {
+            {
+                let mut pending = PENDING.write().await;
+                *pending = None;
+            }
+            FinalizeStart::Duplicate {
+                pending_client,
+                user_id,
+                access_token: matrix_session.tokens.access_token,
+                homeserver_url,
+            }
+        } else {
+            FinalizeStart::New {
+                pending_client,
+                data_dir,
+                homeserver_url,
+                search_index_key,
+                user_id,
+                matrix_session,
+            }
+        }
+    };
 
-    app_log("info", "auth", format!("Account finalized: {}", user_id));
-    info!("Account finalized: {}", user_id);
-    Ok(user_id)
+    match start {
+        FinalizeStart::Duplicate {
+            pending_client,
+            user_id,
+            access_token,
+            homeserver_url,
+        } => {
+            // Remote logout is performed outside the lifecycle lock so an
+            // unreachable server does not block every API call.
+            if pending_client.matrix_auth().logged_in() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    pending_client.matrix_auth().logout(),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        PENDING_REMOTE_LOGOUTS.write().await.insert(
+                            user_id.clone(),
+                            (access_token.clone(), homeserver_url.clone()),
+                        );
+                        app_log(
+                            "warn",
+                            "auth",
+                            format!(
+                                "Remote logout of duplicate pending session failed for {user_id}: {e}"
+                            ),
+                        );
+                        warn!(
+                            "Remote logout of duplicate pending session failed for {user_id}: {e}"
+                        );
+                    }
+                    Err(_) => {
+                        PENDING_REMOTE_LOGOUTS
+                            .write()
+                            .await
+                            .insert(user_id.clone(), (access_token, homeserver_url));
+                        app_log(
+                            "warn",
+                            "auth",
+                            format!(
+                                "Remote logout of duplicate pending session timed out for {user_id}"
+                            ),
+                        );
+                        warn!("Remote logout of duplicate pending session timed out for {user_id}");
+                    }
+                }
+            }
+            drop(pending_client);
+            Err("This account is already signed in.".to_string())
+        }
+        FinalizeStart::New {
+            pending_client,
+            data_dir,
+            homeserver_url,
+            search_index_key,
+            user_id,
+            matrix_session,
+        } => {
+            // Phase 2: under lock, stop sync, clear runtime state, and migrate
+            // the pending store into the per-user directory. File migration
+            // stays under the lock so a concurrent create_client cannot delete
+            // the pending directory while we are moving it.
+            let (sdk_dir, search_index_dir, had_previous_store, previous_dir) = {
+                let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+                // Defensive re-check: another restore may have installed this
+                // account while we were not holding the lock.
+                if CLIENTS.read().await.contains_key(&user_id) {
+                    {
+                        let mut pending = PENDING.write().await;
+                        *pending = None;
+                    }
+                    drop(pending_client);
+                    return Err("This account is already signed in.".to_string());
+                }
+                stop_sync_task(Some(&user_id), false).await;
+                clear_account_runtime_state(&user_id).await;
+
+                let sdk_dir = build_sdk_data_dir(&data_dir, Some(&user_id));
+                let temp_dir = build_sdk_data_dir(&data_dir, None);
+                {
+                    let mut pending = PENDING.write().await;
+                    *pending = None;
+                }
+                drop(pending_client);
+                // TODO: Tweak this value to avoid "Access Denied" (OS error 5) errors on
+                // Windows on login (on `rename(&temp_dir, &sdk_dir)`).
+                // 20000 (20 seconds) worked for me but obviously butchered the waiting time.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                remove_legacy_plaintext_search_index(&sdk_dir).await?;
+                remove_legacy_plaintext_search_index(&temp_dir).await?;
+                let accounts_dir = sdk_dir
+                    .parent()
+                    .ok_or_else(|| "Invalid account store path".to_string())?;
+                tokio::fs::create_dir_all(accounts_dir)
+                    .await
+                    .map_err(|e| format!("Failed to create accounts directory: {e}"))?;
+                let previous_dir = sdk_dir.with_extension("previous");
+                remove_dir_all_if_exists(&previous_dir)
+                    .await
+                    .map_err(|e| format!("Failed to remove stale account store backup: {e}"))?;
+                let had_previous_store = sdk_dir.exists();
+                if had_previous_store {
+                    tokio::fs::rename(&sdk_dir, &previous_dir)
+                        .await
+                        .map_err(|e| format!("Failed to preserve existing account store: {e}"))?;
+                }
+                if let Err(error) = tokio::fs::rename(&temp_dir, &sdk_dir).await {
+                    if had_previous_store {
+                        let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+                    }
+                    return Err(format!("Failed to migrate encryption store: {error}"));
+                }
+                let search_index_dir = match prepare_encrypted_search_index(&sdk_dir, true).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let _ = remove_dir_all_if_exists(&sdk_dir).await;
+                        if had_previous_store {
+                            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+                        }
+                        return Err(error);
+                    }
+                };
+                (sdk_dir, search_index_dir, had_previous_store, previous_dir)
+            };
+
+            // Phase 3: build the per-user client and restore the session outside
+            // the lifecycle lock so long-running work does not block other API
+            // calls.
+            let url = url::Url::parse(&homeserver_url).map_err(|e| format!("Invalid URL: {e}"))?;
+            app_log(
+                "info",
+                "auth",
+                format!("finalize_pending: creating client in {}", sdk_dir.display()),
+            );
+            info!("finalize_pending: creating client in {}", sdk_dir.display());
+            let new_client = match Client::builder()
+                .handle_refresh_tokens()
+                .homeserver_url(url)
+                .with_encryption_settings(encryption_settings())
+                .request_config(bounded_request_config())
+                .search_index_store(
+                    matrix_sdk::search_index::SearchIndexStoreKind::EncryptedDirectory(
+                        search_index_dir.clone(),
+                        search_index_key,
+                    ),
+                )
+                .sqlite_store(&sdk_dir, None)
+                .build()
+                .await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = remove_dir_all_if_exists(&sdk_dir).await;
+                    if had_previous_store {
+                        let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+                    }
+                    return Err(format!("Failed to create per-user client: {error}"));
+                }
+            };
+            install_session_token_callback(&new_client)?;
+
+            app_log(
+                "info",
+                "auth",
+                format!("finalize_pending: restoring session for {}", user_id),
+            );
+            info!("finalize_pending: restoring session for {}", user_id);
+            if let Err(error) = new_client
+                .matrix_auth()
+                .restore_session(matrix_session, RoomLoadSettings::default())
+                .await
+            {
+                drop(new_client);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = remove_dir_all_if_exists(&sdk_dir).await;
+                if had_previous_store {
+                    let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+                }
+                return Err(format!("Restore session in per-user store: {error}"));
+            }
+            if had_previous_store {
+                if let Err(error) = remove_dir_all_if_exists(&previous_dir).await {
+                    warn!("Failed to remove previous account store: {error}");
+                }
+            }
+            wait_for_e2ee_initialization(&new_client, "login finalization").await;
+            app_log(
+                "info",
+                "auth",
+                format!("finalize_pending: session restored for {}", user_id),
+            );
+            info!("finalize_pending: session restored for {}", user_id);
+            let instance_id = NEXT_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+            let identity = ClientIdentity {
+                user_id: user_id.clone(),
+                instance_id,
+            };
+            install_verification_event_handler(&new_client, identity.clone());
+            install_live_update_event_handlers(&new_client, identity.clone());
+            let room_key_task = install_room_key_event_handler(&new_client, identity);
+
+            // Phase 4: reacquire the lock and install the finalized client.
+            {
+                let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+                // If another lifecycle transition installed this account or a
+                // new pending client in the meantime, drop our work and let the
+                // winner stand. We only clean up the store if no other client
+                // owns it.
+                let client_present = CLIENTS.read().await.contains_key(&user_id);
+                if PENDING.read().await.is_some() || client_present {
+                    drop(new_client);
+                    if !client_present {
+                        let _ = remove_dir_all_if_exists(&sdk_dir).await;
+                        if had_previous_store {
+                            let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
+                        }
+                    }
+                    return Err("Account state changed during finalization".to_string());
+                }
+
+                // Stop event publication before replacing the client entry.
+                // This orders callbacks from the old instance before the
+                // identity swap.
+                set_subscription_user(None).await;
+                stop_sync_task(None, false).await;
+                // A previous logout of this account may have failed to reach
+                // the server (dead network): its old token may still be valid
+                // there — retry the remote logout best-effort (fire-and-forget)
+                // with this client's transport.
+                retry_pending_remote_logout(&user_id, &new_client).await;
+                {
+                    let mut clients = CLIENTS.write().await;
+                    clients.insert(
+                        user_id.clone(),
+                        ClientEntry {
+                            client: new_client,
+                            data_dir: data_dir.clone(),
+                            search_index_dir,
+                            instance_id,
+                            room_key_task,
+                        },
+                    );
+                }
+
+                // Invalidate builders on both sides of the active-account write.
+                {
+                    let mut active = ACTIVE_USER.write().await;
+                    *active = Some(user_id.clone());
+                }
+                stop_sync_task(None, false).await;
+                set_subscription_user(Some(user_id.clone())).await;
+            }
+
+            app_log("info", "auth", format!("Account finalized: {}", user_id));
+            info!("Account finalized: {}", user_id);
+            Ok(user_id)
+        }
+    }
 }
 
 // ── FRB data types ───────────────────────────────────────────────────
@@ -3909,8 +4258,23 @@ mod auth_error_tests {
 /// Must be called before any registration / login attempt.
 /// The client is stored as "pending" until a login succeeds,
 /// after which it is automatically migrated to a per-user store.
+///
+/// `use_in_memory_search_index` bypasses the search-index-key requirement and
+/// keeps the pending client's index in memory. The per-user store created by
+/// `finalize_pending` still uses the encrypted index and the supplied key.
 #[frb]
-pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(), String> {
+pub async fn create_client(
+    homeserver_url: String,
+    data_dir: String,
+    search_index_key: String,
+    use_in_memory_search_index: bool,
+) -> Result<(), String> {
+    if !use_in_memory_search_index && search_index_key.is_empty() {
+        return Err(api_err(
+            "auth",
+            "Encrypted search index key is empty".to_string(),
+        ));
+    }
     init_log_store(&data_dir);
     app_log(
         "info",
@@ -3924,20 +4288,20 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
     })?;
     let sdk_dir = build_sdk_data_dir(&data_dir, None);
 
-    // Clean up any stale pending directory under the lifecycle write lock
-    // (same level as finalize_pending / logout / restore): a previous login
-    // attempt may still be in flight with its pending client's SQLite store
-    // open on this directory — its lease holds a SYNC_LIFECYCLE read share,
-    // so the write guard drains those calls before the store is deleted
-    // underneath them, and blocks new ones until the fresh pending client
-    // is installed. Lock order SYNC_LIFECYCLE → PENDING matches get_client
-    // and finalize_pending.
-    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
-    if sdk_dir.exists() {
-        info!("Removing stale pending dir: {}", sdk_dir.display());
-        if let Err(e) = remove_dir_all_if_exists(&sdk_dir).await {
-            warn!("Failed to clean pending dir: {e}");
+    // Drain API calls and remove any stale pending directory under the
+    // lifecycle write lock. Then release the lock for the expensive client
+    // build and verify afterwards that no other lifecycle transition replaced
+    // the pending entry before installing ours.
+    {
+        let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+        if sdk_dir.exists() {
+            info!("Removing stale pending dir: {}", sdk_dir.display());
+            if let Err(e) = remove_dir_all_if_exists(&sdk_dir).await {
+                warn!("Failed to clean pending dir: {e}");
+            }
         }
+        let mut pending = PENDING.write().await;
+        *pending = None;
     }
 
     let client = Client::builder()
@@ -3945,6 +4309,7 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .request_config(bounded_request_config())
+        .search_index_store(matrix_sdk::search_index::SearchIndexStoreKind::InMemory)
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -3961,12 +4326,25 @@ pub async fn create_client(homeserver_url: String, data_dir: String) -> Result<(
         format!("Client created for {}", homeserver_url),
     );
 
-    let mut pending = PENDING.write().await;
-    *pending = Some(PendingEntry {
-        client,
-        data_dir,
-        homeserver_url,
-    });
+    {
+        let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+        // If another login attempt finished while we were building the client,
+        // drop this one and let the winner stand.
+        if PENDING.read().await.is_some() {
+            drop(client);
+            return Err(api_err(
+                "auth",
+                "Another login attempt completed while this one was initializing".to_string(),
+            ));
+        }
+        let mut pending = PENDING.write().await;
+        *pending = Some(PendingEntry {
+            client,
+            data_dir,
+            homeserver_url,
+            search_index_key,
+        });
+    }
     Ok(())
 }
 
@@ -4508,15 +4886,44 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
             .remove(&user_id)
             .ok_or_else(|| api_err("auth", "Active account missing from store".to_string()))?
     };
+    let next_user_id = {
+        let clients = CLIENTS.read().await;
+        clients.iter().next().map(|(id, _)| id.clone())
+    };
+    {
+        let mut active = ACTIVE_USER.write().await;
+        if let Some(next_id) = next_user_id.as_ref() {
+            *active = Some(next_id.clone());
+            app_log(
+                "info",
+                "auth",
+                format!("Switched active account to: {}", next_id),
+            );
+            info!("Switched active account to: {}", next_id);
+        } else {
+            *active = None;
+            app_log(
+                "info",
+                "auth",
+                "No more accounts, active cleared".to_string(),
+            );
+            info!("No more accounts, active cleared");
+        }
+    }
+    // Release the lifecycle lock before the network request and filesystem
+    // cleanup so other API calls are not blocked while the server is unreachable
+    // or while Windows releases file handles.
+    drop(_sync_lifecycle);
+
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bound the remote logout: the server may be unreachable and the SDK
-        // has no HTTP timeout, which would otherwise freeze account removal
-        // (this runs under the SYNC_LIFECYCLE write lock) indefinitely. A
-        // timeout or failure still proceeds with local cleanup below, so the
-        // account can be logged out locally and retried on the server later.
+        // has no HTTP timeout. A timeout or failure still proceeds with local
+        // cleanup below, so the account can be logged out locally and retried
+        // on the server later. This runs outside the lifecycle write lock so
+        // unrelated API calls are not frozen.
         match tokio::time::timeout(
             std::time::Duration::from_secs(15),
             client.matrix_auth().logout(),
@@ -4577,29 +4984,6 @@ pub async fn logout() -> Result<AccountRemovalResult, String> {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let store_delete_result = delete_account_sdk_store(&data_dir, &user_id).await;
 
-    // Update active user to another available account, or None
-    let clients = CLIENTS.write().await;
-    let mut active = ACTIVE_USER.write().await;
-    let next_user_id = clients.iter().next().map(|(id, _)| id.clone());
-    if let Some(next_id) = next_user_id.as_ref() {
-        *active = Some(next_id.clone());
-        app_log(
-            "info",
-            "auth",
-            format!("Switched active account to: {}", next_id),
-        );
-        info!("Switched active account to: {}", next_id);
-    } else {
-        *active = None;
-        app_log(
-            "info",
-            "auth",
-            "No more accounts, active cleared".to_string(),
-        );
-        info!("No more accounts, active cleared");
-    }
-    drop(active);
-    drop(clients);
     // A start_sync already building when logout began can install itself
     // after the first stop while ACTIVE_USER still names this account. Stop
     // once more after changing ACTIVE_USER, before new routes may subscribe.
@@ -4641,12 +5025,27 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
             .remove(&user_id)
             .ok_or_else(|| api_err("auth", "Account not found".to_string()))?
     };
+    let next_user_id = if removing_active {
+        let clients = CLIENTS.read().await;
+        clients.iter().next().map(|(id, _)| id.clone())
+    } else {
+        None
+    };
+    if removing_active {
+        let mut active = ACTIVE_USER.write().await;
+        *active = next_user_id.clone();
+    }
+    // Release the lifecycle lock before the network request and filesystem
+    // cleanup so other API calls are not blocked.
+    drop(_sync_lifecycle);
+
     let (client, data_dir) = entry.into_client_and_data_dir().await;
 
     let mut remote_logout_pending = false;
     if client.matrix_auth().logged_in() {
         // Bounded remote logout: see logout() — an unreachable server must
-        // not freeze account removal, which runs under the write lock.
+        // not freeze account removal. This runs outside the lifecycle write
+        // lock so unrelated API calls are not frozen.
         match tokio::time::timeout(
             std::time::Duration::from_secs(15),
             client.matrix_auth().logout(),
@@ -4707,15 +5106,6 @@ pub async fn remove_account(user_id: String) -> Result<AccountRemovalResult, Str
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let store_delete_result = delete_account_sdk_store(&data_dir, &user_id).await;
 
-    // If this was the active account, switch to another or clear
-    let mut active = ACTIVE_USER.write().await;
-    let mut next_user_id = active.clone();
-    if active.as_ref() == Some(&user_id) {
-        let clients = CLIENTS.read().await;
-        next_user_id = clients.iter().next().map(|(id, _)| id.clone());
-        *active = next_user_id.clone();
-    }
-    drop(active);
     if removing_active {
         // Close the same start_sync installation race as logout().
         stop_sync_task(None, false).await;
@@ -4761,13 +5151,24 @@ pub async fn get_session() -> Option<StoredSession> {
 
 /// Restore a previously saved session (used on app startup).
 /// Uses a per-user store directory so multiple accounts coexist.
+///
+/// `use_in_memory_search_index` keeps the search index in memory instead of
+/// the encrypted on-disk store. When true, `search_index_key` may be empty and
+/// `reset_search_index` is ignored.
 #[frb]
-pub async fn restore_session(session: StoredSession, data_dir: String) -> Result<(), String> {
-    let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
-    if CLIENTS.read().await.contains_key(&session.user_id) {
-        return Ok(());
+pub async fn restore_session(
+    session: StoredSession,
+    data_dir: String,
+    search_index_key: String,
+    reset_search_index: bool,
+    use_in_memory_search_index: bool,
+) -> Result<(), String> {
+    if !use_in_memory_search_index && search_index_key.is_empty() {
+        return Err(api_err(
+            "auth",
+            "Encrypted search index key is empty".to_string(),
+        ));
     }
-    stop_sync_task(Some(&session.user_id), false).await;
     init_log_store(&data_dir);
     app_log(
         "info",
@@ -4784,17 +5185,43 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
     })?;
     let sdk_dir = build_sdk_data_dir(&data_dir, Some(&session.user_id));
 
+    // Hold the lifecycle lock only while inspecting/updating global state and
+    // preparing the on-disk index directory. The expensive client build and
+    // session restore happen outside the lock so other API calls can progress.
+    let search_index_dir = {
+        let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+        if CLIENTS.read().await.contains_key(&session.user_id) {
+            return Ok(());
+        }
+        stop_sync_task(Some(&session.user_id), false).await;
+        if use_in_memory_search_index {
+            sdk_dir.join("search_index")
+        } else {
+            prepare_encrypted_search_index(&sdk_dir, reset_search_index).await?
+        }
+    };
+
     app_log(
         "info",
         "auth",
         format!("restore_session: SDK dir = {}", sdk_dir.display()),
     );
 
+    let search_index_store = if use_in_memory_search_index {
+        matrix_sdk::search_index::SearchIndexStoreKind::InMemory
+    } else {
+        matrix_sdk::search_index::SearchIndexStoreKind::EncryptedDirectory(
+            search_index_dir.clone(),
+            search_index_key,
+        )
+    };
+
     let client = Client::builder()
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
         .request_config(bounded_request_config())
+        .search_index_store(search_index_store)
         .sqlite_store(&sdk_dir, None)
         .build()
         .await
@@ -4839,32 +5266,42 @@ pub async fn restore_session(session: StoredSession, data_dir: String) -> Result
     install_live_update_event_handlers(&client, identity.clone());
     let room_key_task = install_room_key_event_handler(&client, identity);
 
-    // Add to multi-account store, dropping any runtime state bound to a
-    // previous client for this account (e.g. after an engine rebuild).
-    set_subscription_user(None).await;
-    stop_sync_task(None, false).await;
-    clear_account_runtime_state(&session.user_id).await;
+    // Reacquire the lock to install the client. Another restore/login may have
+    // beaten us, in which case we drop our client and let the winner stand.
     {
-        let mut clients = CLIENTS.write().await;
-        clients.insert(
-            session.user_id.clone(),
-            ClientEntry {
-                client,
-                data_dir: data_dir.clone(),
-                instance_id,
-                room_key_task,
-            },
-        );
-    }
+        let _sync_lifecycle = SYNC_LIFECYCLE.write().await;
+        if CLIENTS.read().await.contains_key(&session.user_id) {
+            drop(client);
+            return Ok(());
+        }
+        // Add to multi-account store, dropping any runtime state bound to a
+        // previous client for this account (e.g. after an engine rebuild).
+        set_subscription_user(None).await;
+        stop_sync_task(None, false).await;
+        clear_account_runtime_state(&session.user_id).await;
+        {
+            let mut clients = CLIENTS.write().await;
+            clients.insert(
+                session.user_id.clone(),
+                ClientEntry {
+                    client,
+                    data_dir: data_dir.clone(),
+                    search_index_dir,
+                    instance_id,
+                    room_key_task,
+                },
+            );
+        }
 
-    // Set as active while closing the installation window for a sync builder
-    // that started against the previously active account.
-    {
-        let mut active = ACTIVE_USER.write().await;
-        *active = Some(session.user_id.clone());
+        // Set as active while closing the installation window for a sync builder
+        // that started against the previously active account.
+        {
+            let mut active = ACTIVE_USER.write().await;
+            *active = Some(session.user_id.clone());
+        }
+        stop_sync_task(None, false).await;
+        set_subscription_user(Some(session.user_id.clone())).await;
     }
-    stop_sync_task(None, false).await;
-    set_subscription_user(Some(session.user_id.clone())).await;
 
     app_log(
         "info",
@@ -6113,12 +6550,27 @@ pub async fn subscribe_typing_for_room(
 }
 
 /// Stop tracking typing notifications (e.g. when leaving the room screen).
+///
+/// Verifies the calling route still belongs to the given account, matching
+/// `subscribe_typing_for_room`, so a stale unsubscribe after an account switch
+/// cannot cancel the new account's subscription.
 #[frb]
-pub async fn unsubscribe_typing(room_id: String, subscription_id: String) {
-    let mut task = TYPING_TASK.lock().await;
+pub async fn unsubscribe_typing(
+    room_id: String,
+    subscription_id: String,
+    account_user_id: Option<String>,
+) -> Result<(), String> {
+    let (_subscription_user, mut task) = lock_subscription_state(
+        &SUBSCRIPTION_USER,
+        &TYPING_TASK,
+        account_user_id.as_deref(),
+        "Typing subscription belongs to an inactive account",
+    )
+    .await?;
     if let Some(task) = take_typing_task_for_owner(&mut task, &room_id, &subscription_id) {
         task.handle.abort();
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6216,15 +6668,24 @@ pub async fn subscribe_room_for_receipts(
 ///
 /// The room is removed only after its last mounted owner unsubscribes. The
 /// update runs under the same lock as subscribe, so overlapping routes cannot
-/// cancel each other's subscription.
+/// cancel each other's subscription. The account check mirrors
+/// `subscribe_room_for_receipts` to prevent a stale unsubscribe from a
+/// pre-switch route from removing the new account's subscription.
 #[frb]
 pub async fn unsubscribe_room_for_receipts(
     room_id: String,
     subscription_id: String,
+    account_user_id: Option<String>,
 ) -> Result<(), String> {
     let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
         .map_err(|e| api_err("sync", format!("无效的房间 ID: {e}")))?;
-    let mut state = ROOM_SUBSCRIPTION.lock().await;
+    let (_subscription_user, mut state) = lock_subscription_state(
+        &SUBSCRIPTION_USER,
+        &ROOM_SUBSCRIPTION,
+        account_user_id.as_deref(),
+        "Room subscription belongs to an inactive account",
+    )
+    .await?;
     let last_subscriber = state.remove_desired(&room_id, &subscription_id);
     if last_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
@@ -11324,6 +11785,1184 @@ pub async fn search_rooms(
         .filter(|r| r.name.to_lowercase().contains(&q))
         .collect();
     Ok(filtered)
+}
+
+/// A lightweight message-search row. Full timeline events stay on the Rust
+/// side; Flutter loads the surrounding timeline only after a result is tapped.
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageSearchResult {
+    pub room_id: String,
+    pub room_name: String,
+    pub room_avatar_url: Option<String>,
+    pub event_id: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub body: String,
+    pub timestamp: String,
+    pub is_dm: bool,
+    pub is_edited: bool,
+}
+
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageSearchPage {
+    pub results: Vec<MessageSearchResult>,
+    pub has_more: bool,
+    pub terms: Vec<String>,
+    pub history_complete: bool,
+}
+
+#[frb]
+#[derive(Clone, Debug)]
+pub struct MessageSearchBackfill {
+    pub loaded_events: u32,
+    pub reached_start: bool,
+}
+
+fn message_search_terms(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn escape_tantivy_phrase(term: &str) -> String {
+    let mut escaped = String::with_capacity(term.len());
+    for character in term.chars() {
+        if matches!(character, '\\' | '"') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn message_search_ngrams(term: &str) -> Vec<String> {
+    let characters = term.chars().collect::<Vec<_>>();
+    let gram_size = characters.len().min(3);
+    if gram_size == 0 {
+        return Vec::new();
+    }
+    characters
+        .windows(gram_size)
+        .map(|gram| gram.iter().collect())
+        .collect()
+}
+
+/// Search the custom 1-3 character n-gram field with exact terms. Longer
+/// inputs become overlapping trigrams joined with AND; the decoded event body
+/// is still checked afterwards to reject reordered-gram false positives.
+fn message_search_index_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .flat_map(|term| message_search_ngrams(term))
+        .map(|gram| format!("body_ngram:\"{}\"", escape_tantivy_phrase(&gram)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn message_matches_search_terms(body: &str, terms: &[String]) -> bool {
+    let normalized = body.to_lowercase();
+    terms.iter().all(|term| normalized.contains(term))
+}
+
+async fn begin_message_search(client: &Client, room_id: Option<&str>) -> (String, u64) {
+    let user_id = client
+        .user_id()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let key = format!("{user_id}\n{}", room_id.unwrap_or("*"));
+    let generation = {
+        let mut generations = SEARCH_QUERY_GENERATIONS.lock().await;
+        let generation = generations.entry(key.clone()).or_default();
+        *generation = generation.saturating_add(1);
+        *generation
+    };
+    (key, generation)
+}
+
+async fn message_search_is_current(key: &str, generation: u64) -> bool {
+    SEARCH_QUERY_GENERATIONS.lock().await.get(key).copied() == Some(generation)
+}
+
+fn message_search_cancelled() -> String {
+    api_err(
+        "search_cancelled",
+        "Message search was cancelled.".to_string(),
+    )
+}
+
+fn ordered_event_cache_chunk_ids(
+    metadata: Vec<ChunkMetadata>,
+) -> Result<Vec<ChunkIdentifier>, String> {
+    if metadata.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut chunks = metadata
+        .into_iter()
+        .map(|chunk| (chunk.identifier, chunk))
+        .collect::<HashMap<_, _>>();
+    let first = chunks
+        .values()
+        .find(|chunk| chunk.previous.is_none())
+        .map(|chunk| chunk.identifier)
+        .ok_or_else(|| {
+            api_err(
+                "search",
+                "Cached message chunks have no beginning".to_string(),
+            )
+        })?;
+    let mut ordered = Vec::with_capacity(chunks.len());
+    let mut current = Some(first);
+    while let Some(identifier) = current {
+        let chunk = chunks.remove(&identifier).ok_or_else(|| {
+            api_err(
+                "search",
+                "Cached message chunks contain a cycle or broken link".to_string(),
+            )
+        })?;
+        ordered.push(identifier);
+        current = chunk.next;
+    }
+    if !chunks.is_empty() {
+        return Err(api_err(
+            "search",
+            "Cached message chunks are disconnected".to_string(),
+        ));
+    }
+    Ok(ordered)
+}
+
+const SEARCH_HISTORY_BATCH_SIZE: u16 = 250;
+const SEARCH_CACHED_INDEX_BATCH_SIZE: usize = 1_000;
+
+async fn index_search_events(
+    client: &Client,
+    room: &Room,
+    room_cache: &matrix_sdk::event_cache::RoomEventCache,
+    events: Vec<matrix_sdk::deserialized_responses::TimelineEvent>,
+) -> Result<(), String> {
+    let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
+    if events.is_empty() {
+        return Ok(());
+    }
+    // One remote/cache page becomes one Tantivy transaction. Splitting a page
+    // into tiny batches forced a commit, reader reload, and merge wait for each
+    // slice and dominated first-search latency.
+    client
+        .search_index()
+        .lock()
+        .await
+        .bulk_handle_timeline_event(
+            events.into_iter(),
+            room_cache,
+            room.room_id(),
+            &redaction_rules,
+        )
+        .await
+        .map_err(|error| {
+            api_err(
+                "search",
+                format!("Failed to index cached messages: {error}"),
+            )
+        })
+}
+
+async fn persisted_search_backfill_marker(
+    client: &Client,
+    room: &Room,
+) -> Option<std::path::PathBuf> {
+    let user_id = client.user_id()?;
+    CLIENTS.read().await.get(user_id.as_str()).map(|entry| {
+        let room_digest = Sha256::digest(room.room_id().as_str().as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        entry
+            .search_index_dir
+            .join(".cache-backfilled-v1")
+            .join(room_digest)
+    })
+}
+
+async fn search_backfill_marker_exists(marker: &Path) -> Result<bool, String> {
+    match tokio::fs::metadata(marker).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(api_err(
+            "search",
+            format!(
+                "Failed to inspect search backfill marker at {}: {error}",
+                marker.display()
+            ),
+        )),
+    }
+}
+
+async fn mark_cached_search_backfill_complete(marker: Option<&Path>) -> Result<(), String> {
+    let Some(marker) = marker else {
+        return Ok(());
+    };
+    if let Some(parent) = marker.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            api_err(
+                "search",
+                format!(
+                    "Failed to create search backfill marker directory at {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    tokio::fs::write(marker, b"complete\n")
+        .await
+        .map_err(|error| {
+            api_err(
+                "search",
+                format!(
+                    "Failed to persist search backfill marker at {}: {error}",
+                    marker.display()
+                ),
+            )
+        })
+}
+
+async fn cached_search_backfill_complete(client: &Client, room: &Room) -> Result<bool, String> {
+    let marker = persisted_search_backfill_marker(client, room).await;
+    match marker.as_deref() {
+        Some(marker) => search_backfill_marker_exists(marker).await,
+        None => Ok(true),
+    }
+}
+
+async fn backfill_cached_search_index_page(
+    client: &Client,
+    room: &Room,
+) -> Result<(bool, usize), String> {
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("search", "No logged-in account.".to_string()))?;
+    let key = format!("{user_id}\n{}", room.room_id());
+    let Some(persisted_marker) = persisted_search_backfill_marker(client, room).await else {
+        return Ok((true, 0));
+    };
+    if search_backfill_marker_exists(&persisted_marker).await? {
+        return Ok((true, 0));
+    }
+
+    let (room_cache, _drop_handles) = room.event_cache().await.map_err(|error| {
+        api_err(
+            "search",
+            format!("Failed to open the room search cache: {error}"),
+        )
+    })?;
+    let chunk_ids = {
+        let store_state = client.event_cache_store().lock().await.map_err(|error| {
+            api_err(
+                "search",
+                format!("Failed to lock cached messages for search: {error}"),
+            )
+        })?;
+        let store = store_state.as_clean().ok_or_else(|| {
+            api_err(
+                "search",
+                "Cached messages changed in another process".to_string(),
+            )
+        })?;
+        let metadata = store
+            .load_all_chunks_metadata(LinkedChunkId::Room(room.room_id()))
+            .await
+            .map_err(|error| {
+                api_err(
+                    "search",
+                    format!("Failed to read cached message metadata: {error}"),
+                )
+            })?;
+        ordered_event_cache_chunk_ids(metadata)?
+    };
+    // Copy newest chunks first so the first bounded step produces useful
+    // recent search results instead of starting at the oldest cached event.
+    let start = SEARCH_CACHE_BACKFILL_PROGRESS
+        .lock()
+        .await
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+        .min(chunk_ids.len());
+    let mut processed_chunks = 0usize;
+    let mut pending_events = Vec::with_capacity(SEARCH_CACHED_INDEX_BATCH_SIZE);
+    for processed in start..chunk_ids.len() {
+        let index = chunk_ids.len() - processed - 1;
+        let identifier = chunk_ids[index];
+        let next_identifier = chunk_ids.get(index + 1).copied();
+        let chunk = {
+            let store_state = client.event_cache_store().lock().await.map_err(|error| {
+                api_err(
+                    "search",
+                    format!("Failed to lock a cached message chunk: {error}"),
+                )
+            })?;
+            let store = store_state.as_clean().ok_or_else(|| {
+                api_err(
+                    "search",
+                    "Cached messages changed in another process".to_string(),
+                )
+            })?;
+            let chunk = if let Some(next_identifier) = next_identifier {
+                store
+                    .load_previous_chunk(LinkedChunkId::Room(room.room_id()), next_identifier)
+                    .await
+                    .map_err(|error| {
+                        api_err(
+                            "search",
+                            format!("Failed to read a cached message chunk: {error}"),
+                        )
+                    })?
+            } else {
+                store
+                    .load_last_chunk(LinkedChunkId::Room(room.room_id()))
+                    .await
+                    .map_err(|error| {
+                        api_err(
+                            "search",
+                            format!("Failed to read the latest cached message chunk: {error}"),
+                        )
+                    })?
+                    .0
+            };
+            chunk.ok_or_else(|| {
+                api_err(
+                    "search",
+                    "A cached message chunk disappeared during indexing".to_string(),
+                )
+            })?
+        };
+        if chunk.identifier != identifier {
+            return Err(api_err(
+                "search",
+                "Cached message chunks changed during indexing".to_string(),
+            ));
+        }
+        processed_chunks += 1;
+        if let ChunkContent::Items(events) = chunk.content {
+            pending_events.extend(events);
+        }
+        if pending_events.len() >= SEARCH_CACHED_INDEX_BATCH_SIZE {
+            break;
+        }
+    }
+
+    let event_count = pending_events.len();
+    if event_count > 0 {
+        index_search_events(client, room, &room_cache, pending_events).await?;
+    }
+    let next = start.saturating_add(processed_chunks);
+    let complete = next >= chunk_ids.len();
+    if complete {
+        SEARCH_CACHE_BACKFILL_PROGRESS.lock().await.remove(&key);
+        mark_cached_search_backfill_complete(Some(&persisted_marker)).await?;
+    } else {
+        SEARCH_CACHE_BACKFILL_PROGRESS
+            .lock()
+            .await
+            .insert(key, next);
+    }
+    Ok((complete, event_count))
+}
+
+async fn load_older_search_history(client: &Client, room: &Room) -> Result<(bool, usize), String> {
+    let (room_cache, _drop_handles) = room.event_cache().await.map_err(|error| {
+        api_err(
+            "search",
+            format!("Failed to open the room search cache: {error}"),
+        )
+    })?;
+    let outcome = room_cache
+        .pagination()
+        .run_backwards_once(SEARCH_HISTORY_BATCH_SIZE)
+        .await
+        .map_err(|error| {
+            api_err(
+                "search",
+                format!("Failed to load older messages for search: {error}"),
+            )
+        })?;
+    let event_count = outcome.events.len();
+    if event_count > 0 {
+        index_search_events(client, room, &room_cache, outcome.events).await?;
+    }
+    Ok((outcome.reached_start, event_count))
+}
+
+fn message_search_room_key(client: &Client, room: &Room) -> Result<String, String> {
+    message_search_scope_key(client, Some(room.room_id().as_str()))
+}
+
+fn message_search_scope_key(client: &Client, room_id: Option<&str>) -> Result<String, String> {
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| api_err("search", "No logged-in account.".to_string()))?;
+    Ok(format!("{user_id}\n{}", room_id.unwrap_or("*")))
+}
+
+fn searchable_rooms(client: &Client) -> Vec<Room> {
+    let mut rooms = client
+        .rooms()
+        .into_iter()
+        .filter(|room| room.state() == matrix_sdk::RoomState::Joined && !room.is_space())
+        .collect::<Vec<_>>();
+    rooms.sort_by(|left, right| left.room_id().cmp(right.room_id()));
+    rooms
+}
+
+async fn message_search_backfill_lock(key: &str) -> Arc<Mutex<()>> {
+    SEARCH_HISTORY_BACKFILLS
+        .lock()
+        .await
+        .entry(key.to_owned())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+async fn backfill_global_cached_search_index_page(
+    client: &Client,
+) -> Result<MessageSearchBackfill, String> {
+    let rooms = searchable_rooms(client);
+    if rooms.is_empty() {
+        return Ok(MessageSearchBackfill {
+            loaded_events: 0,
+            reached_start: true,
+        });
+    }
+
+    let key = message_search_scope_key(client, None)?;
+    let start = SEARCH_CACHE_BACKFILL_PROGRESS
+        .lock()
+        .await
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+        % rooms.len();
+    for distance in 0..rooms.len() {
+        let index = (start + distance) % rooms.len();
+        let room = &rooms[index];
+        if cached_search_backfill_complete(client, room).await? {
+            continue;
+        }
+
+        let room_key = message_search_room_key(client, room)?;
+        let room_backfill_lock = message_search_backfill_lock(&room_key).await;
+        let _room_backfill = room_backfill_lock.lock().await;
+        if cached_search_backfill_complete(client, room).await? {
+            continue;
+        }
+        let (complete, loaded_events) = backfill_cached_search_index_page(client, room).await?;
+        SEARCH_CACHE_BACKFILL_PROGRESS
+            .lock()
+            .await
+            .insert(key.clone(), (index + 1) % rooms.len());
+        if loaded_events > 0 || !complete {
+            return Ok(MessageSearchBackfill {
+                loaded_events: loaded_events.min(u32::MAX as usize) as u32,
+                reached_start: false,
+            });
+        }
+    }
+
+    SEARCH_CACHE_BACKFILL_PROGRESS.lock().await.remove(&key);
+    Ok(MessageSearchBackfill {
+        loaded_events: 0,
+        reached_start: true,
+    })
+}
+
+async fn backfill_message_search_with_client(
+    client: &Client,
+    room_id: Option<String>,
+) -> Result<MessageSearchBackfill, String> {
+    let key = message_search_scope_key(client, room_id.as_deref())?;
+    let backfill_lock = message_search_backfill_lock(&key).await;
+    let _backfill = backfill_lock.lock().await;
+
+    let Some(room_id) = room_id else {
+        return backfill_global_cached_search_index_page(client).await;
+    };
+    let room = get_room_by_id(client, &room_id)?;
+    let (cache_complete, cached_events) = backfill_cached_search_index_page(client, &room).await?;
+    if !cache_complete {
+        return Ok(MessageSearchBackfill {
+            loaded_events: cached_events.min(u32::MAX as usize) as u32,
+            reached_start: false,
+        });
+    }
+
+    if SEARCH_HISTORY_COMPLETE.lock().await.contains(&key) {
+        return Ok(MessageSearchBackfill {
+            loaded_events: cached_events.min(u32::MAX as usize) as u32,
+            reached_start: true,
+        });
+    }
+
+    let (reached_start, remote_events) = load_older_search_history(client, &room).await?;
+    if reached_start {
+        SEARCH_HISTORY_COMPLETE.lock().await.insert(key);
+    }
+    let loaded_events = cached_events.saturating_add(remote_events);
+    Ok(MessageSearchBackfill {
+        loaded_events: loaded_events.min(u32::MAX as usize) as u32,
+        reached_start,
+    })
+}
+
+/// Load and index one older room-history page. The search UI calls this in the
+/// background and refreshes visible local results after every bounded step.
+/// Global search only fills already-cached room history; room search continues
+/// with one homeserver pagination request after its cache is indexed.
+#[frb]
+pub async fn backfill_message_search(
+    room_id: Option<String>,
+) -> Result<MessageSearchBackfill, String> {
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("search", "No client created.".to_string()))?;
+    backfill_message_search_with_client(&client, room_id).await
+}
+
+fn insert_latest_search_result(
+    results: &mut HashMap<(String, String), (MessageSearchResult, u64, String)>,
+    result: MessageSearchResult,
+    source_timestamp: u64,
+    source_event_id: String,
+) {
+    let key = (result.room_id.clone(), result.event_id.clone());
+    match results.entry(key) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((result, source_timestamp, source_event_id));
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            let current = entry.get();
+            let is_newer = source_timestamp > current.1
+                || (source_timestamp == current.1
+                    && (result.is_edited && !current.0.is_edited
+                        || (result.is_edited == current.0.is_edited
+                            && source_event_id > current.2)));
+            if is_newer {
+                entry.insert((result, source_timestamp, source_event_id));
+            }
+        }
+    }
+}
+
+async fn search_result_from_event(
+    client: &Client,
+    room: &Room,
+    event: matrix_sdk::deserialized_responses::TimelineEvent,
+    terms: &[String],
+    ignored_user_ids: Option<&HashSet<String>>,
+    is_dm: bool,
+) -> Option<(MessageSearchResult, u64, String)> {
+    if event.kind.is_utd() {
+        return None;
+    }
+    let event = event.raw().deserialize().ok()?;
+    let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+        matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(message),
+    ) = event
+    else {
+        return None;
+    };
+    let original = message.as_original()?;
+    let source_timestamp = u64::from(original.origin_server_ts.0);
+    let source_event_id = original.event_id.to_string();
+    let sender_id = original.sender.to_string();
+    let sender_is_ignored = match ignored_user_ids {
+        Some(ignored_user_ids) => ignored_user_ids.contains(&sender_id),
+        None => effective_is_user_ignored(client, &original.sender).await,
+    };
+    if sender_is_ignored {
+        return None;
+    }
+
+    let body = room_message_preview(&original.content)?;
+    if !message_matches_search_terms(&body, terms) {
+        return None;
+    }
+
+    let mut target_event_id = original.event_id.clone();
+    let mut timestamp = original.origin_server_ts;
+    let mut is_edited = false;
+    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(replacement)) =
+        &original.content.relates_to
+    {
+        is_edited = true;
+        target_event_id = replacement.event_id.clone();
+        if let Ok(target) = room.load_or_fetch_event(&target_event_id, None).await {
+            if let Ok(target) = target.raw().deserialize() {
+                timestamp = target.origin_server_ts();
+            }
+        }
+    }
+
+    let sender_name = if client
+        .user_id()
+        .is_some_and(|user_id| user_id.as_str() == sender_id)
+    {
+        "我".to_string()
+    } else {
+        room.get_member_no_sync(&original.sender)
+            .await
+            .ok()
+            .flatten()
+            .map(|member| member.name().to_string())
+            .unwrap_or_else(|| original.sender.localpart().to_owned())
+    };
+
+    Some((
+        MessageSearchResult {
+            room_id: room.room_id().to_string(),
+            room_name: room_display_name(room),
+            room_avatar_url: room.avatar_url().map(|url| url.to_string()),
+            event_id: target_event_id.to_string(),
+            sender_id,
+            sender_name,
+            body,
+            timestamp: u64::from(timestamp.0).to_string(),
+            is_dm,
+            is_edited,
+        },
+        source_timestamp,
+        source_event_id,
+    ))
+}
+
+/// Cooperatively stop the active search for this account and scope. A
+/// currently running Tantivy batch finishes, then the superseded request
+/// exits before scanning more batches or rooms.
+#[frb]
+pub async fn cancel_message_search(room_id: Option<String>) {
+    if let Some(client) = get_client().await {
+        let _ = begin_message_search(&client, room_id.as_deref()).await;
+    }
+}
+
+fn paginate_message_search_results(
+    results: Vec<MessageSearchResult>,
+    offset: usize,
+    limit: usize,
+) -> (Vec<MessageSearchResult>, bool) {
+    let page_end = offset.saturating_add(limit);
+    let has_more = results.len() > page_end;
+    let page = results.into_iter().skip(offset).take(limit).collect();
+    (page, has_more)
+}
+
+/// Search text already present in the local encrypted index. Room history is
+/// backfilled separately so this call never waits for an unbounded chain of
+/// homeserver pagination requests.
+#[frb]
+pub async fn search_messages(
+    query: String,
+    room_id: Option<String>,
+    offset: u32,
+    limit: u32,
+    ignored_user_ids: Option<Vec<String>>,
+) -> Result<MessageSearchPage, String> {
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("search", "No client created.".to_string()))?;
+    search_messages_with_client(&client, query, room_id, offset, limit, ignored_user_ids).await
+}
+
+async fn search_messages_with_client(
+    client: &Client,
+    query: String,
+    room_id: Option<String>,
+    offset: u32,
+    limit: u32,
+    ignored_user_ids: Option<Vec<String>>,
+) -> Result<MessageSearchPage, String> {
+    let terms = message_search_terms(query.trim());
+    if terms.is_empty() {
+        return Ok(MessageSearchPage {
+            results: Vec::new(),
+            has_more: false,
+            terms,
+            history_complete: true,
+        });
+    }
+
+    let (search_key, search_generation) = begin_message_search(client, room_id.as_deref()).await;
+    let room_scoped = room_id.is_some();
+    let rooms = if let Some(room_id) = room_id {
+        vec![get_room_by_id(client, &room_id)?]
+    } else {
+        searchable_rooms(client)
+    };
+    let ignored_user_ids = ignored_user_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    let index_query = message_search_index_query(&terms);
+    let offset = offset.min(500) as usize;
+    if offset == 500 {
+        return Ok(MessageSearchPage {
+            results: Vec::new(),
+            has_more: false,
+            terms,
+            history_complete: true,
+        });
+    }
+    let limit = limit.clamp(1, (500 - offset) as u32) as usize;
+    let result_target = offset.saturating_add(limit).saturating_add(1);
+    let room_target = result_target;
+    let batch_size = room_target.clamp(32, 128);
+    let mut results = HashMap::new();
+    let mut successful_rooms = 0usize;
+    let mut room_failures = Vec::new();
+    let mut history_complete = true;
+
+    for room in rooms {
+        if !message_search_is_current(&search_key, search_generation).await {
+            return Err(message_search_cancelled());
+        }
+        let cache_complete = match cached_search_backfill_complete(client, &room).await {
+            Ok(complete) => complete,
+            Err(error) => {
+                app_log(
+                    "warn",
+                    "search",
+                    format!(
+                        "Could not inspect search backfill state for {}: {error}",
+                        room.room_id()
+                    ),
+                );
+                false
+            }
+        };
+        history_complete &= if room_scoped {
+            let key = message_search_room_key(client, &room)?;
+            cache_complete && SEARCH_HISTORY_COMPLETE.lock().await.contains(&key)
+        } else {
+            cache_complete
+        };
+        let is_dm = match room.is_direct().await {
+            Ok(true) => true,
+            Ok(false) | Err(_) => is_dm_by_members(&room).await,
+        };
+        let mut raw_offset = 0usize;
+        let mut room_result_ids = HashSet::new();
+        let mut room_succeeded = false;
+        loop {
+            if !message_search_is_current(&search_key, search_generation).await {
+                return Err(message_search_cancelled());
+            }
+            let event_ids = match room
+                .search(&index_query, batch_size, Some(raw_offset))
+                .await
+            {
+                Ok(event_ids) => event_ids,
+                Err(error) => {
+                    let error = api_err("search", format!("Message search failed: {error}"));
+                    if room_scoped {
+                        return Err(error);
+                    }
+                    app_log(
+                        "warn",
+                        "search",
+                        format!("Skipping failed room search {}: {error}", room.room_id()),
+                    );
+                    room_failures.push(error);
+                    break;
+                }
+            };
+            room_succeeded = true;
+            let raw_exhausted = event_ids.len() < batch_size;
+            raw_offset = raw_offset.saturating_add(event_ids.len());
+            for event_id in event_ids {
+                // Search hits come from the local EventCache-backed index. Read that
+                // cache first so offline or server-rejected /event requests don't
+                // discard otherwise valid matches.
+                let event = match room.load_or_fetch_event(&event_id, None).await {
+                    Ok(event) => event,
+                    Err(error) => {
+                        app_log(
+                            "warn",
+                            "search",
+                            format!("Skipping unavailable search result {event_id}: {error}"),
+                        );
+                        continue;
+                    }
+                };
+                if let Some((result, source_timestamp, source_event_id)) = search_result_from_event(
+                    client,
+                    &room,
+                    event,
+                    &terms,
+                    ignored_user_ids.as_ref(),
+                    is_dm,
+                )
+                .await
+                {
+                    room_result_ids.insert(result.event_id.clone());
+                    insert_latest_search_result(
+                        &mut results,
+                        result,
+                        source_timestamp,
+                        source_event_id,
+                    );
+                }
+            }
+            if room_result_ids.len() >= room_target {
+                break;
+            }
+            if raw_exhausted {
+                break;
+            }
+        }
+        if room_succeeded {
+            successful_rooms += 1;
+        }
+    }
+
+    if successful_rooms == 0 {
+        if let Some(error) = room_failures.into_iter().next() {
+            return Err(error);
+        }
+    }
+
+    let mut results = results
+        .into_values()
+        .map(|(result, _, _)| result)
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .timestamp
+            .parse::<u64>()
+            .unwrap_or_default()
+            .cmp(&left.timestamp.parse::<u64>().unwrap_or_default())
+            .then_with(|| right.event_id.cmp(&left.event_id))
+    });
+
+    let (page, has_more) = paginate_message_search_results(results, offset, limit);
+    Ok(MessageSearchPage {
+        results: page,
+        has_more,
+        terms,
+        history_complete,
+    })
+}
+
+#[cfg(test)]
+mod message_search_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::{
+        backfill_message_search_with_client, insert_latest_search_result,
+        message_matches_search_terms, message_search_index_query, message_search_terms,
+        ordered_event_cache_chunk_ids, paginate_message_search_results,
+        search_messages_with_client, MessageSearchResult,
+    };
+    use matrix_sdk::{
+        ruma::{event_id, room_id, user_id},
+        search_index::SearchIndexStoreKind,
+        test_utils::mocks::{MatrixMockServer, RoomMessagesResponseTemplate},
+    };
+    use matrix_sdk_base::linked_chunk::{ChunkIdentifier, ChunkMetadata};
+    use matrix_sdk_test::{event_factory::EventFactory, JoinedRoomBuilder};
+    use tantivy::{
+        collector::TopDocs,
+        doc,
+        query::QueryParser,
+        schema::{Schema, STRING, TEXT},
+        Index,
+    };
+
+    fn search_count(body: &str, query: &str) -> usize {
+        let mut schema = Schema::builder();
+        let body_field = schema.add_text_field("body", TEXT);
+        let body_ngram_field = schema.add_text_field("body_ngram", STRING);
+        let schema = schema.build();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer(15_000_000).unwrap();
+        let mut document = doc!(body_field => body);
+        let normalized = body.to_lowercase();
+        for term in normalized.split(|character: char| !character.is_alphanumeric()) {
+            let characters = term.chars().collect::<Vec<_>>();
+            for size in 1..=characters.len().min(3) {
+                for gram in characters.windows(size) {
+                    document.add_text(body_ngram_field, gram.iter().collect::<String>());
+                }
+            }
+        }
+        writer.add_document(document).unwrap();
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        let parser = QueryParser::for_index(&index, vec![body_field]);
+        let terms = message_search_terms(query);
+        let query = parser
+            .parse_query(&message_search_index_query(&terms))
+            .unwrap();
+        reader
+            .searcher()
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn substring_query_matches_unsegmented_cjk_terms() {
+        assert_eq!(search_count("今晚八点开会", "八点开会"), 1);
+        assert_eq!(search_count("検索機能を確認する", "機能"), 1);
+        assert_eq!(search_count("메시지 검색 기능", "검색"), 1);
+    }
+
+    #[test]
+    fn query_is_literal_case_insensitive_and_requires_every_term() {
+        assert_eq!(
+            search_count("ReleasePlanning starts today", "PLANNING TOD"),
+            1
+        );
+        assert_eq!(search_count("明天在北京见", "明天 北京"), 1);
+        assert_eq!(search_count("明天再说", "明天 北京"), 0);
+        assert!(message_matches_search_terms(
+            "混合 Matrix 消息",
+            &message_search_terms("matrix 消息")
+        ));
+    }
+
+    #[test]
+    fn edited_search_result_replaces_the_original_target() {
+        let result = |body: &str, is_edited: bool| MessageSearchResult {
+            room_id: "!room:example.org".to_owned(),
+            room_name: "Room".to_owned(),
+            room_avatar_url: None,
+            event_id: "$original".to_owned(),
+            sender_id: "@alice:example.org".to_owned(),
+            sender_name: "Alice".to_owned(),
+            body: body.to_owned(),
+            timestamp: "10".to_owned(),
+            is_dm: false,
+            is_edited,
+        };
+        let mut results = HashMap::new();
+
+        insert_latest_search_result(
+            &mut results,
+            result("原始内容", false),
+            10,
+            "$original".to_owned(),
+        );
+        insert_latest_search_result(
+            &mut results,
+            result("最新内容", true),
+            30,
+            "$edit-2".to_owned(),
+        );
+        insert_latest_search_result(
+            &mut results,
+            result("过时内容", true),
+            20,
+            "$edit-1".to_owned(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.into_values().next().unwrap().0.body, "最新内容");
+    }
+
+    #[test]
+    fn message_search_pages_skip_results_without_reloading_the_first_page() {
+        let result = |event_id: &str| MessageSearchResult {
+            room_id: "!room:example.org".to_owned(),
+            room_name: "Room".to_owned(),
+            room_avatar_url: None,
+            event_id: event_id.to_owned(),
+            sender_id: "@alice:example.org".to_owned(),
+            sender_name: "Alice".to_owned(),
+            body: "消息".to_owned(),
+            timestamp: "10".to_owned(),
+            is_dm: false,
+            is_edited: false,
+        };
+        let results = vec![result("$first"), result("$second"), result("$third")];
+
+        let (page, has_more) = paginate_message_search_results(results, 1, 1);
+
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].event_id, "$second");
+        assert!(has_more);
+    }
+
+    #[test]
+    fn cached_message_chunks_are_indexed_oldest_first() {
+        let id = ChunkIdentifier::new;
+        let chunks = vec![
+            ChunkMetadata {
+                num_items: 5,
+                previous: Some(id(1)),
+                identifier: id(2),
+                next: None,
+            },
+            ChunkMetadata {
+                num_items: 5,
+                previous: None,
+                identifier: id(0),
+                next: Some(id(1)),
+            },
+            ChunkMetadata {
+                num_items: 5,
+                previous: Some(id(0)),
+                identifier: id(1),
+                next: Some(id(2)),
+            },
+        ];
+
+        assert_eq!(
+            ordered_event_cache_chunk_ids(chunks).unwrap(),
+            [id(0), id(1), id(2)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn room_search_returns_cached_results_before_progressively_loading_history() {
+        let server = MatrixMockServer::new().await;
+        let client = server
+            .client_builder()
+            .on_builder(|builder| builder.search_index_store(SearchIndexStoreKind::InMemory))
+            .build()
+            .await;
+        client.event_cache().subscribe().unwrap();
+
+        let room_id = room_id!("!search:localhost");
+        let sender = user_id!("@alice:localhost");
+        let events = EventFactory::new().room(room_id).sender(sender);
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room_id)
+                    .set_timeline_limited()
+                    .set_timeline_prev_batch("older")
+                    .add_state_event(events.room_encryption())
+                    .add_timeline_event(
+                        events
+                            .text_msg("歇逼")
+                            .event_id(event_id!("$cached:localhost"))
+                            .server_ts(5_000),
+                    ),
+            )
+            .await;
+
+        server
+            .mock_room_messages()
+            .match_from("older")
+            .ok(RoomMessagesResponseTemplate::default()
+                .events(vec![
+                    events
+                        .text_msg("歇逼")
+                        .event_id(event_id!("$older1:localhost"))
+                        .server_ts(4_000),
+                    events
+                        .text_msg("歇逼")
+                        .event_id(event_id!("$older2:localhost"))
+                        .server_ts(3_000),
+                ])
+                .end_token("older-2"))
+            .mock_once()
+            .mount()
+            .await;
+        server
+            .mock_room_messages()
+            .match_from("older-2")
+            .ok(RoomMessagesResponseTemplate::default().events(vec![
+                events
+                    .text_msg("歇逼")
+                    .event_id(event_id!("$older3:localhost"))
+                    .server_ts(2_000),
+                events
+                    .text_msg("歇逼")
+                    .event_id(event_id!("$older4:localhost"))
+                    .server_ts(1_000),
+            ]))
+            .mock_once()
+            .mount()
+            .await;
+
+        let cached_page = search_messages_with_client(
+            &client,
+            "歇逼".to_owned(),
+            Some(room_id.to_string()),
+            0,
+            30,
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached_page.results.len(), 1);
+        assert_eq!(cached_page.results[0].event_id, "$cached:localhost");
+        assert!(!cached_page.history_complete);
+
+        let first_backfill =
+            backfill_message_search_with_client(&client, Some(room_id.to_string()))
+                .await
+                .unwrap();
+        assert_eq!(first_backfill.loaded_events, 2);
+        assert!(!first_backfill.reached_start);
+        let partial_page = search_messages_with_client(
+            &client,
+            "歇逼".to_owned(),
+            Some(room_id.to_string()),
+            0,
+            30,
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(partial_page.results.len(), 3);
+        assert!(!partial_page.history_complete);
+
+        let final_backfill =
+            backfill_message_search_with_client(&client, Some(room_id.to_string()))
+                .await
+                .unwrap();
+        assert_eq!(final_backfill.loaded_events, 2);
+        assert!(final_backfill.reached_start);
+        let complete_page = search_messages_with_client(
+            &client,
+            "歇逼".to_owned(),
+            Some(room_id.to_string()),
+            0,
+            30,
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert!(complete_page.history_complete);
+        let ordered_event_ids = complete_page
+            .results
+            .into_iter()
+            .map(|result| result.event_id)
+            .collect::<Vec<_>>();
+        let event_ids = ordered_event_ids.iter().cloned().collect::<HashSet<_>>();
+
+        assert_eq!(event_ids.len(), 5);
+        assert!(event_ids.contains("$cached:localhost"));
+        assert!(event_ids.contains("$older1:localhost"));
+        assert!(event_ids.contains("$older2:localhost"));
+        assert!(event_ids.contains("$older3:localhost"));
+        assert!(event_ids.contains("$older4:localhost"));
+        assert_eq!(
+            ordered_event_ids,
+            [
+                "$cached:localhost",
+                "$older1:localhost",
+                "$older2:localhost",
+                "$older3:localhost",
+                "$older4:localhost",
+            ]
+        );
+        server.verify_and_reset().await;
+    }
 }
 
 /// Load a focused slice of the room timeline around one event.
