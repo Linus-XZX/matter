@@ -65,7 +65,7 @@
 		331C80D7294CF71000263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		333000ED22D3DE5D00554162 /* Warnings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Warnings.xcconfig; sourceTree = "<group>"; };
 		335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GeneratedPluginRegistrant.swift; sourceTree = "<group>"; };
-		33CC10ED2044A3C60003C045 /* matter_temp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = matter_temp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		33CC10ED2044A3C60003C045 /* Matter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Matter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		33CC10F22044A3C60003C045 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Runner/Assets.xcassets; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
@@ -133,7 +133,7 @@
 		33CC10EE2044A3C60003C045 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				33CC10ED2044A3C60003C045 /* matter_temp.app */,
+				33CC10ED2044A3C60003C045 /* Matter.app */,
 				331C80D5294CF71000263BE5 /* RunnerTests.xctest */,
 			);
 			name = Products;
@@ -217,7 +217,7 @@
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
 			);
 			productName = Runner;
-			productReference = 33CC10ED2044A3C60003C045 /* matter_temp.app */;
+			productReference = 33CC10ED2044A3C60003C045 /* Matter.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -349,7 +349,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\n\n# Determine architecture and target\n# TODO: A proper universal app will need both archs for the Rust component lipo-ed together.\nARCH_NAME=\"$NATIVE_ARCH\"\nif [ \"$ARCH_NAME\" = \"arm64\" ]; then\n  RUST_TARGET=\"aarch64-apple-darwin\"\nelse\n  RUST_TARGET=\"x86_64-apple-darwin\"\nfi\n\n# Build the Rust library\ncd \"$SRCROOT/../rust\"\n\nif [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  PROFILE=\"debug\"\n  cargo build --target \"$RUST_TARGET\"\nelse\n  PROFILE=\"release\"\n  cargo build --target \"$RUST_TARGET\" --release\n  # Manually strip the final product due to an issue with derived intermediate products being broken by stripping\n  /usr/bin/strip -x \"$SRCROOT/../rust/target/$RUST_TARGET/$PROFILE/librust_lib_matter.dylib\"\nfi\n\nDYLIB_SRC=\"$SRCROOT/../rust/target/$RUST_TARGET/$PROFILE/librust_lib_matter.dylib\"\nFRAMEWORK_DIR=\"$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH/rust_lib_matter.framework\"\nVERSION_DIR=\"$FRAMEWORK_DIR/Versions/A\"\n\n# Create versioned framework bundle structure (macOS requirement)\nmkdir -p \"$VERSION_DIR/Resources\"\ncp -f \"$DYLIB_SRC\" \"$VERSION_DIR/rust_lib_matter\"\ninstall_name_tool -id \"@rpath/rust_lib_matter.framework/rust_lib_matter\" \"$VERSION_DIR/rust_lib_matter\"\n\n# Manually strip the final product due to an issue with derived intermediate products being broken by stripping\n/usr/bin/strip -x \"$VERSION_DIR/rust_lib_matter\"\n\n# Create Info.plist in the versioned Resources directory\ncat > \"$VERSION_DIR/Resources/Info.plist\" << PLISTEOF\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>CFBundleDevelopmentRegion</key>\n    <string>en</string>\n    <key>CFBundleExecutable</key>\n    <string>rust_lib_matter</string>\n    <key>CFBundleIdentifier</key>\n    <string>moe.aks.matter.rust-lib-matter</string>\n    <key>CFBundleInfoDictionaryVersion</key>\n    <string>6.0</string>\n    <key>CFBundleName</key>\n    <string>rust_lib_matter</string>\n    <key>CFBundlePackageType</key>\n    <string>FMWK</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0</string>\n    <key>CFBundleVersion</key>\n    <string>1</string>\n</dict>\n</plist>\nPLISTEOF\n\n# Create Current → A symlink\nln -sfh A \"$FRAMEWORK_DIR/Versions/Current\"\n\n# Create top-level symlinks for compatibility\nln -sfh \"Versions/Current/rust_lib_matter\" \"$FRAMEWORK_DIR/rust_lib_matter\"\nln -sfh \"Versions/Current/Resources\" \"$FRAMEWORK_DIR/Resources\"\n\n# Code sign the framework\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n    /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none --preserve-metadata=identifier,entitlements \"$FRAMEWORK_DIR\"\nfi\n";
+			shellScript = "set -euo pipefail\n\n# Determine architecture and target\n# TODO: A proper universal app will need both archs for the Rust component lipo-ed together.\nARCH_NAME=\"$NATIVE_ARCH\"\nif [ \"$ARCH_NAME\" = \"arm64\" ]; then\n  RUST_TARGET=\"aarch64-apple-darwin\"\nelse\n  RUST_TARGET=\"x86_64-apple-darwin\"\nfi\n\n# Build the Rust library\ncd \"$SRCROOT/../rust\"\n\nif [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  PROFILE=\"debug\"\n  cargo build --target \"$RUST_TARGET\"\nelse\n  PROFILE=\"release\"\n  cargo build --target \"$RUST_TARGET\" --release\nfi\n\nDYLIB_SRC=\"$SRCROOT/../rust/target/$RUST_TARGET/$PROFILE/librust_lib_matter.dylib\"\nFRAMEWORK_DIR=\"$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH/rust_lib_matter.framework\"\nVERSION_DIR=\"$FRAMEWORK_DIR/Versions/A\"\n\n# Create versioned framework bundle structure (macOS requirement)\nmkdir -p \"$VERSION_DIR/Resources\"\ncp -f \"$DYLIB_SRC\" \"$VERSION_DIR/rust_lib_matter\"\ninstall_name_tool -id \"@rpath/rust_lib_matter.framework/rust_lib_matter\" \"$VERSION_DIR/rust_lib_matter\"\n\n# Create Info.plist in the versioned Resources directory\ncat > \"$VERSION_DIR/Resources/Info.plist\" << PLISTEOF\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>CFBundleDevelopmentRegion</key>\n    <string>en</string>\n    <key>CFBundleExecutable</key>\n    <string>rust_lib_matter</string>\n    <key>CFBundleIdentifier</key>\n    <string>moe.aks.matter.rust-lib-matter</string>\n    <key>CFBundleInfoDictionaryVersion</key>\n    <string>6.0</string>\n    <key>CFBundleName</key>\n    <string>rust_lib_matter</string>\n    <key>CFBundlePackageType</key>\n    <string>FMWK</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0</string>\n    <key>CFBundleVersion</key>\n    <string>1</string>\n</dict>\n</plist>\nPLISTEOF\n\n# Create Current → A symlink\nln -sfh A \"$FRAMEWORK_DIR/Versions/Current\"\n\n# Create top-level symlinks for compatibility\nln -sfh \"Versions/Current/rust_lib_matter\" \"$FRAMEWORK_DIR/rust_lib_matter\"\nln -sfh \"Versions/Current/Resources\" \"$FRAMEWORK_DIR/Resources\"\n\n# Code sign the framework\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n    /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none --preserve-metadata=identifier,entitlements \"$FRAMEWORK_DIR\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -410,7 +410,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = moe.aks.matter.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/matter_temp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/matter_temp";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Matter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Matter";
 			};
 			name = Debug;
 		};
@@ -424,7 +424,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = moe.aks.matter.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/matter_temp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/matter_temp";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Matter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Matter";
 			};
 			name = Release;
 		};
@@ -438,7 +438,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = moe.aks.matter.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/matter_temp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/matter_temp";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Matter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Matter";
 			};
 			name = Profile;
 		};
