@@ -2719,23 +2719,18 @@ fn is_access_denied(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::PermissionDenied {
         return true;
     }
+    // Match on numeric OS error codes only. The string form of
+    // `std::io::Error` is the localized message from the OS message table
+    // (e.g. "拒绝访问。" on zh-CN Windows), so substring matching is not
+    // portable across system locales.
     #[cfg(windows)]
     {
         if let Some(code) = error.raw_os_error() {
             // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION.
             return code == 5 || code == 32;
         }
-        // Some `tokio::fs` paths surface the error without a raw code; the
-        // Display string still includes the OS message.
-        let message = error.to_string();
-        return message.contains("Access is denied")
-            || message.contains("being used by another process");
     }
-    #[cfg(not(windows))]
-    {
-        let _ = std::marker::PhantomData::<&std::io::Error>;
-        false
-    }
+    false
 }
 
 async fn remove_legacy_plaintext_search_index(sdk_dir: &Path) -> Result<(), String> {
