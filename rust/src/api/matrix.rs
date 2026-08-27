@@ -2660,6 +2660,84 @@ fn build_sdk_data_dir(base: &str, user_id: Option<&str>) -> std::path::PathBuf {
     }
 }
 
+/// Rename a directory, retrying with exponential backoff when Windows reports
+/// `AccessDenied` (os error 5). This happens when the source directory still
+/// has open file handles (e.g. SQLite stores held by a recently-dropped
+/// `matrix-sdk::Client` whose internal `deadpool` connections have not yet
+/// been returned to the pool or closed). The retry window is bounded so the
+/// login flow is not blocked indefinitely.
+async fn rename_with_retry(
+    from: &Path,
+    to: &Path,
+    max_attempts: u32,
+    base_backoff: std::time::Duration,
+) -> std::io::Result<()> {
+    let mut attempt = 0u32;
+    let mut backoff = base_backoff;
+    loop {
+        match tokio::fs::rename(from, to).await {
+            Ok(()) => {
+                if attempt > 0 {
+                    app_log(
+                        "info",
+                        "auth",
+                        format!(
+                            "rename {} -> {} succeeded after {} retries",
+                            from.display(),
+                            to.display(),
+                            attempt
+                        ),
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) if attempt + 1 < max_attempts && is_access_denied(&error) => {
+                warn!(
+                    "rename {} -> {} hit {} (attempt {}/{}); retrying after {:?}",
+                    from.display(),
+                    to.display(),
+                    error,
+                    attempt + 1,
+                    max_attempts,
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(800));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Returns true for the Windows `AccessDenied` / sharing-violation errors we
+/// see when a SQLite store is briefly held open after the owning `Client` is
+/// dropped. On non-Windows targets this only matches the rare `PermissionDenied`
+/// (EACCES) case, which we let fall through; on POSIX the rename usually just
+/// succeeds, so the retry path is rarely exercised there.
+fn is_access_denied(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(code) = error.raw_os_error() {
+            // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION.
+            return code == 5 || code == 32;
+        }
+        // Some `tokio::fs` paths surface the error without a raw code; the
+        // Display string still includes the OS message.
+        let message = error.to_string();
+        return message.contains("Access is denied")
+            || message.contains("being used by another process");
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::marker::PhantomData::<&std::io::Error>;
+        false
+    }
+}
+
 async fn remove_legacy_plaintext_search_index(sdk_dir: &Path) -> Result<(), String> {
     let index_dir = sdk_dir.join("search_index");
     match tokio::fs::remove_dir_all(&index_dir).await {
@@ -3140,10 +3218,16 @@ async fn finalize_pending() -> Result<String, String> {
                     *pending = None;
                 }
                 drop(pending_client);
-                // TODO: Tweak this value to avoid "Access Denied" (OS error 5) errors on
-                // Windows on login (on `rename(&temp_dir, &sdk_dir)`).
-                // 20000 (20 seconds) worked for me but obviously butchered the waiting time.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // The pending client's SQLite stores are released asynchronously
+                // by matrix-sdk's internal deadpool: `Object::drop` returns the
+                // connection to the pool rather than closing it, and the pool
+                // only releases the underlying file handle when the last
+                // connection is dropped. On Windows the rename below can therefore
+                // race the still-open handles and fail with `AccessDenied`
+                // (os error 5). Retry with bounded backoff instead of sleeping a
+                // fixed duration: most attempts succeed on the first try, while
+                // slow machines and antivirus scans get enough headroom without
+                // a hard 100 ms penalty on the happy path.
 
                 remove_legacy_plaintext_search_index(&sdk_dir).await?;
                 remove_legacy_plaintext_search_index(&temp_dir).await?;
@@ -3159,11 +3243,15 @@ async fn finalize_pending() -> Result<String, String> {
                     .map_err(|e| format!("Failed to remove stale account store backup: {e}"))?;
                 let had_previous_store = sdk_dir.exists();
                 if had_previous_store {
-                    tokio::fs::rename(&sdk_dir, &previous_dir)
-                        .await
-                        .map_err(|e| format!("Failed to preserve existing account store: {e}"))?;
+                    if let Err(error) =
+                        rename_with_retry(&sdk_dir, &previous_dir, 6, std::time::Duration::from_millis(50)).await
+                    {
+                        return Err(format!("Failed to preserve existing account store: {error}"));
+                    }
                 }
-                if let Err(error) = tokio::fs::rename(&temp_dir, &sdk_dir).await {
+                if let Err(error) =
+                    rename_with_retry(&temp_dir, &sdk_dir, 6, std::time::Duration::from_millis(50)).await
+                {
                     if had_previous_store {
                         let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;
                     }
