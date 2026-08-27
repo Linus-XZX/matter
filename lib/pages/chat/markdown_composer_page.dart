@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/markdown/markdown_composer.dart';
+import '../../features/markdown/markdown_format_toolbar.dart';
+import '../../features/markdown/markdown_text_editing_controller.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../theme/app_theme.dart';
 
@@ -73,7 +75,7 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: widget.initialText);
+    _controller = MarkdownTextEditingController(text: widget.initialText);
     _hasText = widget.initialText.trim().isNotEmpty;
     _controller.addListener(() {
       final text = _controller.text;
@@ -227,6 +229,7 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
         focusNode: _focusNode,
         readOnly: _sending,
         autofocus: true,
+        contextMenuBuilder: markdownSelectionContextMenuBuilder,
         expands: true,
         maxLines: null,
         minLines: null,

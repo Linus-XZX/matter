@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import '../../features/markdown/markdown_composer.dart';
+import '../../features/markdown/markdown_format_toolbar.dart';
+import '../../features/markdown/markdown_text_editing_controller.dart';
 import '../../features/markdown/markdown_source_store.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
@@ -450,7 +452,7 @@ class MessageInputState extends ConsumerState<MessageInput> {
   static const _markdownComposer = MarkdownComposer();
   static const _markdownSourceStore = MarkdownSourceStore();
 
-  final _controller = TextEditingController();
+  final _controller = MarkdownTextEditingController();
   final _focusNode = FocusNode();
   final _autocompleteScrollController = ScrollController();
   final _textFieldKey = GlobalKey();
@@ -1763,6 +1765,7 @@ class MessageInputState extends ConsumerState<MessageInput> {
                         controller: _controller,
                         focusNode: _focusNode,
                         readOnly: editingSourceLoading,
+                        contextMenuBuilder: markdownSelectionContextMenuBuilder,
                         style: const TextStyle(
                           color: AppColors.onBackground,
                           fontSize: 15,
