@@ -79,17 +79,14 @@ class _NeuActionState extends State<NeuAction> {
               : null,
           child: Container(
             constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            foregroundDecoration: ShapeDecoration(
-              shape: RoundedSuperellipseBorder(
-                borderRadius: BorderRadius.circular(widget.radius),
-                side: BorderSide(
-                  color: enabled && _focusVisible
-                      ? context.neu.accent
-                      : Colors.transparent,
-                  width: 2,
-                ),
-              ),
-            ),
+            foregroundDecoration: enabled && _focusVisible
+                ? ShapeDecoration(
+                    shape: RoundedSuperellipseBorder(
+                      borderRadius: BorderRadius.circular(widget.radius),
+                      side: BorderSide(color: context.neu.accent, width: 2),
+                    ),
+                  )
+                : null,
             child: widget.child,
           ),
         ),
