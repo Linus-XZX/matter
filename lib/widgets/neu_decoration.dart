@@ -45,6 +45,11 @@ class NeuDecoration extends Decoration {
   /// 额外描边(如选中描主色)。
   final Color? borderColor;
 
+  // Let repaint boundaries (including lazy-list rows) raster-cache the blur
+  // operations instead of rasterizing both shadows on every scrolling frame.
+  @override
+  bool get isComplex => depth != NeuDepth.flat;
+
   @override
   BoxPainter createBoxPainter([VoidCallback? onChanged]) =>
       _NeuPainter(this, onChanged);
@@ -69,61 +74,63 @@ class _NeuPainter extends BoxPainter {
   _NeuPainter(this.decoration, super.onChanged);
 
   final NeuDecoration decoration;
+  Size? _size;
+  late Path _path;
+  late Path _darkShadow;
+  late Path _lightShadow;
+  late Paint _fillPaint;
 
   @override
   void paint(Canvas canvas, Offset offset, ImageConfiguration configuration) {
     final size = configuration.size!;
-    final rect = offset & size;
+    final rect = Offset.zero & size;
     if (rect.isEmpty) return;
 
     final c = decoration.colors;
-    final radius = decoration.radius.clamp(
-      0.0,
-      math.min(size.width, size.height) / 2,
-    );
-    final shape = RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(radius),
-    );
-    final path = shape.getOuterPath(rect);
-
-    final d = 3.8 * decoration.intensity; // 阴影偏移
-    final sigma = d * 1.15; // 阴影模糊:收敛半径,阴影更实、层次更清晰
-    final base = decoration.color ?? c.surface;
+    final d = 3.8 * decoration.intensity;
+    final sigma = d * 1.15;
+    if (_size != size) {
+      _size = size;
+      _prepare(size, rect, c, d, sigma);
+    }
+    final path = _path;
+    canvas.save();
+    canvas.translate(offset.dx, offset.dy);
 
     switch (decoration.depth) {
       case NeuDepth.raised:
-        _outerShadow(canvas, path, Offset(d, d), c.shadowDark, sigma, 0.72);
-        // 受光边:高光阴影压得比暗部更锐,读作一条"光",不读作"线"。
-        // 不透明度按主题收敛(深色下满强度就是辉光)。
-        _outerShadow(
+        _shadow(
           canvas,
-          path,
-          Offset(-d, -d),
-          c.shadowLight,
-          sigma * 0.65,
-          c.highlightAlpha,
+          _darkShadow,
+          c.shadowDark.withValues(alpha: .72),
+          sigma,
         );
-        _fill(canvas, path, rect, base, convex: true, c: c);
-      case NeuDepth.flat:
-        _fill(canvas, path, rect, base, convex: false, c: c);
-      case NeuDepth.pressed:
-        _fill(canvas, path, rect, neuShift(base, -0.012), convex: false, c: c);
-        _innerShadow(
+        _shadow(
           canvas,
-          rect,
-          path,
-          Offset(d * .8, d * .8),
+          _lightShadow,
+          c.shadowLight.withValues(alpha: c.highlightAlpha),
+          sigma * .65,
+        );
+        canvas.drawPath(path, _fillPaint);
+      case NeuDepth.flat:
+        canvas.drawPath(path, _fillPaint);
+      case NeuDepth.pressed:
+        canvas.drawPath(path, _fillPaint);
+        canvas.save();
+        canvas.clipPath(path);
+        _shadow(
+          canvas,
+          _darkShadow,
           c.shadowDark.withValues(alpha: .48),
           sigma,
         );
-        _innerShadow(
+        _shadow(
           canvas,
-          rect,
-          path,
-          Offset(-d * .8, -d * .8),
+          _lightShadow,
           c.shadowLight.withValues(alpha: c.highlightAlpha),
           sigma * .9,
         );
+        canvas.restore();
     }
 
     if (decoration.borderColor != null) {
@@ -135,11 +142,41 @@ class _NeuPainter extends BoxPainter {
           ..color = decoration.borderColor!,
       );
     }
+    canvas.restore();
   }
 
-  void _fill(
-    Canvas canvas,
-    Path path,
+  void _prepare(Size size, Rect rect, NeuColors c, double d, double sigma) {
+    final radius = decoration.radius.clamp(
+      0.0,
+      math.min(size.width, size.height) / 2,
+    );
+    final shape = RoundedSuperellipseBorder(
+      borderRadius: BorderRadius.circular(radius),
+    );
+    final path = _path = shape.getOuterPath(rect);
+
+    final base = decoration.color ?? c.surface;
+
+    switch (decoration.depth) {
+      case NeuDepth.raised:
+        _darkShadow = path.shift(Offset(d, d));
+        _lightShadow = path.shift(Offset(-d, -d));
+        _fillPaint = _fill(rect, base, convex: true, c: c);
+      case NeuDepth.flat:
+        _fillPaint = _fill(rect, base, convex: false, c: c);
+      case NeuDepth.pressed:
+        _fillPaint = _fill(rect, neuShift(base, -0.012), convex: false, c: c);
+        _darkShadow = _innerShadow(rect, path, Offset(d * .8, d * .8), sigma);
+        _lightShadow = _innerShadow(
+          rect,
+          path,
+          Offset(-d * .8, -d * .8),
+          sigma * .9,
+        );
+    }
+  }
+
+  Paint _fill(
     Rect rect,
     Color base, {
     required bool convex,
@@ -161,53 +198,28 @@ class _NeuPainter extends BoxPainter {
     } else {
       gradient = null;
     }
+    return Paint()
+      ..color = decoration.accent ? c.accent : base
+      ..shader = gradient?.createShader(rect);
+  }
+
+  void _shadow(Canvas canvas, Path path, Color color, double sigma) {
     canvas.drawPath(
       path,
       Paint()
-        ..color = decoration.accent ? c.accent : base
-        ..shader = gradient?.createShader(rect),
-    );
-  }
-
-  void _outerShadow(
-    Canvas canvas,
-    Path path,
-    Offset shift,
-    Color color,
-    double sigma,
-    double opacity,
-  ) {
-    canvas.drawPath(
-      path.shift(shift),
-      Paint()
-        ..color = color.withValues(alpha: opacity)
+        ..color = color
         ..maskFilter = MaskFilter.blur(BlurStyle.normal, sigma),
     );
   }
 
   /// 内阴影:绘制"大矩形减本体"的反形并模糊,裁切到本体内部,
   /// 只在内边缘留下渐隐的暗部/高光。
-  void _innerShadow(
-    Canvas canvas,
-    Rect rect,
-    Path path,
-    Offset shift,
-    Color color,
-    double sigma,
-  ) {
+  Path _innerShadow(Rect rect, Path path, Offset shift, double sigma) {
     final inverse = Path.combine(
       PathOperation.difference,
       Path()..addRect(rect.inflate(sigma * 2 + 8)),
       path,
     );
-    canvas.save();
-    canvas.clipPath(path);
-    canvas.drawPath(
-      inverse.shift(shift),
-      Paint()
-        ..color = color
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, sigma),
-    );
-    canvas.restore();
+    return inverse.shift(shift);
   }
 }
