@@ -49,10 +49,7 @@ ThemeData buildNeuTheme(NeuColors neu, Brightness brightness) {
     dividerColor: neu.hairline,
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
-        // The fullscreen variant uses snapshot-backed zoom transitions for
-        // normal navigation, while retaining Android's predictive back.
-        TargetPlatform.android:
-            PredictiveBackFullscreenPageTransitionsBuilder(),
+        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
         TargetPlatform.iOS: NeuPageTransitionsBuilder(),
         TargetPlatform.linux: NeuPageTransitionsBuilder(),
         TargetPlatform.macOS: NeuPageTransitionsBuilder(),
