@@ -25,6 +25,34 @@ import 'widgets/sheets.dart';
 
 enum _DesktopRoomSource { directMessages, ungroupedRooms, space }
 
+// PageView mounts tabs lazily. Retain visited tabs so a return swipe does
+// not repeat initialization, layout and image loading. Account-scoped keys
+// discard retained state when switching accounts.
+class _MobilePage extends ConsumerStatefulWidget {
+  const _MobilePage({super.key, required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  ConsumerState<_MobilePage> createState() => _MobilePageState();
+}
+
+class _MobilePageState extends ConsumerState<_MobilePage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return TickerMode(
+      enabled: ref.watch(navigationIndexProvider) == widget.index,
+      child: widget.child,
+    );
+  }
+}
+
 class MatterApp extends ConsumerStatefulWidget {
   const MatterApp({super.key});
 
@@ -462,7 +490,14 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       extendBody: true,
       body: PageView(
         controller: _pageController,
-        children: _pages,
+        children: [
+          for (var index = 0; index < _pages.length; index++)
+            _MobilePage(
+              key: ValueKey((ref.watch(activeUserIdProvider), index)),
+              index: index,
+              child: _pages[index],
+            ),
+        ],
         onPageChanged: (index) {
           if (ref.read(navigationIndexProvider) != index) {
             ref.read(navigationIndexProvider.notifier).value = index;

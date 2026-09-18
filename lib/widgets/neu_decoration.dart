@@ -75,7 +75,9 @@ class _NeuPainter extends BoxPainter {
 
   final NeuDecoration decoration;
   Size? _size;
-  late Path _path;
+  late RSuperellipse _shape;
+  late RSuperellipse _darkOuterShadow;
+  late RSuperellipse _lightOuterShadow;
   late Path _darkShadow;
   late Path _lightShadow;
   late Paint _fillPaint;
@@ -93,31 +95,29 @@ class _NeuPainter extends BoxPainter {
       _size = size;
       _prepare(size, rect, c, d, sigma);
     }
-    final path = _path;
     canvas.save();
     canvas.translate(offset.dx, offset.dy);
 
     switch (decoration.depth) {
       case NeuDepth.raised:
-        _shadow(
-          canvas,
-          _darkShadow,
-          c.shadowDark.withValues(alpha: .72),
-          sigma,
+        canvas.drawRSuperellipse(
+          _darkOuterShadow,
+          _shadowPaint(c.shadowDark.withValues(alpha: .72), sigma),
         );
-        _shadow(
-          canvas,
-          _lightShadow,
-          c.shadowLight.withValues(alpha: c.highlightAlpha),
-          sigma * .65,
+        canvas.drawRSuperellipse(
+          _lightOuterShadow,
+          _shadowPaint(
+            c.shadowLight.withValues(alpha: c.highlightAlpha),
+            sigma * .65,
+          ),
         );
-        canvas.drawPath(path, _fillPaint);
+        canvas.drawRSuperellipse(_shape, _fillPaint);
       case NeuDepth.flat:
-        canvas.drawPath(path, _fillPaint);
+        canvas.drawRSuperellipse(_shape, _fillPaint);
       case NeuDepth.pressed:
-        canvas.drawPath(path, _fillPaint);
+        canvas.drawRSuperellipse(_shape, _fillPaint);
         canvas.save();
-        canvas.clipPath(path);
+        canvas.clipRSuperellipse(_shape);
         _shadow(
           canvas,
           _darkShadow,
@@ -134,8 +134,8 @@ class _NeuPainter extends BoxPainter {
     }
 
     if (decoration.borderColor != null) {
-      canvas.drawPath(
-        path,
+      canvas.drawRSuperellipse(
+        _shape,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.2
@@ -150,21 +150,21 @@ class _NeuPainter extends BoxPainter {
       0.0,
       math.min(size.width, size.height) / 2,
     );
-    final shape = RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(radius),
-    );
-    final path = _path = shape.getOuterPath(rect);
+    // Preserve the primitive: converting it to a Path prevents Impeller
+    // from using its specialized superellipse blur shader for the shadows.
+    _shape = RSuperellipse.fromRectAndRadius(rect, Radius.circular(radius));
 
     final base = decoration.color ?? c.surface;
 
     switch (decoration.depth) {
       case NeuDepth.raised:
-        _darkShadow = path.shift(Offset(d, d));
-        _lightShadow = path.shift(Offset(-d, -d));
+        _darkOuterShadow = _shape.shift(Offset(d, d));
+        _lightOuterShadow = _shape.shift(Offset(-d, -d));
         _fillPaint = _fill(rect, base, convex: true, c: c);
       case NeuDepth.flat:
         _fillPaint = _fill(rect, base, convex: false, c: c);
       case NeuDepth.pressed:
+        final path = Path()..addRSuperellipse(_shape);
         _fillPaint = _fill(rect, neuShift(base, -0.012), convex: false, c: c);
         _darkShadow = _innerShadow(rect, path, Offset(d * .8, d * .8), sigma);
         _lightShadow = _innerShadow(
@@ -204,13 +204,12 @@ class _NeuPainter extends BoxPainter {
   }
 
   void _shadow(Canvas canvas, Path path, Color color, double sigma) {
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, sigma),
-    );
+    canvas.drawPath(path, _shadowPaint(color, sigma));
   }
+
+  Paint _shadowPaint(Color color, double sigma) => Paint()
+    ..color = color
+    ..maskFilter = MaskFilter.blur(BlurStyle.normal, sigma);
 
   /// 内阴影:绘制"大矩形减本体"的反形并模糊,裁切到本体内部,
   /// 只在内边缘留下渐隐的暗部/高光。

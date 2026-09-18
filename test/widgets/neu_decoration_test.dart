@@ -7,9 +7,14 @@ import 'package:matter/widgets/neu_decoration.dart';
 
 class _RecordingCanvas implements Canvas {
   final paths = <Path>[];
+  final superellipses = <ui.RSuperellipse>[];
 
   @override
   void drawPath(Path path, Paint paint) => paths.add(path);
+
+  @override
+  void drawRSuperellipse(ui.RSuperellipse shape, Paint paint) =>
+      superellipses.add(shape);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
@@ -28,6 +33,28 @@ Future<List<int>> _pixels(BoxPainter painter, Size size, Offset offset) async {
 }
 
 void main() {
+  test(
+    'raised surfaces use native superellipses for both shadows and fill',
+    () {
+      final painter = const NeuDecoration(
+        colors: NeuColors.light,
+      ).createBoxPainter();
+      final canvas = _RecordingCanvas();
+      painter.paint(
+        canvas,
+        Offset.zero,
+        const ImageConfiguration(size: Size(120, 60)),
+      );
+      expect(canvas.paths, isEmpty);
+      expect(canvas.superellipses, hasLength(3));
+      expect(
+        canvas.superellipses.last.outerRect,
+        const Rect.fromLTWH(0, 0, 120, 60),
+      );
+      painter.dispose();
+    },
+  );
+
   test('shadow decorations advertise raster-cache complexity', () {
     for (final depth in NeuDepth.values) {
       expect(
@@ -48,10 +75,17 @@ void main() {
       const configuration = ImageConfiguration(size: Size(120, 60));
       painter.paint(first, Offset.zero, configuration);
       painter.paint(second, const Offset(20, 30), configuration);
-      expect(first.paths, isNotEmpty);
+      expect(first.superellipses, isNotEmpty);
       expect(second.paths.length, first.paths.length);
       for (var i = 0; i < first.paths.length; i++) {
         expect(identical(first.paths[i], second.paths[i]), isTrue);
+      }
+      expect(second.superellipses.length, first.superellipses.length);
+      for (var i = 0; i < first.superellipses.length; i++) {
+        expect(
+          identical(first.superellipses[i], second.superellipses[i]),
+          isTrue,
+        );
       }
       painter.dispose();
     });

@@ -13,6 +13,7 @@ import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
+import '../../widgets/neu_decoration.dart';
 import '../../widgets/sheets.dart';
 import 'chat_list_item.dart';
 import 'space_detail_page.dart';
@@ -58,30 +59,22 @@ class SpacePage extends ConsumerWidget {
               const SliverToBoxAdapter(child: SizedBox(height: NeuSpacing.md)),
               spacesAsync.when(
                 data: (spaces) {
-                  if (spaces.isEmpty) {
-                    return const SliverToBoxAdapter(
-                      child: _SectionCard(
-                        title: '空间',
-                        subtitle: '暂无已加入空间',
-                        child: _HintText('当前账号还没有可浏览的空间。'),
-                      ),
-                    );
-                  }
-
-                  return SliverToBoxAdapter(
-                    child: _SectionCard(
-                      title: '空间',
-                      subtitle: '用于组织房间和成员，不直接作为聊天入口',
-                      child: Column(
-                        children: [
-                          for (final space in spaces)
-                            _SpaceRoomTile(
-                              space: space,
-                              key: ValueKey(space.id),
+                  return _SliverSectionCard(
+                    title: '空间',
+                    subtitle: spaces.isEmpty
+                        ? '暂无已加入空间'
+                        : '用于组织房间和成员，不直接作为聊天入口',
+                    sliver: spaces.isEmpty
+                        ? const SliverToBoxAdapter(
+                            child: _HintText('当前账号还没有可浏览的空间。'),
+                          )
+                        : SliverList.builder(
+                            itemCount: spaces.length,
+                            itemBuilder: (context, index) => _SpaceRoomTile(
+                              space: spaces[index],
+                              key: ValueKey(spaces[index].id),
                             ),
-                        ],
-                      ),
-                    ),
+                          ),
                   );
                 },
                 loading: () => SliverToBoxAdapter(
@@ -108,23 +101,20 @@ class SpacePage extends ConsumerWidget {
               const SliverToBoxAdapter(child: SizedBox(height: NeuSpacing.md)),
               ungroupedAsync.when(
                 data: (rooms) {
-                  return SliverToBoxAdapter(
-                    child: _SectionCard(
-                      title: '未归属群组',
-                      subtitle: '这些房间当前不属于任何已加入空间',
-                      child: rooms.isEmpty
-                          ? const _HintText('暂无普通房间')
-                          : Column(
-                              children: [
-                                for (final room in rooms)
-                                  ChatListItem(
-                                    room: room,
-                                    dense: true,
-                                    showRoomTypeIcon: true,
-                                  ),
-                              ],
+                  return _SliverSectionCard(
+                    title: '未归属群组',
+                    subtitle: '这些房间当前不属于任何已加入空间',
+                    sliver: rooms.isEmpty
+                        ? const SliverToBoxAdapter(child: _HintText('暂无普通房间'))
+                        : SliverList.builder(
+                            itemCount: rooms.length,
+                            itemBuilder: (context, index) => ChatListItem(
+                              key: ValueKey(rooms[index].id),
+                              room: rooms[index],
+                              dense: true,
+                              showRoomTypeIcon: true,
                             ),
-                    ),
+                          ),
                   );
                 },
                 loading: () =>
@@ -632,34 +622,50 @@ class _SpaceRoomTile extends StatelessWidget {
   }
 }
 
-class _SectionCard extends StatelessWidget {
+// Keep the section surface while allowing its rows to participate in the
+// outer viewport's lazy layout, instead of laying out a whole Column.
+class _SliverSectionCard extends StatelessWidget {
   final String title;
   final String subtitle;
-  final Widget child;
+  final Widget sliver;
 
-  const _SectionCard({
+  const _SliverSectionCard({
     required this.title,
     required this.subtitle,
-    required this.child,
+    required this.sliver,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: NeuSpacing.lg),
-      child: NeuSurface(
-        color: context.neu.surfaceStrong,
-        radius: NeuRadius.surface,
-        padding: const EdgeInsets.all(NeuSpacing.lg),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: NeuSpacing.xs),
-            Text(subtitle, style: Theme.of(context).textTheme.bodyMedium),
-            const SizedBox(height: 14),
-            child,
-          ],
+      sliver: DecoratedSliver(
+        decoration: NeuDecoration(
+          colors: context.neu,
+          color: context.neu.surfaceStrong,
+          radius: NeuRadius.surface,
+        ),
+        sliver: SliverPadding(
+          padding: const EdgeInsets.all(NeuSpacing.lg),
+          sliver: SliverMainAxisGroup(
+            slivers: [
+              SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: NeuSpacing.xs),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                ),
+              ),
+              sliver,
+            ],
+          ),
         ),
       ),
     );

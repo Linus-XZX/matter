@@ -545,212 +545,194 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             elevation: 0,
             scrolledUnderElevation: 0,
           ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                NeuSpacing.lg,
-                NeuSpacing.lg,
-                NeuSpacing.lg,
-                NeuSpacing.navClearance,
-              ),
-              child: Column(
-                children: [
-                  // Profile card
-                  NeuAction(
-                    radius: NeuRadius.surface,
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const ProfileEditPage(),
-                        ),
-                      );
-                    },
-                    child: NeuSurface(
-                      color: colors.card,
-                      radius: NeuRadius.surface,
-                      padding: const EdgeInsets.all(NeuSpacing.lg),
-                      child: Row(
-                        children: [
-                          AppAvatar(
-                            fallback: currentUser?.displayName ?? '我',
-                            size: 60,
-                            url: currentUser?.avatarUrl,
-                          ),
-                          const SizedBox(width: NeuSpacing.lg),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  currentUser?.displayName ?? '未登录',
-                                  style: Theme.of(context).textTheme.titleMedium
-                                      ?.copyWith(fontWeight: FontWeight.w700),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  currentUser != null
-                                      ? currentUser.id
-                                      : '点击登录你的 Matrix 账号',
-                                  style: Theme.of(context).textTheme.bodyMedium,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(
+              NeuSpacing.lg,
+              NeuSpacing.lg,
+              NeuSpacing.lg,
+              NeuSpacing.navClearance,
+            ),
+            sliver: SliverList.list(
+              children: [
+                // Profile card
+                NeuAction(
+                  radius: NeuRadius.surface,
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ProfileEditPage(),
                       ),
-                    ),
-                  ),
-
-                  // ── Account switcher ────────────────────────────────
-                  if (_accountsLoadError != null) ...[
-                    const SizedBox(height: NeuSpacing.xl),
-                    _buildGroup(
-                      title: '账号',
-                      items: [
-                        _SettingItem(
-                          icon: Icons.error_outline_rounded,
-                          iconColor: colors.error,
-                          title: '账号列表加载失败',
-                          subtitle: '$_accountsLoadError',
-                          onTap: _loadAccounts,
+                    );
+                  },
+                  child: NeuSurface(
+                    color: colors.card,
+                    radius: NeuRadius.surface,
+                    padding: const EdgeInsets.all(NeuSpacing.lg),
+                    child: Row(
+                      children: [
+                        AppAvatar(
+                          fallback: currentUser?.displayName ?? '我',
+                          size: 60,
+                          url: currentUser?.avatarUrl,
+                        ),
+                        const SizedBox(width: NeuSpacing.lg),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                currentUser?.displayName ?? '未登录',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                currentUser != null
+                                    ? currentUser.id
+                                    : '点击登录你的 Matrix 账号',
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
-                  ],
-                  if (_accounts.length > 1) ...[
-                    const SizedBox(height: NeuSpacing.xl),
-                    _buildGroup(
-                      title: '账号切换',
-                      items: _accounts.map((account) {
-                        final isActive = account.userId == activeUserId;
-                        return _SettingItem(
-                          icon: Icons.person_outline_rounded,
-                          iconColor: isActive ? colors.accent : null,
-                          title: _formatUserId(account.userId),
-                          subtitle: account.homeserverUrl.replaceAll(
-                            RegExp(r'https?://'),
-                            '',
-                          ),
-                          trailing: isActive
-                              ? Icon(
-                                  Icons.check_circle_rounded,
-                                  color: colors.accent,
-                                  size: 20,
-                                )
-                              : _switchingAccountId == account.userId
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : null,
-                          // Removal internally switches accounts (see
-                          // `_removeAccount`); during that window a switch
-                          // tile must stay disabled like the remove buttons,
-                          // or a queued tap can target the account being
-                          // deleted.
-                          onTap:
-                              (isActive ||
-                                  _switchingAccountId != null ||
-                                  _removingAccountId != null)
-                              ? null
-                              : () => _switchAccount(account.userId),
-                        );
-                      }).toList(),
+                  ),
+                ),
+
+                // ── Account switcher ────────────────────────────────
+                if (_accountsLoadError != null) ...[
+                  const SizedBox(height: NeuSpacing.xl),
+                  _buildGroup(
+                    title: '账号',
+                    items: [
+                      _SettingItem(
+                        icon: Icons.error_outline_rounded,
+                        iconColor: colors.error,
+                        title: '账号列表加载失败',
+                        subtitle: '$_accountsLoadError',
+                        onTap: _loadAccounts,
+                      ),
+                    ],
+                  ),
+                ],
+                if (_accounts.length > 1) ...[
+                  const SizedBox(height: NeuSpacing.xl),
+                  _buildGroup(
+                    title: '账号切换',
+                    items: _accounts.map((account) {
+                      final isActive = account.userId == activeUserId;
+                      return _SettingItem(
+                        icon: Icons.person_outline_rounded,
+                        iconColor: isActive ? colors.accent : null,
+                        title: _formatUserId(account.userId),
+                        subtitle: account.homeserverUrl.replaceAll(
+                          RegExp(r'https?://'),
+                          '',
+                        ),
+                        trailing: isActive
+                            ? Icon(
+                                Icons.check_circle_rounded,
+                                color: colors.accent,
+                                size: 20,
+                              )
+                            : _switchingAccountId == account.userId
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : null,
+                        // Removal internally switches accounts (see
+                        // `_removeAccount`); during that window a switch
+                        // tile must stay disabled like the remove buttons,
+                        // or a queued tap can target the account being
+                        // deleted.
+                        onTap:
+                            (isActive ||
+                                _switchingAccountId != null ||
+                                _removingAccountId != null)
+                            ? null
+                            : () => _switchAccount(account.userId),
+                      );
+                    }).toList(),
+                  ),
+                ],
+
+                const SizedBox(height: NeuSpacing.xl),
+                // Settings groups
+                _buildGroup(
+                  title: '通用',
+                  items: [
+                    _SettingItem(
+                      icon: Icons.dark_mode_rounded,
+                      title: '主题',
+                      subtitle: _themeStyleLabel(
+                        ref.watch(appThemeStyleProvider),
+                      ),
+                      onTap: _showThemeStylePicker,
+                    ),
+                    _SettingItem(
+                      icon: Icons.notifications_rounded,
+                      title: '通知',
+                      subtitle: '免打扰请在房间管理中设置',
+                    ),
+                    _SettingItem(
+                      icon: Icons.language_rounded,
+                      title: '语言',
+                      subtitle: '当前固定为简体中文',
                     ),
                   ],
-
-                  const SizedBox(height: NeuSpacing.xl),
-                  // Settings groups
-                  _buildGroup(
-                    title: '通用',
-                    items: [
-                      _SettingItem(
-                        icon: Icons.dark_mode_rounded,
-                        title: '主题',
-                        subtitle: _themeStyleLabel(
-                          ref.watch(appThemeStyleProvider),
-                        ),
-                        onTap: _showThemeStylePicker,
-                      ),
-                      _SettingItem(
-                        icon: Icons.notifications_rounded,
-                        title: '通知',
-                        subtitle: '免打扰请在房间管理中设置',
-                      ),
-                      _SettingItem(
-                        icon: Icons.language_rounded,
-                        title: '语言',
-                        subtitle: '当前固定为简体中文',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: NeuSpacing.xl),
-                  _buildGroup(
-                    title: 'Matrix',
-                    items: [
-                      _SettingItem(
-                        icon: Icons.account_tree_rounded,
-                        title: 'Homeserver',
-                        subtitle:
-                            currentUser?.homeserver.replaceAll(
-                              RegExp(r'https?://'),
-                              '',
-                            ) ??
-                            'matrix.org',
-                      ),
-                      _SettingItem(
-                        icon: Icons.sync_rounded,
-                        title: '同步设置',
-                        subtitle: '自动管理，无手动配置项',
-                      ),
-                      _SettingItem(
-                        icon: Icons.security_rounded,
-                        title: '加密',
-                        subtitle: '设备验证与加密恢复',
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => const EncryptionPage(),
-                            ),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                  // On web there is no app-managed disk cache to clear; the
-                  // browser owns the HTTP cache.
-                  if (!kIsWeb) ...[
-                    const SizedBox(height: NeuSpacing.xl),
-                    _buildGroup(
-                      title: '存储',
-                      items: [
-                        if (_credentialCompatibilityMode)
-                          _SettingItem(
-                            icon: Icons.warning_amber_rounded,
-                            iconColor: colors.warning,
-                            title: '凭据兼容模式',
-                            subtitle: '已启用 · Root 权限可读取登录凭据',
-                            trailing: _updatingCredentialCompatibilityMode
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : null,
-                            onTap: _updatingCredentialCompatibilityMode
-                                ? null
-                                : _disableCredentialCompatibilityMode,
+                ),
+                const SizedBox(height: NeuSpacing.xl),
+                _buildGroup(
+                  title: 'Matrix',
+                  items: [
+                    _SettingItem(
+                      icon: Icons.account_tree_rounded,
+                      title: 'Homeserver',
+                      subtitle:
+                          currentUser?.homeserver.replaceAll(
+                            RegExp(r'https?://'),
+                            '',
+                          ) ??
+                          'matrix.org',
+                    ),
+                    _SettingItem(
+                      icon: Icons.sync_rounded,
+                      title: '同步设置',
+                      subtitle: '自动管理，无手动配置项',
+                    ),
+                    _SettingItem(
+                      icon: Icons.security_rounded,
+                      title: '加密',
+                      subtitle: '设备验证与加密恢复',
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const EncryptionPage(),
                           ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+                // On web there is no app-managed disk cache to clear; the
+                // browser owns the HTTP cache.
+                if (!kIsWeb) ...[
+                  const SizedBox(height: NeuSpacing.xl),
+                  _buildGroup(
+                    title: '存储',
+                    items: [
+                      if (_credentialCompatibilityMode)
                         _SettingItem(
-                          icon: Icons.cleaning_services_rounded,
-                          title: '清理缓存',
-                          subtitle: '图片与媒体缓存 · $_cacheSizeLabel',
-                          trailing: _clearingCache
+                          icon: Icons.warning_amber_rounded,
+                          iconColor: colors.warning,
+                          title: '凭据兼容模式',
+                          subtitle: '已启用 · Root 权限可读取登录凭据',
+                          trailing: _updatingCredentialCompatibilityMode
                               ? const SizedBox(
                                   width: 18,
                                   height: 18,
@@ -759,24 +741,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   ),
                                 )
                               : null,
-                          onTap: _clearingCache ? null : _clearCache,
+                          onTap: _updatingCredentialCompatibilityMode
+                              ? null
+                              : _disableCredentialCompatibilityMode,
                         ),
-                      ],
-                    ),
-                  ],
-                  const SizedBox(height: NeuSpacing.xl),
-                  _buildGroup(
-                    title: '关于',
-                    items: [
                       _SettingItem(
-                        icon: Icons.info_rounded,
-                        title: '当前版本',
-                        subtitle: _versionLabel,
-                        onTap:
-                            appUpdateService.isSupported && !_checkingForUpdate
-                            ? _checkForUpdate
-                            : null,
-                        trailing: _checkingForUpdate
+                        icon: Icons.cleaning_services_rounded,
+                        title: '清理缓存',
+                        subtitle: '图片与媒体缓存 · $_cacheSizeLabel',
+                        trailing: _clearingCache
                             ? const SizedBox(
                                 width: 18,
                                 height: 18,
@@ -785,108 +758,122 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 ),
                               )
                             : null,
-                      ),
-                      _SettingItem(
-                        icon: Icons.code_rounded,
-                        title: '开源许可',
-                        subtitle: '',
-                        onTap: () {
-                          showLicensePage(context: context);
-                        },
-                      ),
-                      _SettingItem(
-                        icon: Icons.terminal_rounded,
-                        title: '查看日志',
-                        subtitle: '调试连接、同步问题',
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const LogViewerPage(),
-                            ),
-                          );
-                        },
-                      ),
-                      _SettingItem(
-                        icon: Icons.folder_zip_outlined,
-                        title: '导出日志',
-                        subtitle: '完整日志 zip，含设备信息，已脱敏',
-                        trailing: _exportingLogs
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : null,
-                        onTap: _exportingLogs ? null : _exportLogs,
+                        onTap: _clearingCache ? null : _clearCache,
                       ),
                     ],
                   ),
-                  if (currentUser != null) ...[
-                    const SizedBox(height: NeuSpacing.xl),
-                    // Remove other accounts (not current)
-                    for (final account in _accounts.where(
-                      (a) => a.userId != activeUserId,
-                    ))
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: NeuSpacing.md),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: NeuButton(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            onPressed:
-                                (_removingAccountId != null ||
-                                    _switchingAccountId != null)
-                                ? null
-                                : () => _removeAccount(account.userId),
-                            icon: _removingAccountId == account.userId
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.remove_circle_outline_rounded,
-                                  ),
-                            child: Text('移除 ${_formatUserId(account.userId)}'),
+                ],
+                const SizedBox(height: NeuSpacing.xl),
+                _buildGroup(
+                  title: '关于',
+                  items: [
+                    _SettingItem(
+                      icon: Icons.info_rounded,
+                      title: '当前版本',
+                      subtitle: _versionLabel,
+                      onTap: appUpdateService.isSupported && !_checkingForUpdate
+                          ? _checkForUpdate
+                          : null,
+                      trailing: _checkingForUpdate
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : null,
+                    ),
+                    _SettingItem(
+                      icon: Icons.code_rounded,
+                      title: '开源许可',
+                      subtitle: '',
+                      onTap: () {
+                        showLicensePage(context: context);
+                      },
+                    ),
+                    _SettingItem(
+                      icon: Icons.terminal_rounded,
+                      title: '查看日志',
+                      subtitle: '调试连接、同步问题',
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const LogViewerPage(),
                           ),
-                        ),
-                      ),
-                    // Logout current account
-                    SizedBox(
-                      width: double.infinity,
-                      child: NeuButton(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        onPressed:
-                            (_removingAccountId != null ||
-                                _switchingAccountId != null)
-                            ? null
-                            : () => _removeAccount(
-                                activeUserId ?? currentUser.id,
-                              ),
-                        icon:
-                            _removingAccountId ==
-                                (activeUserId ?? currentUser.id)
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : Icon(Icons.logout_rounded, color: colors.error),
-                        child: Text(
-                          '退出登录',
-                          style: TextStyle(color: colors.error),
+                        );
+                      },
+                    ),
+                    _SettingItem(
+                      icon: Icons.folder_zip_outlined,
+                      title: '导出日志',
+                      subtitle: '完整日志 zip，含设备信息，已脱敏',
+                      trailing: _exportingLogs
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : null,
+                      onTap: _exportingLogs ? null : _exportLogs,
+                    ),
+                  ],
+                ),
+                if (currentUser != null) ...[
+                  const SizedBox(height: NeuSpacing.xl),
+                  // Remove other accounts (not current)
+                  for (final account in _accounts.where(
+                    (a) => a.userId != activeUserId,
+                  ))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: NeuSpacing.md),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: NeuButton(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          onPressed:
+                              (_removingAccountId != null ||
+                                  _switchingAccountId != null)
+                              ? null
+                              : () => _removeAccount(account.userId),
+                          icon: _removingAccountId == account.userId
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.remove_circle_outline_rounded),
+                          child: Text('移除 ${_formatUserId(account.userId)}'),
                         ),
                       ),
                     ),
-                  ],
+                  // Logout current account
+                  SizedBox(
+                    width: double.infinity,
+                    child: NeuButton(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      onPressed:
+                          (_removingAccountId != null ||
+                              _switchingAccountId != null)
+                          ? null
+                          : () =>
+                                _removeAccount(activeUserId ?? currentUser.id),
+                      icon:
+                          _removingAccountId == (activeUserId ?? currentUser.id)
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(Icons.logout_rounded, color: colors.error),
+                      child: Text(
+                        '退出登录',
+                        style: TextStyle(color: colors.error),
+                      ),
+                    ),
+                  ),
                 ],
-              ),
+              ],
             ),
           ),
         ],
