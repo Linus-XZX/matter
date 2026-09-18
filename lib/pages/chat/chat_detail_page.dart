@@ -1933,11 +1933,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     final animatePanelChange = !keyboardVisible && !_isPickerResizing;
     final pinnedStackHeight =
         kPinnedMessageRowHeight * _pinnedStackVisibleCount;
-    // The timeline always runs under the floating glass header (like the
-    // prototype) and only clears the status-bar strip above its top gap. The
-    // pinned stack is a floating glass layer as well, so messages scroll
-    // under it the same way instead of being clipped at its bottom edge.
-    final timelineTopInset = mediaQuery.padding.top + _headerTopGap;
+    // The timeline fills the whole screen and runs under the floating glass
+    // header (like the prototype); its clip edge sits at the screen edge
+    // where the gradient-blur layer is nearly opaque, so no hard clip line
+    // shows inside the header gap. The pinned stack is a floating glass
+    // layer as well, so messages scroll under it the same way instead of
+    // being clipped at its bottom edge.
 
     if (_keepPickerDuringKeyboardOpen &&
         keyboardHeight >= pickerFullHeight - 1) {
@@ -1975,7 +1976,6 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           children: [
             Positioned.fill(child: ColoredBox(color: colors.base)),
             Positioned.fill(
-              top: timelineTopInset,
               child: Builder(
                 builder: (context) {
                   final messages = messageCacheOwner == activeUserId
@@ -2165,6 +2165,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   );
                 },
               ),
+            ),
+            // 渐变模糊层:柔和过渡从浮动顶栏下方滚过的消息,
+            // 避免在视口上缘被硬裁切。
+            Positioned(
+              left: 0,
+              top: 0,
+              right: 0,
+              height: headerInset + 24,
+              child: const TopFadeBlur(),
             ),
             // Floating glass header — the only persistent glass layer.
             Positioned(

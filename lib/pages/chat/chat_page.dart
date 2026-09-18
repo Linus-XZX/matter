@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/chat_provider.dart';
@@ -7,6 +5,7 @@ import '../../src/rust/api/matrix.dart';
 import '../../providers/connection_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/cascade_title.dart';
+import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
@@ -359,38 +358,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             left: 0,
             right: 0,
             height: topInset + _headerHeight + 24,
-            child: IgnorePointer(
-              child: ClipRect(
-                child: ShaderMask(
-                  shaderCallback: (rect) => const LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.white, Colors.transparent],
-                    stops: [0.75, 1.0],
-                  ).createShader(rect),
-                  blendMode: BlendMode.dstIn,
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                    // 顶部近不透明,向下渐隐:滚入头部下方的内容先被
-                    // 底色盖住,再随渐变柔和消失。
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            colors.base.withValues(alpha: .96),
-                            colors.base.withValues(alpha: .75),
-                            colors.base.withValues(alpha: 0),
-                          ],
-                          stops: const [0, .55, 1],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+            child: const TopFadeBlur(),
           ),
           Positioned(top: 0, left: 0, right: 0, child: _buildHeader(titleText)),
         ],
