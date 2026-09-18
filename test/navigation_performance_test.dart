@@ -130,7 +130,9 @@ void main() {
     },
   );
 
-  testWidgets('Android route transitions use page snapshots', (tester) async {
+  testWidgets('Android route transitions animate between routes', (
+    tester,
+  ) async {
     final navigator = GlobalKey<NavigatorState>();
     await tester.pumpWidget(
       MaterialApp(
@@ -146,8 +148,11 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.byType(SnapshotWidget), findsWidgets);
+    // 标准预测性返回构建器沿用 Zoom 过渡:转场期间两个路由都在树中。
+    expect(find.text('Rooms'), findsOneWidget);
+    expect(find.text('Chat'), findsOneWidget);
     await tester.pumpAndSettle();
+    expect(find.text('Rooms'), findsNothing);
     expect(find.text('Chat'), findsOneWidget);
     navigator.currentState!.pop();
     await tester.pumpAndSettle();
