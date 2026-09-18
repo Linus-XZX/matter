@@ -40,23 +40,15 @@ class SpacePage extends ConsumerWidget {
         children: [
           CustomScrollView(
             slivers: [
-              SliverAppBar(
-                floating: true,
-                pinned: true,
-                expandedHeight: 56,
-                collapsedHeight: 56,
-                toolbarHeight: 56,
-                flexibleSpace: FlexibleSpaceBar(
-                  titlePadding: const EdgeInsets.only(left: 16, bottom: 12),
-                  title: CascadeTitle(
-                    text: titleText,
-                    style: Theme.of(context).textTheme.titleLarge!,
-                  ),
+              // 标题栏移到上方浮层,这里只预留其高度。
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height:
+                      MediaQuery.viewPaddingOf(context).top +
+                      kToolbarHeight +
+                      NeuSpacing.md,
                 ),
-                backgroundColor: context.neu.base,
-                scrolledUnderElevation: 0,
               ),
-              const SliverToBoxAdapter(child: SizedBox(height: NeuSpacing.md)),
               spacesAsync.when(
                 data: (spaces) {
                   return _SliverSectionCard(
@@ -124,6 +116,35 @@ class SpacePage extends ConsumerWidget {
               ),
               const SliverPadding(padding: EdgeInsets.only(bottom: 96)),
             ],
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 24,
+            child: const TopFadeBlur(),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Align(
+                  alignment: Alignment.bottomLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 16, bottom: 12),
+                    child: CascadeTitle(
+                      text: titleText,
+                      style: Theme.of(context).textTheme.titleLarge!,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
           Positioned(
             right: 16,

@@ -6,6 +6,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
@@ -29,94 +30,129 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
 
     return Scaffold(
       backgroundColor: context.neu.base,
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar(
-            floating: true,
-            pinned: true,
-            title: Text('通讯录', style: Theme.of(context).textTheme.titleLarge),
-            backgroundColor: context.neu.base,
-            scrolledUnderElevation: 0,
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                NeuSpacing.lg,
-                NeuSpacing.xs,
-                NeuSpacing.lg,
-                NeuSpacing.sm,
+      body: Stack(
+        children: [
+          CustomScrollView(
+            slivers: [
+              // 标题栏移到上方浮层,这里只预留其高度。
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height:
+                      MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                ),
               ),
-              child: NeuTextField(
-                hint: '搜索联系人',
-                leading: const Icon(Icons.search_rounded),
-                onChanged: (value) {
-                  setState(() => _searchQuery = value.toLowerCase());
-                },
-              ),
-            ),
-          ),
-          contactsAsync.when(
-            data: (contacts) {
-              final filtered = _searchQuery.isEmpty
-                  ? contacts
-                  : contacts
-                        .where(
-                          (c) =>
-                              c.name.toLowerCase().contains(_searchQuery) ||
-                              c.status.toLowerCase().contains(_searchQuery),
-                        )
-                        .toList();
-
-              if (filtered.isEmpty) {
-                return const SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.all(NeuSpacing.xl),
-                    child: _EmptyView(),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    NeuSpacing.lg,
+                    NeuSpacing.xs,
+                    NeuSpacing.lg,
+                    NeuSpacing.sm,
                   ),
-                );
-              }
+                  child: NeuTextField(
+                    hint: '搜索联系人',
+                    leading: const Icon(Icons.search_rounded),
+                    onChanged: (value) {
+                      setState(() => _searchQuery = value.toLowerCase());
+                    },
+                  ),
+                ),
+              ),
+              contactsAsync.when(
+                data: (contacts) {
+                  final filtered = _searchQuery.isEmpty
+                      ? contacts
+                      : contacts
+                            .where(
+                              (c) =>
+                                  c.name.toLowerCase().contains(_searchQuery) ||
+                                  c.status.toLowerCase().contains(_searchQuery),
+                            )
+                            .toList();
 
-              return SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: NeuSpacing.lg),
-                sliver: SliverList.separated(
-                  itemCount: filtered.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(height: NeuSpacing.md),
-                  itemBuilder: (context, index) {
-                    final contact = filtered[index];
-                    return _ContactTile(
-                      key: ValueKey(contact.id),
-                      contact: contact,
+                  if (filtered.isEmpty) {
+                    return const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.all(NeuSpacing.xl),
+                        child: _EmptyView(),
+                      ),
                     );
-                  },
+                  }
+
+                  return SliverPadding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: NeuSpacing.lg,
+                    ),
+                    sliver: SliverList.separated(
+                      itemCount: filtered.length,
+                      separatorBuilder: (context, index) =>
+                          const SizedBox(height: NeuSpacing.md),
+                      itemBuilder: (context, index) {
+                        final contact = filtered[index];
+                        return _ContactTile(
+                          key: ValueKey(contact.id),
+                          contact: contact,
+                        );
+                      },
+                    ),
+                  );
+                },
+                loading: () => SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(NeuSpacing.xl),
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        color: context.neu.accent,
+                        strokeWidth: 2,
+                      ),
+                    ),
+                  ),
                 ),
-              );
-            },
-            loading: () => SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.all(NeuSpacing.xl),
-                child: Center(
-                  child: CircularProgressIndicator(
-                    color: context.neu.accent,
-                    strokeWidth: 2,
+                error: (err, _) => SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(NeuSpacing.xl),
+                    child: Center(
+                      child: SelectableText(
+                        '加载失败: $err',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            error: (err, _) => SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.all(NeuSpacing.xl),
-                child: Center(
-                  child: SelectableText(
-                    '加载失败: $err',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ),
+              const SliverPadding(
+                padding: EdgeInsets.only(bottom: NeuSpacing.navClearance),
               ),
-            ),
+            ],
           ),
-          const SliverPadding(
-            padding: EdgeInsets.only(bottom: NeuSpacing.navClearance),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 24,
+            child: const TopFadeBlur(),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      '通讯录',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
