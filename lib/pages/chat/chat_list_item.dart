@@ -32,7 +32,27 @@ String chatListPreview(ChatRoom room) {
   return '$sender：${room.lastMessage}';
 }
 
-class ChatListItem extends ConsumerWidget {
+/// 列表条目之间的缩进短线,从头像右侧的文字区起始。
+class ChatListDivider extends StatelessWidget {
+  final bool dense;
+
+  /// 覆盖默认缩进(8 + 头像 46(dense 44) + 间隔 12),
+  /// 用于条目布局不同的列表(如通讯录)。
+  final double? indent;
+
+  const ChatListDivider({super.key, this.dense = false, this.indent});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: EdgeInsets.only(left: indent ?? 8 + (dense ? 44 : 46) + 12),
+      height: 1,
+      color: context.neu.hairline,
+    );
+  }
+}
+
+class ChatListItem extends ConsumerStatefulWidget {
   final ChatRoom room;
   final bool dense;
   final bool showRoomTypeIcon;
@@ -49,9 +69,23 @@ class ChatListItem extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatListItem> createState() => _ChatListItemState();
+}
+
+class _ChatListItemState extends ConsumerState<ChatListItem> {
+  bool _pressed = false;
+
+  ChatRoom get room => widget.room;
+
+  bool get dense => widget.dense;
+
+  bool get isSelected => widget.isSelected;
+
+  @override
+  Widget build(BuildContext context) {
     final colors = context.neu;
     final room = this.room;
+    final showRoomTypeIcon = widget.showRoomTypeIcon;
     final isPendingMembership =
         room.roomState == 'invited' || room.roomState == 'knocked';
     final userId =
@@ -81,24 +115,20 @@ class ChatListItem extends ConsumerWidget {
       clearStaleRoomUnreadOverride(ref, context, room.id, unreadOverride);
     }
 
-    final surfaceColor = isPendingMembership
-        ? colors.accentSoft.withValues(alpha: .5)
-        : isSelected
-        ? colors.surfaceStrong
-        : colors.card;
-    final borderColor = isSelected
-        ? colors.accent.withValues(alpha: .8)
+    final fillColor = _pressed || isSelected
+        ? colors.accentSoft
         : isPendingMembership
-        ? colors.accent.withValues(alpha: .5)
+        ? colors.accentSoft.withValues(alpha: .45)
         : null;
 
     return NeuAction(
       radius: NeuRadius.content,
       selected: isSelected,
       label: room.name,
+      onPressedChanged: (value) => setState(() => _pressed = value),
       onTap: () {
         if (isPendingMembership) return;
-        if (onRoomSelected case final onRoomSelected?) {
+        if (widget.onRoomSelected case final onRoomSelected?) {
           onRoomSelected(room);
           return;
         }
@@ -137,11 +167,15 @@ class ChatListItem extends ConsumerWidget {
       onLongPress: room.roomState == 'joined' && room.roomType != 'space'
           ? () => _showRoomListActions(context, ref, room)
           : null,
-      child: NeuSurface(
-        radius: NeuRadius.content,
-        color: surfaceColor,
-        borderColor: borderColor,
-        padding: EdgeInsets.all(dense ? 8 : 12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        padding: EdgeInsets.symmetric(horizontal: 8, vertical: dense ? 8 : 10),
+        decoration: ShapeDecoration(
+          color: fillColor,
+          shape: RoundedSuperellipseBorder(
+            borderRadius: BorderRadius.circular(NeuRadius.content),
+          ),
+        ),
         child: Row(
           children: [
             AppAvatar(

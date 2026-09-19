@@ -791,7 +791,7 @@ class _RoomSearchResults extends ConsumerWidget {
                 NeuSpacing.xl,
               ),
               itemCount: results.length,
-              separatorBuilder: (_, _) => const SizedBox(height: NeuSpacing.md),
+              separatorBuilder: (_, _) => const ChatListDivider(),
               itemBuilder: (_, index) => ChatListItem(room: results[index]),
             );
           },

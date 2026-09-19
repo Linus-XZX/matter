@@ -13,6 +13,7 @@ import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
 import '../chat/action_failure_message.dart';
 import '../chat/chat_detail_page.dart';
+import '../chat/chat_list_item.dart';
 
 class ContactsPage extends ConsumerStatefulWidget {
   const ContactsPage({super.key});
@@ -85,8 +86,9 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                     ),
                     sliver: SliverList.separated(
                       itemCount: filtered.length,
+                      // 与条目内边距对齐:水平 8 + 头像 48 + 间隔 14。
                       separatorBuilder: (context, index) =>
-                          const SizedBox(height: NeuSpacing.md),
+                          const ChatListDivider(indent: 8 + 48 + 14),
                       itemBuilder: (context, index) {
                         final contact = filtered[index];
                         return _ContactTile(
@@ -191,6 +193,7 @@ class _ContactTile extends ConsumerStatefulWidget {
 class _ContactTileState extends ConsumerState<_ContactTile> {
   String? _resolvedAvatarUrl;
   bool _creatingDm = false;
+  bool _pressed = false;
 
   @override
   void initState() {
@@ -336,12 +339,15 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
     return NeuAction(
       radius: NeuRadius.content,
       onTap: _showProfile,
-      child: NeuSurface(
-        radius: NeuRadius.content,
-        color: context.neu.card,
-        padding: const EdgeInsets.symmetric(
-          horizontal: NeuSpacing.lg,
-          vertical: NeuSpacing.md,
+      onPressedChanged: (value) => setState(() => _pressed = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: ShapeDecoration(
+          color: _pressed ? context.neu.accentSoft : null,
+          shape: RoundedSuperellipseBorder(
+            borderRadius: BorderRadius.circular(NeuRadius.content),
+          ),
         ),
         child: Row(
           children: [

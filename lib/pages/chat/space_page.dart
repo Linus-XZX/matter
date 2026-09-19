@@ -98,8 +98,10 @@ class SpacePage extends ConsumerWidget {
                     subtitle: '这些房间当前不属于任何已加入空间',
                     sliver: rooms.isEmpty
                         ? const SliverToBoxAdapter(child: _HintText('暂无普通房间'))
-                        : SliverList.builder(
+                        : SliverList.separated(
                             itemCount: rooms.length,
+                            separatorBuilder: (_, _) =>
+                                const ChatListDivider(dense: true),
                             itemBuilder: (context, index) => ChatListItem(
                               key: ValueKey(rooms[index].id),
                               room: rooms[index],

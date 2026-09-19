@@ -220,7 +220,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         }
         if (!underHeader) {
           return ListView.separated(
-            // 与联系人页同节奏:列表上 8、卡片间距 12。
+            // 与联系人页同节奏:列表上 8。
             padding: const EdgeInsets.fromLTRB(
               NeuSpacing.lg,
               NeuSpacing.sm,
@@ -228,7 +228,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               NeuSpacing.xl,
             ),
             itemCount: rooms.length,
-            separatorBuilder: (_, _) => const SizedBox(height: NeuSpacing.md),
+            separatorBuilder: (_, _) => const ChatListDivider(),
             itemBuilder: (context, index) {
               final room = rooms[index];
               return ChatListItem(
@@ -250,8 +250,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             NeuSpacing.navClearance,
           ),
           itemCount: rooms.length + 1,
-          separatorBuilder: (_, index) =>
-              SizedBox(height: index == 0 ? NeuSpacing.sm : NeuSpacing.md),
+          separatorBuilder: (_, index) => index == 0
+              ? const SizedBox(height: NeuSpacing.sm)
+              : const ChatListDivider(),
           itemBuilder: (context, index) {
             if (index == 0) {
               return ValueListenableBuilder<double>(

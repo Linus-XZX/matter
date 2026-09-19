@@ -183,7 +183,8 @@ class NeuRadius {
 
 /// 间距档位:页面节奏统一从这里取,不再散落魔数。
 /// 列表页统一节奏:标题行(20,12,16,8) → 搜索框(上 4) → 筛选条(上 12)
-/// → 列表(上 8),卡片间距 12,窄屏底部为玻璃导航留 104。
+/// → 列表(上 8),条目间用缩进短线(ChatListDivider)分隔,
+/// 窄屏底部为玻璃导航留 104。
 class NeuSpacing {
   static const double xs = 4;
   static const double sm = 8;
