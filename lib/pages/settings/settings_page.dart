@@ -898,8 +898,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             top: 0,
             left: 0,
             right: 0,
-            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 24,
-            child: const TopFadeBlur(),
+            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
           ),
           Positioned(
             top: 0,

@@ -132,201 +132,257 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
       orElse: () => fallbackDetails,
     );
 
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: context.neu.base,
-      appBar: AppBar(
-        backgroundColor: context.neu.base,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back_rounded, color: context.neu.text),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        title: Text('空间', style: Theme.of(context).textTheme.titleLarge),
-        actions: [
-          NeuIconButton(
-            icon: Icons.playlist_add_rounded,
-            tooltip: '添加房间',
-            onPressed: () => _showAddRoomDialog(context, ref),
-          ),
-          const SizedBox(width: NeuSpacing.xs),
-          NeuIconButton(
-            icon: Icons.more_horiz_rounded,
-            tooltip: '更多',
-            onPressed: () =>
-                _showSpaceMenu(context, ref, details, detailsAsync.hasValue),
-          ),
-          const SizedBox(width: NeuSpacing.sm),
-        ],
-      ),
-      body: MaxContentWidth(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(
-            NeuSpacing.lg,
-            NeuSpacing.sm,
-            NeuSpacing.lg,
-            NeuSpacing.xl,
-          ),
-          children: [
-            NeuSurface(
-              color: context.neu.card,
-              radius: NeuRadius.surface,
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: MaxContentWidth(
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(
+                  NeuSpacing.lg,
+                  viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                  NeuSpacing.lg,
+                  NeuSpacing.xl,
+                ),
                 children: [
-                  Row(
-                    children: [
-                      AppAvatar(
-                        fallback: details.name,
-                        size: 56,
-                        radius: NeuRadius.content,
-                        url: details.avatarUrl,
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                  NeuSurface(
+                    color: context.neu.card,
+                    radius: NeuRadius.surface,
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
                           children: [
-                            Text(
-                              details.name,
-                              style: Theme.of(context).textTheme.titleLarge,
+                            AppAvatar(
+                              fallback: details.name,
+                              size: 56,
+                              radius: NeuRadius.content,
+                              url: details.avatarUrl,
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              details.id,
-                              style: Theme.of(context).textTheme.bodySmall,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    details.name,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleLarge,
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    details.id,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
                             ),
                           ],
                         ),
+                        if ((details.topic ?? '').isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Text(
+                            details.topic!,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: NeuSpacing.md),
+                  _Section(
+                    title: '房间列表',
+                    child: childrenAsync.when(
+                      data: (rooms) {
+                        if (rooms.isEmpty) {
+                          return Text(
+                            '这个空间下暂时没有可见房间',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          );
+                        }
+                        return Column(
+                          children: [
+                            for (final room in rooms)
+                              _SpaceChildTile(
+                                room: room,
+                                onRemove: room.roomType == 'space'
+                                    ? null
+                                    : () => _confirmRemoveRoom(
+                                        context,
+                                        ref,
+                                        room,
+                                      ),
+                              ),
+                          ],
+                        );
+                      },
+                      loading: () => Center(
+                        child: CircularProgressIndicator(
+                          color: context.neu.accent,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                      error: (err, _) => Text(
+                        '加载房间失败: $err',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: NeuSpacing.md),
+                  _Section(
+                    title: '成员',
+                    child: membersAsync.when(
+                      data: (members) {
+                        if (members.isEmpty) {
+                          return Text(
+                            '暂无成员信息',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          );
+                        }
+                        return Column(
+                          children: [
+                            for (final member in members.take(8))
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Row(
+                                  children: [
+                                    AppAvatar(
+                                      fallback: member.name,
+                                      size: 36,
+                                      radius: NeuRadius.content,
+                                      url: member.avatarUrl,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        member.name,
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodyLarge,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (members.length > 8)
+                              Text(
+                                '还有 ${members.length - 8} 位成员',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                          ],
+                        );
+                      },
+                      loading: () => Center(
+                        child: CircularProgressIndicator(
+                          color: context.neu.accent,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                      error: (err, _) => Text(
+                        '加载成员失败: $err',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: NeuSpacing.md),
+                  _Section(
+                    title: '设置',
+                    child: Column(
+                      children: [
+                        _ActionSettingRow(
+                          icon: Icons.edit_rounded,
+                          label: '编辑空间',
+                          value: '修改名称与说明',
+                          onTap: () =>
+                              _showEditSpaceDialog(context, ref, details),
+                        ),
+                        const SizedBox(height: 10),
+                        _ActionSettingRow(
+                          icon: Icons.exit_to_app_rounded,
+                          label: '退出空间',
+                          value: '离开当前空间',
+                          danger: true,
+                          onTap: () =>
+                              _confirmLeaveSpace(context, ref, details),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Padding(
+                  padding: const EdgeInsets.only(
+                    left: NeuSpacing.sm,
+                    right: NeuSpacing.md,
+                  ),
+                  child: Row(
+                    children: [
+                      NeuIconButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        size: 40,
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                      const SizedBox(width: NeuSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          '空间',
+                          style: Theme.of(context).textTheme.titleLarge,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      NeuIconButton(
+                        icon: Icons.playlist_add_rounded,
+                        size: 40,
+                        tooltip: '添加房间',
+                        onPressed: () => _showAddRoomDialog(context, ref),
+                      ),
+                      const SizedBox(width: NeuSpacing.xs),
+                      NeuIconButton(
+                        icon: Icons.more_horiz_rounded,
+                        size: 40,
+                        tooltip: '更多',
+                        onPressed: () => _showSpaceMenu(
+                          context,
+                          ref,
+                          details,
+                          detailsAsync.hasValue,
+                        ),
                       ),
                     ],
                   ),
-                  if ((details.topic ?? '').isNotEmpty) ...[
-                    const SizedBox(height: 14),
-                    Text(
-                      details.topic!,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(height: NeuSpacing.md),
-            _Section(
-              title: '房间列表',
-              child: childrenAsync.when(
-                data: (rooms) {
-                  if (rooms.isEmpty) {
-                    return Text(
-                      '这个空间下暂时没有可见房间',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    );
-                  }
-                  return Column(
-                    children: [
-                      for (final room in rooms)
-                        _SpaceChildTile(
-                          room: room,
-                          onRemove: room.roomType == 'space'
-                              ? null
-                              : () => _confirmRemoveRoom(context, ref, room),
-                        ),
-                    ],
-                  );
-                },
-                loading: () => Center(
-                  child: CircularProgressIndicator(
-                    color: context.neu.accent,
-                    strokeWidth: 2,
-                  ),
-                ),
-                error: (err, _) => Text(
-                  '加载房间失败: $err',
-                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
               ),
             ),
-            const SizedBox(height: NeuSpacing.md),
-            _Section(
-              title: '成员',
-              child: membersAsync.when(
-                data: (members) {
-                  if (members.isEmpty) {
-                    return Text(
-                      '暂无成员信息',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    );
-                  }
-                  return Column(
-                    children: [
-                      for (final member in members.take(8))
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Row(
-                            children: [
-                              AppAvatar(
-                                fallback: member.name,
-                                size: 36,
-                                radius: NeuRadius.content,
-                                url: member.avatarUrl,
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  member.name,
-                                  style: Theme.of(context).textTheme.bodyLarge,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      if (members.length > 8)
-                        Text(
-                          '还有 ${members.length - 8} 位成员',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                    ],
-                  );
-                },
-                loading: () => Center(
-                  child: CircularProgressIndicator(
-                    color: context.neu.accent,
-                    strokeWidth: 2,
-                  ),
-                ),
-                error: (err, _) => Text(
-                  '加载成员失败: $err',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ),
-            ),
-            const SizedBox(height: NeuSpacing.md),
-            _Section(
-              title: '设置',
-              child: Column(
-                children: [
-                  _ActionSettingRow(
-                    icon: Icons.edit_rounded,
-                    label: '编辑空间',
-                    value: '修改名称与说明',
-                    onTap: () => _showEditSpaceDialog(context, ref, details),
-                  ),
-                  const SizedBox(height: 10),
-                  _ActionSettingRow(
-                    icon: Icons.exit_to_app_rounded,
-                    label: '退出空间',
-                    value: '离开当前空间',
-                    danger: true,
-                    onTap: () => _confirmLeaveSpace(context, ref, details),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

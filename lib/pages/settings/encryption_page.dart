@@ -116,38 +116,85 @@ class _EncryptionPageState extends State<EncryptionPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: AppBar(
-        backgroundColor: colors.base,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: Text('加密与验证', style: Theme.of(context).textTheme.titleLarge),
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadAll,
-              child: MaxContentWidth(
-                child: ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.fromLTRB(
-                    NeuSpacing.lg,
-                    NeuSpacing.sm,
-                    NeuSpacing.lg,
-                    32,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: _loadAll,
+                    // 悬浮标题栏让滚动视图从屏幕顶部开始,下拉指示器按标题栏
+                    // 高度下移,否则会被标题栏挡住。
+                    edgeOffset: viewPaddingTop + kToolbarHeight,
+                    child: MaxContentWidth(
+                      child: ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        padding: EdgeInsets.fromLTRB(
+                          NeuSpacing.lg,
+                          viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                          NeuSpacing.lg,
+                          32,
+                        ),
+                        children: [
+                          _buildOverview(),
+                          const SizedBox(height: NeuSpacing.lg),
+                          _buildDevices(),
+                          const SizedBox(height: NeuSpacing.lg),
+                          _buildRecovery(),
+                        ],
+                      ),
+                    ),
                   ),
-                  children: [
-                    _buildOverview(),
-                    const SizedBox(height: NeuSpacing.lg),
-                    _buildDevices(),
-                    const SizedBox(height: NeuSpacing.lg),
-                    _buildRecovery(),
-                  ],
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Padding(
+                  padding: const EdgeInsets.only(
+                    left: NeuSpacing.sm,
+                    right: NeuSpacing.md,
+                  ),
+                  child: Row(
+                    children: [
+                      NeuIconButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        size: 40,
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: NeuSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          '加密与验证',
+                          style: Theme.of(context).textTheme.titleLarge,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
+          ),
+        ],
+      ),
     );
   }
 

@@ -8,6 +8,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
@@ -17,6 +18,9 @@ import 'chat_timestamp.dart';
 
 const _searchPageSize = 30;
 const _maxSearchResults = 500;
+
+/// 搜索框行的实测高度:上下内边距 8/4 加输入框自身高度 50。
+const _searchFieldRowHeight = 62.0;
 
 List<rust.ChatRoom> filterRoomsForSearch(
   List<rust.ChatRoom> rooms,
@@ -172,6 +176,26 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
       ),
     );
 
+    final tabBar = _isRoomSearch
+        ? null
+        : TabBar(
+            controller: _tabController,
+            tabs: const [
+              Tab(text: '消息'),
+              Tab(text: '聊天'),
+            ],
+            labelColor: colors.accent,
+            unselectedLabelColor: colors.textTertiary,
+            indicatorColor: colors.accent,
+            dividerColor: colors.hairline,
+          );
+    // 浮动标题栏的高度(搜索框行 + 标签栏),同时用作结果列表的顶部内边距
+    // 和渐变模糊层的高度,结果滚动时从标题栏下方穿过。
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
+    final headerHeight =
+        _searchFieldRowHeight + (tabBar?.preferredSize.height ?? 0);
+    final topInset = viewPaddingTop + headerHeight;
+
     final messageSearchKey = ValueKey(
       Object.hash(
         'message-search',
@@ -184,6 +208,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
             key: messageSearchKey,
             query: _activeQuery,
             roomId: widget.roomId,
+            topInset: topInset,
           )
         : TabBarView(
             controller: _tabController,
@@ -192,33 +217,46 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
                 key: messageSearchKey,
                 active: _selectedTab == 0,
                 query: _activeQuery,
+                topInset: topInset,
               ),
-              _RoomSearchResults(active: _selectedTab == 1, query: _query),
+              _RoomSearchResults(
+                active: _selectedTab == 1,
+                query: _query,
+                topInset: topInset,
+              ),
             ],
           );
 
     final scaffold = Scaffold(
       backgroundColor: colors.base,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            header,
-            if (!_isRoomSearch)
-              TabBar(
-                controller: _tabController,
-                tabs: const [
-                  Tab(text: '消息'),
-                  Tab(text: '聊天'),
-                ],
-                labelColor: colors.accent,
-                unselectedLabelColor: colors.textTertiary,
-                indicatorColor: colors.accent,
-                dividerColor: colors.hairline,
+      body: Stack(
+        children: [
+          Positioned.fill(child: body),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: topInset,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,结果从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: headerHeight,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [header, ?tabBar],
+                ),
               ),
-            Expanded(child: body),
-          ],
-        ),
+            ),
+          ),
+        ],
       ),
     );
     return PopScope(
@@ -238,11 +276,15 @@ class _MessageSearchResults extends ConsumerStatefulWidget {
   final String query;
   final String? roomId;
 
+  /// 浮动标题栏占用的顶部内边距(设备顶部安全区 + 标题栏高度)。
+  final double topInset;
+
   const _MessageSearchResults({
     super.key,
     this.active = true,
     required this.query,
     this.roomId,
+    required this.topInset,
   });
 
   @override
@@ -482,9 +524,9 @@ class _MessageSearchResultsState extends ConsumerState<_MessageSearchResults> {
         Object.hash('message-search-results', widget.roomId, widget.query),
       ),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         NeuSpacing.lg,
-        NeuSpacing.sm,
+        widget.topInset + NeuSpacing.sm,
         NeuSpacing.lg,
         NeuSpacing.xl,
       ),
@@ -754,7 +796,14 @@ class _RoomSearchResults extends ConsumerWidget {
   final bool active;
   final String query;
 
-  const _RoomSearchResults({required this.active, required this.query});
+  /// 浮动标题栏占用的顶部内边距(设备顶部安全区 + 标题栏高度)。
+  final double topInset;
+
+  const _RoomSearchResults({
+    required this.active,
+    required this.query,
+    required this.topInset,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -784,9 +833,9 @@ class _RoomSearchResults extends ConsumerWidget {
             return ListView.separated(
               key: PageStorageKey(Object.hash('room-search-results', query)),
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              padding: const EdgeInsets.fromLTRB(
+              padding: EdgeInsets.fromLTRB(
                 NeuSpacing.lg,
-                NeuSpacing.sm,
+                topInset + NeuSpacing.sm,
                 NeuSpacing.lg,
                 NeuSpacing.xl,
               ),

@@ -318,95 +318,116 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                NeuSpacing.sm,
-                NeuSpacing.sm,
-                NeuSpacing.lg,
-                NeuSpacing.xs,
-              ),
-              child: Row(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: MaxContentWidth(
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(
+                  NeuSpacing.lg,
+                  viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                  NeuSpacing.lg,
+                  NeuSpacing.xl,
+                ),
                 children: [
-                  NeuIconButton(
-                    icon: Icons.arrow_back_ios_new_rounded,
-                    size: 40,
-                    tooltip: '返回',
-                    onPressed: () => Navigator.of(context).pop(),
+                  NeuTextField(
+                    controller: _searchController,
+                    hint: '输入 @用户 ID 发起私聊',
+                    leading: const Icon(Icons.search_rounded),
+                    textInputAction: TextInputAction.go,
+                    onSubmitted: (value) {
+                      final trimmed = value.trim();
+                      if (trimmed.isNotEmpty) _createDm(trimmed);
+                    },
                   ),
-                  const SizedBox(width: NeuSpacing.sm),
-                  Text('新建聊天', style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: NeuSpacing.md),
+                  NeuButton(
+                    accent: true,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    onPressed: _isCreating
+                        ? null
+                        : () {
+                            final trimmed = _searchController.text.trim();
+                            if (trimmed.isNotEmpty) _createDm(trimmed);
+                          },
+                    child: _isCreating
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: colors.onAccent,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Text('发起私聊'),
+                  ),
+                  const SizedBox(height: NeuSpacing.xl),
+                  _ActionCard(
+                    icon: Icons.group_add_rounded,
+                    iconColor: colors.accent,
+                    title: '创建群组',
+                    subtitle: '创建一个新的群聊房间',
+                    onTap: _showCreateGroupDialog,
+                  ),
+                  const SizedBox(height: NeuSpacing.md),
+                  _ActionCard(
+                    icon: Icons.meeting_room_rounded,
+                    iconColor: colors.warning,
+                    title: '加入房间',
+                    subtitle: '通过房间 ID 加入已有房间',
+                    onTap: _showJoinRoomDialog,
+                  ),
                 ],
               ),
             ),
-            Expanded(
-              child: MaxContentWidth(
-                child: ListView(
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Padding(
                   padding: const EdgeInsets.fromLTRB(
-                    NeuSpacing.lg,
+                    NeuSpacing.sm,
                     NeuSpacing.sm,
                     NeuSpacing.lg,
-                    NeuSpacing.xl,
+                    NeuSpacing.xs,
                   ),
-                  children: [
-                    NeuTextField(
-                      controller: _searchController,
-                      hint: '输入 @用户 ID 发起私聊',
-                      leading: const Icon(Icons.search_rounded),
-                      textInputAction: TextInputAction.go,
-                      onSubmitted: (value) {
-                        final trimmed = value.trim();
-                        if (trimmed.isNotEmpty) _createDm(trimmed);
-                      },
-                    ),
-                    const SizedBox(height: NeuSpacing.md),
-                    NeuButton(
-                      accent: true,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      onPressed: _isCreating
-                          ? null
-                          : () {
-                              final trimmed = _searchController.text.trim();
-                              if (trimmed.isNotEmpty) _createDm(trimmed);
-                            },
-                      child: _isCreating
-                          ? SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                color: colors.onAccent,
-                                strokeWidth: 2,
-                              ),
-                            )
-                          : const Text('发起私聊'),
-                    ),
-                    const SizedBox(height: NeuSpacing.xl),
-                    _ActionCard(
-                      icon: Icons.group_add_rounded,
-                      iconColor: colors.accent,
-                      title: '创建群组',
-                      subtitle: '创建一个新的群聊房间',
-                      onTap: _showCreateGroupDialog,
-                    ),
-                    const SizedBox(height: NeuSpacing.md),
-                    _ActionCard(
-                      icon: Icons.meeting_room_rounded,
-                      iconColor: colors.warning,
-                      title: '加入房间',
-                      subtitle: '通过房间 ID 加入已有房间',
-                      onTap: _showJoinRoomDialog,
-                    ),
-                  ],
+                  child: Row(
+                    children: [
+                      NeuIconButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        size: 40,
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                      const SizedBox(width: NeuSpacing.sm),
+                      Text(
+                        '新建聊天',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

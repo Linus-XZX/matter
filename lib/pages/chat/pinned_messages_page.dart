@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
@@ -360,47 +361,68 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
   Widget build(BuildContext context) {
     final colors = context.neu;
     final ignoredUserIdsAsync = ref.watch(ignoredUserIdsProvider);
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                NeuSpacing.sm,
-                NeuSpacing.sm,
-                NeuSpacing.lg,
-                NeuSpacing.xs,
-              ),
-              child: Row(
-                children: [
-                  NeuIconButton(
-                    icon: Icons.arrow_back_ios_new_rounded,
-                    size: 40,
-                    tooltip: '返回',
-                    onPressed: () => Navigator.of(context).maybePop(),
+      body: Stack(
+        children: [
+          Positioned.fill(child: _buildBody(ignoredUserIdsAsync)),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    NeuSpacing.sm,
+                    NeuSpacing.sm,
+                    NeuSpacing.lg,
+                    NeuSpacing.xs,
                   ),
-                  const SizedBox(width: NeuSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      '置顶消息',
-                      style: Theme.of(context).textTheme.titleLarge,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                  child: Row(
+                    children: [
+                      NeuIconButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        size: 40,
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: NeuSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          '置顶消息',
+                          style: Theme.of(context).textTheme.titleLarge,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-            Expanded(child: _buildBody(ignoredUserIdsAsync)),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildBody(AsyncValue<Set<String>> ignoredUserIdsAsync) {
     final colors = context.neu;
+    // 悬浮标题栏让滚动视图从屏幕顶部开始:下拉指示器按标题栏高度下移,
+    // 列表顶部同样预留这段内边距,行才不会被标题栏压住。
+    final topInset = MediaQuery.viewPaddingOf(context).top + kToolbarHeight;
     if (_loading && _messages == null) {
       return Center(
         child: CircularProgressIndicator(color: colors.accent, strokeWidth: 2),
@@ -446,6 +468,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       return RefreshIndicator(
         color: colors.accent,
         onRefresh: _reload,
+        edgeOffset: topInset,
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
@@ -478,11 +501,12 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     return RefreshIndicator(
       color: colors.accent,
       onRefresh: _reload,
+      edgeOffset: topInset,
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(
+        padding: EdgeInsets.fromLTRB(
           NeuSpacing.lg,
-          NeuSpacing.md,
+          topInset + NeuSpacing.md,
           NeuSpacing.lg,
           NeuSpacing.xl,
         ),

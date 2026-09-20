@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_field.dart';
@@ -168,129 +169,183 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
     final fallbackName = _profile?.displayName.isNotEmpty == true
         ? _profile!.displayName
         : (ref.read(currentUserProvider)?.displayName ?? '我');
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: AppBar(
-        backgroundColor: colors.base,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: Text('个人资料', style: textTheme.titleLarge),
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : MaxContentWidth(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(NeuSpacing.lg),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Avatar editor
-                    Center(
-                      child: GestureDetector(
-                        onTap: _saving ? null : _pickAvatar,
-                        child: Stack(
-                          children: [
-                            AppAvatar(
-                              fallback: fallbackName,
-                              size: 96,
-                              url: _avatarHttpUrl,
-                            ),
-                            Positioned(
-                              right: 0,
-                              bottom: 0,
-                              child: Container(
-                                width: 32,
-                                height: 32,
-                                decoration: BoxDecoration(
-                                  color: colors.accent,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: colors.base,
-                                    width: 2,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : MaxContentWidth(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        NeuSpacing.lg,
+                        viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                        NeuSpacing.lg,
+                        NeuSpacing.lg,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Avatar editor
+                          Center(
+                            child: GestureDetector(
+                              onTap: _saving ? null : _pickAvatar,
+                              child: Stack(
+                                children: [
+                                  AppAvatar(
+                                    fallback: fallbackName,
+                                    size: 96,
+                                    url: _avatarHttpUrl,
                                   ),
-                                ),
-                                child: Icon(
-                                  Icons.camera_alt_rounded,
-                                  color: colors.onAccent,
-                                  size: 16,
-                                ),
+                                  Positioned(
+                                    right: 0,
+                                    bottom: 0,
+                                    child: Container(
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        color: colors.accent,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: colors.base,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: Icon(
+                                        Icons.camera_alt_rounded,
+                                        color: colors.onAccent,
+                                        size: 16,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
+                          ),
+                          const SizedBox(height: NeuSpacing.sm),
+                          Center(
+                            child: Text('点击头像更换', style: textTheme.bodySmall),
+                          ),
+                          const SizedBox(height: 32),
+
+                          // Display name editor
+                          Text(
+                            '昵称',
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colors.textSecondary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: NeuSpacing.sm),
+                          NeuTextField(
+                            controller: _nameController,
+                            hint: '输入你的昵称',
+                            onSubmitted: _saving ? null : (_) => _saveName(),
+                          ),
+                          const SizedBox(height: NeuSpacing.md),
+                          SizedBox(
+                            width: double.infinity,
+                            child: NeuButton(
+                              accent: true,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              onPressed: _saving ? null : _saveName,
+                              icon: _saving
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : null,
+                              child: const Center(child: Text('保存')),
+                            ),
+                          ),
+
+                          const SizedBox(height: NeuSpacing.xl),
+
+                          // User ID (read-only)
+                          Text(
+                            '用户 ID',
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colors.textSecondary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: NeuSpacing.sm),
+                          NeuSurface(
+                            depth: NeuDepth.pressed,
+                            color: colors.card,
+                            radius: NeuRadius.content,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 14,
+                            ),
+                            child: Text(
+                              _profile?.userId ??
+                                  ref.read(currentUserProvider)?.id ??
+                                  '',
+                              style: textTheme.bodyMedium,
+                            ),
+                          ),
+                          const SizedBox(height: NeuSpacing.sm),
+                          Text(
+                            '用户 ID 是你的唯一标识，无法更改',
+                            style: textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Padding(
+                  padding: const EdgeInsets.only(
+                    left: NeuSpacing.sm,
+                    right: NeuSpacing.md,
+                  ),
+                  child: Row(
+                    children: [
+                      NeuIconButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        size: 40,
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: NeuSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          '个人资料',
+                          style: textTheme.titleLarge,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: NeuSpacing.sm),
-                    Center(child: Text('点击头像更换', style: textTheme.bodySmall)),
-                    const SizedBox(height: 32),
-
-                    // Display name editor
-                    Text(
-                      '昵称',
-                      style: textTheme.bodySmall?.copyWith(
-                        color: colors.textSecondary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: NeuSpacing.sm),
-                    NeuTextField(
-                      controller: _nameController,
-                      hint: '输入你的昵称',
-                      onSubmitted: _saving ? null : (_) => _saveName(),
-                    ),
-                    const SizedBox(height: NeuSpacing.md),
-                    SizedBox(
-                      width: double.infinity,
-                      child: NeuButton(
-                        accent: true,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        onPressed: _saving ? null : _saveName,
-                        icon: _saving
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : null,
-                        child: const Center(child: Text('保存')),
-                      ),
-                    ),
-
-                    const SizedBox(height: NeuSpacing.xl),
-
-                    // User ID (read-only)
-                    Text(
-                      '用户 ID',
-                      style: textTheme.bodySmall?.copyWith(
-                        color: colors.textSecondary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: NeuSpacing.sm),
-                    NeuSurface(
-                      depth: NeuDepth.pressed,
-                      color: colors.card,
-                      radius: NeuRadius.content,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 14,
-                      ),
-                      child: Text(
-                        _profile?.userId ??
-                            ref.read(currentUserProvider)?.id ??
-                            '',
-                        style: textTheme.bodyMedium,
-                      ),
-                    ),
-                    const SizedBox(height: NeuSpacing.sm),
-                    Text('用户 ID 是你的唯一标识，无法更改', style: textTheme.bodySmall),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
+          ),
+        ],
+      ),
     );
   }
 }

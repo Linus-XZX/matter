@@ -78,13 +78,14 @@ void main() {
           .first,
     );
     expect(surfaceMargin.padding, const EdgeInsets.fromLTRB(10, 4, 10, 12));
-    expect(find.byType(ShaderMask), findsOneWidget);
+    expect(find.byType(BottomFadeBlur), findsOneWidget);
 
     final backdropFilters = find.descendant(
       of: find.byType(MessageInput),
       matching: find.byType(BackdropFilter),
     );
-    expect(backdropFilters, findsNWidgets(2));
+    // GlassPanel 一层 + BottomFadeBlur 的渐进模糊条带。
+    expect(backdropFilters, findsAtLeastNWidgets(3));
     expect(tester.getBottomLeft(backdropFilters.first).dy, 800);
   });
 

@@ -8,6 +8,8 @@ import '../../features/markdown/markdown_format_toolbar.dart';
 import '../../features/markdown/markdown_text_editing_controller.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../theme/neu_colors.dart';
+import '../../widgets/glass.dart';
+import '../../widgets/neu_surface.dart';
 
 /// What the full-screen markdown composer returns to the message input:
 /// the (possibly edited) draft [text], and whether the message was [sent]
@@ -159,6 +161,7 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return PopScope(
       // Keep system back from dropping in-editor edits: veto it and close
       // through the same draft-returning path as the close button.
@@ -168,55 +171,111 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
         _close();
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Markdown'),
-          leading: IconButton(
-            tooltip: '关闭',
-            icon: const Icon(Icons.close_rounded),
-            onPressed: _close,
-          ),
-          actions: [
-            IconButton(
-              tooltip: '发送',
-              onPressed: _hasText && !_sending ? _send : null,
-              icon: _sending
-                  ? SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(
-                        color: colors.accent,
-                        strokeWidth: 2,
+        backgroundColor: colors.base,
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: Padding(
+                // 标题栏移到上方浮层,编辑区从它下方开始。
+                padding: EdgeInsets.only(
+                  top: viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                        child: SegmentedButton<bool>(
+                          segments: const [
+                            ButtonSegment(
+                              value: false,
+                              icon: Icon(Icons.edit_rounded),
+                              label: Text('编辑'),
+                            ),
+                            ButtonSegment(
+                              value: true,
+                              icon: Icon(Icons.visibility_rounded),
+                              label: Text('预览'),
+                            ),
+                          ],
+                          selected: {_previewing},
+                          onSelectionChanged: (selection) =>
+                              _setPreviewing(selection.first),
+                        ),
                       ),
-                    )
-                  : Icon(Icons.send_rounded, color: colors.accent),
-            ),
-          ],
-        ),
-        body: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                child: SegmentedButton<bool>(
-                  segments: const [
-                    ButtonSegment(
-                      value: false,
-                      icon: Icon(Icons.edit_rounded),
-                      label: Text('编辑'),
-                    ),
-                    ButtonSegment(
-                      value: true,
-                      icon: Icon(Icons.visibility_rounded),
-                      label: Text('预览'),
-                    ),
-                  ],
-                  selected: {_previewing},
-                  onSelectionChanged: (selection) =>
-                      _setPreviewing(selection.first),
+                      Expanded(
+                        child: _previewing ? _buildPreview() : _buildEditor(),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              Expanded(child: _previewing ? _buildPreview() : _buildEditor()),
-            ],
-          ),
+            ),
+            // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
+            // 标题栏移到上方浮层,编辑区从它下方穿过。
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(
+                      left: NeuSpacing.sm,
+                      right: NeuSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.close_rounded,
+                          size: 40,
+                          tooltip: '关闭',
+                          onPressed: _close,
+                        ),
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            'Markdown',
+                            style: Theme.of(context).textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (_sending)
+                          Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(
+                                color: colors.accent,
+                                strokeWidth: 2,
+                              ),
+                            ),
+                          )
+                        else
+                          NeuIconButton(
+                            icon: Icons.send_rounded,
+                            size: 40,
+                            accent: true,
+                            tooltip: '发送',
+                            onPressed: _hasText ? _send : null,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

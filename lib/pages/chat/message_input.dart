@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1926,41 +1925,7 @@ class MessageInputState extends ConsumerState<MessageInput> {
       child: Stack(
         alignment: Alignment.bottomCenter,
         children: [
-          Positioned.fill(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final fadeStop = constraints.maxHeight <= 32
-                    ? 1.0
-                    : 32 / constraints.maxHeight;
-                return ShaderMask(
-                  blendMode: BlendMode.dstIn,
-                  shaderCallback: (bounds) => LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: const [Colors.transparent, Colors.black],
-                    stops: [0, fadeStop],
-                  ).createShader(bounds),
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.transparent,
-                            colors.base.withValues(alpha: 0.52),
-                            colors.base.withValues(alpha: 0.88),
-                          ],
-                          stops: [0, fadeStop, 1],
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
+          const Positioned.fill(child: BottomFadeBlur(useShader: true)),
           input,
         ],
       ),

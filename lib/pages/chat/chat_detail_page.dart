@@ -2172,8 +2172,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               left: 0,
               top: 0,
               right: 0,
-              height: headerInset + 24,
-              child: const TopFadeBlur(),
+              height: headerInset,
+              child: const TopFadeBlur(useShader: true),
             ),
             // Floating glass header — the only persistent glass layer.
             Positioned(
