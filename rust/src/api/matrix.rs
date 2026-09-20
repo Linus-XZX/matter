@@ -53,7 +53,7 @@ mod sdk_timeline;
 pub struct AppLogEntry {
     /// Milliseconds since Unix epoch
     pub timestamp: i64,
-    /// log / warn / error
+    /// info / warn / error / debug
     pub level: String,
     /// What subsystem: sync, auth, rooms, media, etc.
     pub tag: String,
@@ -171,6 +171,7 @@ fn app_log(level: &str, tag: &str, message: String) {
     match level {
         "error" => log::error!("[{}] {}", tag, entry.message),
         "warn" => log::warn!("[{}] {}", tag, entry.message),
+        "debug" => log::debug!("[{}] {}", tag, entry.message),
         _ => log::info!("[{}] {}", tag, entry.message),
     }
     // Push to broadcast (live listeners)
@@ -268,7 +269,7 @@ pub fn clear_app_logs() {
 #[frb(sync)]
 pub fn log_app_message(level: String, tag: String, message: String) {
     let level = match level.as_str() {
-        "error" | "warn" => level,
+        "error" | "warn" | "debug" => level,
         _ => "info".to_string(),
     };
     app_log(&level, &tag, message);
