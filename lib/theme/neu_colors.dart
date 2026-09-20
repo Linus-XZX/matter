@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 
 /// 全局兜底变体:从 cmap 排除了 #/*/0-9,防止普通计数被空白占位字形接管。
-/// emoji 的精确渲染由 theme/emoji.dart 的 run 拆分负责,这里只兜
-/// 未经拆分的路径(输入框、toast 等)。
 const kEmojiFallbackFontFamily = 'Twemoji Mozilla Fallback';
 const kEmojiFontFallback = [kEmojiFallbackFontFamily];
 
