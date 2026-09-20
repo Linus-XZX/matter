@@ -146,6 +146,13 @@ enum _Edge { top, bottom }
 ///
 /// 不用 ShaderMask + BackdropFilter 的组合:该组合在 Android (Impeller)
 /// 上模糊层完全不生效(flutter/flutter#164079),条带叠加则各端一致。
+///
+/// TODO(neu): 发行目标只有 Android arm64,Impeller 默认开启且清单未关闭,
+/// 因此所有调用点实际都走 [useShader] 的 shader 路径,这条 16 层条带兜底
+/// 在已支持的平台上不可达,只是为 web/CanvasKit 等非 Impeller 后端保留的
+/// 降级。等非 Impeller 后端有了明确的边缘渐隐方案(或确认不再支持这些
+/// 平台)后再删,届时 `useShader`、`_strips`、`_strip` 与 `dart:math` 的
+/// `pow` 依赖可一并移除。
 class _ProgressiveEdgeBlur extends StatelessWidget {
   const _ProgressiveEdgeBlur({
     required this.edge,
