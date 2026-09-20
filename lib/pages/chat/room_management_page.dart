@@ -10,8 +10,14 @@ import 'action_failure_message.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
-import '../../theme/app_theme.dart';
+import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
+import '../../widgets/neu_action.dart';
+import '../../widgets/neu_decoration.dart';
+import '../../widgets/neu_field.dart';
+import '../../widgets/neu_surface.dart';
+import '../../widgets/sheets.dart';
 import '../settings/avatar_crop_editor_page.dart';
 import 'pinned_messages_page.dart';
 import 'room_metadata_patch.dart';
@@ -157,10 +163,6 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   int _ignoredUsersRevision = 0;
   bool _saving = false;
   bool _leavingRoom = false;
-
-  /// Leave-dialog failure text (page-level like `_leavingRoom`: the dialog
-  /// is a separate route and the error must survive its rebuilds).
-  String? _leaveError;
 
   /// Number of member reads currently in flight (`_load`'s fetch and
   /// `_refreshMembers` each hold their own share). Zero means the gate is
@@ -583,9 +585,7 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   void _showSnackBar(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    neuToast(context, message);
   }
 
   /// Map a failed write's error to the unified wording — delegates to the
@@ -1218,128 +1218,152 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
           // success and the failure paths fall back to the page snackbar
           // when the dialog is gone.
           canPop: true,
-          child: AlertDialog(
-            backgroundColor: AppColors.surface,
-            title: const Text(
-              '邀请用户',
-              style: TextStyle(color: AppColors.onBackground),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  onChanged: (value) => invitedUserId = value,
-                  autofocus: true,
-                  style: const TextStyle(color: AppColors.onBackground),
-                  decoration: const InputDecoration(
-                    hintText: '@user:server.example',
-                    hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
-                  ),
-                ),
-                if (inviteError != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      inviteError!,
-                      style: const TextStyle(
-                        color: AppColors.error,
-                        fontSize: 13,
-                      ),
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+            child: GlassPanel(
+              radius: NeuRadius.nav,
+              padding: const EdgeInsets.all(22),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '邀请用户',
+                      style: Theme.of(dialogContext).textTheme.titleMedium,
                     ),
-                  ),
-              ],
+                    const SizedBox(height: 16),
+                    NeuTextField(
+                      hint: '@user:server.example',
+                      autofocus: true,
+                      onChanged: (value) => invitedUserId = value,
+                    ),
+                    if (inviteError != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Text(
+                          inviteError!,
+                          style: Theme.of(dialogContext).textTheme.bodyMedium
+                              ?.copyWith(color: dialogContext.neu.error),
+                        ),
+                      ),
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: NeuButton(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            onPressed: inviting
+                                ? null
+                                : () => Navigator.of(dialogContext).pop(),
+                            child: const Center(child: Text('取消')),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: NeuButton(
+                            accent: true,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            onPressed: inviting
+                                ? null
+                                : () async {
+                                    // Entry guard (not only the disabled button): the
+                                    // rebuild lags a frame, so a second tap on the old
+                                    // widget could otherwise issue a duplicate invite.
+                                    if (inviting) return;
+                                    final userId = invitedUserId.trim();
+                                    if (userId.isEmpty) return;
+                                    setDialogState(() {
+                                      inviting = true;
+                                      inviteError = null;
+                                    });
+                                    try {
+                                      await rust.inviteUserToRoom(
+                                        accountUserId: _openedUserId ?? '',
+                                        roomId: widget.roomId,
+                                        userId: userId,
+                                      );
+                                      // Close the dialog first, then report: if the page
+                                      // is gone (dismissal race), the dialog must not
+                                      // stay stuck in its non-dismissible in-flight state
+                                      // — mirror the error path. `isCurrent` guard: the
+                                      // dialog may already be in its exit animation —
+                                      // popping then would pop the page below it.
+                                      if (dialogContext.mounted &&
+                                          ModalRoute.of(
+                                                dialogContext,
+                                              )?.isCurrent ==
+                                              true) {
+                                        Navigator.of(dialogContext).pop();
+                                      }
+                                      // The account may have switched while the request
+                                      // was in flight: the invite itself was guarded
+                                      // server-side, so skip the local bookkeeping (the
+                                      // page shows the switched placeholder).
+                                      if (!mounted || !_accountActive()) return;
+                                      // Room invalidation and the feedback must not
+                                      // depend on the dialog still being up.
+                                      _invalidateRoom();
+                                      _showSnackBar('邀请已发送');
+                                      // Fire the member refetch detached, like the knock
+                                      // approval path: the invitee must appear without
+                                      // waiting for the server join event.
+                                      unawaited(_retryMembers());
+                                    } catch (error) {
+                                      if (!mounted) {
+                                        // The page is gone: close the dialog so it is
+                                        // not stuck in its non-dismissible in-flight
+                                        // state.
+                                        if (dialogContext.mounted &&
+                                            ModalRoute.of(
+                                                  dialogContext,
+                                                )?.isCurrent ==
+                                                true) {
+                                          Navigator.of(dialogContext).pop();
+                                        }
+                                        return;
+                                      }
+                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                                      if (!_accountActive()) {
+                                        if (dialogContext.mounted &&
+                                            ModalRoute.of(
+                                                  dialogContext,
+                                                )?.isCurrent ==
+                                                true) {
+                                          Navigator.of(dialogContext).pop();
+                                        }
+                                        return;
+                                      }
+                                      if (dialogContext.mounted) {
+                                        setDialogState(() {
+                                          inviting = false;
+                                          // Render the failure inside the dialog: a
+                                          // page-level snackbar would sit beneath the
+                                          // modal barrier and stay invisible while the
+                                          // dialog stays open for retry.
+                                          inviteError = _actionFailureMessage(
+                                            error,
+                                          );
+                                        });
+                                      } else if (mounted) {
+                                        // The dialog was dismissed while the request was
+                                        // in flight: fall back to the page snackbar so
+                                        // the failure is not completely silent.
+                                        _showActionFailure(error);
+                                      }
+                                    }
+                                  },
+                            child: const Center(child: Text('邀请')),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
-            actions: [
-              TextButton(
-                onPressed: inviting
-                    ? null
-                    : () => Navigator.of(dialogContext).pop(),
-                child: const Text('取消'),
-              ),
-              TextButton(
-                onPressed: inviting
-                    ? null
-                    : () async {
-                        // Entry guard (not only the disabled button): the
-                        // rebuild lags a frame, so a second tap on the old
-                        // widget could otherwise issue a duplicate invite.
-                        if (inviting) return;
-                        final userId = invitedUserId.trim();
-                        if (userId.isEmpty) return;
-                        setDialogState(() {
-                          inviting = true;
-                          inviteError = null;
-                        });
-                        try {
-                          await rust.inviteUserToRoom(
-                            accountUserId: _openedUserId ?? '',
-                            roomId: widget.roomId,
-                            userId: userId,
-                          );
-                          // Close the dialog first, then report: if the page
-                          // is gone (dismissal race), the dialog must not
-                          // stay stuck in its non-dismissible in-flight state
-                          // — mirror the error path. `isCurrent` guard: the
-                          // dialog may already be in its exit animation —
-                          // popping then would pop the page below it.
-                          if (dialogContext.mounted &&
-                              ModalRoute.of(dialogContext)?.isCurrent == true) {
-                            Navigator.of(dialogContext).pop();
-                          }
-                          // The account may have switched while the request
-                          // was in flight: the invite itself was guarded
-                          // server-side, so skip the local bookkeeping (the
-                          // page shows the switched placeholder).
-                          if (!mounted || !_accountActive()) return;
-                          // Room invalidation and the feedback must not
-                          // depend on the dialog still being up.
-                          _invalidateRoom();
-                          _showSnackBar('邀请已发送');
-                          // Fire the member refetch detached, like the knock
-                          // approval path: the invitee must appear without
-                          // waiting for the server join event.
-                          unawaited(_retryMembers());
-                        } catch (error) {
-                          if (!mounted) {
-                            // The page is gone: close the dialog so it is
-                            // not stuck in its non-dismissible in-flight
-                            // state.
-                            if (dialogContext.mounted &&
-                                ModalRoute.of(dialogContext)?.isCurrent ==
-                                    true) {
-                              Navigator.of(dialogContext).pop();
-                            }
-                            return;
-                          }
-                          // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                          if (!_accountActive()) {
-                            if (dialogContext.mounted &&
-                                ModalRoute.of(dialogContext)?.isCurrent ==
-                                    true) {
-                              Navigator.of(dialogContext).pop();
-                            }
-                            return;
-                          }
-                          if (dialogContext.mounted) {
-                            setDialogState(() {
-                              inviting = false;
-                              // Render the failure inside the dialog: a
-                              // page-level snackbar would sit beneath the
-                              // modal barrier and stay invisible while the
-                              // dialog stays open for retry.
-                              inviteError = _actionFailureMessage(error);
-                            });
-                          } else if (mounted) {
-                            // The dialog was dismissed while the request was
-                            // in flight: fall back to the page snackbar so
-                            // the failure is not completely silent.
-                            _showActionFailure(error);
-                          }
-                        }
-                      },
-                child: const Text('邀请'),
-              ),
-            ],
           ),
         ),
       ),
@@ -1419,172 +1443,145 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
   }
 
   void _showIgnoredUsers() {
-    showModalBottomSheet<void>(
+    showNeuSheet<void>(
       context: context,
-      backgroundColor: Colors.transparent,
       // Watch the provider inside the sheet so a retry (or the initial
       // load) updates the sheet in place, and a load error renders an
       // error row with a retry entry instead of a misleading "暂无".
-      builder: (sheetContext) {
-        // Track the sheet's context: an account switch dismisses the
-        // sheet through it (see the activeUserIdProvider listener).
-        _ignoredUsersSheetContext = sheetContext;
-        return Consumer(
-          builder: (context, ref, _) {
-            final ignoredAsync = ref.watch(ignoredUserIdsProvider);
-            final ignoredUsers = [...?ignoredAsync.value]..sort();
-            final loadError = ignoredAsync.hasError ? ignoredAsync.error : null;
-            // Failure feedback must render inside the sheet: a page-level
-            // snackbar would appear beneath the open sheet and stay
-            // invisible. Kept on the STATE so a provider rebuild of this
-            // builder cannot orphan an in-flight error write.
-            return StatefulBuilder(
-              builder: (sheetContext, setSheetState) => Container(
-                margin: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(AppRadii.surface),
-                ),
-                child: SafeArea(
-                  child: loadError != null
-                      ? Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text(
-                                '加载已忽略用户失败',
-                                style: TextStyle(
-                                  color: AppColors.error,
-                                  fontSize: 13,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              OutlinedButton(
-                                onPressed: () =>
-                                    ref.invalidate(ignoredUserIdsProvider),
-                                child: const Text('重试'),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ignoredUsers.isEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text(
-                            '暂无已忽略用户',
-                            style: TextStyle(color: AppColors.onSurfaceVariant),
-                          ),
-                        )
-                      : Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_ignoredUsersSheetError != null)
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  16,
-                                  12,
-                                  16,
-                                  0,
-                                ),
-                                child: Text(
-                                  _ignoredUsersSheetError!,
-                                  style: const TextStyle(
-                                    color: AppColors.error,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              ),
-                            Flexible(
-                              child: ListView.separated(
-                                shrinkWrap: true,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                                itemCount: ignoredUsers.length,
-                                separatorBuilder: (_, _) => const Divider(
-                                  color: AppColors.surfaceVariant,
-                                  height: 1,
-                                ),
-                                itemBuilder: (context, index) {
-                                  final userId = ignoredUsers[index];
-                                  return ListTile(
-                                    title: Text(
-                                      userId,
-                                      style: const TextStyle(
-                                        color: AppColors.onBackground,
-                                      ),
-                                    ),
-                                    trailing: IconButton(
-                                      tooltip: '取消忽略',
-                                      icon: const Icon(
-                                        Icons.person_add_alt_rounded,
-                                        color: AppColors.primary,
-                                      ),
-                                      onPressed: () async {
-                                        // Only close the sheet when the
-                                        // server write succeeded; on failure
-                                        // keep the list visible so the user
-                                        // can retry, and surface the error
-                                        // inside the sheet (see onError).
-                                        await _setUserIgnored(
-                                          userId,
-                                          false,
-                                          onError: (message) {
-                                            if (sheetContext.mounted) {
-                                              setSheetState(
-                                                () => _ignoredUsersSheetError =
-                                                    message,
-                                              );
-                                            } else if (mounted) {
-                                              // The sheet was dismissed
-                                              // while the request was in
-                                              // flight: fall back to the
-                                              // page snackbar (same
-                                              // discipline as the invite
-                                              // dialog) — a silent failure
-                                              // would look like a stuck
-                                              // row.
-                                              _showSnackBar(message);
-                                            }
-                                          },
-                                          onSuccess: (message) {
-                                            // Close the sheet first, then
-                                            // report: a page snackbar queued
-                                            // while the sheet is still up
-                                            // would sit hidden behind its
-                                            // barrier. `isCurrent` guard: the
-                                            // sheet may already be in its exit
-                                            // animation.
-                                            if (sheetContext.mounted &&
-                                                ModalRoute.of(
-                                                      sheetContext,
-                                                    )?.isCurrent ==
-                                                    true) {
-                                              Navigator.of(sheetContext).pop();
-                                            }
-                                            if (context.mounted) {
-                                              _showSnackBar(message);
-                                            }
-                                          },
-                                        );
-                                        // The success path pops the sheet and
-                                        // reports via onSuccess; a failure
-                                        // keeps it open for retry.
-                                      },
-                                    ),
-                                  );
-                                },
+      child: Consumer(
+        builder: (context, ref, _) {
+          final ignoredAsync = ref.watch(ignoredUserIdsProvider);
+          final ignoredUsers = [...?ignoredAsync.value]..sort();
+          final loadError = ignoredAsync.hasError ? ignoredAsync.error : null;
+          // Failure feedback must render inside the sheet: a page-level
+          // snackbar would appear beneath the open sheet and stay
+          // invisible. Kept on the STATE so a provider rebuild of this
+          // builder cannot orphan an in-flight error write.
+          return StatefulBuilder(
+            builder: (sheetContext, setSheetState) {
+              // Track the sheet's context: an account switch dismisses the
+              // sheet through it (see the activeUserIdProvider listener).
+              _ignoredUsersSheetContext = sheetContext;
+              final colors = sheetContext.neu;
+              if (loadError != null) {
+                return Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '加载已忽略用户失败',
+                        style: Theme.of(
+                          sheetContext,
+                        ).textTheme.bodyMedium?.copyWith(color: colors.error),
+                      ),
+                      const SizedBox(height: 12),
+                      NeuButton(
+                        onPressed: () => ref.invalidate(ignoredUserIdsProvider),
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
+                );
+              }
+              if (ignoredUsers.isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    '暂无已忽略用户',
+                    style: Theme.of(sheetContext).textTheme.bodyMedium,
+                  ),
+                );
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_ignoredUsersSheetError != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+                      child: Text(
+                        _ignoredUsersSheetError!,
+                        style: Theme.of(
+                          sheetContext,
+                        ).textTheme.bodyMedium?.copyWith(color: colors.error),
+                      ),
+                    ),
+                  for (var index = 0; index < ignoredUsers.length; index++) ...[
+                    if (index > 0) const NeuSheetDivider(),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                ignoredUsers[index],
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(
+                                  sheetContext,
+                                ).textTheme.bodyLarge,
                               ),
                             ),
-                          ],
-                        ),
-                ),
-              ),
-            );
-          },
-        );
-      },
+                          ),
+                          NeuIconButton(
+                            icon: Icons.person_add_alt_rounded,
+                            size: 38,
+                            tooltip: '取消忽略',
+                            onPressed: () async {
+                              // Only close the sheet when the server write
+                              // succeeded; on failure keep the list visible
+                              // so the user can retry, and surface the error
+                              // inside the sheet (see onError).
+                              await _setUserIgnored(
+                                ignoredUsers[index],
+                                false,
+                                onError: (message) {
+                                  if (sheetContext.mounted) {
+                                    setSheetState(
+                                      () => _ignoredUsersSheetError = message,
+                                    );
+                                  } else if (mounted) {
+                                    // The sheet was dismissed while the
+                                    // request was in flight: fall back to
+                                    // the page snackbar (same discipline as
+                                    // the invite dialog) — a silent failure
+                                    // would look like a stuck row.
+                                    _showSnackBar(message);
+                                  }
+                                },
+                                onSuccess: (message) {
+                                  // Close the sheet first, then report: a
+                                  // page snackbar queued while the sheet is
+                                  // still up would sit hidden behind its
+                                  // barrier. `isCurrent` guard: the sheet may
+                                  // already be in its exit animation.
+                                  if (sheetContext.mounted &&
+                                      ModalRoute.of(sheetContext)?.isCurrent ==
+                                          true) {
+                                    Navigator.of(sheetContext).pop();
+                                  }
+                                  if (context.mounted) {
+                                    _showSnackBar(message);
+                                  }
+                                },
+                              );
+                              // The success path pops the sheet and reports
+                              // via onSuccess; a failure keeps it open for
+                              // retry.
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
+          );
+        },
+      ),
     ).whenComplete(() {
       _ignoredUsersSheetContext = null;
       _ignoredUsersSheetError = null;
@@ -1655,112 +1652,25 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     }
   }
 
-  void _confirmLeave() {
-    // A previous leave may still be in flight while its dialog was
+  Future<void> _confirmLeave() async {
+    // A previous leave may still be in flight after its confirm sheet was
     // dismissed (the request keeps running): keep the page-level flag — a
-    // re-opened dialog must not fire a second concurrent leave. The
+    // re-opened confirm must not fire a second concurrent leave. The
     // request's finally resets the flag once it ends, so a later reopen
     // renders a clean state.
     if (_leavingRoom) {
       _showSnackBar('正在退出房间，请稍候');
       return;
     }
-    _leaveError = null;
-    showDialog<void>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => PopScope(
-          // The leave request may run for up to 90s (queue bound): the
-          // dialog must stay dismissible (barrier tap, system back, cancel)
-          // so a mis-tap is not a lock-in. The write keeps running and the
-          // page closes itself on success (`_closeCurrentRoom`); on failure
-          // the catch falls back to the page snackbar when the dialog is
-          // gone, and the finally resets `_leavingRoom` page-wide so a
-          // re-opened dialog renders a clean state.
-          canPop: true,
-          child: AlertDialog(
-            backgroundColor: AppColors.surface,
-            title: const Text(
-              '退出房间',
-              style: TextStyle(color: AppColors.onBackground),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  '退出后将无法继续接收此房间的新消息。',
-                  style: TextStyle(color: AppColors.onSurface),
-                ),
-                if (_leaveError != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      _leaveError!,
-                      style: const TextStyle(
-                        color: AppColors.error,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: _leavingRoom
-                    ? null
-                    : () => Navigator.of(dialogContext).pop(),
-                child: const Text('取消'),
-              ),
-              TextButton(
-                onPressed: _leavingRoom
-                    ? null
-                    : () {
-                        // Guard against a same-frame double tap: the button
-                        // is disabled only after the dialog rebuilds.
-                        if (_leavingRoom) return;
-                        unawaited(
-                          _confirmLeaveRequest(dialogContext, setDialogState),
-                        );
-                      },
-                child: _leavingRoom
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          color: AppColors.error,
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Text(
-                        '退出',
-                        style: TextStyle(color: AppColors.error),
-                      ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    final confirmed = await showNeuConfirm(
+      context,
+      title: '退出房间',
+      message: '退出后将无法继续接收此房间的新消息。',
+      confirmLabel: '退出',
+      danger: true,
     );
-  }
-
-  Future<void> _confirmLeaveRequest(
-    BuildContext dialogContext,
-    StateSetter setDialogState,
-  ) async {
-    if (!_accountActive()) {
-      // `isCurrent` guard: another modal (e.g. the device-verification
-      // dialog) may sit above the leave dialog — popping then would
-      // dismiss that dialog instead.
-      if (dialogContext.mounted &&
-          ModalRoute.of(dialogContext)?.isCurrent == true) {
-        Navigator.of(dialogContext).pop();
-      }
-      return;
-    }
-    setDialogState(() {
-      _leavingRoom = true;
-      _leaveError = null;
-    });
+    if (!confirmed || !mounted || !_accountActive()) return;
+    setState(() => _leavingRoom = true);
     try {
       await rust.leaveRoom(
         accountUserId: _openedUserId ?? '',
@@ -1768,58 +1678,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       );
       // The account may have switched while the request was in flight (the
       // write itself landed under the previous account): skip the local
-      // bookkeeping and close the dialog (same discipline as the catch
-      // path) — the page shows the switched placeholder.
-      if (!_accountActive()) {
-        // `isCurrent` guard: another modal (e.g. the device-verification
-        // dialog) may sit above the leave dialog — popping then would
-        // dismiss that dialog instead.
-        if (dialogContext.mounted &&
-            ModalRoute.of(dialogContext)?.isCurrent == true) {
-          Navigator.of(dialogContext).pop();
-        }
-        return;
-      }
+      // bookkeeping — the page shows the switched placeholder.
+      if (!_accountActive()) return;
       _invalidateRoom();
-      // PopScope keeps the dialog open while the request is in flight, but
-      // keep the mounted guard as defense in depth: the room is left on the
-      // server either way, so still close the room page itself. `isCurrent`
-      // guard: the dialog may already be in its exit animation.
-      if (dialogContext.mounted &&
-          ModalRoute.of(dialogContext)?.isCurrent == true) {
-        Navigator.of(dialogContext).pop();
-      }
       _closeCurrentRoom();
     } catch (error) {
-      // The failure must render inside the dialog (a page-level snackbar
-      // would sit beneath the modal barrier while the dialog stays open
-      // for retry); the dialog may be popped independently, so also keep
-      // the page guard for the fallback.
       // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-      if (!_accountActive()) {
-        // `isCurrent` guard: another modal may sit above the leave dialog.
-        if (dialogContext.mounted &&
-            ModalRoute.of(dialogContext)?.isCurrent == true) {
-          Navigator.of(dialogContext).pop();
-        }
-        return;
-      }
-      if (dialogContext.mounted) {
-        setDialogState(() {
-          _leavingRoom = false;
-          _leaveError = _actionFailureMessage(error);
-        });
-      } else if (mounted) {
-        _showActionFailure(error);
-      }
+      if (!mounted || !_accountActive()) return;
+      _showActionFailure(error);
     } finally {
-      // The dialog is a separate route: the page's setState below does not
-      // rebuild its button, so reset the in-flight state through the
-      // dialog's own builder when it is still showing, and through the page
-      // for the next time the dialog is opened.
-      if (dialogContext.mounted) {
-        setDialogState(() => _leavingRoom = false);
-      }
       if (mounted) {
         setState(() => _leavingRoom = false);
       }
@@ -1852,6 +1719,52 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         });
         _scheduleHandledKnockExpiry();
       },
+    );
+  }
+
+  Widget _header(rust.RoomDetails? details) {
+    final colors = context.neu;
+    // The row fills a kToolbarHeight box, so it needs no vertical padding to
+    // center its buttons on the title (same as the other pages' headers).
+    return Padding(
+      padding: const EdgeInsets.only(left: NeuSpacing.sm, right: NeuSpacing.md),
+      child: Row(
+        children: [
+          NeuIconButton(
+            icon: Icons.arrow_back_ios_new_rounded,
+            size: 40,
+            tooltip: '返回',
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
+          const SizedBox(width: NeuSpacing.sm),
+          Expanded(
+            child: Text(
+              '房间管理',
+              style: Theme.of(context).textTheme.titleLarge,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (_saving)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  color: colors.accent,
+                  strokeWidth: 2,
+                ),
+              ),
+            )
+          else
+            NeuIconButton(
+              icon: Icons.save_outlined,
+              size: 40,
+              tooltip: '保存房间信息',
+              onPressed: details == null ? null : _saveDetails,
+            ),
+        ],
+      ),
     );
   }
 
@@ -1893,555 +1806,545 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final knocksLoadError = knockRequestsAsync.hasError
         ? knockRequestsAsync.error
         : null;
+    final colors = context.neu;
+    final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.background,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: const Text(
-          '房间管理',
-          style: TextStyle(
-            color: AppColors.onBackground,
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        actions: [
-          IconButton(
-            tooltip: '保存房间信息',
-            onPressed: details == null || _saving ? null : _saveDetails,
-            icon: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+      backgroundColor: colors.base,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: _loading
+                ? Center(
+                    child: CircularProgressIndicator(
+                      color: colors.accent,
+                      strokeWidth: 2,
+                    ),
                   )
-                : const Icon(Icons.save_outlined),
-          ),
-        ],
-      ),
-      body: _loading
-          ? const Center(
-              child: CircularProgressIndicator(
-                color: AppColors.primary,
-                strokeWidth: 2,
-              ),
-            )
-          : _accountSwitched
-          ? const Center(
-              child: Text(
-                '账号已切换',
-                style: TextStyle(color: AppColors.onSurfaceVariant),
-              ),
-            )
-          : _error != null
-          ? Center(
-              child: TextButton.icon(
-                onPressed: _load,
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text('加载失败: $_error'),
-              ),
-            )
-          : Padding(
-              // CustomScrollView has no `padding` parameter; pad the viewport
-              // itself with the insets the ListView used to carry.
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-              child: CustomScrollView(
-                slivers: [
-                  SliverToBoxAdapter(
-                    child: _section(
-                      title: '房间信息',
-                      child: Column(
-                        children: [
-                          Center(
-                            child: Stack(
+                : _accountSwitched
+                ? Center(
+                    child: Text(
+                      '账号已切换',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  )
+                : _error != null
+                ? Center(
+                    child: NeuButton(
+                      icon: const Icon(Icons.refresh_rounded),
+                      onPressed: _load,
+                      child: Text('加载失败: $_error'),
+                    ),
+                  )
+                : Padding(
+                    // CustomScrollView has no `padding` parameter; pad the
+                    // viewport itself with the insets the ListView used to
+                    // carry, plus the floating header's height so the first
+                    // card starts below the title.
+                    padding: EdgeInsets.fromLTRB(
+                      16,
+                      viewPaddingTop + kToolbarHeight + 8,
+                      16,
+                      32,
+                    ),
+                    child: CustomScrollView(
+                      slivers: [
+                        SliverToBoxAdapter(
+                          child: _section(
+                            title: '房间信息',
+                            child: Column(
                               children: [
-                                if (_avatarPreviewBytes case final bytes?)
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(
-                                      AppRadii.content,
-                                    ),
-                                    child: Image.memory(
-                                      bytes,
-                                      width: 76,
-                                      height: 76,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  )
-                                else
-                                  AppAvatar(
-                                    fallback: details!.name,
-                                    size: 76,
-                                    radius: AppRadii.content,
-                                    url: details.avatarUrl,
+                                Center(
+                                  child: Stack(
+                                    children: [
+                                      if (_avatarPreviewBytes case final bytes?)
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            NeuRadius.content,
+                                          ),
+                                          child: Image.memory(
+                                            bytes,
+                                            width: 76,
+                                            height: 76,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        )
+                                      else
+                                        AppAvatar(
+                                          fallback: details!.name,
+                                          size: 76,
+                                          radius: NeuRadius.content,
+                                          url: details.avatarUrl,
+                                        ),
+                                      Positioned(
+                                        right: -4,
+                                        bottom: -4,
+                                        child: NeuIconButton(
+                                          icon: Icons.edit_rounded,
+                                          size: 36,
+                                          tooltip: '修改房间头像',
+                                          onPressed: _saving
+                                              ? null
+                                              : _pickAvatar,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                Positioned(
-                                  right: -4,
-                                  bottom: -4,
-                                  child: IconButton.filled(
-                                    tooltip: '修改房间头像',
-                                    onPressed: _saving ? null : _pickAvatar,
-                                    icon: const Icon(
-                                      Icons.edit_rounded,
-                                      size: 18,
-                                    ),
-                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                NeuTextField(
+                                  controller: _nameController,
+                                  hint: '房间名称',
+                                ),
+                                const SizedBox(height: 12),
+                                NeuTextField(
+                                  controller: _topicController,
+                                  hint: '房间主题',
+                                  maxLines: 4,
                                 ),
                               ],
                             ),
                           ),
-                          const SizedBox(height: 18),
-                          TextField(
-                            controller: _nameController,
-                            style: const TextStyle(
-                              color: AppColors.onBackground,
-                            ),
-                            decoration: const InputDecoration(
-                              labelText: '房间名称',
-                            ),
+                        ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                        // The header and every member tile share one rounded card,
+                        // and the tiles are built lazily: off-screen entries are not
+                        // constructed up front.
+                        _sliverSectionCard<rust.Contact>(
+                          title: _membersLoadError == null
+                              ? '成员 ${_members.length}'
+                              : '成员',
+                          action: NeuIconButton(
+                            icon: Icons.person_add_alt_1_rounded,
+                            size: 38,
+                            tooltip: '邀请用户',
+                            onPressed: _showInviteDialog,
                           ),
-                          const SizedBox(height: 12),
-                          TextField(
-                            controller: _topicController,
-                            minLines: 2,
-                            maxLines: 4,
-                            style: const TextStyle(
-                              color: AppColors.onBackground,
-                            ),
-                            decoration: const InputDecoration(
-                              labelText: '房间主题',
-                            ),
+                          // Keep previously loaded members visible when a refresh
+                          // fails; only a first load with no data at all shows the
+                          // load-failure tile instead.
+                          leadingRows: [
+                            if (_membersLoadError != null)
+                              _partialLoadErrorTile(
+                                label: _members.isEmpty
+                                    ? '无法加载成员'
+                                    : '成员刷新失败，显示缓存数据',
+                                onRetry: _retryMembers,
+                              ),
+                          ],
+                          rows: _members,
+                          rowBuilder: _memberTile,
+                        ),
+                        if (knocksLoadError != null ||
+                            knockRequests.isNotEmpty) ...[
+                          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                          _sliverSectionCard<rust.KnockRequest>(
+                            title: knocksLoadError == null
+                                ? '加入请求 ${knockRequests.length}'
+                                : '加入请求',
+                            leadingRows: [
+                              if (knocksLoadError != null)
+                                _partialLoadErrorTile(
+                                  label: knockRequests.isEmpty
+                                      ? '无法加载加入请求'
+                                      : '加入请求刷新失败，显示缓存数据',
+                                  onRetry: _retryKnocks,
+                                ),
+                            ],
+                            rows: knockRequests,
+                            rowBuilder: _knockTile,
                           ),
                         ],
-                      ),
-                    ),
-                  ),
-                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                  SliverToBoxAdapter(
-                    child: _section(
-                      title: _membersLoadError == null
-                          ? '成员 ${_members.length}'
-                          : '成员',
-                      action: IconButton(
-                        tooltip: '邀请用户',
-                        icon: const Icon(Icons.person_add_alt_1_rounded),
-                        onPressed: _showInviteDialog,
-                      ),
-                      child: _membersLoadError != null && _members.isEmpty
-                          ? _partialLoadErrorTile(
-                              label: '无法加载成员',
-                              onRetry: _retryMembers,
-                            )
-                          : Column(
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                        SliverToBoxAdapter(
+                          child: _section(
+                            title: '通知与消息',
+                            child: Column(
                               children: [
-                                // Keep previously loaded members visible when a
-                                // refresh fails; only a first load with no data
-                                // at all shows the error tile instead.
-                                if (_membersLoadError != null) ...[
-                                  _partialLoadErrorTile(
-                                    label: '成员刷新失败，显示缓存数据',
-                                    onRetry: _retryMembers,
+                                SwitchListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  activeThumbColor: context.neu.accent,
+                                  title: Text(
+                                    '免打扰',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodyLarge,
                                   ),
-                                  const Divider(height: 1),
-                                ],
+                                  subtitle: Text(
+                                    _mutedLoadError == null
+                                        ? '不接收此房间的推送通知'
+                                        : '通知设置加载/更新失败，点击重试',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
+                                  value: _muted,
+                                  onChanged:
+                                      _mutedLoadError == null && !_muteSaving
+                                      ? _setMuted
+                                      : null,
+                                  secondary: _muteSaving
+                                      ? SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            color: context.neu.accent,
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : _mutedLoadError == null
+                                      ? null
+                                      : NeuIconButton(
+                                          icon: Icons.refresh_rounded,
+                                          size: 38,
+                                          tooltip: '重试',
+                                          onPressed: _muteSaving
+                                              ? null
+                                              : _retryMuted,
+                                        ),
+                                ),
+                                _actionTile(
+                                  icon: Icons.push_pin_rounded,
+                                  label: '置顶消息',
+                                  onTap: () => Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => PinnedMessagesPage(
+                                        roomId: widget.roomId,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                _actionTile(
+                                  icon: Icons.done_all_rounded,
+                                  label: '标记为已读',
+                                  saving: _markSaving,
+                                  onTap: _markSaving
+                                      ? null
+                                      : () async {
+                                          // Entry guard (not only the disabled
+                                          // button): the rebuild lags a frame, so a
+                                          // same-frame second tap could otherwise
+                                          // issue a duplicate write.
+                                          if (!_accountActive() ||
+                                              _markSaving) {
+                                            return;
+                                          }
+                                          setState(() => _markSaving = true);
+                                          final suppression =
+                                              roomAutoReadSuppressedProvider(
+                                                widget.roomId,
+                                              );
+                                          final suppressionNotifier = ref.read(
+                                            suppression.notifier,
+                                          );
+                                          final previousSuppression =
+                                              suppressionNotifier.value;
+                                          final suppressionToken =
+                                              setRoomAutoReadSuppressed(
+                                                ref,
+                                                widget.roomId,
+                                                suppressed: false,
+                                              );
+                                          try {
+                                            await rust.markRoomAsRead(
+                                              accountUserId:
+                                                  _openedUserId ?? '',
+                                              roomId: widget.roomId,
+                                              explicit: true,
+                                            );
+                                            // The account may have switched while the
+                                            // request was in flight: the write itself
+                                            // was guarded server-side, so skip ALL
+                                            // feedback on an account switch (the page
+                                            // shows the switched placeholder — same
+                                            // discipline as `_setMuted`). On a pure
+                                            // token takeover the server write
+                                            // succeeded regardless: still report it;
+                                            // only the override and list invalidation
+                                            // belong to the token holder (a takeover
+                                            // owns that bookkeeping).
+                                            if (!mounted || !_accountActive()) {
+                                              return;
+                                            }
+                                            if (suppressionToken.isCurrent) {
+                                              setRoomUnreadOverrideById(
+                                                ref,
+                                                widget.roomId,
+                                                unread: false,
+                                              );
+                                              _invalidateRoom();
+                                            }
+                                            _showSnackBar('已标记为已读');
+                                          } catch (error) {
+                                            // The provider bookkeeping restores even
+                                            // when the page is gone (the writes are
+                                            // global); only the snackbar needs it.
+                                            if (suppressionToken.isCurrent) {
+                                              // Only the actor holding the suppression
+                                              // token restores it; a takeover (chat
+                                              // page re-activation) owns its own
+                                              // bookkeeping.
+                                              suppressionNotifier.value =
+                                                  previousSuppression;
+                                              // A STALE-armed restoration (a previous
+                                              // mark-unread timeout left it true) must
+                                              // still be converged: the old entry's
+                                              // revision no longer matches after this
+                                              // write bumped it, so register afresh
+                                              // (same discipline as the mark-unread
+                                              // branch).
+                                              if (previousSuppression) {
+                                                noteTimedOutUnreadSuppression(
+                                                  widget.roomId,
+                                                  revision:
+                                                      suppressionToken.value,
+                                                );
+                                              }
+                                            }
+                                            // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                                            if (!mounted || !_accountActive()) {
+                                              return;
+                                            }
+                                            if (mounted) {
+                                              // The write failed regardless of the
+                                              // takeover: surface it (the snackbar
+                                              // shows on the visible page even when
+                                              // the management page sits below the
+                                              // chat).
+                                              _showActionFailure(error);
+                                            }
+                                          } finally {
+                                            if (mounted) {
+                                              setState(
+                                                () => _markSaving = false,
+                                              );
+                                            }
+                                          }
+                                        },
+                                ),
+                                _actionTile(
+                                  icon: Icons.mark_unread_chat_alt_rounded,
+                                  label: '标记为未读',
+                                  saving: _markSaving,
+                                  onTap: _markSaving
+                                      ? null
+                                      : () async {
+                                          // Entry guard (not only the disabled
+                                          // button): the rebuild lags a frame, so a
+                                          // same-frame second tap could otherwise
+                                          // issue a duplicate write.
+                                          if (!_accountActive() ||
+                                              _markSaving) {
+                                            return;
+                                          }
+                                          setState(() => _markSaving = true);
+                                          final suppression =
+                                              roomAutoReadSuppressedProvider(
+                                                widget.roomId,
+                                              );
+                                          final suppressionNotifier = ref.read(
+                                            suppression.notifier,
+                                          );
+                                          final previousSuppression =
+                                              suppressionNotifier.value;
+                                          final unreadOverrideNotifier = ref
+                                              .read(
+                                                roomUnreadOverrideProvider(
+                                                  widget.roomId,
+                                                ).notifier,
+                                              );
+                                          final previousUnreadOverride =
+                                              unreadOverrideNotifier.value;
+                                          final suppressionToken =
+                                              setRoomAutoReadSuppressed(
+                                                ref,
+                                                widget.roomId,
+                                                suppressed: true,
+                                              );
+                                          setRoomUnreadOverrideById(
+                                            ref,
+                                            widget.roomId,
+                                            unread: true,
+                                          );
+                                          try {
+                                            await rust.markRoomUnread(
+                                              accountUserId:
+                                                  _openedUserId ?? '',
+                                              roomId: widget.roomId,
+                                            );
+                                            if (!mounted || !_accountActive()) {
+                                              return;
+                                            }
+                                            // The server write succeeded regardless of
+                                            // the token: still report it. The
+                                            // invalidation and the room close belong
+                                            // to the token holder (a takeover owns
+                                            // that bookkeeping — closing the room
+                                            // under a new viewer would be wrong).
+                                            if (suppressionToken.isCurrent) {
+                                              _invalidateRoom();
+                                              _closeCurrentRoom();
+                                            }
+                                            _showSnackBar('已标记为未读');
+                                          } catch (error) {
+                                            // The provider bookkeeping restores even
+                                            // when the page is gone (the writes are
+                                            // global); only the snackbar needs it.
+                                            if (suppressionToken.isCurrent) {
+                                              // Only the actor holding the suppression
+                                              // token restores it; a takeover (chat
+                                              // page re-activation) owns its own
+                                              // bookkeeping.
+                                              //
+                                              // A timeout is not a failure: the queued
+                                              // write's tail may still land (same
+                                              // discipline as the mute timeout marker).
+                                              // Keep the suppression armed so a later
+                                              // auto-read cannot revoke a marker that
+                                              // did land — drop only the optimistic
+                                              // override (its TTL covers a real
+                                              // failure). A confirmed failure restores
+                                              // both.
+                                              unreadOverrideNotifier.value =
+                                                  previousUnreadOverride;
+                                              if (!isMutationTimeout(error)) {
+                                                suppressionNotifier.value =
+                                                    previousSuppression;
+                                                // Restoring a STALE-armed suppression
+                                                // (a previous write's timeout left it
+                                                // true) must still be converged: the
+                                                // old entry may already be gone (its
+                                                // revision no longer matches after
+                                                // this write bumped it) — register
+                                                // afresh with the current revision so
+                                                // the sync flow can still lift the
+                                                // suppression once this write is
+                                                // definitively failed.
+                                                if (previousSuppression) {
+                                                  noteTimedOutUnreadSuppression(
+                                                    widget.roomId,
+                                                    revision:
+                                                        suppressionToken.value,
+                                                  );
+                                                }
+                                              } else {
+                                                // The suppression stays armed: register
+                                                // the room so the sync flow converges
+                                                // it if the write ultimately failed
+                                                // (same discipline as the mute 250s
+                                                // convergence read). The token's
+                                                // revision is the value captured when
+                                                // the write armed the suppression —
+                                                // read before the await, so this works
+                                                // even if the page was disposed.
+                                                noteTimedOutUnreadSuppression(
+                                                  widget.roomId,
+                                                  revision:
+                                                      suppressionToken.value,
+                                                );
+                                              }
+                                            }
+                                            // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+                                            if (!mounted || !_accountActive()) {
+                                              return;
+                                            }
+                                            if (mounted) {
+                                              // The write failed regardless of the
+                                              // takeover: surface it (the snackbar
+                                              // shows on the visible page even when
+                                              // the management page sits below the
+                                              // chat).
+                                              _showActionFailure(error);
+                                            }
+                                          } finally {
+                                            if (mounted) {
+                                              setState(
+                                                () => _markSaving = false,
+                                              );
+                                            }
+                                          }
+                                        },
+                                ),
                               ],
                             ),
-                    ),
-                  ),
-                  // Only the member tiles are virtualized: off-screen entries
-                  // are built lazily, so a rebuild no longer constructs every
-                  // tile up front. The tiles keep the section card's surface
-                  // background and horizontal padding so the section still
-                  // reads as one card.
-                  SliverList.builder(
-                    itemCount: _members.length,
-                    itemBuilder: (context, index) {
-                      final member = _members[index];
-                      return ColoredBox(
-                        color: AppColors.surface,
-                        child: _memberTile(member),
-                      );
-                    },
-                  ),
-                  if (knocksLoadError != null || knockRequests.isNotEmpty) ...[
-                    const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                    SliverToBoxAdapter(
-                      child: _section(
-                        title: knocksLoadError == null
-                            ? '加入请求 ${knockRequests.length}'
-                            : '加入请求',
-                        child: knocksLoadError != null && knockRequests.isEmpty
-                            ? _partialLoadErrorTile(
-                                label: '无法加载加入请求',
-                                onRetry: _retryKnocks,
-                              )
-                            : Column(
-                                children: [
-                                  if (knocksLoadError != null) ...[
-                                    _partialLoadErrorTile(
-                                      label: '加入请求刷新失败，显示缓存数据',
-                                      onRetry: _retryKnocks,
-                                    ),
-                                    const Divider(height: 1),
-                                  ],
-                                ],
-                              ),
-                      ),
-                    ),
-                    // The knock tiles are virtualized like the member tiles.
-                    SliverList.builder(
-                      itemCount: knockRequests.length,
-                      itemBuilder: (context, index) {
-                        final request = knockRequests[index];
-                        return ColoredBox(
-                          color: AppColors.surface,
-                          child: _knockTile(request),
-                        );
-                      },
-                    ),
-                  ],
-                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                  SliverToBoxAdapter(
-                    child: _section(
-                      title: '通知与消息',
-                      child: Column(
-                        children: [
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            title: const Text(
-                              '免打扰',
-                              style: TextStyle(color: AppColors.onBackground),
-                            ),
-                            subtitle: Text(
-                              _mutedLoadError == null
-                                  ? '不接收此房间的推送通知'
-                                  : '通知设置加载/更新失败，点击重试',
-                              style: const TextStyle(
-                                color: AppColors.onSurfaceVariant,
-                              ),
-                            ),
-                            value: _muted,
-                            onChanged: _mutedLoadError == null && !_muteSaving
-                                ? _setMuted
-                                : null,
-                            secondary: _muteSaving
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : _mutedLoadError == null
-                                ? null
-                                : IconButton(
-                                    tooltip: '重试',
-                                    icon: const Icon(Icons.refresh_rounded),
-                                    onPressed: _muteSaving ? null : _retryMuted,
-                                  ),
                           ),
-                          _actionTile(
-                            icon: Icons.push_pin_rounded,
-                            label: '置顶消息',
-                            onTap: () => Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    PinnedMessagesPage(roomId: widget.roomId),
-                              ),
+                        ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                        SliverToBoxAdapter(
+                          child: _section(
+                            title: '隐私',
+                            child: _actionTile(
+                              icon: _ignoredUsersLoadError == null
+                                  ? Icons.block_rounded
+                                  : Icons.refresh_rounded,
+                              label: _ignoredUsersLoadError == null
+                                  ? '已忽略用户 (${_ignoredUsers.length})'
+                                  : '无法加载已忽略用户',
+                              onTap: _ignoredUsersLoadError == null
+                                  ? _showIgnoredUsers
+                                  : _retryIgnoredUsers,
                             ),
                           ),
-                          _actionTile(
-                            icon: Icons.done_all_rounded,
-                            label: '标记为已读',
-                            saving: _markSaving,
-                            onTap: _markSaving
-                                ? null
-                                : () async {
-                                    // Entry guard (not only the disabled
-                                    // button): the rebuild lags a frame, so a
-                                    // same-frame second tap could otherwise
-                                    // issue a duplicate write.
-                                    if (!_accountActive() || _markSaving) {
-                                      return;
-                                    }
-                                    setState(() => _markSaving = true);
-                                    final suppression =
-                                        roomAutoReadSuppressedProvider(
-                                          widget.roomId,
-                                        );
-                                    final suppressionNotifier = ref.read(
-                                      suppression.notifier,
-                                    );
-                                    final previousSuppression =
-                                        suppressionNotifier.value;
-                                    final suppressionToken =
-                                        setRoomAutoReadSuppressed(
-                                          ref,
-                                          widget.roomId,
-                                          suppressed: false,
-                                        );
-                                    try {
-                                      await rust.markRoomAsRead(
-                                        accountUserId: _openedUserId ?? '',
-                                        roomId: widget.roomId,
-                                        explicit: true,
-                                      );
-                                      // The account may have switched while the
-                                      // request was in flight: the write itself
-                                      // was guarded server-side, so skip ALL
-                                      // feedback on an account switch (the page
-                                      // shows the switched placeholder — same
-                                      // discipline as `_setMuted`). On a pure
-                                      // token takeover the server write
-                                      // succeeded regardless: still report it;
-                                      // only the override and list invalidation
-                                      // belong to the token holder (a takeover
-                                      // owns that bookkeeping).
-                                      if (!mounted || !_accountActive()) return;
-                                      if (suppressionToken.isCurrent) {
-                                        setRoomUnreadOverrideById(
-                                          ref,
-                                          widget.roomId,
-                                          unread: false,
-                                        );
-                                        _invalidateRoom();
-                                      }
-                                      _showSnackBar('已标记为已读');
-                                    } catch (error) {
-                                      // The provider bookkeeping restores even
-                                      // when the page is gone (the writes are
-                                      // global); only the snackbar needs it.
-                                      if (suppressionToken.isCurrent) {
-                                        // Only the actor holding the suppression
-                                        // token restores it; a takeover (chat
-                                        // page re-activation) owns its own
-                                        // bookkeeping.
-                                        suppressionNotifier.value =
-                                            previousSuppression;
-                                        // A STALE-armed restoration (a previous
-                                        // mark-unread timeout left it true) must
-                                        // still be converged: the old entry's
-                                        // revision no longer matches after this
-                                        // write bumped it, so register afresh
-                                        // (same discipline as the mark-unread
-                                        // branch).
-                                        if (previousSuppression) {
-                                          noteTimedOutUnreadSuppression(
-                                            widget.roomId,
-                                            revision: suppressionToken.value,
-                                          );
-                                        }
-                                      }
-                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                                      if (!mounted || !_accountActive()) return;
-                                      if (mounted) {
-                                        // The write failed regardless of the
-                                        // takeover: surface it (the snackbar
-                                        // shows on the visible page even when
-                                        // the management page sits below the
-                                        // chat).
-                                        _showActionFailure(error);
-                                      }
-                                    } finally {
-                                      if (mounted) {
-                                        setState(() => _markSaving = false);
-                                      }
-                                    }
-                                  },
+                        ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                        SliverToBoxAdapter(
+                          child: _section(
+                            title: '危险操作',
+                            child: _actionTile(
+                              icon: Icons.exit_to_app_rounded,
+                              label: '退出房间',
+                              danger: true,
+                              onTap: _confirmLeave,
+                            ),
                           ),
-                          _actionTile(
-                            icon: Icons.mark_unread_chat_alt_rounded,
-                            label: '标记为未读',
-                            saving: _markSaving,
-                            onTap: _markSaving
-                                ? null
-                                : () async {
-                                    // Entry guard (not only the disabled
-                                    // button): the rebuild lags a frame, so a
-                                    // same-frame second tap could otherwise
-                                    // issue a duplicate write.
-                                    if (!_accountActive() || _markSaving) {
-                                      return;
-                                    }
-                                    setState(() => _markSaving = true);
-                                    final suppression =
-                                        roomAutoReadSuppressedProvider(
-                                          widget.roomId,
-                                        );
-                                    final suppressionNotifier = ref.read(
-                                      suppression.notifier,
-                                    );
-                                    final previousSuppression =
-                                        suppressionNotifier.value;
-                                    final unreadOverrideNotifier = ref.read(
-                                      roomUnreadOverrideProvider(
-                                        widget.roomId,
-                                      ).notifier,
-                                    );
-                                    final previousUnreadOverride =
-                                        unreadOverrideNotifier.value;
-                                    final suppressionToken =
-                                        setRoomAutoReadSuppressed(
-                                          ref,
-                                          widget.roomId,
-                                          suppressed: true,
-                                        );
-                                    setRoomUnreadOverrideById(
-                                      ref,
-                                      widget.roomId,
-                                      unread: true,
-                                    );
-                                    try {
-                                      await rust.markRoomUnread(
-                                        accountUserId: _openedUserId ?? '',
-                                        roomId: widget.roomId,
-                                      );
-                                      if (!mounted || !_accountActive()) return;
-                                      // The server write succeeded regardless of
-                                      // the token: still report it. The
-                                      // invalidation and the room close belong
-                                      // to the token holder (a takeover owns
-                                      // that bookkeeping — closing the room
-                                      // under a new viewer would be wrong).
-                                      if (suppressionToken.isCurrent) {
-                                        _invalidateRoom();
-                                        _closeCurrentRoom();
-                                      }
-                                      _showSnackBar('已标记为未读');
-                                    } catch (error) {
-                                      // The provider bookkeeping restores even
-                                      // when the page is gone (the writes are
-                                      // global); only the snackbar needs it.
-                                      if (suppressionToken.isCurrent) {
-                                        // Only the actor holding the suppression
-                                        // token restores it; a takeover (chat
-                                        // page re-activation) owns its own
-                                        // bookkeeping.
-                                        //
-                                        // A timeout is not a failure: the queued
-                                        // write's tail may still land (same
-                                        // discipline as the mute timeout marker).
-                                        // Keep the suppression armed so a later
-                                        // auto-read cannot revoke a marker that
-                                        // did land — drop only the optimistic
-                                        // override (its TTL covers a real
-                                        // failure). A confirmed failure restores
-                                        // both.
-                                        unreadOverrideNotifier.value =
-                                            previousUnreadOverride;
-                                        if (!isMutationTimeout(error)) {
-                                          suppressionNotifier.value =
-                                              previousSuppression;
-                                          // Restoring a STALE-armed suppression
-                                          // (a previous write's timeout left it
-                                          // true) must still be converged: the
-                                          // old entry may already be gone (its
-                                          // revision no longer matches after
-                                          // this write bumped it) — register
-                                          // afresh with the current revision so
-                                          // the sync flow can still lift the
-                                          // suppression once this write is
-                                          // definitively failed.
-                                          if (previousSuppression) {
-                                            noteTimedOutUnreadSuppression(
-                                              widget.roomId,
-                                              revision: suppressionToken.value,
-                                            );
-                                          }
-                                        } else {
-                                          // The suppression stays armed: register
-                                          // the room so the sync flow converges
-                                          // it if the write ultimately failed
-                                          // (same discipline as the mute 250s
-                                          // convergence read). The token's
-                                          // revision is the value captured when
-                                          // the write armed the suppression —
-                                          // read before the await, so this works
-                                          // even if the page was disposed.
-                                          noteTimedOutUnreadSuppression(
-                                            widget.roomId,
-                                            revision: suppressionToken.value,
-                                          );
-                                        }
-                                      }
-                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                                      if (!mounted || !_accountActive()) return;
-                                      if (mounted) {
-                                        // The write failed regardless of the
-                                        // takeover: surface it (the snackbar
-                                        // shows on the visible page even when
-                                        // the management page sits below the
-                                        // chat).
-                                        _showActionFailure(error);
-                                      }
-                                    } finally {
-                                      if (mounted) {
-                                        setState(() => _markSaving = false);
-                                      }
-                                    }
-                                  },
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                  SliverToBoxAdapter(
-                    child: _section(
-                      title: '隐私',
-                      child: _actionTile(
-                        icon: _ignoredUsersLoadError == null
-                            ? Icons.block_rounded
-                            : Icons.refresh_rounded,
-                        label: _ignoredUsersLoadError == null
-                            ? '已忽略用户 (${_ignoredUsers.length})'
-                            : '无法加载已忽略用户',
-                        onTap: _ignoredUsersLoadError == null
-                            ? _showIgnoredUsers
-                            : _retryIgnoredUsers,
-                      ),
-                    ),
-                  ),
-                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                  SliverToBoxAdapter(
-                    child: _section(
-                      title: '危险操作',
-                      child: _actionTile(
-                        icon: Icons.exit_to_app_rounded,
-                        label: '退出房间',
-                        danger: true,
-                        onTap: _confirmLeave,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: viewPaddingTop + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(height: kToolbarHeight, child: _header(details)),
             ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _knockTile(rust.KnockRequest request) {
+    final colors = context.neu;
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: AppAvatar(
         fallback: request.displayName,
         size: 40,
-        radius: 20,
+        radius: NeuRadius.content,
         url: request.avatarUrl,
       ),
       title: Text(
         request.displayName,
-        style: const TextStyle(
-          color: AppColors.onBackground,
-          fontWeight: FontWeight.w600,
-        ),
+        style: Theme.of(
+          context,
+        ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
       ),
       subtitle: Text(
         request.reason?.isNotEmpty == true
             ? '${request.userId}\n${request.reason}'
             : request.userId,
-        style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12),
+        style: Theme.of(context).textTheme.bodySmall,
       ),
       isThreeLine: request.reason?.isNotEmpty == true,
       trailing: Wrap(
@@ -2449,14 +2352,14 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
         children: [
           IconButton(
             tooltip: '批准',
-            icon: const Icon(Icons.check_rounded, color: AppColors.primary),
+            icon: Icon(Icons.check_rounded, color: colors.accent),
             onPressed: _pendingKnockUserIds.contains(request.userId)
                 ? null
                 : () => _runKnockAction(request, true),
           ),
           IconButton(
             tooltip: '拒绝',
-            icon: const Icon(Icons.close_rounded, color: AppColors.error),
+            icon: Icon(Icons.close_rounded, color: colors.error),
             onPressed: _pendingKnockUserIds.contains(request.userId)
                 ? null
                 : () => _runKnockAction(request, false),
@@ -2475,32 +2378,29 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       leading: AppAvatar(
         fallback: member.name,
         size: 40,
-        radius: 20,
+        radius: NeuRadius.content,
         url: member.avatarUrl,
       ),
       title: Text(
         member.name,
-        style: const TextStyle(
-          color: AppColors.onBackground,
-          fontWeight: FontWeight.w600,
-        ),
+        style: Theme.of(
+          context,
+        ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
       ),
-      subtitle: Text(
-        member.id,
-        style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12),
-      ),
+      subtitle: Text(member.id, style: Theme.of(context).textTheme.bodySmall),
       trailing: isCurrentUser
           ? null
-          : IconButton(
+          : NeuIconButton(
+              icon: ignored
+                  ? Icons.person_add_alt_rounded
+                  : Icons.block_rounded,
+              size: 38,
+              accent: ignored,
               tooltip: _ignoredUsersLoadError != null
                   ? '无法加载忽略状态'
                   : ignored
                   ? '取消忽略'
                   : '忽略用户',
-              icon: Icon(
-                ignored ? Icons.person_add_alt_rounded : Icons.block_rounded,
-                color: ignored ? AppColors.primary : AppColors.onSurfaceVariant,
-              ),
               onPressed: _ignoredUsersLoadError == null
                   ? () => _setUserIgnored(member.id, !ignored)
                   : null,
@@ -2512,19 +2412,15 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     required String label,
     required VoidCallback onRetry,
   }) {
+    final colors = context.neu;
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: const Icon(
-        Icons.error_outline_rounded,
-        color: AppColors.onSurfaceVariant,
-      ),
-      title: Text(
-        label,
-        style: const TextStyle(color: AppColors.onSurfaceVariant),
-      ),
-      trailing: IconButton(
+      leading: Icon(Icons.error_outline_rounded, color: colors.textTertiary),
+      title: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+      trailing: NeuIconButton(
+        icon: Icons.refresh_rounded,
+        size: 38,
         tooltip: '重试',
-        icon: const Icon(Icons.refresh_rounded),
         onPressed: onRetry,
       ),
     );
@@ -2535,32 +2431,87 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     required Widget child,
     Widget? action,
   }) {
-    return Material(
-      color: AppColors.surface,
-      borderRadius: BorderRadius.circular(AppRadii.surface),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: AppColors.onBackground,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
+    return NeuSurface(
+      color: context.neu.card,
+      radius: NeuRadius.surface,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              ?action,
+            ],
+          ),
+          child,
+        ],
+      ),
+    );
+  }
+
+  /// One rounded card holding a whole section: the title row, the optional
+  /// error tile and every data row, separated by hairlines. The rows stay lazy
+  /// through the inner [SliverList], so a long member list is not laid out up
+  /// front.
+  Widget _sliverSectionCard<T>({
+    required String title,
+    Widget? action,
+    List<Widget> leadingRows = const [],
+    required List<T> rows,
+    required Widget Function(T row) rowBuilder,
+  }) {
+    final colors = context.neu;
+    // Hairlines under a data row start at the row title: card padding 16 +
+    // avatar 40 + ListTile's title gap 16 (same alignment as ChatListDivider).
+    const rowSeparatorIndent = 16.0 + 40 + 16;
+    return DecoratedSliver(
+      decoration: NeuDecoration(
+        colors: colors,
+        color: colors.card,
+        radius: NeuRadius.surface,
+      ),
+      sliver: SliverList.separated(
+        // Item 0 is the section title; the rest are the error tiles followed
+        // by the data rows.
+        itemCount: leadingRows.length + rows.length + 1,
+        separatorBuilder: (context, index) => Divider(
+          height: 1,
+          // The title and error tiles keep the card's own left inset.
+          indent: index <= leadingRows.length ? 16 : rowSeparatorIndent,
+          endIndent: 16,
+          color: colors.hairline,
+        ),
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleSmall,
                     ),
                   ),
-                ),
-                ?action,
-              ],
-            ),
-            child,
-          ],
-        ),
+                  ?action,
+                ],
+              ),
+            );
+          }
+          final rowIndex = index - 1;
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: rowIndex < leadingRows.length
+                ? leadingRows[rowIndex]
+                : rowBuilder(rows[rowIndex - leadingRows.length]),
+          );
+        },
       ),
     );
   }
@@ -2572,22 +2523,44 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     bool danger = false,
     bool saving = false,
   }) {
-    final color = danger ? AppColors.error : AppColors.onBackground;
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(icon, color: danger ? AppColors.error : AppColors.primary),
-      title: Text(label, style: TextStyle(color: color)),
-      trailing: saving
-          ? const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : const Icon(
-              Icons.chevron_right_rounded,
-              color: AppColors.onSurfaceVariant,
-            ),
+    final colors = context.neu;
+    final color = danger ? colors.error : colors.text;
+    return NeuAction(
+      radius: NeuRadius.button,
+      label: label,
       onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: danger ? colors.error : colors.accent),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                label,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyLarge?.copyWith(color: color),
+              ),
+            ),
+            if (saving)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  color: colors.accent,
+                  strokeWidth: 2,
+                ),
+              )
+            else
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 20,
+                color: colors.textTertiary,
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
-import '../../theme/app_theme.dart';
+import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/glass.dart';
+import '../../widgets/neu_action.dart';
+import '../../widgets/neu_field.dart';
+import '../../widgets/neu_surface.dart';
+import '../../widgets/sheets.dart';
 import '../chat/action_failure_message.dart';
 import '../chat/chat_detail_page.dart';
+import '../chat/chat_list_item.dart';
 
 class ContactsPage extends ConsumerStatefulWidget {
   const ContactsPage({super.key});
@@ -23,154 +30,153 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
     final contactsAsync = ref.watch(contactsProvider);
 
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          const SliverAppBar(
-            floating: true,
-            pinned: true,
-            title: Text(
-              '通讯录',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-                color: AppColors.onBackground,
-                letterSpacing: -0.5,
-              ),
-            ),
-            backgroundColor: AppColors.background,
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Container(
-                height: 44,
-                decoration: BoxDecoration(
-                  color: AppColors.surfaceVariant,
-                  borderRadius: BorderRadius.circular(AppRadii.surface),
-                ),
-                child: Row(
-                  children: [
-                    const SizedBox(width: 12),
-                    const Icon(
-                      Icons.search_rounded,
-                      color: AppColors.onSurfaceVariant,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextField(
-                        style: const TextStyle(
-                          color: AppColors.onBackground,
-                          fontSize: 15,
-                        ),
-                        decoration: const InputDecoration(
-                          hintText: '搜索联系人',
-                          hintStyle: TextStyle(
-                            color: AppColors.onSurfaceVariant,
-                            fontSize: 15,
-                          ),
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.zero,
-                          isDense: true,
-                        ),
-                        onChanged: (value) {
-                          setState(() => _searchQuery = value.toLowerCase());
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                  ],
+      backgroundColor: context.neu.base,
+      body: Stack(
+        children: [
+          CustomScrollView(
+            slivers: [
+              // 标题栏移到上方浮层,这里只预留其高度。
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height:
+                      MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
                 ),
               ),
-            ),
-          ),
-          contactsAsync.when(
-            data: (contacts) {
-              final filtered = _searchQuery.isEmpty
-                  ? contacts
-                  : contacts
-                        .where(
-                          (c) =>
-                              c.name.toLowerCase().contains(_searchQuery) ||
-                              c.status.toLowerCase().contains(_searchQuery),
-                        )
-                        .toList();
-
-              if (filtered.isEmpty) {
-                return const SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Center(
-                      child: Column(
-                        children: [
-                          Icon(
-                            Icons.contacts_rounded,
-                            color: AppColors.onSurfaceVariant,
-                            size: 48,
-                          ),
-                          SizedBox(height: 12),
-                          Text(
-                            '暂无联系人',
-                            style: TextStyle(
-                              color: AppColors.onSurfaceVariant,
-                              fontSize: 15,
-                            ),
-                          ),
-                          SizedBox(height: 4),
-                          Text(
-                            '加入房间后，成员会显示在这里',
-                            style: TextStyle(
-                              color: AppColors.onSurfaceVariant,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    NeuSpacing.lg,
+                    NeuSpacing.xs,
+                    NeuSpacing.lg,
+                    NeuSpacing.sm,
                   ),
-                );
-              }
-
-              return SliverList.separated(
-                itemCount: filtered.length,
-                separatorBuilder: (context, index) => const Divider(
-                  color: AppColors.surfaceVariant,
-                  thickness: 0.5,
-                  indent: 82,
-                  height: 1,
+                  child: NeuTextField(
+                    hint: '搜索联系人',
+                    leading: const Icon(Icons.search_rounded),
+                    onChanged: (value) {
+                      setState(() => _searchQuery = value.toLowerCase());
+                    },
+                  ),
                 ),
-                itemBuilder: (context, index) {
-                  final contact = filtered[index];
-                  return _ContactTile(contact: contact);
+              ),
+              contactsAsync.when(
+                data: (contacts) {
+                  final filtered = _searchQuery.isEmpty
+                      ? contacts
+                      : contacts
+                            .where(
+                              (c) =>
+                                  c.name.toLowerCase().contains(_searchQuery) ||
+                                  c.status.toLowerCase().contains(_searchQuery),
+                            )
+                            .toList();
+
+                  if (filtered.isEmpty) {
+                    return const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.all(NeuSpacing.xl),
+                        child: _EmptyView(),
+                      ),
+                    );
+                  }
+
+                  return SliverPadding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: NeuSpacing.lg,
+                    ),
+                    sliver: SliverList.separated(
+                      itemCount: filtered.length,
+                      // 与条目内边距对齐:水平 8 + 头像 48 + 间隔 14。
+                      separatorBuilder: (context, index) =>
+                          const ChatListDivider(indent: 8 + 48 + 14),
+                      itemBuilder: (context, index) {
+                        final contact = filtered[index];
+                        return _ContactTile(
+                          key: ValueKey(contact.id),
+                          contact: contact,
+                        );
+                      },
+                    ),
+                  );
                 },
-              );
-            },
-            loading: () => const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.all(32),
-                child: Center(
-                  child: CircularProgressIndicator(
-                    color: AppColors.primary,
-                    strokeWidth: 2,
+                loading: () => SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(NeuSpacing.xl),
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        color: context.neu.accent,
+                        strokeWidth: 2,
+                      ),
+                    ),
+                  ),
+                ),
+                error: (err, _) => SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(NeuSpacing.xl),
+                    child: Center(
+                      child: SelectableText(
+                        '加载失败: $err',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            error: (err, _) => SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.all(32),
-                child: Center(
-                  child: SelectableText(
-                    '加载失败: $err',
-                    style: const TextStyle(color: AppColors.onSurfaceVariant),
+              const SliverPadding(
+                padding: EdgeInsets.only(bottom: NeuSpacing.navClearance),
+              ),
+            ],
+          ),
+          // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+            child: const TopFadeBlur(useShader: true),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: SizedBox(
+                height: kToolbarHeight,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      '通讯录',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-          const SliverPadding(padding: EdgeInsets.only(bottom: 96)),
         ],
       ),
+    );
+  }
+}
+
+/// 无联系人 / 搜索无结果的占位。
+class _EmptyView extends StatelessWidget {
+  const _EmptyView();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const NeuIconButton(icon: Icons.contacts_rounded, size: 72),
+        const SizedBox(height: NeuSpacing.md),
+        Text('暂无联系人', style: Theme.of(context).textTheme.bodyLarge),
+        const SizedBox(height: NeuSpacing.xs),
+        Text('加入房间后，成员会显示在这里', style: Theme.of(context).textTheme.bodySmall),
+      ],
     );
   }
 }
@@ -178,7 +184,7 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
 class _ContactTile extends ConsumerStatefulWidget {
   final Contact contact;
 
-  const _ContactTile({required this.contact});
+  const _ContactTile({super.key, required this.contact});
 
   @override
   ConsumerState<_ContactTile> createState() => _ContactTileState();
@@ -187,6 +193,7 @@ class _ContactTile extends ConsumerStatefulWidget {
 class _ContactTileState extends ConsumerState<_ContactTile> {
   String? _resolvedAvatarUrl;
   bool _creatingDm = false;
+  bool _pressed = false;
 
   @override
   void initState() {
@@ -204,112 +211,180 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
     }
   }
 
+  /// 资料卡:头像 + 昵称 + Matrix ID,底部「发消息 / 复制 ID」。
+  Future<void> _showProfile() async {
+    final contact = widget.contact;
+    // 页面 context 用于关闭弹层后的提示与导航;弹层自身的 context
+    // 在 pop 后随路由销毁,不能拿来做这些。
+    final pageContext = context;
+    await showNeuSheet<void>(
+      context: context,
+      child: Builder(
+        builder: (sheetContext) => Padding(
+          padding: const EdgeInsets.fromLTRB(
+            NeuSpacing.xl,
+            NeuSpacing.lg,
+            NeuSpacing.xl,
+            NeuSpacing.lg,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppAvatar(
+                fallback: contact.name,
+                size: 84,
+                radius: NeuRadius.nav,
+                url: _resolvedAvatarUrl,
+              ),
+              const SizedBox(height: NeuSpacing.md),
+              Text(
+                contact.name,
+                style: Theme.of(pageContext).textTheme.titleLarge,
+              ),
+              const SizedBox(height: NeuSpacing.xs),
+              Text(
+                contact.status,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(pageContext).textTheme.bodySmall,
+              ),
+              const SizedBox(height: NeuSpacing.lg),
+              SizedBox(
+                width: double.infinity,
+                child: NeuButton(
+                  accent: true,
+                  onPressed: () {
+                    Navigator.of(sheetContext).pop();
+                    _createDm();
+                  },
+                  child: const Center(child: Text('发消息')),
+                ),
+              ),
+              const SizedBox(height: NeuSpacing.sm),
+              SizedBox(
+                width: double.infinity,
+                child: NeuButton(
+                  intensity: .7,
+                  icon: const Icon(Icons.copy_outlined, size: 16),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: contact.status));
+                    Navigator.of(sheetContext).pop();
+                    neuToast(pageContext, '已复制 Matrix ID');
+                  },
+                  child: const Center(child: Text('复制 ID')),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _createDm() async {
+    // Entry guard (not only the disabled button): the rebuild lags a frame,
+    // so a second tap could otherwise issue a duplicate createDm (two
+    // concurrent scans would both miss the existing DM and create duplicate
+    // rooms).
+    if (_creatingDm) return;
+    setState(() => _creatingDm = true);
+    // Account snapshot: a switch while the request is in flight must not
+    // redirect the write, and suppresses the feedback below (the room would
+    // belong to the previous account).
+    final accountUserId = ref.read(activeUserIdProvider) ?? '';
+    try {
+      final roomId = await createDm(
+        accountUserId: accountUserId,
+        userId: widget.contact.id,
+      );
+      // The account may have switched while the request was in flight: skip
+      // the navigation — the chat page would open against a room of the
+      // previous account. `mounted` first: `ref.read` throws after unmount
+      // (Riverpod asserts on disposed widgets).
+      if (!mounted) return;
+      if (ref.read(activeUserIdProvider) != accountUserId) {
+        return;
+      }
+      if (context.mounted) {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ChatDetailPage(
+              roomId: roomId,
+              roomName: widget.contact.name,
+              avatarUrl: _resolvedAvatarUrl,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
+      // `mounted` first: `ref.read` throws after unmount.
+      if (!mounted) return;
+      if (ref.read(activeUserIdProvider) != accountUserId) {
+        return;
+      }
+      if (context.mounted) {
+        // Shared wording: timeout mapping and partial-success passthrough
+        // come from the single `actionFailureMessage` source.
+        neuToast(context, actionFailureMessage(e));
+      }
+    } finally {
+      if (mounted) setState(() => _creatingDm = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final contact = widget.contact;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      child: Row(
-        children: [
-          AppAvatar(
-            fallback: contact.name,
-            size: 48,
-            radius: AppRadii.content,
-            url: _resolvedAvatarUrl,
+    return NeuAction(
+      radius: NeuRadius.content,
+      onTap: _showProfile,
+      onPressedChanged: (value) => setState(() => _pressed = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: ShapeDecoration(
+          color: _pressed ? context.neu.accentSoft : null,
+          shape: RoundedSuperellipseBorder(
+            borderRadius: BorderRadius.circular(NeuRadius.content),
           ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  contact.name,
-                  style: const TextStyle(
-                    color: AppColors.onBackground,
-                    fontSize: 15.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  contact.status,
-                  style: const TextStyle(
-                    color: AppColors.onSurfaceVariant,
-                    fontSize: 13,
-                  ),
-                ),
-              ],
+        ),
+        child: Row(
+          children: [
+            AppAvatar(
+              fallback: contact.name,
+              size: 48,
+              radius: NeuRadius.content,
+              url: _resolvedAvatarUrl,
             ),
-          ),
-          IconButton(
-            icon: const Icon(
-              Icons.message_rounded,
-              color: AppColors.onSurfaceVariant,
-              size: 20,
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    contact.name,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    contact.status,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
             ),
-            onPressed: _creatingDm
-                ? null
-                : () async {
-                    // Entry guard (not only the disabled button): the
-                    // rebuild lags a frame, so a second tap could otherwise
-                    // issue a duplicate createDm (two concurrent scans would
-                    // both miss the existing DM and create duplicate rooms).
-                    if (_creatingDm) return;
-                    setState(() => _creatingDm = true);
-                    // Account snapshot: a switch while the request is in
-                    // flight must not redirect the write, and suppresses
-                    // the feedback below (the room would belong to the
-                    // previous account).
-                    final accountUserId = ref.read(activeUserIdProvider) ?? '';
-                    try {
-                      final roomId = await createDm(
-                        accountUserId: accountUserId,
-                        userId: contact.id,
-                      );
-                      // The account may have switched while the request was
-                      // in flight: skip the navigation — the chat page
-                      // would open against a room of the previous account.
-                      // `mounted` first: `ref.read` throws after unmount
-                      // (Riverpod asserts on disposed widgets).
-                      if (!mounted) return;
-                      if (ref.read(activeUserIdProvider) != accountUserId) {
-                        return;
-                      }
-                      if (context.mounted) {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => ChatDetailPage(
-                              roomId: roomId,
-                              roomName: contact.name,
-                              avatarUrl: _resolvedAvatarUrl,
-                            ),
-                          ),
-                        );
-                      }
-                    } catch (e) {
-                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
-                      // `mounted` first: `ref.read` throws after unmount.
-                      if (!mounted) return;
-                      if (ref.read(activeUserIdProvider) != accountUserId) {
-                        return;
-                      }
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          // Shared wording: timeout mapping and partial-
-                          // success passthrough come from the single
-                          // `actionFailureMessage` source.
-                          SnackBar(
-                            content: Text(actionFailureMessage(e)),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
-                      }
-                    } finally {
-                      if (mounted) setState(() => _creatingDm = false);
-                    }
-                  },
-          ),
-        ],
+            const SizedBox(width: NeuSpacing.sm),
+            NeuIconButton(
+              icon: Icons.chat_bubble_outline_rounded,
+              size: 36,
+              tooltip: '发消息',
+              onPressed: _creatingDm ? null : _createDm,
+            ),
+          ],
+        ),
       ),
     );
   }

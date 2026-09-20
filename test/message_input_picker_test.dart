@@ -5,15 +5,22 @@ import 'package:matter/pages/chat/attachment_picker.dart';
 import 'package:matter/pages/chat/composer_picker_panel.dart';
 import 'package:matter/pages/chat/latest_message_control.dart';
 import 'package:matter/pages/chat/message_input.dart';
-import 'package:matter/theme/app_theme.dart';
-import 'package:matter/widgets/liquid_glass.dart';
+import 'package:matter/theme/neu_colors.dart';
+import 'package:matter/widgets/glass.dart';
+
+import 'helpers/neu_test_theme.dart';
 
 void main() {
   testWidgets('picker button reopens the previously selected sticker tab', (
     tester,
   ) async {
     await tester.pumpWidget(
-      const ProviderScope(child: MaterialApp(home: _MessageInputHarness())),
+      ProviderScope(
+        child: MaterialApp(
+          theme: neuTestTheme(),
+          home: const _MessageInputHarness(),
+        ),
+      ),
     );
     await tester.pump();
 
@@ -26,7 +33,7 @@ void main() {
     expect(find.byIcon(Icons.interests_rounded), findsOneWidget);
     expect(find.byIcon(Icons.sticky_note_2_rounded), findsNothing);
 
-    await tester.tap(find.byType(IconButton).first);
+    await tester.tap(find.byIcon(Icons.interests_rounded));
     await tester.pump();
     await tester.pump();
 
@@ -44,23 +51,41 @@ void main() {
     addTearDown(tester.view.resetPadding);
 
     await tester.pumpWidget(
-      const ProviderScope(child: MaterialApp(home: _MessageInputHarness())),
+      ProviderScope(
+        child: MaterialApp(
+          theme: neuTestTheme(),
+          home: const _MessageInputHarness(),
+        ),
+      ),
     );
     await tester.pump();
 
-    final surface = tester.widget<LiquidGlassContainer>(
+    final surface = tester.widget<GlassPanel>(
       find.byKey(const ValueKey('message-input-surface')),
     );
-    expect(surface.borderRadius, AppRadii.nav);
-    expect(surface.blurSigma, 18);
-    expect(surface.margin, const EdgeInsets.fromLTRB(10, 4, 10, 12));
-    expect(find.byType(ShaderMask), findsOneWidget);
+    expect(surface.radius, NeuRadius.nav);
+    expect(surface.blur, 18);
+    expect(
+      surface.padding,
+      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+    );
+    final surfaceMargin = tester.widget<Padding>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('message-input-surface')),
+            matching: find.byType(Padding),
+          )
+          .first,
+    );
+    expect(surfaceMargin.padding, const EdgeInsets.fromLTRB(10, 4, 10, 12));
+    expect(find.byType(BottomFadeBlur), findsOneWidget);
 
     final backdropFilters = find.descendant(
       of: find.byType(MessageInput),
       matching: find.byType(BackdropFilter),
     );
-    expect(backdropFilters, findsNWidgets(2));
+    // GlassPanel 一层 + BottomFadeBlur 的渐进模糊条带。
+    expect(backdropFilters, findsAtLeastNWidgets(3));
     expect(tester.getBottomLeft(backdropFilters.first).dy, 800);
   });
 
@@ -68,9 +93,12 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
         child: MaterialApp(
-          home: _MessageInputHarness(initialPanelMode: InputPanelMode.keyboard),
+          theme: neuTestTheme(),
+          home: const _MessageInputHarness(
+            initialPanelMode: InputPanelMode.keyboard,
+          ),
         ),
       ),
     );
@@ -94,9 +122,10 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      const ProviderScope(
+      ProviderScope(
         child: MaterialApp(
-          home: _MessageInputHarness(
+          theme: neuTestTheme(),
+          home: const _MessageInputHarness(
             initialPanelMode: InputPanelMode.attachment,
             keepPickerWhileKeyboard: true,
           ),

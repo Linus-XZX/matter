@@ -53,7 +53,7 @@ mod sdk_timeline;
 pub struct AppLogEntry {
     /// Milliseconds since Unix epoch
     pub timestamp: i64,
-    /// log / warn / error
+    /// info / warn / error / debug
     pub level: String,
     /// What subsystem: sync, auth, rooms, media, etc.
     pub tag: String,
@@ -171,6 +171,7 @@ fn app_log(level: &str, tag: &str, message: String) {
     match level {
         "error" => log::error!("[{}] {}", tag, entry.message),
         "warn" => log::warn!("[{}] {}", tag, entry.message),
+        "debug" => log::debug!("[{}] {}", tag, entry.message),
         _ => log::info!("[{}] {}", tag, entry.message),
     }
     // Push to broadcast (live listeners)
@@ -268,7 +269,7 @@ pub fn clear_app_logs() {
 #[frb(sync)]
 pub fn log_app_message(level: String, tag: String, message: String) {
     let level = match level.as_str() {
-        "error" | "warn" => level,
+        "error" | "warn" | "debug" => level,
         _ => "info".to_string(),
     };
     app_log(&level, &tag, message);
@@ -3238,14 +3239,22 @@ async fn finalize_pending() -> Result<String, String> {
                     .map_err(|e| format!("Failed to remove stale account store backup: {e}"))?;
                 let had_previous_store = sdk_dir.exists();
                 if had_previous_store {
-                    if let Err(error) =
-                        rename_with_retry(&sdk_dir, &previous_dir, 6, std::time::Duration::from_millis(50)).await
+                    if let Err(error) = rename_with_retry(
+                        &sdk_dir,
+                        &previous_dir,
+                        6,
+                        std::time::Duration::from_millis(50),
+                    )
+                    .await
                     {
-                        return Err(format!("Failed to preserve existing account store: {error}"));
+                        return Err(format!(
+                            "Failed to preserve existing account store: {error}"
+                        ));
                     }
                 }
                 if let Err(error) =
-                    rename_with_retry(&temp_dir, &sdk_dir, 6, std::time::Duration::from_millis(50)).await
+                    rename_with_retry(&temp_dir, &sdk_dir, 6, std::time::Duration::from_millis(50))
+                        .await
                 {
                     if had_previous_store {
                         let _ = tokio::fs::rename(&previous_dir, &sdk_dir).await;

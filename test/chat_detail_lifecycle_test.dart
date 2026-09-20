@@ -16,7 +16,9 @@ import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
+import 'package:matter/widgets/neu_surface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'helpers/neu_test_theme.dart';
 
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
@@ -299,7 +301,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -313,6 +316,60 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets(
+    'the timeline runs under the pinned stack instead of beneath it',
+    (tester) async {
+      const roomId = '!pinned-underlay:example.org';
+      const userId = '@me:example.org';
+      rustApi.pinnedMessages = [_message(r'$pinned')];
+      final container = ProviderContainer(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+          roomMembersProvider(roomId).overrideWith((ref) async => const []),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value = userId;
+      await container.read(roomMembersProvider(roomId).future);
+      container.read(messageCacheProvider(roomId).notifier).value = [
+        _ownMessage(r'$own', content: 'hi', timestamp: '10'),
+      ];
+      container.read(messageCacheOwnerProvider(roomId).notifier).value = userId;
+      container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: neuTestTheme(),
+            home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey(r'pinned-message:$pinned')),
+        findsOneWidget,
+      );
+
+      // The pinned stack is a floating glass layer: the timeline viewport must
+      // start above its bottom edge so messages scroll under it. Clipping the
+      // viewport exactly at that edge is what cut the background off at a hard
+      // line below the stack.
+      final viewport = tester.getRect(
+        find.byKey(const ValueKey('pinned-messages-stack')),
+      );
+      final timeline = tester.getRect(find.byType(CustomScrollView));
+      expect(timeline.top, lessThan(viewport.bottom));
+      expect(timeline.top, lessThanOrEqualTo(viewport.top));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
   testWidgets('switching away and back restores live room view ownership', (
     tester,
   ) async {
@@ -324,7 +381,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -357,7 +415,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -387,15 +446,16 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
     );
     await tester.pump();
 
-    final searchButton = tester.widget<IconButton>(
-      find.widgetWithIcon(IconButton, Icons.search_rounded),
+    final searchButton = tester.widget<NeuIconButton>(
+      find.widgetWithIcon(NeuIconButton, Icons.search_rounded),
     );
     searchButton.onPressed!();
     searchButton.onPressed!();
@@ -428,7 +488,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             roomId: roomId,
             roomName: 'Room',
@@ -475,7 +536,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             roomId: roomId,
             roomName: 'Room',
@@ -525,7 +587,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             roomId: roomId,
             roomName: 'Room',
@@ -573,7 +636,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -613,7 +677,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -672,7 +737,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -741,7 +807,8 @@ void main() {
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
-          child: const MaterialApp(
+          child: MaterialApp(
+            theme: neuTestTheme(),
             home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
           ),
         ),
@@ -810,7 +877,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -879,7 +947,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -912,7 +981,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -924,7 +994,7 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(home: SizedBox.shrink()),
+        child: MaterialApp(theme: neuTestTheme(), home: SizedBox.shrink()),
       ),
     );
     await tester.pump();
@@ -946,7 +1016,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -987,6 +1058,7 @@ void main() {
       return UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             key: ValueKey(roomId),
             roomId: roomId,
@@ -1045,6 +1117,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const ChatDetailPage(roomId: '!a:example.org', roomName: 'A'),
         ),
@@ -1091,6 +1164,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const ChatDetailPage(
             roomId: '!room:example.org',
@@ -1135,6 +1209,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const ChatDetailPage(
             roomId: '!room:example.org',
@@ -1183,7 +1258,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1221,7 +1297,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1251,7 +1328,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -1288,7 +1366,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -1324,7 +1403,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -1370,6 +1450,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const ChatDetailPage(
             roomId: '!room:example.org',
@@ -1425,6 +1506,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const ChatDetailPage(
             roomId: '!room:example.org',
@@ -1470,6 +1552,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          theme: neuTestTheme(),
           navigatorObservers: [chatRouteObserver],
           home: const Scaffold(body: SizedBox(key: ValueKey('root-route'))),
         ),
@@ -1527,7 +1610,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1570,7 +1654,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1616,7 +1701,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1661,7 +1747,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1720,7 +1807,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1783,7 +1871,8 @@ void main() {
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
-          child: const MaterialApp(
+          child: MaterialApp(
+            theme: neuTestTheme(),
             home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
           ),
         ),
@@ -1832,7 +1921,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1888,7 +1978,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -1949,7 +2040,8 @@ void main() {
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
-          child: const MaterialApp(
+          child: MaterialApp(
+            theme: neuTestTheme(),
             home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
           ),
         ),
@@ -2019,7 +2111,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2101,7 +2194,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2170,7 +2264,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2260,7 +2355,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2321,7 +2417,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2400,7 +2497,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2443,7 +2541,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: roomId, roomName: 'Room'),
         ),
       ),
@@ -2464,10 +2563,10 @@ void main() {
     );
     expect(hasOngoingSendFlight, isTrue);
 
-    final sendButton = tester.widget<IconButton>(
+    final sendButton = tester.widget<NeuIconButton>(
       find.descendant(
         of: find.byKey(const ValueKey('send_only')),
-        matching: find.byType(IconButton),
+        matching: find.byType(NeuIconButton),
       ),
     );
     sendButton.onPressed!();
@@ -2508,7 +2607,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(roomId: '!room:example.org', roomName: 'Room'),
         ),
       ),
@@ -2545,7 +2645,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             roomId: '!room:example.org',
             roomName: 'Old name',
@@ -2592,7 +2693,8 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(
+        child: MaterialApp(
+          theme: neuTestTheme(),
           home: ChatDetailPage(
             roomId: '!room:example.org',
             roomName: 'Name A',

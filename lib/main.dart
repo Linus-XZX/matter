@@ -14,9 +14,11 @@ import 'pages/chat/chat_detail_page.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/mutable_state.dart';
+import 'providers/theme_provider.dart';
 import 'src/rust/api/matrix.dart' as rust;
 import 'src/rust/frb_generated.dart';
-import 'theme/app_theme.dart';
+import 'theme/neu_colors.dart';
+import 'theme/neu_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,12 +61,18 @@ Future<void> main() async {
   }
   final credentialStoreFailure = startupSessionCredentialStoreFailure;
 
+  final startupDark =
+      ui.PlatformDispatcher.instance.platformBrightness == Brightness.dark;
   SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
+    SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      systemNavigationBarColor: AppColors.background,
-      systemNavigationBarIconBrightness: Brightness.light,
+      statusBarIconBrightness: startupDark ? Brightness.light : Brightness.dark,
+      systemNavigationBarColor: startupDark
+          ? NeuColors.dark.base
+          : NeuColors.light.base,
+      systemNavigationBarIconBrightness: startupDark
+          ? Brightness.light
+          : Brightness.dark,
       systemNavigationBarDividerColor: Colors.transparent,
     ),
   );
@@ -315,16 +323,60 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     ref.watch(sessionTokenPersistenceProvider);
     final isLoggedIn = ref.watch(isLoggedInProvider);
     final showMainApp = isLoggedIn || _restoring;
+    final themeStyle = ref.watch(appThemeStyleProvider);
+    _syncSystemOverlayStyle(themeStyle);
+
+    final neuLight = buildNeuTheme(NeuColors.light, Brightness.light);
+    final neuDark = buildNeuTheme(NeuColors.dark, Brightness.dark);
+    final (theme, darkTheme, themeMode) = switch (themeStyle) {
+      AppThemeStyle.neuLight => (neuLight, neuDark, ThemeMode.light),
+      AppThemeStyle.neuDark => (neuLight, neuDark, ThemeMode.dark),
+      AppThemeStyle.neuSystem => (neuLight, neuDark, ThemeMode.system),
+    };
 
     return MaterialApp(
       navigatorKey: _navigatorKey,
       navigatorObservers: [chatRouteObserver],
       title: 'Matter',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
-      darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.dark,
+      theme: theme,
+      darkTheme: darkTheme,
+      themeMode: themeMode,
       home: showMainApp ? const MatterApp() : const LoginPage(),
     );
+  }
+
+  AppThemeStyle? _lastOverlayStyle;
+
+  /// 状态栏/导航栏图标亮度跟随主题明暗（启动时 main() 里先按系统明暗设一次）。
+  void _syncSystemOverlayStyle(AppThemeStyle style) {
+    if (_lastOverlayStyle == style) return;
+    _lastOverlayStyle = style;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final platformDark =
+          MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+      final isDark = switch (style) {
+        AppThemeStyle.neuDark => true,
+        AppThemeStyle.neuLight => false,
+        AppThemeStyle.neuSystem => platformDark,
+      };
+      final navColor = switch (style) {
+        AppThemeStyle.neuLight => NeuColors.light.base,
+        AppThemeStyle.neuDark => NeuColors.dark.base,
+        AppThemeStyle.neuSystem =>
+          platformDark ? NeuColors.dark.base : NeuColors.light.base,
+      };
+      SystemChrome.setSystemUIOverlayStyle(
+        SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+          systemNavigationBarColor: navColor,
+          systemNavigationBarIconBrightness: isDark
+              ? Brightness.light
+              : Brightness.dark,
+          systemNavigationBarDividerColor: Colors.transparent,
+        ),
+      );
+    });
   }
 }
