@@ -12,6 +12,7 @@ import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/chat_visual_settings_provider.dart';
 import 'action_failure_message.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/neu_colors.dart';
@@ -49,21 +50,29 @@ String? effectiveFormattedHtml(ChatMessage message) =>
 /// 配方与 [NeuDecoration] 的 raised/intensity .7 一致,但接受分角
 /// [BorderRadius],以保留同发送者聚合时的拼接圆角。
 Decoration neuBubbleDecoration(
+  BuildContext context,
   NeuColors colors, {
   required bool isMe,
   required BorderRadius borderRadius,
 }) {
   const offset = 3.8 * .7;
+  final settings = ChatVisualSettingsScope.of(context);
   return ShapeDecoration(
-    shape: RoundedSuperellipseBorder(borderRadius: borderRadius),
-    gradient: LinearGradient(
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-      colors: isMe
-          ? [neuShift(colors.accent, .08), neuShift(colors.accent, -.06)]
-          : [neuShift(colors.card, .055), neuShift(colors.card, -.05)],
-    ),
-    shadows: neuBubbleShadows(colors, offset: offset),
+    shape: settings.superellipseBorderEnabled
+        ? RoundedSuperellipseBorder(borderRadius: borderRadius)
+        : RoundedRectangleBorder(borderRadius: borderRadius),
+    gradient: settings.bubbleGradientEnabled
+        ? LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: isMe
+                ? [neuShift(colors.accent, .08), neuShift(colors.accent, -.06)]
+                : [neuShift(colors.card, .055), neuShift(colors.card, -.05)],
+          )
+        : null,
+    shadows: settings.bubbleShadowsEnabled
+        ? neuBubbleShadows(colors, offset: offset)
+        : const [],
   );
 }
 
@@ -81,6 +90,22 @@ List<BoxShadow> neuBubbleShadows(NeuColors colors, {double offset = 2.66}) => [
     offset: Offset(-offset, -offset),
   ),
 ];
+
+ShapeBorder neuBubbleShape(BuildContext context, BorderRadius borderRadius) {
+  return ChatVisualSettingsScope.of(context).superellipseBorderEnabled
+      ? RoundedSuperellipseBorder(borderRadius: borderRadius)
+      : RoundedRectangleBorder(borderRadius: borderRadius);
+}
+
+List<BoxShadow> enabledNeuBubbleShadows(
+  BuildContext context,
+  NeuColors colors, {
+  double offset = 2.66,
+}) {
+  return ChatVisualSettingsScope.of(context).bubbleShadowsEnabled
+      ? neuBubbleShadows(colors, offset: offset)
+      : const [];
+}
 
 class MessageGroup {
   final String senderId;
@@ -846,6 +871,7 @@ class MessageGroupWidget extends ConsumerWidget {
       constraints: BoxConstraints(maxWidth: maxBubbleWidth),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: neuBubbleDecoration(
+        context,
         colors,
         isMe: isMe,
         borderRadius: _messageBorderRadius(

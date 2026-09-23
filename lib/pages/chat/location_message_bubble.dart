@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../theme/neu_colors.dart';
-import 'message_group.dart' show neuBubbleShadows;
+import 'message_group.dart' show enabledNeuBubbleShadows, neuBubbleShape;
 
 typedef LocationUriLauncher = Future<bool> Function(Uri uri);
 
@@ -89,8 +89,9 @@ class LocationMessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.neu;
     final label = body.trim().isEmpty ? geoUri : body;
-    final shape = RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(NeuRadius.content),
+    final shape = neuBubbleShape(
+      context,
+      BorderRadius.circular(NeuRadius.content),
     );
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
@@ -98,7 +99,7 @@ class LocationMessageBubble extends StatelessWidget {
         decoration: ShapeDecoration(
           shape: shape,
           color: isMe ? colors.accent : colors.card,
-          shadows: neuBubbleShadows(colors),
+          shadows: enabledNeuBubbleShadows(context, colors),
         ),
         child: ClipPath.shape(
           shape: shape,

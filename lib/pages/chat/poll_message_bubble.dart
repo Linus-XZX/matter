@@ -5,7 +5,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/neu_surface.dart';
-import 'message_group.dart' show neuBubbleShadows;
+import 'message_group.dart' show enabledNeuBubbleShadows, neuBubbleShape;
 
 typedef PollVoteCallback = Future<void> Function(List<String> answerIds);
 typedef PollEndCallback = Future<void> Function();
@@ -227,8 +227,9 @@ class _PollMessageBubbleState extends ConsumerState<PollMessageBubble> {
         !_submitting &&
         _selected.isNotEmpty &&
         !_setsEqual(_selected, _committedVote);
-    final shape = RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(NeuRadius.content),
+    final shape = neuBubbleShape(
+      context,
+      BorderRadius.circular(NeuRadius.content),
     );
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: widget.maxWidth),
@@ -238,7 +239,7 @@ class _PollMessageBubbleState extends ConsumerState<PollMessageBubble> {
           color: widget.isMe
               ? colors.accent.withValues(alpha: 0.18)
               : colors.card,
-          shadows: neuBubbleShadows(colors),
+          shadows: enabledNeuBubbleShadows(context, colors),
         ),
         child: ClipPath.shape(
           shape: shape,

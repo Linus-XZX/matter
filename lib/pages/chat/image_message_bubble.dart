@@ -6,10 +6,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/chat_visual_settings_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
-import 'message_group.dart' show neuBubbleShadows;
+import 'message_group.dart' show enabledNeuBubbleShadows;
 import 'message_text.dart';
 import 'send_flight.dart';
 
@@ -216,7 +217,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
         borderRadius: mediaBorderRadius,
         boxShadow: widget.isSticker || hasCaption
             ? null
-            : neuBubbleShadows(colors),
+            : enabledNeuBubbleShadows(context, colors),
       ),
       clipBehavior: Clip.antiAlias,
       child: Stack(
@@ -298,7 +299,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       decoration: BoxDecoration(
         color: widget.isMe ? colors.accent : colors.card,
         borderRadius: _bubbleBorderRadius,
-        boxShadow: neuBubbleShadows(colors),
+        boxShadow: enabledNeuBubbleShadows(context, colors),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -366,6 +367,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
 
   bool _needsShortImageBackdrop(BuildContext context) =>
       !widget.isSticker &&
+      ChatVisualSettingsScope.of(context).shortImageBlurredBackdropEnabled &&
       _fittedBubbleSize(context).height < _minimumImageBubbleHeight;
 
   Size _fittedBubbleSize(BuildContext context) {
@@ -402,7 +404,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
             isMe ? NeuRadius.tag : NeuRadius.content,
           ),
         ),
-        boxShadow: neuBubbleShadows(colors),
+        boxShadow: enabledNeuBubbleShadows(context, colors),
       ),
       child: Center(
         child: Icon(
@@ -422,7 +424,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       decoration: BoxDecoration(
         color: colors.card,
         borderRadius: _bubbleBorderRadius,
-        boxShadow: neuBubbleShadows(colors),
+        boxShadow: enabledNeuBubbleShadows(context, colors),
       ),
       child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
     );

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/chat_visual_settings_provider.dart';
 import '../../providers/message_cache_persistence.dart';
 import '../../providers/message_ordering.dart';
 import '../../providers/mutable_state.dart';
@@ -1742,7 +1743,10 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   }
 
   bool _needsStickyAvatar(MessageGroup group) {
-    return !widget.isDm && !group.isMe && !_isEventGroup(group);
+    return ref.read(chatVisualSettingsProvider).stickyAvatarsEnabled &&
+        !widget.isDm &&
+        !group.isMe &&
+        !_isEventGroup(group);
   }
 
   Widget _buildTimelineEntry(
@@ -1900,6 +1904,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         : pickerBaseHeight;
     final mediaQuery = MediaQuery.of(context);
     final colors = context.neu;
+    final visualSettings = ref.watch(chatVisualSettingsProvider);
     // The floating header hangs below the status bar; the pinned stack and
     // the timeline's oldest-end clearance are measured from its bottom edge.
     // Prefer the measured panel height (CJK title metrics can exceed the
@@ -1959,342 +1964,347 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               : '已标记未读')
         : '在线';
 
-    return PopScope(
-      canPop:
-          !widget.embedded &&
-          _inputPanelMode == InputPanelMode.none &&
-          !keyboardVisible,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
-        _setInputPanelMode(InputPanelMode.none);
-      },
-      child: Scaffold(
-        resizeToAvoidBottomInset: false,
-        backgroundColor: colors.base,
-        body: Stack(
-          children: [
-            Positioned.fill(child: ColoredBox(color: colors.base)),
-            Positioned.fill(
-              child: Builder(
-                builder: (context) {
-                  final messages = messageCacheOwner == activeUserId
-                      ? cachedMessages
-                      : const <ChatMessage>[];
-                  // The account switched while this page stayed mounted:
-                  // the old account's messages must not render (the gate
-                  // above) and the empty timeline must not mislead with its
-                  // retry affordances — show a neutral placeholder instead
-                  // (same discipline as the sibling pages).
-                  if (messageCacheOwner != activeUserId &&
-                      messageCacheOwner != null) {
-                    return Center(
-                      child: Text(
-                        '账号已切换',
-                        style: TextStyle(color: colors.textTertiary),
-                      ),
-                    );
-                  }
-                  final ignoredUserIds = ignoredUserIdsAsync.value;
-                  // An unknown ignore list (first load, or a failed load
-                  // without any snapshot) must not degrade into "nobody is
-                  // ignored" and re-expose messages from ignored senders.
-                  if (ignoredUserIds == null) {
-                    if (ignoredUserIdsAsync.hasError) {
+    return ChatVisualSettingsScope(
+      settings: visualSettings,
+      child: PopScope(
+        canPop:
+            !widget.embedded &&
+            _inputPanelMode == InputPanelMode.none &&
+            !keyboardVisible,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+          _setInputPanelMode(InputPanelMode.none);
+        },
+        child: Scaffold(
+          resizeToAvoidBottomInset: false,
+          backgroundColor: colors.base,
+          body: Stack(
+            children: [
+              Positioned.fill(child: ColoredBox(color: colors.base)),
+              Positioned.fill(
+                child: Builder(
+                  builder: (context) {
+                    final messages = messageCacheOwner == activeUserId
+                        ? cachedMessages
+                        : const <ChatMessage>[];
+                    // The account switched while this page stayed mounted:
+                    // the old account's messages must not render (the gate
+                    // above) and the empty timeline must not mislead with its
+                    // retry affordances — show a neutral placeholder instead
+                    // (same discipline as the sibling pages).
+                    if (messageCacheOwner != activeUserId &&
+                        messageCacheOwner != null) {
                       return Center(
-                        child: TextButton.icon(
-                          onPressed: () =>
-                              ref.invalidate(ignoredUserIdsProvider),
-                          icon: Icon(
-                            Icons.refresh_rounded,
-                            color: colors.accent,
-                          ),
-                          label: Text(
-                            '无法加载忽略列表，消息已隐藏',
-                            style: TextStyle(color: colors.textSecondary),
-                          ),
+                        child: Text(
+                          '账号已切换',
+                          style: TextStyle(color: colors.textTertiary),
                         ),
                       );
                     }
-                    return Center(
-                      child: CircularProgressIndicator(
-                        color: colors.accent,
-                        strokeWidth: 2,
-                      ),
-                    );
-                  }
-                  // Do not expose the timeline until its initial insets and
-                  // member-dependent labels are stable enough for layout.
-                  if ((!messageCachePrimed &&
-                          messages.isEmpty &&
-                          localOutgoingMessages.isEmpty) ||
-                      _inputChromeHeight == null ||
-                      (membersAsync.isLoading && !membersAsync.hasValue)) {
-                    return Center(
-                      child: CircularProgressIndicator(
-                        color: colors.accent,
-                        strokeWidth: 2,
-                      ),
-                    );
-                  }
-                  final visibleMessages = ignoredUserIds.isEmpty
-                      ? messages
-                      : messages
-                            .where(
-                              (message) =>
-                                  message.isMe ||
-                                  !ignoredUserIds.contains(message.senderId),
-                            )
-                            .toList();
-                  final timelineMessages = _timelineMessagesFor(
-                    visibleMessages,
-                    localOutgoingMessages,
-                    roomAccountKey,
-                  );
-                  _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
-                  if (_displayedMessages.isEmpty &&
-                      !_initialMessageJumpPending &&
-                      !_automaticOlderLoadBlocked &&
-                      !_isLoadingOlder &&
-                      _hasMoreMessages &&
-                      _paginationAnchorId() != null) {
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (mounted) unawaited(_loadOlderMessages());
-                    });
-                  }
-                  final timelineEntries = _timelineEntries;
-                  final messageIndex = _messageIndex;
-                  final avatarMap = membersAsync.maybeWhen(
-                    data: _buildAvatarMap,
-                    orElse: () => const <String, String?>{},
-                  );
-                  final membersById = <String, Contact>{
-                    for (final member
-                        in membersAsync.asData?.value ?? const <Contact>[])
-                      member.id: member,
-                  };
-                  final timeline = TweenAnimationBuilder<double>(
-                    tween: Tween<double>(end: messageBottomPadding),
-                    duration: animatePanelChange
-                        ? const Duration(milliseconds: 180)
-                        : Duration.zero,
-                    curve: Curves.easeOutCubic,
-                    builder: (context, animatedBottomPadding, _) {
-                      return NotificationListener<ScrollMetricsNotification>(
-                        onNotification: _handleScrollMetricsNotification,
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: _handleScrollNotification,
-                          child: CustomScrollView(
-                            key: _scrollViewportKey,
-                            reverse: true,
-                            controller: _scrollController,
-                            slivers: [
-                              SliverPadding(
-                                padding: EdgeInsets.only(
-                                  bottom: 8 + animatedBottomPadding,
-                                ),
-                              ),
-                              SliverList(
-                                delegate: SliverChildBuilderDelegate(
-                                  (context, index) => _buildTimelineEntry(
-                                    timelineEntries[index],
-                                    avatarMap,
-                                    membersById,
-                                    messageIndex,
-                                    8 + animatedBottomPadding,
-                                  ),
-                                  childCount: timelineEntries.length,
-                                  findChildIndexCallback:
-                                      _findTimelineEntryIndex,
-                                ),
-                              ),
-                              if (_automaticOlderLoadBlocked &&
-                                  _hasMoreMessages)
-                                if (timelineEntries.isEmpty)
-                                  SliverFillRemaining(
-                                    hasScrollBody: false,
-                                    child: Center(
-                                      child: TextButton.icon(
-                                        onPressed: _retryOlderMessages,
-                                        icon: const Icon(Icons.refresh_rounded),
-                                        label: const Text('重试加载更早消息'),
-                                      ),
-                                    ),
-                                  )
-                                else
-                                  SliverToBoxAdapter(
-                                    child: Center(
-                                      child: TextButton.icon(
-                                        onPressed: _retryOlderMessages,
-                                        icon: const Icon(
-                                          Icons.refresh_rounded,
-                                          size: 16,
-                                        ),
-                                        label: const Text('加载更早消息'),
-                                      ),
-                                    ),
-                                  ),
-                              SliverPadding(
-                                padding: EdgeInsets.only(
-                                  // The timeline runs under the floating
-                                  // header and the pinned stack; keep the
-                                  // oldest end clear of both layers.
-                                  top: headerInset + pinnedStackHeight + 4,
-                                ),
-                              ),
-                            ],
+                    final ignoredUserIds = ignoredUserIdsAsync.value;
+                    // An unknown ignore list (first load, or a failed load
+                    // without any snapshot) must not degrade into "nobody is
+                    // ignored" and re-expose messages from ignored senders.
+                    if (ignoredUserIds == null) {
+                      if (ignoredUserIdsAsync.hasError) {
+                        return Center(
+                          child: TextButton.icon(
+                            onPressed: () =>
+                                ref.invalidate(ignoredUserIdsProvider),
+                            icon: Icon(
+                              Icons.refresh_rounded,
+                              color: colors.accent,
+                            ),
+                            label: Text(
+                              '无法加载忽略列表，消息已隐藏',
+                              style: TextStyle(color: colors.textSecondary),
+                            ),
                           ),
-                        ),
-                      );
-                    },
-                    child: const SizedBox.shrink(),
-                  );
-                  if (!_initialMessageJumpPending) return timeline;
-                  return Stack(
-                    children: [
-                      Positioned.fill(
-                        child: Opacity(opacity: 0, child: timeline),
-                      ),
-                      Center(
+                        );
+                      }
+                      return Center(
                         child: CircularProgressIndicator(
                           color: colors.accent,
                           strokeWidth: 2,
                         ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
-            // 渐变模糊层:柔和过渡从浮动顶栏下方滚过的消息,
-            // 避免在视口上缘被硬裁切。
-            Positioned(
-              left: 0,
-              top: 0,
-              right: 0,
-              height: headerInset,
-              child: const TopFadeBlur(useShader: true),
-            ),
-            // Floating glass header — the only persistent glass layer.
-            Positioned(
-              left: 0,
-              top: 0,
-              right: 0,
-              child: _MeasuredSize(
-                onChanged: (size) {
-                  if (_measuredHeaderHeight == size.height) return;
-                  setState(() => _measuredHeaderHeight = size.height);
-                },
-                child: _buildTopBar(headerSubtitle),
-              ),
-            ),
-            Positioned(
-              left: 12,
-              top: headerInset,
-              right: 12,
-              child: PinnedMessagesStack(
-                roomId: widget.roomId,
-                onMessageTap: (messageId) =>
-                    unawaited(_jumpToMessage(messageId)),
-                onVisibleCountChanged: (count) {
-                  if (mounted && _pinnedStackVisibleCount != count) {
-                    setState(() => _pinnedStackVisibleCount = count);
-                  }
-                },
-              ),
-            ),
-            // Telegram-style floating date that tracks the day at the top edge
-            // of the viewport while scrolling, then fades out.
-            if (_hasTimelineGroups)
-              FloatingDateHeader(
-                scrollController: _scrollController,
-                scrollViewportKey: _scrollViewportKey,
-                boundaries: _floatingDateBoundariesCache,
-                separatorKeys: _floatingDateSeparatorKeysCache,
-                topInset: headerInset + pinnedStackHeight,
-              ),
-            AnimatedPositioned(
-              right: 16,
-              bottom: messageBottomPadding + 12,
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              child: LatestMessageControl(
-                visible:
-                    !_initialMessageJumpPending &&
-                    (_showLatestMessageControl || _focusedBrowsing) &&
-                    _forwardNoticeRoom == null,
-                showSentNotice: _showSentNotice,
-                onPressed: _focusedBrowsing
-                    ? () => _exitFocusedBrowsing()
-                    : _scrollToLatest,
-              ),
-            ),
-            if (_forwardNoticeRoom case final room?)
-              ForwardSuccessNoticeOverlay(
-                key: const ValueKey('forward-success-position'),
-                bottomInset: messageBottomPadding,
-                roomName: room.name,
-                onRoomTap: _openForwardNoticeRoom,
-              ),
-            AnimatedPositioned(
-              left: 0,
-              right: 0,
-              bottom: bottomOffset,
-              duration: Duration.zero,
-              curve: Curves.easeOutCubic,
-              child: _MeasuredSize(
-                onChanged: (size) {
-                  final chromeHeight = math.max(
-                    0.0,
-                    size.height - pickerHeight,
-                  );
-                  if (_inputChromeHeight == null) {
-                    setState(() => _inputChromeHeight = chromeHeight);
-                    return;
-                  }
-                  if ((inputChromeHeight - chromeHeight).abs() < 0.5) {
-                    return;
-                  }
-                  setState(() => _inputChromeHeight = chromeHeight);
-                },
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _buildTypingIndicator(),
-                    // The input panel belongs to the account the page was
-                    // opened under. After a switch-away the timeline is
-                    // cleared (messageCacheOwner mismatch) and subscriptions
-                    // are torn down, but the panel itself would remain
-                    // usable — typing or sending then would act as the new
-                    // account. Hide it until the switch-back listener
-                    // re-activates the page.
-                    if (_subscriptionsAccount == null ||
-                        activeUserId == _subscriptionsAccount)
-                      MessageInput(
-                        key: _messageInputKey,
-                        roomId: widget.roomId,
-                        totalMembers: totalMembers,
-                        panelMode: _inputPanelMode,
-                        pickerHeight: pickerHeight,
-                        pickerFullHeight: pickerFullHeight,
-                        pickerBaseHeight: pickerBaseHeight,
-                        pickerMaxHeight: pickerMaxHeight,
-                        animatePickerHeight: animatePanelChange,
-                        onPanelModeChanged: _setInputPanelMode,
-                        onPickerHeightChanged: (height) =>
-                            _handlePickerHeightChanged(
-                              height,
-                              pickerBaseHeight,
+                      );
+                    }
+                    // Do not expose the timeline until its initial insets and
+                    // member-dependent labels are stable enough for layout.
+                    if ((!messageCachePrimed &&
+                            messages.isEmpty &&
+                            localOutgoingMessages.isEmpty) ||
+                        _inputChromeHeight == null ||
+                        (membersAsync.isLoading && !membersAsync.hasValue)) {
+                      return Center(
+                        child: CircularProgressIndicator(
+                          color: colors.accent,
+                          strokeWidth: 2,
+                        ),
+                      );
+                    }
+                    final visibleMessages = ignoredUserIds.isEmpty
+                        ? messages
+                        : messages
+                              .where(
+                                (message) =>
+                                    message.isMe ||
+                                    !ignoredUserIds.contains(message.senderId),
+                              )
+                              .toList();
+                    final timelineMessages = _timelineMessagesFor(
+                      visibleMessages,
+                      localOutgoingMessages,
+                      roomAccountKey,
+                    );
+                    _rebuildDerivedMessages(timelineMessages, ignoredUserIds);
+                    if (_displayedMessages.isEmpty &&
+                        !_initialMessageJumpPending &&
+                        !_automaticOlderLoadBlocked &&
+                        !_isLoadingOlder &&
+                        _hasMoreMessages &&
+                        _paginationAnchorId() != null) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) unawaited(_loadOlderMessages());
+                      });
+                    }
+                    final timelineEntries = _timelineEntries;
+                    final messageIndex = _messageIndex;
+                    final avatarMap = membersAsync.maybeWhen(
+                      data: _buildAvatarMap,
+                      orElse: () => const <String, String?>{},
+                    );
+                    final membersById = <String, Contact>{
+                      for (final member
+                          in membersAsync.asData?.value ?? const <Contact>[])
+                        member.id: member,
+                    };
+                    final timeline = TweenAnimationBuilder<double>(
+                      tween: Tween<double>(end: messageBottomPadding),
+                      duration: animatePanelChange
+                          ? const Duration(milliseconds: 180)
+                          : Duration.zero,
+                      curve: Curves.easeOutCubic,
+                      builder: (context, animatedBottomPadding, _) {
+                        return NotificationListener<ScrollMetricsNotification>(
+                          onNotification: _handleScrollMetricsNotification,
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: _handleScrollNotification,
+                            child: CustomScrollView(
+                              key: _scrollViewportKey,
+                              reverse: true,
+                              controller: _scrollController,
+                              slivers: [
+                                SliverPadding(
+                                  padding: EdgeInsets.only(
+                                    bottom: 8 + animatedBottomPadding,
+                                  ),
+                                ),
+                                SliverList(
+                                  delegate: SliverChildBuilderDelegate(
+                                    (context, index) => _buildTimelineEntry(
+                                      timelineEntries[index],
+                                      avatarMap,
+                                      membersById,
+                                      messageIndex,
+                                      8 + animatedBottomPadding,
+                                    ),
+                                    childCount: timelineEntries.length,
+                                    findChildIndexCallback:
+                                        _findTimelineEntryIndex,
+                                  ),
+                                ),
+                                if (_automaticOlderLoadBlocked &&
+                                    _hasMoreMessages)
+                                  if (timelineEntries.isEmpty)
+                                    SliverFillRemaining(
+                                      hasScrollBody: false,
+                                      child: Center(
+                                        child: TextButton.icon(
+                                          onPressed: _retryOlderMessages,
+                                          icon: const Icon(
+                                            Icons.refresh_rounded,
+                                          ),
+                                          label: const Text('重试加载更早消息'),
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    SliverToBoxAdapter(
+                                      child: Center(
+                                        child: TextButton.icon(
+                                          onPressed: _retryOlderMessages,
+                                          icon: const Icon(
+                                            Icons.refresh_rounded,
+                                            size: 16,
+                                          ),
+                                          label: const Text('加载更早消息'),
+                                        ),
+                                      ),
+                                    ),
+                                SliverPadding(
+                                  padding: EdgeInsets.only(
+                                    // The timeline runs under the floating
+                                    // header and the pinned stack; keep the
+                                    // oldest end clear of both layers.
+                                    top: headerInset + pinnedStackHeight + 4,
+                                  ),
+                                ),
+                              ],
                             ),
-                        resolveSendPresentation: _resolveSendPresentation,
-                        onMessageQueued: _handleMessageQueued,
-                        onMessageSent: _handleMessageSent,
-                      ),
-                  ],
+                          ),
+                        );
+                      },
+                      child: const SizedBox.shrink(),
+                    );
+                    if (!_initialMessageJumpPending) return timeline;
+                    return Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Opacity(opacity: 0, child: timeline),
+                        ),
+                        Center(
+                          child: CircularProgressIndicator(
+                            color: colors.accent,
+                            strokeWidth: 2,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
-            ),
-          ],
+              // 渐变模糊层:柔和过渡从浮动顶栏下方滚过的消息,
+              // 避免在视口上缘被硬裁切。
+              Positioned(
+                left: 0,
+                top: 0,
+                right: 0,
+                height: headerInset,
+                child: const TopFadeBlur(useShader: true),
+              ),
+              // Floating glass header — the only persistent glass layer.
+              Positioned(
+                left: 0,
+                top: 0,
+                right: 0,
+                child: _MeasuredSize(
+                  onChanged: (size) {
+                    if (_measuredHeaderHeight == size.height) return;
+                    setState(() => _measuredHeaderHeight = size.height);
+                  },
+                  child: _buildTopBar(headerSubtitle),
+                ),
+              ),
+              Positioned(
+                left: 12,
+                top: headerInset,
+                right: 12,
+                child: PinnedMessagesStack(
+                  roomId: widget.roomId,
+                  onMessageTap: (messageId) =>
+                      unawaited(_jumpToMessage(messageId)),
+                  onVisibleCountChanged: (count) {
+                    if (mounted && _pinnedStackVisibleCount != count) {
+                      setState(() => _pinnedStackVisibleCount = count);
+                    }
+                  },
+                ),
+              ),
+              // Telegram-style floating date that tracks the day at the top edge
+              // of the viewport while scrolling, then fades out.
+              if (_hasTimelineGroups)
+                FloatingDateHeader(
+                  scrollController: _scrollController,
+                  scrollViewportKey: _scrollViewportKey,
+                  boundaries: _floatingDateBoundariesCache,
+                  separatorKeys: _floatingDateSeparatorKeysCache,
+                  topInset: headerInset + pinnedStackHeight,
+                ),
+              AnimatedPositioned(
+                right: 16,
+                bottom: messageBottomPadding + 12,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                child: LatestMessageControl(
+                  visible:
+                      !_initialMessageJumpPending &&
+                      (_showLatestMessageControl || _focusedBrowsing) &&
+                      _forwardNoticeRoom == null,
+                  showSentNotice: _showSentNotice,
+                  onPressed: _focusedBrowsing
+                      ? () => _exitFocusedBrowsing()
+                      : _scrollToLatest,
+                ),
+              ),
+              if (_forwardNoticeRoom case final room?)
+                ForwardSuccessNoticeOverlay(
+                  key: const ValueKey('forward-success-position'),
+                  bottomInset: messageBottomPadding,
+                  roomName: room.name,
+                  onRoomTap: _openForwardNoticeRoom,
+                ),
+              AnimatedPositioned(
+                left: 0,
+                right: 0,
+                bottom: bottomOffset,
+                duration: Duration.zero,
+                curve: Curves.easeOutCubic,
+                child: _MeasuredSize(
+                  onChanged: (size) {
+                    final chromeHeight = math.max(
+                      0.0,
+                      size.height - pickerHeight,
+                    );
+                    if (_inputChromeHeight == null) {
+                      setState(() => _inputChromeHeight = chromeHeight);
+                      return;
+                    }
+                    if ((inputChromeHeight - chromeHeight).abs() < 0.5) {
+                      return;
+                    }
+                    setState(() => _inputChromeHeight = chromeHeight);
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _buildTypingIndicator(),
+                      // The input panel belongs to the account the page was
+                      // opened under. After a switch-away the timeline is
+                      // cleared (messageCacheOwner mismatch) and subscriptions
+                      // are torn down, but the panel itself would remain
+                      // usable — typing or sending then would act as the new
+                      // account. Hide it until the switch-back listener
+                      // re-activates the page.
+                      if (_subscriptionsAccount == null ||
+                          activeUserId == _subscriptionsAccount)
+                        MessageInput(
+                          key: _messageInputKey,
+                          roomId: widget.roomId,
+                          totalMembers: totalMembers,
+                          panelMode: _inputPanelMode,
+                          pickerHeight: pickerHeight,
+                          pickerFullHeight: pickerFullHeight,
+                          pickerBaseHeight: pickerBaseHeight,
+                          pickerMaxHeight: pickerMaxHeight,
+                          animatePickerHeight: animatePanelChange,
+                          onPanelModeChanged: _setInputPanelMode,
+                          onPickerHeightChanged: (height) =>
+                              _handlePickerHeightChanged(
+                                height,
+                                pickerBaseHeight,
+                              ),
+                          resolveSendPresentation: _resolveSendPresentation,
+                          onMessageQueued: _handleMessageQueued,
+                          onMessageSent: _handleMessageSent,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
