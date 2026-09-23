@@ -707,9 +707,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           subtitle: '自动管理，无手动配置项',
                         ),
                         _SettingItem(
-                          icon: Icons.security_rounded,
-                          title: '加密',
-                          subtitle: '设备验证与加密恢复',
+                          icon: Icons.devices_rounded,
+                          title: '设备与加密',
+                          subtitle: '登录设备、验证与加密恢复',
                           onTap: () {
                             Navigator.of(context).push(
                               MaterialPageRoute<void>(
