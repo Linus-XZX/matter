@@ -4,7 +4,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/sheets.dart';
 import 'file_download_saver.dart';
-import 'message_group.dart' show neuBubbleShadows;
+import 'message_group.dart' show enabledNeuBubbleShadows, neuBubbleShape;
 
 /// Converts an untrusted attachment name into a portable suggested filename.
 @visibleForTesting
@@ -159,8 +159,9 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
     final secondary = widget.isMe
         ? colors.onAccent.withValues(alpha: 0.7)
         : colors.textTertiary;
-    final shape = RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(NeuRadius.content),
+    final shape = neuBubbleShape(
+      context,
+      BorderRadius.circular(NeuRadius.content),
     );
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: widget.maxWidth),
@@ -168,7 +169,7 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
         decoration: ShapeDecoration(
           shape: shape,
           color: widget.isMe ? colors.accent : colors.card,
-          shadows: neuBubbleShadows(colors),
+          shadows: enabledNeuBubbleShadows(context, colors),
         ),
         child: ClipPath.shape(
           shape: shape,

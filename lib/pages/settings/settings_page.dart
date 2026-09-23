@@ -10,6 +10,7 @@ import '../../features/diagnostics/diagnostic_exporter.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/authenticated_media_cache.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/chat_visual_settings_provider.dart';
 import '../../providers/session_credential_store.dart';
 import '../../providers/theme_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
@@ -689,6 +690,78 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     ),
                     const SizedBox(height: NeuSpacing.xl),
                     _buildGroup(
+                      title: '聊天性能',
+                      items: [
+                        _buildChatVisualSwitch(
+                          icon: Icons.blur_on_rounded,
+                          title: '聊天模糊',
+                          subtitle: '启用聊天界面的玻璃模糊效果',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .chatBlurEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setChatBlurEnabled(value),
+                        ),
+                        _buildChatVisualSwitch(
+                          icon: Icons.shield_moon_rounded,
+                          title: '消息气泡阴影',
+                          subtitle: '启用新拟物消息气泡的阴影',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .bubbleShadowsEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setBubbleShadowsEnabled(value),
+                        ),
+                        _buildChatVisualSwitch(
+                          icon: Icons.rounded_corner,
+                          title: '超椭圆边框',
+                          subtitle: '使用超椭圆消息气泡边框',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .superellipseBorderEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setSuperellipseBorderEnabled(value),
+                        ),
+                        _buildChatVisualSwitch(
+                          icon: Icons.gradient_rounded,
+                          title: '气泡渐变',
+                          subtitle: '启用消息气泡的渐变填充',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .bubbleGradientEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setBubbleGradientEnabled(value),
+                        ),
+                        _buildChatVisualSwitch(
+                          icon: Icons.blur_on_rounded,
+                          title: '短图片模糊背景',
+                          subtitle: '为较矮的图片气泡显示模糊背景',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .shortImageBlurredBackdropEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setShortImageBlurredBackdropEnabled(value),
+                        ),
+                        _buildChatVisualSwitch(
+                          icon: Icons.account_circle_rounded,
+                          title: '消息头像吸附',
+                          subtitle: '在消息分组旁显示吸附头像',
+                          value: ref
+                              .watch(chatVisualSettingsProvider)
+                              .stickyAvatarsEnabled,
+                          onChanged: (value) => ref
+                              .read(chatVisualSettingsProvider.notifier)
+                              .setStickyAvatarsEnabled(value),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: NeuSpacing.xl),
+                    _buildGroup(
                       title: 'Matrix',
                       items: [
                         _SettingItem(
@@ -1008,6 +1081,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildChatVisualSwitch({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return _SettingItem(
+      icon: icon,
+      title: title,
+      subtitle: subtitle,
+      trailing: Switch.adaptive(value: value, onChanged: onChanged),
     );
   }
 }

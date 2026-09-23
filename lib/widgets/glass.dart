@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:inspire_blur/inspire_blur.dart';
 
+import '../providers/chat_visual_settings_provider.dart';
 import '../theme/neu_colors.dart';
 
 /// 磨砂玻璃点缀面板。
@@ -38,27 +39,39 @@ class GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final blurEnabled =
+        ChatVisualSettingsScope.maybeOf(context)?.chatBlurEnabled ?? true;
     final shape = RoundedSuperellipseBorder(
       borderRadius: BorderRadius.circular(radius),
       side: BorderSide(color: colors.glassBorder, width: 1),
     );
     return ClipPath.shape(
       shape: shape,
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-        child: Container(
-          width: width,
-          height: height,
-          padding: padding,
-          decoration: ShapeDecoration(
-            shape: shape,
-            color: colors.glassFill.withValues(
-              alpha: (colors.glassFill.a * opacity).clamp(0, 1),
-            ),
-          ),
-          child: child,
+      child: blurEnabled
+          ? BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+              child: _glassContent(context, shape, colors),
+            )
+          : _glassContent(context, shape, colors),
+    );
+  }
+
+  Widget _glassContent(
+    BuildContext context,
+    ShapeBorder shape,
+    NeuColors colors,
+  ) {
+    return Container(
+      width: width,
+      height: height,
+      padding: padding,
+      decoration: ShapeDecoration(
+        shape: shape,
+        color: colors.glassFill.withValues(
+          alpha: (colors.glassFill.a * opacity).clamp(0, 1),
         ),
       ),
+      child: child,
     );
   }
 }
@@ -77,6 +90,24 @@ class TopFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (!(ChatVisualSettingsScope.maybeOf(context)?.chatBlurEnabled ?? true)) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              colors.base.withValues(alpha: .96),
+              colors.base.withValues(alpha: .54),
+              colors.base.withValues(alpha: .24),
+              colors.base.withValues(alpha: .06),
+              colors.base.withValues(alpha: 0),
+            ],
+            stops: const [0, .25, .5, .75, 1],
+          ),
+        ),
+      );
+    }
     return _ProgressiveEdgeBlur(
       edge: _Edge.top,
       blur: blur,
@@ -180,6 +211,18 @@ class _ProgressiveEdgeBlur extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!(ChatVisualSettingsScope.maybeOf(context)?.chatBlurEnabled ?? true)) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: colors,
+            stops: stops,
+          ),
+        ),
+      );
+    }
     return IgnorePointer(
       child: ClipRect(
         child: LayoutBuilder(

@@ -11,7 +11,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import 'decrypted_video_source.dart';
-import 'message_group.dart' show neuBubbleShadows;
+import 'message_group.dart' show enabledNeuBubbleShadows;
 
 class VideoMessageBubble extends ConsumerStatefulWidget {
   final String? videoUrl;
@@ -165,7 +165,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       decoration: BoxDecoration(
         color: widget.isMe ? colors.accent.withValues(alpha: 0.3) : colors.card,
         borderRadius: BorderRadius.circular(NeuRadius.button),
-        boxShadow: neuBubbleShadows(colors),
+        boxShadow: enabledNeuBubbleShadows(context, colors),
       ),
       child: Stack(
         children: [
