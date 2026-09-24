@@ -1,0 +1,59 @@
+name: Flutter Checks
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: flutter-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flutter:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.1
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Restore generated bridge bindings
+        id: bridge-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            lib/src/rust/frb_generated.dart
+            lib/src/rust/frb_generated.io.dart
+            lib/src/rust/frb_generated.web.dart
+            rust/src/frb_generated.rs
+          key: bridge-2.13.0-flutter-3.47.1-${{ hashFiles('rust/src/**/*.rs', 'rust/Cargo.toml', 'rust/Cargo.lock', 'lib/src/rust/api/**', 'flutter_rust_bridge.yaml', 'pubspec.lock') }}
+
+      - name: Set up Rust on cache miss
+        if: steps.bridge-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate bridge bindings on cache miss
+        if: steps.bridge-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install flutter_rust_bridge_codegen@2.13.0 cargo-expand
+          flutter_rust_bridge_codegen generate
+
+      - name: Analyze Dart code
+        run: flutter analyze
+
+      - name: Run Dart tests
+        run: flutter test
