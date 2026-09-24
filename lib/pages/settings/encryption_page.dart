@@ -462,7 +462,7 @@ class _EncryptionPageState extends State<EncryptionPage> {
               },
             ),
             if (!device.isCurrent) NeuSheetItem(
-              icon: Icons.edit_rounded,
+              icon: Icons.shield_outlined,
               label: '验证',
               onTap: _busy ? () => {} : () async {
                 Navigator.of(context).pop();
