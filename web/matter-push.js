@@ -3,6 +3,9 @@
 (() => {
   const base = new URL('.', document.baseURI);
   const accountUrl = (id) => new URL(`.matter-push/accounts/${encodeURIComponent(id)}`, base).href;
+  const roomsUrl = (id) => new URL(`.matter-push/rooms/${encodeURIComponent(id)}`, base).href;
+  const conversationsUrl = (id) =>
+    new URL(`.matter-push/conversations/${encodeURIComponent(id)}`, base).href;
   const cacheName = `matter-push:${base.href}`;
   let registration;
   let initialTarget = null;
@@ -76,12 +79,25 @@
       const cache = await caches.open(cacheName);
       await cache.put(accountUrl(userId), new Response(JSON.stringify({ registrationId, enabled })));
     },
+    /**
+     * Publish room metadata for the worker.
+     *
+     * A worker cannot read the app's local storage, so the page forwards the
+     * direct/group flag and room names it already knows. The gateway payload
+     * carries neither.
+     */
+    async updateRoomDirectory(userId, roomsJson) {
+      const cache = await caches.open(cacheName);
+      await cache.put(roomsUrl(userId), new Response(roomsJson));
+    },
     async roomNotificationEvents(userId, roomId) {
       const saved = registration || await navigator.serviceWorker?.getRegistration(
         new URL('.matter-push/', base).href,
       );
       if (!saved) return '[]';
       const notifications = await saved.getNotifications();
+      // One notification now represents the whole room, so its payload holds
+      // the newest event that must be covered by the read receipt.
       return JSON.stringify(notifications
         .filter(({ data }) => data?.user_id === userId && data?.room_id === roomId)
         .map(({ data }) => data.event_id));
@@ -97,6 +113,17 @@
         if (data?.user_id === userId && data?.room_id === roomId && readEvents.has(data.event_id)) {
           notification.close();
         }
+      }
+      // Drop the accumulated lines too, otherwise the next message would
+      // resurface text the user already read.
+      const cache = await caches.open(cacheName);
+      const savedRooms = await cache.match(conversationsUrl(userId));
+      if (!savedRooms) return;
+      let conversations;
+      try { conversations = await savedRooms.json(); } catch { return; }
+      if (conversations && roomId in conversations) {
+        delete conversations[roomId];
+        await cache.put(conversationsUrl(userId), new Response(JSON.stringify(conversations)));
       }
     },
     addOpenListener(listener) { listeners.add(listener); },

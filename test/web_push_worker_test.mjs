@@ -58,11 +58,73 @@ test('worker suppresses notifications only for a focused visible Matter window',
 test('worker shows plain message content and keeps encrypted messages generic', async () => {
   const env = environment();
   await account(env, target.user_id);
-  for (const type of ['m.room.message', 'm.room.encrypted', undefined]) {
+  for (const [type, expected] of [
+    ['m.room.message', '正文'],
+    ['m.room.encrypted', '已加密的消息'],
+    [undefined, '你有一条新消息'],
+  ]) {
+    // A fresh account per case keeps the accumulated conversation separate.
+    await account(env, target.user_id, false);
+    await env.cache.put('https://example.org/matter/.matter-push/conversations/' +
+      encodeURIComponent(target.user_id), new Response('{}'));
+    await account(env, target.user_id);
     await env.dispatch('push', { data: { json: () => ({ ...target, type, content: { body: '正文' } }) } });
-    assert.equal(env.shown.at(-1).options.body, type === 'm.room.message' ? '正文' : '你有一条新消息');
+    assert.equal(env.shown.at(-1).options.body, expected);
   }
 });
+
+test('worker titles with the room, prefixes the sender in a group and accumulates', async () => {
+  const env = environment();
+  await account(env, target.user_id);
+  const rooms = { [target.room_id]: { name: '项目组', is_direct: false } };
+  await env.cache.put('https://example.org/matter/.matter-push/rooms/' +
+    encodeURIComponent(target.user_id), new Response(JSON.stringify(rooms)));
+  const message = (eventId, sender, display, body) => ({ ...target, event_id: eventId,
+    type: 'm.room.message', sender, sender_display_name: display, content: { body } });
+  await env.dispatch('push', { data: { json: () => message('$one', '@alice:example.org', 'Alice', '第一条') } });
+  assert.equal(env.shown.at(-1).title, '项目组');
+  assert.equal(env.shown.at(-1).options.body, 'Alice：第一条');
+  await env.dispatch('push', { data: { json: () => message('$two', '@bob:example.org', 'Bob', '第二条') } });
+  // The same tag updates one notification rather than stacking a new one.
+  assert.equal(env.shown.at(-1).options.tag, `matter:${target.user_id}:${target.room_id}`);
+  assert.equal(env.shown.at(-1).options.body, 'Alice：第一条\nBob：第二条');
+});
+
+test('a direct chat drops the sender prefix and read clears accumulated lines', async () => {
+  const env = environment();
+  await account(env, target.user_id);
+  await env.cache.put('https://example.org/matter/.matter-push/rooms/' +
+    encodeURIComponent(target.user_id),
+    new Response(JSON.stringify({ [target.room_id]: { name: 'Alice', is_direct: true } })));
+  await env.dispatch('push', { data: { json: () => ({ ...target, type: 'm.room.message',
+    sender: '@alice:example.org', sender_display_name: 'Alice', content: { body: '在吗' } }) } });
+  assert.equal(env.shown.at(-1).title, 'Alice');
+  assert.equal(env.shown.at(-1).options.body, '在吗');
+
+  env.active.push({ data: target, close() {} });
+  const bridge = await browserBridge(env);
+  await bridge.cancelRoomNotifications(target.user_id, target.room_id, [target.event_id]);
+  // Otherwise the next message would resurface text the user already read.
+  const saved = await env.cache.match('https://example.org/matter/.matter-push/conversations/' +
+    encodeURIComponent(target.user_id));
+  assert.deepEqual(await saved.json(), {});
+});
+
+/** Load the browser bridge into the same context as the worker. */
+async function browserBridge(env) {
+  Object.assign(env.context, {
+    document: { baseURI: 'https://example.org/matter/' },
+    location: { href: 'https://example.org/matter/' },
+    history: { replaceState() {} },
+    isSecureContext: true,
+    Notification: { permission: 'granted', async requestPermission() { return 'granted'; } },
+    navigator: { serviceWorker: { addEventListener() {}, async register() { return {}; },
+      async getRegistration() { return { async getNotifications() { return env.active; } }; } } },
+    window: { PushManager: {}, Notification: {} },
+  });
+  vm.runInContext(readFileSync(new URL('../web/matter-push.js', import.meta.url), 'utf8'), env.context);
+  return env.context.window.matterPush;
+}
 
 test('worker displays generic content and routes notification clicks from a closed app', async () => {
   const env = environment();

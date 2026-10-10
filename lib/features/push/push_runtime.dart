@@ -105,3 +105,10 @@ Future<void> dismissReadRoomPushes(String userId, String roomId) async {
 
 Future<void> updatePushDeliveryState(String userId, PushSettings settings) =>
     web_push.updateAccount(userId, settings);
+
+/// Publish room metadata to the browser push worker.
+///
+/// A worker cannot read the app's local storage, so the direct/group flag and
+/// room names the notification needs are forwarded explicitly. No-op off Web.
+Future<void> updateWebPushRoomDirectory(String userId, String roomsJson) =>
+    web_push.updateRoomDirectory(userId, roomsJson);

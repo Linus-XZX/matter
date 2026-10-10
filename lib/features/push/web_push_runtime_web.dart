@@ -18,6 +18,8 @@ external JSPromise<JSAny?> _updateAccount(
   JSString registrationId,
   JSBoolean enabled,
 );
+@JS('matterPush.updateRoomDirectory')
+external JSPromise<JSAny?> _updateRoomDirectory(JSString userId, JSString rooms);
 @JS('matterPush.roomNotificationEvents')
 external JSPromise<JSString> _roomNotificationEvents(
   JSString userId,
@@ -81,6 +83,10 @@ Future<void> updateAccount(String userId, PushSettings settings) async {
     (settings.enabled && settings.backend == PushBackend.web).toJS,
   ).toDart;
 }
+
+/// Publish room metadata for the push worker, which cannot read app storage.
+Future<void> updateRoomDirectory(String userId, String roomsJson) async =>
+    await _updateRoomDirectory(userId.toJS, roomsJson.toJS).toDart;
 
 Future<List<String>> roomNotificationEvents(
   String userId,

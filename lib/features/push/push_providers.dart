@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -93,20 +94,34 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
     if (next.isLoading || next.hasError) return;
     final rooms = next.asData?.value;
     if (rooms == null) return;
-    unawaited(
-      savePushRoomDirectory(
-        userId,
-        rooms.where((room) => room.roomType != 'space').map(
-          (room) => (
+    final snapshot = [
+      for (final room in rooms)
+        if (room.roomType != 'space')
+          (
             id: room.id,
             name: room.name,
             roomType: room.roomType,
             avatarMxc: room.avatarUrl ?? '',
             isEncrypted: room.isEncrypted,
           ),
+    ];
+    unawaited(savePushRoomDirectory(userId, snapshot));
+    if (kIsWeb) {
+      // The browser push worker cannot read local storage, so mirror the
+      // direct/group flag it needs to title a notification.
+      unawaited(
+        updateWebPushRoomDirectory(
+          userId,
+          jsonEncode({
+            for (final room in snapshot)
+              room.id: {
+                'name': room.name,
+                'is_direct': room.roomType == 'dm',
+              },
+          }),
         ),
-      ),
-    );
+      );
+    }
   }, fireImmediately: true);
 });
 
