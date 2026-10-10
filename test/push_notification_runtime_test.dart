@@ -291,7 +291,7 @@ void main() {
     expect(platform['actions'], anyOf(isNull, isEmpty));
   });
 
-  test('a repeated author is not re-encoded into the notification', () async {
+  test('every message retains its own sender avatar across updates', () async {
     // Seed real avatar files, otherwise the assertion would pass trivially
     // with no icons at all.
     await savePushRoomDirectory(target.userId, [
@@ -305,39 +305,161 @@ void main() {
     ]);
     await savePushSenderAvatars(target.userId, {
       '@alice:example.org': 'mxc://example.org/alice',
+      '@bob:example.org': 'mxc://example.org/bob',
+    });
+    final avatars = PushAvatarCache(
+      download: (mxc) async => Uint8List.fromList([1, 2, 3]),
+    );
+    final roomAvatar = await avatars.ensure(
+      target.userId,
+      'mxc://example.org/room',
+    );
+    final aliceAvatar = await avatars.ensure(
+      target.userId,
+      'mxc://example.org/alice',
+    );
+    final bobAvatar = await avatars.ensure(
+      target.userId,
+      'mxc://example.org/bob',
+    );
+
+    final notifications = FlutterLocalNotificationsPlugin();
+    Map<String, dynamic> message(String eventId, String sender) => {
+      ...target.toData(),
+      'event_id': eventId,
+      'type': 'm.room.message',
+      'sender': sender,
+      'sender_display_name': sender.contains('alice') ? 'Alice' : 'Bob',
+      'content_body': eventId,
+      'content_msgtype': 'm.text',
+    };
+
+    final expectedAvatars = [aliceAvatar, bobAvatar, aliceAvatar];
+    final senders = [
+      '@alice:example.org',
+      '@bob:example.org',
+      '@alice:example.org',
+    ];
+    for (var i = 0; i < senders.length; i++) {
+      await showMatrixPush(
+        notifications,
+        message('\$event-$i', senders[i]),
+        publishShortcut: (id, title, avatarPath) async {
+          // Publish the room identity before Android sees its notification.
+          expect(calls.where((call) => call.method == 'show'), hasLength(i));
+          expect(title, '项目组');
+          expect(avatarPath, roomAvatar);
+          return id;
+        },
+      );
+      final specifics =
+          (calls.last.arguments as Map)['platformSpecifics'] as Map;
+      expect(specifics['largeIcon'], roomAvatar);
+      expect(
+        specifics['shortcutId'],
+        'matrix:${target.userId}:${target.roomId}',
+      );
+      expect(specifics['category'], 'msg');
+      final style = specifics['styleInformation'] as Map;
+      final messages = (style['messages'] as List).cast<Map>();
+      expect(messages, hasLength(i + 1));
+      expect([
+        for (final entry in messages) (entry['person'] as Map)['icon'],
+      ], expectedAvatars.take(i + 1).toList());
+    }
+  });
+
+  test('a missing sender avatar never borrows the room avatar', () async {
+    await savePushRoomDirectory(target.userId, [
+      (
+        id: target.roomId,
+        name: '项目组',
+        roomType: 'group',
+        avatarMxc: 'mxc://example.org/room',
+        isEncrypted: false,
+      ),
+    ]);
+    final avatars = PushAvatarCache(
+      download: (mxc) async => Uint8List.fromList([1, 2, 3]),
+    );
+    final roomAvatar = await avatars.ensure(
+      target.userId,
+      'mxc://example.org/room',
+    );
+    await showMatrixPush(FlutterLocalNotificationsPlugin(), {
+      ...target.toData(),
+      'type': 'm.room.message',
+      'sender': '@unknown:example.org',
+      'sender_display_name': 'Unknown',
+      'content_body': 'hello',
+    });
+    final specifics = (calls.last.arguments as Map)['platformSpecifics'] as Map;
+    expect(specifics['largeIcon'], roomAvatar);
+    final style = specifics['styleInformation'] as Map;
+    final messages = (style['messages'] as List).cast<Map>();
+    expect((messages.single['person'] as Map)['icon'], isNull);
+  });
+
+  test('a direct conversation publishes the peer avatar', () async {
+    await savePushRoomDirectory(target.userId, [
+      (
+        id: target.roomId,
+        name: 'Bob',
+        roomType: 'dm',
+        avatarMxc: 'mxc://example.org/room',
+        isEncrypted: false,
+      ),
+    ]);
+    await savePushSenderAvatars(target.userId, {
+      '@bob:example.org': 'mxc://example.org/bob',
     });
     final avatars = PushAvatarCache(
       download: (mxc) async => Uint8List.fromList([1, 2, 3]),
     );
     await avatars.ensure(target.userId, 'mxc://example.org/room');
-    await avatars.ensure(target.userId, 'mxc://example.org/alice');
-
-    final notifications = FlutterLocalNotificationsPlugin();
-    Map<String, dynamic> message(String eventId, String body) => {
-      ...target.toData(),
-      'event_id': eventId,
-      'type': 'm.room.message',
-      'sender': '@alice:example.org',
-      'sender_display_name': 'Alice',
-      'content_body': body,
-      'content_msgtype': 'm.text',
-    };
-
-    await showMatrixPush(notifications, message(r'$a', 'a'));
-    await showMatrixPush(notifications, message(r'$b', 'b'));
-
+    final bobAvatar = await avatars.ensure(
+      target.userId,
+      'mxc://example.org/bob',
+    );
+    await showMatrixPush(
+      FlutterLocalNotificationsPlugin(),
+      {
+        ...target.toData(),
+        'type': 'm.room.message',
+        'sender': '@bob:example.org',
+        'sender_display_name': 'Bob',
+        'content_body': 'hello',
+      },
+      publishShortcut: (id, title, avatarPath) async {
+        expect(title, 'Bob');
+        expect(avatarPath, bobAvatar);
+        return id;
+      },
+    );
     final specifics = (calls.last.arguments as Map)['platformSpecifics'] as Map;
+    expect(specifics['largeIcon'], bobAvatar);
     final style = specifics['styleInformation'] as Map;
+    expect(style['groupConversation'], false);
+    expect(style['conversationTitle'], isNull);
     final messages = (style['messages'] as List).cast<Map>();
-    expect(messages, hasLength(2));
-    final icons = [
-      for (final entry in messages) (entry['person'] as Map)['icon'],
-    ];
-    // The same author's avatar is attached once: resending it for every
-    // message makes Android decode the file again for each entry.
-    expect(icons.first, isNotNull);
-    expect(icons.last, isNull);
+    expect((messages.single['person'] as Map)['icon'], bobAvatar);
   });
+
+  test(
+    'unavailable shortcut metadata still delivers the notification',
+    () async {
+      await showMatrixPush(
+        FlutterLocalNotificationsPlugin(),
+        target.toData(),
+        publishShortcut: (id, title, avatarPath) async => null,
+      );
+      final shows = calls.where((call) => call.method == 'show');
+      expect(shows, hasLength(1));
+      final specifics =
+          (shows.single.arguments as Map)['platformSpecifics'] as Map;
+      expect(specifics['shortcutId'], isNull);
+    },
+  );
 
   test('a read room also drops its accumulated conversation', () async {
     active = [

@@ -15,6 +15,7 @@ import 'push_payload.dart';
 import 'push_reply.dart';
 import 'push_room_directory.dart';
 import 'push_settings.dart';
+import 'push_shortcut.dart';
 
 /// Per-account room metadata snapshot, shared with the notification path.
 final _roomDirectory = PushRoomDirectory();
@@ -90,12 +91,10 @@ Future<String?> _roomAvatarPath(PushTarget target, PushRoomInfo? room) async {
 /// the notification path, matching how other clients render a locked room.
 Future<String?> _senderAvatarPath(
   PushTarget target,
-  Map<String, dynamic> data,
+  String sender,
   PushRoomInfo? room,
 ) async {
-  if (room?.isEncrypted ?? false) return null;
-  final sender = pushSenderId(data);
-  if (sender == null) return null;
+  if ((room?.isEncrypted ?? false) || sender.isEmpty) return null;
   final mxc = await loadPushSenderAvatar(target.userId, sender);
   return mxc == null ? null : pushAvatarPath(target.userId, mxc);
 }
@@ -138,6 +137,8 @@ Future<void> showMatrixPush(
   FlutterLocalNotificationsPlugin notifications,
   Map<String, dynamic> data, {
   bool Function()? isFocused,
+  Future<String?> Function(String id, String title, String? avatarPath)?
+  publishShortcut,
 }) async {
   final target = PushTarget.fromData(data);
   // Counts-only updates do not represent a new event. Ignore stale pushes
@@ -166,7 +167,18 @@ Future<void> showMatrixPush(
   // Avatar paths are read from cache written by the foreground: no session,
   // no download and no `path_provider` are needed on this isolate.
   final roomAvatar = await _roomAvatarPath(target, room);
-  final senderAvatar = await _senderAvatarPath(target, data, room);
+  final senderAvatars = <String, String?>{};
+  for (final sender
+      in conversation.entries.map((entry) => entry.senderId).toSet()) {
+    senderAvatars[sender] = await _senderAvatarPath(target, sender, room);
+  }
+  final senderAvatar = senderAvatars[pushSenderId(data)];
+  final conversationAvatar = isDirect ? senderAvatar ?? roomAvatar : roomAvatar;
+  final shortcutId = await (publishShortcut ?? publishPushShortcut)(
+    'matrix:${target.userId}:${target.roomId}',
+    preview.title,
+    conversationAvatar,
+  );
   final replyable = supportsInlineReply(data, room: room);
   await notifications.show(
     // Identity is stable per room: Android keys a notification by (tag, id),
@@ -188,16 +200,16 @@ Future<void> showMatrixPush(
         groupKey: 'matrix:${target.userId}:${target.roomId}',
         // The large icon identifies the room at a glance. A direct chat shows
         // the author instead, which is the more useful identity there.
-        largeIcon: isDirect
-            ? _bitmap(senderAvatar) ?? _bitmap(roomAvatar)
-            : _bitmap(roomAvatar),
+        largeIcon: _bitmap(conversationAvatar),
+        // A large icon alone does not identify an Android conversation. The
+        // shortcut supplies the room avatar to the system's conversation UI.
+        shortcutId: shortcutId,
+        category: AndroidNotificationCategory.message,
         styleInformation: _conversationStyle(
           preview: preview,
           conversation: conversation,
           isDirect: isDirect,
-          senderId: pushSenderId(data),
-          senderAvatar: senderAvatar,
-          roomAvatar: roomAvatar,
+          senderAvatars: senderAvatars,
         ),
         actions: replyable
             ? [
@@ -235,12 +247,10 @@ FilePathAndroidBitmap? _bitmap(String? path) =>
 /// Wrap an avatar file path as a `Person` icon.
 ///
 /// `Person.icon` takes an `AndroidIcon` rather than an `AndroidBitmap`, so the
-/// two helpers are not interchangeable. Pass [attach] as false to omit the
-/// icon for a repeated author: sending the same file again for every message
-/// of a conversation makes Android decode it once per entry for a
-/// notification it collapses anyway.
-BitmapFilePathAndroidIcon? _icon(String? path, {bool attach = true}) =>
-    path == null || !attach ? null : BitmapFilePathAndroidIcon(path);
+/// two helpers are not interchangeable. Every message carries a complete
+/// Person: Android can display separate groups when an author speaks again.
+BitmapFilePathAndroidIcon? _icon(String? path) =>
+    path == null ? null : BitmapFilePathAndroidIcon(path);
 
 /// Render accumulated messages as an Android conversation.
 ///
@@ -250,12 +260,8 @@ MessagingStyleInformation _conversationStyle({
   required PushPreview preview,
   required PushConversation conversation,
   required bool isDirect,
-  required String? senderId,
-  required String? senderAvatar,
-  required String? roomAvatar,
+  required Map<String, String?> senderAvatars,
 }) {
-  // Authors whose avatar has already been attached in this conversation.
-  final iconOwners = <String>{};
   return MessagingStyleInformation(
     // Only used to label the user's own messages, which a push never contains;
     // the account display name is not in the payload, so fall back to a label.
@@ -272,14 +278,7 @@ MessagingStyleInformation _conversationStyle({
           Person(
             name: entry.senderName.isEmpty ? null : entry.senderName,
             key: entry.senderId.isEmpty ? null : entry.senderId,
-            // Only the newest message's author was resolved, so earlier history
-            // falls back to the room avatar rather than showing no icon.
-            icon: _icon(
-              entry.senderId == senderId
-                  ? senderAvatar ?? roomAvatar
-                  : roomAvatar,
-              attach: iconOwners.add(entry.senderId),
-            ),
+            icon: _icon(senderAvatars[entry.senderId]),
           ),
         ),
     ],
