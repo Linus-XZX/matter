@@ -65,19 +65,28 @@ final pushReadStateProvider = Provider<void>((ref) {
   if (!pushSupported || !ref.watch(sessionReadyProvider)) return;
   final userId = ref.watch(activeUserIdProvider);
   if (userId == null) return;
-  Map<String, int>? previousCounts;
+  var previous = <String, (int, String)>{};
   ref.listen(allChatRoomsProvider, (_, next) {
     if (next.isLoading || next.hasError) return;
     final rooms = next.asData?.value;
     if (rooms == null) return;
-    final previous = previousCounts;
-    previousCounts = {for (final room in rooms) room.id: room.unreadCount};
-    if (previous == null) return;
+    final current = {
+      for (final room in rooms) room.id: (room.unreadCount, room.lastEventId),
+    };
     for (final room in rooms) {
-      if (room.unreadCount == 0 && (previous[room.id] ?? 0) > 0) {
-        unawaited(dismissReadRoomPushes(userId, room.id));
+      // A room can already be read on the first snapshot, or a new last event
+      // can be read before sync ever reports a positive unread count.
+      if (room.unreadCount == 0 && previous[room.id] != current[room.id]) {
+        unawaited(
+          dismissReadRoomPushes(
+            userId,
+            room.id,
+            throughEventId: room.lastEventId,
+          ),
+        );
       }
     }
+    previous = current;
   }, fireImmediately: true);
 });
 

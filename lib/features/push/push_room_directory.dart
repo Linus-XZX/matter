@@ -131,6 +131,12 @@ class PushRoomDirectory {
   Future<PushRoomInfo?> lookup(String userId, String roomId) async =>
       (await _roomsFor(userId))[roomId];
 
+  /// Room icons must survive sender-avatar cache eviction.
+  Future<Set<String>> avatarMxcs(String userId) async => {
+    for (final room in (await _roomsFor(userId)).values)
+      if (room.avatarMxc.isNotEmpty) room.avatarMxc,
+  };
+
   /// Drop an account's cached snapshot so a removed or re-signed-in account
   /// never renders notifications from stale room metadata.
   void forget(String userId) => _cache.remove(userId);

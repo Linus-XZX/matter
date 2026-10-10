@@ -7,7 +7,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Keep enough avatars on disk for the rooms and people that notify.
+import '../../providers/session_credential_store.dart';
+import 'push_room_directory.dart';
+
+/// Keep up to this many sender avatars in addition to joined-room icons.
 const _maxCachedAvatars = 128;
 
 /// Directory holding downloaded notification avatars.
@@ -54,9 +57,18 @@ Future<PushMediaSession?> loadPushMediaSession(String userId) async {
     return null;
   }
   if (homeserver == null) return null;
-  final token = await const FlutterSecureStorage(
-    aOptions: AndroidOptions(resetOnError: false),
-  ).read(key: _accessTokenKey(userId));
+  final stored = await readSessionCredentials(
+    userId: userId,
+    readSecureCredentials: () async {
+      final token = await const FlutterSecureStorage(
+        aOptions: AndroidOptions(resetOnError: false),
+      ).read(key: _accessTokenKey(userId));
+      return token == null || token.isEmpty
+          ? null
+          : SessionCredentials(accessToken: token, refreshToken: null);
+    },
+  );
+  final token = stored.credentials?.accessToken;
   if (token == null || token.isEmpty) return null;
   return PushMediaSession(homeserver: homeserver, accessToken: token);
 }
@@ -98,6 +110,7 @@ class PushAvatarCache {
 
   /// Fetch raw bytes for an `mxc://` URI, e.g. `rust.downloadMediaBytes`.
   final Future<Uint8List?> Function(String mxc) download;
+  final _rooms = PushRoomDirectory();
 
   Future<String?> _directory() async {
     final base = await getApplicationSupportDirectory();
@@ -124,6 +137,7 @@ class PushAvatarCache {
   /// for the same avatar before either has written it. Without this, both
   /// would download and write the same file.
   final Map<String, Future<String?>> _inFlight = {};
+  final Map<String, Future<void>> _indexWrites = {};
 
   /// Ensure [mxc] is on disk and return its absolute path.
   ///
@@ -161,24 +175,40 @@ class PushAvatarCache {
       final file = File('$directory/$name.img');
       await file.writeAsBytes(bytes, flush: true);
 
-      final index = await _loadIndex(userId);
-      index[mxc] = file.path;
-      // Bound growth by dropping entries until the file count fits, deleting
-      // the files too so the cache cannot grow without limit on disk.
-      while (index.length > _maxCachedAvatars) {
-        final oldest = index.keys.first;
-        final path = index.remove(oldest);
-        if (path is String) {
-          try {
-            final stale = File(path);
-            if (await stale.exists()) await stale.delete();
-          } catch (error) {
-            debugPrint('Push avatar eviction failed: ${error.runtimeType}');
+      // Different room/contact prefetches can finish together. Serialize the
+      // read-modify-write so one avatar cannot erase another's index entry.
+      final write = (_indexWrites[userId] ?? Future<void>.value()).then((
+        _,
+      ) async {
+        // Contact prefetch can exceed the sender budget. Joined-room icons are
+        // still needed by background notifications and conversation shortcuts.
+        final roomAvatars = await _rooms.avatarMxcs(userId);
+        final index = await _loadIndex(userId);
+        index[mxc] = file.path;
+        while (index.keys.where((mxc) => !roomAvatars.contains(mxc)).length >
+            _maxCachedAvatars) {
+          final oldest = index.keys.firstWhere(
+            (mxc) => !roomAvatars.contains(mxc),
+          );
+          final path = index.remove(oldest);
+          if (path is String) {
+            try {
+              final stale = File(path);
+              if (await stale.exists()) await stale.delete();
+            } catch (error) {
+              debugPrint('Push avatar eviction failed: ${error.runtimeType}');
+            }
           }
         }
-      }
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(pushAvatarIndexKey(userId), jsonEncode(index));
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(pushAvatarIndexKey(userId), jsonEncode(index));
+      });
+      // The caller below still observes failure; release subsequent writes.
+      _indexWrites[userId] = write.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace _) {},
+      );
+      await write;
       return file.path;
     } catch (error) {
       debugPrint('Push avatar cache write failed: ${error.runtimeType}');

@@ -1,15 +1,39 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:matter/features/push/push_avatar.dart';
 import 'package:matter/features/push/push_reply.dart';
+import 'package:matter/features/push/push_room_directory.dart';
+import 'package:matter/providers/session_credential_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'support/temp_path_provider.dart';
+
+/// Models a native preference read whose reply arrives after other file IO.
+class _DelayedPreferencesStore extends SharedPreferencesStorePlatform {
+  _DelayedPreferencesStore(this.inner);
+  final SharedPreferencesStorePlatform inner;
+
+  @override
+  Future<Map<String, Object>> getAll() async {
+    final values = await inner.getAll();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    return values;
+  }
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) =>
+      inner.setValue(valueType, key, value);
+  @override
+  Future<bool> remove(String key) => inner.remove(key);
+  @override
+  Future<bool> clear() => inner.clear();
+}
 
 /// Records requests and replies with a canned response.
 class _RecordingClient extends http.BaseClient {
@@ -156,6 +180,39 @@ void main() {
       expect(await pushAvatarPath(alice, 'mxc://example.org/139'), isNotNull);
     });
 
+    test('sender prefetch cannot evict joined-room avatars', () async {
+      await savePushRoomDirectory(alice, [
+        (
+          id: room,
+          name: 'Room',
+          roomType: 'group',
+          avatarMxc: 'mxc://example.org/room',
+          isEncrypted: false,
+        ),
+      ]);
+      final roomPath = await cache.ensure(alice, 'mxc://example.org/room');
+      for (var i = 0; i < 140; i++) {
+        await cache.ensure(alice, 'mxc://example.org/sender$i');
+      }
+      expect(await pushAvatarPath(alice, 'mxc://example.org/room'), roomPath);
+      expect(File(roomPath!).existsSync(), isTrue);
+    });
+
+    test('concurrent different avatars retain every index entry', () async {
+      final original = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance = _DelayedPreferencesStore(
+        original,
+      );
+      addTearDown(() => SharedPreferencesStorePlatform.instance = original);
+      final mxcs = [for (var i = 0; i < 20; i++) 'mxc://example.org/person$i'];
+      final paths = await Future.wait([
+        for (final mxc in mxcs) cache.ensure(alice, mxc),
+      ]);
+      for (var i = 0; i < mxcs.length; i++) {
+        expect(await pushAvatarPath(alice, mxcs[i]), paths[i], reason: mxcs[i]);
+      }
+    });
+
     test('clearing an account deletes its files and leaves others', () async {
       final alicePath = await cache.ensure(alice, 'mxc://example.org/avatar');
       await cache.ensure(bob, 'mxc://example.org/avatar');
@@ -165,6 +222,31 @@ void main() {
       expect(await pushAvatarPath(bob, 'mxc://example.org/avatar'), isNotNull);
     });
   });
+
+  test(
+    'background read checks use the configured compatibility credentials',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await enableSessionCredentialCompatibilityMode();
+      await storeSessionCredentials(
+        userId: alice,
+        accessToken: 'compat-token',
+        writeSecureCredentials: () async =>
+            fail('compatibility mode must not write to Keystore'),
+      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'multi_sessions',
+        jsonEncode([
+          {'user_id': alice, 'homeserver_url': session.homeserver},
+        ]),
+      );
+      final loaded = await loadPushMediaSession(alice);
+      expect(loaded?.homeserver, session.homeserver);
+      expect(loaded?.accessToken, 'compat-token');
+    },
+  );
 
   group('sendNotificationReply', () {
     test(

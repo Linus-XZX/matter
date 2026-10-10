@@ -12,6 +12,7 @@ import 'firebase_client_config.dart';
 import 'push_avatar.dart';
 import 'push_conversation.dart';
 import 'push_payload.dart';
+import 'push_read_state.dart';
 import 'push_reply.dart';
 import 'push_room_directory.dart';
 import 'push_settings.dart';
@@ -121,16 +122,21 @@ Future<void> handleFcmBackgroundMessage(RemoteMessage message) async {
   await showMatrixPush(notifications, message.data);
 }
 
-Future<bool> acceptsPushTarget(PushTarget target) async {
-  final settings = await PushSettingsStore().load(target.userId);
-  if (!target.acceptedBy(settings)) return false;
+Future<bool> acceptsPushTarget(PushTarget target) =>
+    _acceptsPushAccount(target.userId, target.registrationId);
+
+Future<bool> _acceptsPushAccount(String userId, String registrationId) async {
+  final settings = await PushSettingsStore().load(userId);
+  if (!settings.enabled || settings.registrationId != registrationId) {
+    return false;
+  }
   final prefs = await SharedPreferences.getInstance();
   final removedKey =
-      'matrix_session_removed_${base64Url.encode(utf8.encode(target.userId))}';
+      'matrix_session_removed_${base64Url.encode(utf8.encode(userId))}';
   if (prefs.containsKey(removedKey)) return false;
   final sessions =
       jsonDecode(prefs.getString('multi_sessions') ?? '[]') as List;
-  return sessions.any((session) => session['user_id'] == target.userId);
+  return sessions.any((session) => session['user_id'] == userId);
 }
 
 Future<void> showMatrixPush(
@@ -139,31 +145,125 @@ Future<void> showMatrixPush(
   bool Function()? isFocused,
   Future<String?> Function(String id, String title, String? avatarPath)?
   publishShortcut,
+  Future<Set<String>> Function(String userId, Set<String> eventIds)?
+  fetchReadEvents,
 }) async {
   final target = PushTarget.fromData(data);
-  // Counts-only updates do not represent a new event. Ignore stale pushes
-  // from an old gateway, disabled setting or removed account, too.
-  if (target == null ||
-      !await acceptsPushTarget(target) ||
+  final userId = data['user_id'];
+  final registrationId = data['registration_id'];
+  if (userId is! String ||
+      !userId.startsWith('@') ||
+      registrationId is! String ||
+      registrationId.isEmpty ||
+      !await _acceptsPushAccount(userId, registrationId)) {
+    return;
+  }
+  // Counts-only pushes wake the background engine after a read on another
+  // device. They must reconcile existing conversations, not be discarded.
+  if (target == null &&
+      !data.containsKey('unread') &&
+      !data.containsKey('counts') &&
+      !data.containsKey('counts_unread')) {
+    return;
+  }
+  // Record arrival before the network check so a receipt written while it is
+  // pending can include this event in its notification snapshot.
+  if (target != null && !(isFocused?.call() ?? false)) {
+    await _conversations.append(
+      target.userId,
+      target.roomId,
+      PushConversationEntry(
+        senderId: pushSenderId(data) ?? '',
+        senderName: pushSenderName(data) ?? '',
+        // The messaging style renders the author through its Person entry.
+        body: pushMessageText(data),
+        eventId: target.eventId,
+        receivedAtMillis: DateTime.now().millisecondsSinceEpoch,
+        eventType: data['type'] as String? ?? '',
+        roomName: data['room_name'] as String? ?? '',
+      ),
+    );
+  }
+  final tracked = await _conversations.all(userId);
+  // Android can retain a notification after its bounded history was evicted.
+  // Include native tags so counts-only cleanup reaches those rooms too.
+  final active = [
+    for (final notification in await notifications.getActiveNotifications())
+      if (_notificationData(notification) case final data?)
+        if (data['user_id'] == userId && data['room_id'] is String) data,
+  ];
+  final roomByEvent = {
+    for (final room in tracked.entries)
+      for (final entry in room.value.entries) entry.eventId: room.key,
+    for (final data in active)
+      if (data['event_id'] case final String eventId)
+        eventId: data['room_id'] as String,
+    if (target != null) target.eventId: target.roomId,
+  };
+  final roomIds = {
+    ...tracked.keys,
+    for (final data in active) data['room_id'] as String,
+    if (target != null) target.roomId,
+  };
+  final readRooms = <String>{};
+  final read = fetchReadEvents != null
+      ? await fetchReadEvents(userId, roomByEvent.keys.toSet())
+      : await fetchReadPushEvents(
+          userId,
+          roomByEvent.keys.toSet(),
+          roomByEvent: roomByEvent,
+          roomIds: roomIds,
+          onReadRoom: readRooms.add,
+        );
+  if (!await _acceptsPushAccount(userId, registrationId)) return;
+  for (final roomId in roomIds) {
+    final covered = [
+      for (final entry in roomByEvent.entries)
+        if (entry.value == roomId &&
+            (read.contains(entry.key) || readRooms.contains(roomId)))
+          entry.key,
+    ];
+    if (covered.isNotEmpty || readRooms.contains(roomId)) {
+      await _cancelPushRoom(notifications, userId, roomId, covered);
+    }
+  }
+  if (target == null) return;
+  if (await _conversations.wasRead(userId, target.eventId) ||
       (isFocused?.call() ?? false)) {
     return;
   }
+  await _showPushConversation(
+    notifications,
+    target,
+    publishShortcut: publishShortcut,
+    isFocused: isFocused,
+  );
+}
+
+Future<void> _showPushConversation(
+  FlutterLocalNotificationsPlugin notifications,
+  PushTarget target, {
+  bool onlyAlertOnce = false,
+  bool Function()? isFocused,
+  Future<String?> Function(String id, String title, String? avatarPath)?
+  publishShortcut,
+}) async {
+  final conversation = await _conversations.load(target.userId, target.roomId);
+  if (conversation == null || conversation.latestEventId != target.eventId) {
+    return;
+  }
+  final latest = conversation.entries.last;
+  final data = <String, dynamic>{
+    ...target.toData(),
+    'sender': latest.senderId,
+    'sender_display_name': latest.senderName,
+    'type': latest.eventType,
+    'room_name': latest.roomName,
+    'content_body': latest.body,
+  };
   final room = await _roomDirectory.lookup(target.userId, target.roomId);
   final preview = buildPushPreview(data, room: room);
   final isDirect = room?.isDirect ?? false;
-  final conversation = await _conversations.append(
-    target.userId,
-    target.roomId,
-    PushConversationEntry(
-      senderId: pushSenderId(data) ?? '',
-      senderName: pushSenderName(data) ?? '',
-      // Stored without the sender prefix: the messaging style renders the
-      // author through its own Person entry.
-      body: pushMessageText(data),
-      eventId: target.eventId,
-      receivedAtMillis: DateTime.now().millisecondsSinceEpoch,
-    ),
-  );
   // Avatar paths are read from cache written by the foreground: no session,
   // no download and no `path_provider` are needed on this isolate.
   final roomAvatar = await _roomAvatarPath(target, room);
@@ -180,6 +280,14 @@ Future<void> showMatrixPush(
     conversationAvatar,
   );
   final replyable = supportsInlineReply(data, room: room);
+  // A read can complete while avatars or the shortcut are being resolved.
+  // Reload before posting so it cannot resurrect a cancelled conversation.
+  final current = await _conversations.load(target.userId, target.roomId);
+  if (current == null ||
+      current.latestEventId != target.eventId ||
+      (isFocused?.call() ?? false)) {
+    return;
+  }
   await notifications.show(
     // Identity is stable per room: Android keys a notification by (tag, id),
     // so an event-specific tag would post a new notification per message
@@ -194,6 +302,7 @@ Future<void> showMatrixPush(
         channelDescription: 'Matrix 聊天消息推送',
         importance: Importance.high,
         priority: Priority.high,
+        onlyAlertOnce: onlyAlertOnce,
         visibility: NotificationVisibility.private,
         // Group by room, not by account: Android collapses a conversation's
         // notifications together, which is what a chat notification should do.
@@ -207,7 +316,7 @@ Future<void> showMatrixPush(
         category: AndroidNotificationCategory.message,
         styleInformation: _conversationStyle(
           preview: preview,
-          conversation: conversation,
+          conversation: current,
           isDirect: isDirect,
           senderAvatars: senderAvatars,
         ),
@@ -285,6 +394,55 @@ MessagingStyleInformation _conversationStyle({
   );
 }
 
+Map<String, dynamic>? _notificationData(ActiveNotification notification) {
+  final raw = notification.payload ?? notification.tag;
+  if (raw == null) return null;
+  try {
+    final data = jsonDecode(raw);
+    return data is Map<String, dynamic> ? data : null;
+  } on FormatException {
+    return null;
+  }
+}
+
+Future<void> _cancelPushRoom(
+  FlutterLocalNotificationsPlugin notifications,
+  String userId,
+  String roomId,
+  List<String> eventIds,
+) async {
+  final read = eventIds.toSet();
+  // History is read state too, even after swiping the system notification away.
+  await _conversations.markRead(userId, roomId, read);
+  for (final notification in await notifications.getActiveNotifications()) {
+    final data = _notificationData(notification);
+    if (data?['user_id'] != userId || data?['room_id'] != roomId) continue;
+    final legacyEvent = data?['event_id'];
+    if (legacyEvent is String && !read.contains(legacyEvent)) continue;
+    final remaining = await _conversations.load(userId, roomId);
+    if (legacyEvent is String || remaining == null) {
+      if (notification.id != null) {
+        await notifications.cancel(id: notification.id!, tag: notification.tag);
+      }
+    } else {
+      // One stable notification can contain read history and newer unread
+      // messages. Rebuild it quietly with just the unread entries.
+      final registrationId = data?['registration_id'];
+      if (registrationId is! String || registrationId.isEmpty) continue;
+      await _showPushConversation(
+        notifications,
+        PushTarget(
+          userId: userId,
+          roomId: roomId,
+          eventId: remaining.latestEventId,
+          registrationId: registrationId,
+        ),
+        onlyAlertOnce: true,
+      );
+    }
+  }
+}
+
 class FcmPushRuntime {
   final notifications = FlutterLocalNotificationsPlugin();
   final _opened = StreamController<PushTarget>.broadcast();
@@ -358,47 +516,28 @@ class FcmPushRuntime {
     String userId,
     String roomId,
   ) async {
-    final active = await notifications.getActiveNotifications();
-    return [
-      for (final notification in active)
-        // The payload holds the latest event id; the tag is now stable per
-        // room and carries no event, so it is only a fallback for older
-        // notifications posted before this change.
-        if (parsePushTargetPayload(notification.payload ?? notification.tag)
-            case final target?
-            when target.userId == userId && target.roomId == roomId)
-          target.eventId,
-    ];
+    final conversation = await _conversations.load(userId, roomId);
+    final events = {
+      if (conversation != null)
+        for (final entry in conversation.entries) entry.eventId,
+    };
+    for (final notification in await notifications.getActiveNotifications()) {
+      final data = _notificationData(notification);
+      final eventId = data?['event_id'];
+      if (data?['user_id'] == userId &&
+          data?['room_id'] == roomId &&
+          eventId is String) {
+        events.add(eventId);
+      }
+    }
+    return events.toList();
   }
 
   Future<void> cancelRoomNotifications(
     String userId,
     String roomId,
     List<String> eventIds,
-  ) async {
-    final readEvents = eventIds.toSet();
-    for (final notification in await notifications.getActiveNotifications()) {
-      final target = parsePushTargetPayload(
-        notification.payload ?? notification.tag,
-      );
-      // One notification represents the whole conversation, so its payload
-      // carries only the newest event. Cancelling it also drops the
-      // accumulated messages, otherwise the next message would resurface
-      // everything already read.
-      if (target != null &&
-          target.userId == userId &&
-          target.roomId == roomId &&
-          readEvents.contains(target.eventId)) {
-        if (notification.id != null) {
-          await notifications.cancel(
-            id: notification.id!,
-            tag: notification.tag,
-          );
-        }
-        await _conversations.clearRoom(userId, roomId);
-      }
-    }
-  }
+  ) => _cancelPushRoom(notifications, userId, roomId, eventIds);
 
   Future<void> retireToken() async {
     if (configuration != null && initializationError == null) {
