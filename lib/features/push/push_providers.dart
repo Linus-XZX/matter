@@ -99,11 +99,7 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
         rooms
             .where((room) => room.roomType != 'space')
             .map(
-              (room) => (
-                id: room.id,
-                name: room.name,
-                roomType: room.roomType,
-              ),
+              (room) => (id: room.id, name: room.name, roomType: room.roomType),
             ),
       ),
     );

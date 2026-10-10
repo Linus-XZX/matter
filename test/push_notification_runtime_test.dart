@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/push/fcm_push_runtime.dart';
 import 'package:matter/features/push/firebase_client_config.dart';
+import 'package:matter/features/push/push_conversation.dart';
 import 'package:matter/features/push/push_providers.dart';
 import 'package:matter/features/push/push_room_directory.dart';
 import 'package:matter/features/push/push_runtime.dart';
@@ -118,7 +119,15 @@ void main() {
           'content_body': '展开后的正文',
         });
         final args = calls.last.arguments as Map;
-        expect(args['body'], type == 'm.room.message' ? '消息正文' : '你有一条新消息');
+        expect(
+          args['body'],
+          switch (type) {
+            'm.room.message' => '消息正文',
+            // Ciphertext is never rendered as a body.
+            'm.room.encrypted' => '已加密的消息',
+            _ => '你有一条新消息',
+          },
+        );
       }
     },
   );
@@ -172,9 +181,82 @@ void main() {
     // Keyed by room so Android collapses one conversation together; the old
     // account-wide key would merge every room into a single stack.
     final specifics = args['platformSpecifics'] as Map;
+    expect(specifics['groupKey'], 'matrix:${target.userId}:${target.roomId}');
+  });
+
+  test('the same room aggregates successive messages into one notification', () async {
+    final notifications = FlutterLocalNotificationsPlugin();
+    Map<String, dynamic> message(String eventId, String sender, String body) => {
+      ...target.toData(),
+      'event_id': eventId,
+      'type': 'm.room.message',
+      'room_name': '项目组',
+      'sender': sender,
+      'sender_display_name': sender.contains('alice') ? 'Alice' : 'Bob',
+      'content_body': body,
+      'content_msgtype': 'm.text',
+    };
+
+    await showMatrixPush(
+      notifications,
+      message(r'$one', '@alice:example.org', '第一条'),
+    );
+    await showMatrixPush(
+      notifications,
+      message(r'$two', '@bob:example.org', '第二条'),
+    );
+
+    final shows = calls.where((call) => call.method == 'show').toList();
+    expect(shows, hasLength(2));
+    final first = shows.first.arguments as Map;
+    final second = shows.last.arguments as Map;
+    // A stable (tag, id) per room is what makes Android update in place
+    // rather than stack a separate notification per message.
+    expect(second['id'], first['id']);
+    final firstSpecifics = first['platformSpecifics'] as Map;
+    final secondSpecifics = second['platformSpecifics'] as Map;
+    expect(secondSpecifics['tag'], firstSpecifics['tag']);
+    expect(firstSpecifics['tag'], isNot(contains(r'$one')));
+    // The latest event travels in the payload, which Android ignores for
+    // identity but read-receipt cleanup relies on.
+    expect(second['payload'], contains(r'$two'));
+    final style = secondSpecifics['styleInformation'] as Map;
+    expect(style['messages'], hasLength(2));
     expect(
-      specifics['groupKey'],
-      'matrix:${target.userId}:${target.roomId}',
+      (style['messages'] as List)
+          .map((entry) => (entry as Map)['text'])
+          .toList(),
+      ['第一条', '第二条'],
+    );
+    // Each entry is labelled by its own author, so the text stays prefix-free.
+    final authors = [
+      for (final entry in (style['messages'] as List))
+        ((entry as Map)['person'] as Map)['name'],
+    ];
+    expect(authors, ['Alice', 'Bob']);
+  });
+
+  test('a read room also drops its accumulated conversation', () async {
+    active = [
+      {'id': 1, 'tag': jsonEncode(target.toData())},
+    ];
+    await showMatrixPush(FlutterLocalNotificationsPlugin(), {
+      ...target.toData(),
+      'type': 'm.room.message',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+      'content_body': '在吗',
+      'content_msgtype': 'm.text',
+    });
+    await fcmPushRuntime.cancelRoomNotifications(
+      target.userId,
+      target.roomId,
+      [target.eventId],
+    );
+    // Otherwise the next message would resurrect everything already read.
+    expect(
+      await PushConversationStore().load(target.userId, target.roomId),
+      isNull,
     );
   });
 
@@ -198,9 +280,11 @@ void main() {
         final args = calls.last.arguments as Map;
         expect(
           args['body'],
-          type == 'm.room.message' || type == 'm.sticker'
-              ? 'Sygnal 消息正文'
-              : '你有一条新消息',
+          switch (type) {
+            'm.room.message' || 'm.sticker' => 'Sygnal 消息正文',
+            'm.room.encrypted' => '已加密的消息',
+            _ => '你有一条新消息',
+          },
         );
       }
     },

@@ -57,10 +57,13 @@ Map<String, dynamic>? _content(Map<String, dynamic> data) {
 }
 
 String? _msgType(Map<String, dynamic> data, Map<String, dynamic>? content) =>
-    _nonEmptyString(content?['msgtype']) ?? _nonEmptyString(data['content_msgtype']);
+    _nonEmptyString(content?['msgtype']) ??
+    _nonEmptyString(data['content_msgtype']);
 
-String? _messageBody(Map<String, dynamic> data, Map<String, dynamic>? content) =>
-    _nonEmptyString(content?['body']) ?? _nonEmptyString(data['content_body']);
+String? _messageBody(
+  Map<String, dynamic> data,
+  Map<String, dynamic>? content,
+) => _nonEmptyString(content?['body']) ?? _nonEmptyString(data['content_body']);
 
 /// Sender name is display name when the homeserver provided one, else the
 /// localpart of the sender MXID.
@@ -103,15 +106,31 @@ bool isMessageEvent(Map<String, dynamic> data) {
 bool isEncryptedEvent(Map<String, dynamic> data) =>
     _nonEmptyString(data['type']) == 'm.room.encrypted';
 
+/// Sender MXID, or null when the gateway omitted it.
+String? pushSenderId(Map<String, dynamic> data) =>
+    _nonEmptyString(data['sender']);
+
+/// Display name for the sender, falling back to the MXID localpart.
+String? pushSenderName(Map<String, dynamic> data) => _senderName(data);
+
+/// The message text on its own, with no sender prefix.
+///
+/// A messaging-style notification renders the sender through its own `Person`
+/// entry, so the text must not repeat the name.
+String pushMessageText(Map<String, dynamic> data) {
+  if (isEncryptedEvent(data)) return encryptedGroupBody;
+  if (!isMessageEvent(data)) return genericBody;
+  final content = _content(data);
+  return _bodyForType(_msgType(data, content), _messageBody(data, content)) ??
+      genericBody;
+}
+
 /// Build the notification title and body from a gateway payload.
 ///
 /// [room] supplies the direct-chat flag and a name for rooms the gateway left
 /// unnamed; it is optional because the payload alone still yields a usable
 /// notification.
-PushPreview buildPushPreview(
-  Map<String, dynamic> data, {
-  PushRoomInfo? room,
-}) {
+PushPreview buildPushPreview(Map<String, dynamic> data, {PushRoomInfo? room}) {
   final roomName =
       _nonEmptyString(room?.name) ?? _nonEmptyString(data['room_name']);
   final sender = _senderName(data);
@@ -121,30 +140,16 @@ PushPreview buildPushPreview(
   // a homeserver reports for a direct chat.
   final title = roomName ?? sender ?? genericTitle;
 
-  String body;
+  var body = pushMessageText(data);
   if (isEncryptedEvent(data)) {
     // The body is ciphertext; the sender is plaintext envelope metadata the
     // gateway already received, so quoting it reveals nothing new.
-    body = sender == null ? genericBody : '$sender：$encryptedGroupBody';
-  } else if (isMessageEvent(data)) {
-    final content = _content(data);
-    final text =
-        _bodyForType(_msgType(data, content), _messageBody(data, content)) ??
-        genericBody;
-    body = text;
-  } else {
-    body = genericBody;
-  }
-
-  // A direct chat shows the message alone: the title already names the peer
-  // and repeating the sender would be noise.
-  if (!isDirect && sender != null && isMessageEvent(data)) {
+    if (sender != null) body = '$sender：$body';
+  } else if (!isDirect && sender != null && isMessageEvent(data)) {
+    // A direct chat shows the message alone: the title already names the peer
+    // and repeating the sender would be noise.
     body = '$sender：$body';
   }
 
-  return PushPreview(
-    title: title,
-    body: body,
-    groupTitle: roomName ?? title,
-  );
+  return PushPreview(title: title, body: body, groupTitle: roomName ?? title);
 }

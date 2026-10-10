@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:crypto/crypto.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -10,12 +9,16 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_client_config.dart';
+import 'push_conversation.dart';
 import 'push_payload.dart';
 import 'push_room_directory.dart';
 import 'push_settings.dart';
 
 /// Per-account room metadata snapshot, shared with the notification path.
 final _roomDirectory = PushRoomDirectory();
+
+/// Accumulated per-room conversations, rebuilt on every background message.
+final _conversations = PushConversationStore();
 
 const _channelId = 'matrix_messages';
 const _initializationSettings = InitializationSettings(
@@ -45,14 +48,6 @@ Future<bool> acceptsPushTarget(PushTarget target) async {
   return sessions.any((session) => session['user_id'] == target.userId);
 }
 
-int pushNotificationId(PushTarget target) {
-  final bytes = sha256
-      .convert(utf8.encode('${target.userId}\n${target.eventId}'))
-      .bytes;
-  return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) &
-      0x7fffffff;
-}
-
 Future<void> showMatrixPush(
   FlutterLocalNotificationsPlugin notifications,
   Map<String, dynamic> data, {
@@ -68,8 +63,25 @@ Future<void> showMatrixPush(
   }
   final room = await _roomDirectory.lookup(target.userId, target.roomId);
   final preview = buildPushPreview(data, room: room);
+  final isDirect = room?.isDirect ?? false;
+  final conversation = await _conversations.append(
+    target.userId,
+    target.roomId,
+    PushConversationEntry(
+      senderId: pushSenderId(data) ?? '',
+      senderName: pushSenderName(data) ?? '',
+      // Stored without the sender prefix: the messaging style renders the
+      // author through its own Person entry.
+      body: pushMessageText(data),
+      eventId: target.eventId,
+      receivedAtMillis: DateTime.now().millisecondsSinceEpoch,
+    ),
+  );
   await notifications.show(
-    id: pushNotificationId(target),
+    // Identity is stable per room: Android keys a notification by (tag, id),
+    // so an event-specific tag would post a new notification per message
+    // instead of updating the conversation in place.
+    id: pushRoomNotificationId(target.userId, target.roomId),
     title: preview.title,
     body: preview.body,
     notificationDetails: NotificationDetails(
@@ -83,13 +95,54 @@ Future<void> showMatrixPush(
         // Group by room, not by account: Android collapses a conversation's
         // notifications together, which is what a chat notification should do.
         groupKey: 'matrix:${target.userId}:${target.roomId}',
+        styleInformation: _conversationStyle(
+          preview: preview,
+          conversation: conversation,
+          isDirect: isDirect,
+        ),
         // Android's active-notification query exposes tags, not payloads.
-        tag: jsonEncode(target.toData()),
+        // A stable tag plus a stable id keeps one notification per room; the
+        // latest event id travels in the payload, which Android ignores for
+        // identity.
+        tag: pushRoomTag(
+          userId: target.userId,
+          roomId: target.roomId,
+          registrationId: target.registrationId,
+        ),
       ),
     ),
     payload: jsonEncode(target.toData()),
   );
 }
+
+/// Render accumulated messages as an Android conversation.
+///
+/// The author is carried by each entry's [Person], which is why the stored
+/// bodies omit the `Sender：` prefix shown in the collapsed form.
+MessagingStyleInformation _conversationStyle({
+  required PushPreview preview,
+  required PushConversation conversation,
+  required bool isDirect,
+}) => MessagingStyleInformation(
+  // Only used to label the user's own messages, which a push never contains;
+  // the account display name is not in the payload, so fall back to a label.
+  const Person(name: '我'),
+  // A direct chat has no conversation title: Android then shows the sender
+  // name alone, matching how the collapsed notification reads.
+  conversationTitle: isDirect ? null : preview.groupTitle,
+  groupConversation: !isDirect,
+  messages: [
+    for (final entry in conversation.entries)
+      Message(
+        entry.body,
+        DateTime.fromMillisecondsSinceEpoch(entry.receivedAtMillis),
+        Person(
+          name: entry.senderName.isEmpty ? null : entry.senderName,
+          key: entry.senderId.isEmpty ? null : entry.senderId,
+        ),
+      ),
+  ],
+);
 
 class FcmPushRuntime {
   final notifications = FlutterLocalNotificationsPlugin();
@@ -173,7 +226,10 @@ class FcmPushRuntime {
     final active = await notifications.getActiveNotifications();
     return [
       for (final notification in active)
-        if (_parsePayload(notification.tag ?? notification.payload)
+        // The payload holds the latest event id; the tag is now stable per
+        // room and carries no event, so it is only a fallback for older
+        // notifications posted before this change.
+        if (_parsePayload(notification.payload ?? notification.tag)
             case final target?
             when target.userId == userId && target.roomId == roomId)
           target.eventId,
@@ -187,13 +243,22 @@ class FcmPushRuntime {
   ) async {
     final readEvents = eventIds.toSet();
     for (final notification in await notifications.getActiveNotifications()) {
-      final target = _parsePayload(notification.tag ?? notification.payload);
+      final target = _parsePayload(notification.payload ?? notification.tag);
+      // One notification represents the whole conversation, so its payload
+      // carries only the newest event. Cancelling it also drops the
+      // accumulated messages, otherwise the next message would resurface
+      // everything already read.
       if (target != null &&
           target.userId == userId &&
           target.roomId == roomId &&
-          readEvents.contains(target.eventId) &&
-          notification.id != null) {
-        await notifications.cancel(id: notification.id!, tag: notification.tag);
+          readEvents.contains(target.eventId)) {
+        if (notification.id != null) {
+          await notifications.cancel(
+            id: notification.id!,
+            tag: notification.tag,
+          );
+        }
+        await _conversations.clearRoom(userId, roomId);
       }
     }
   }

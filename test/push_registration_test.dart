@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/push/fcm_push_runtime.dart';
 import 'package:matter/features/push/push_build_config.dart';
+import 'package:matter/features/push/push_conversation.dart';
 import 'package:matter/features/push/push_registration_manager.dart';
 import 'package:matter/features/push/push_settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -382,19 +383,53 @@ void main() {
         PushTarget.fromData({...target.toData(), 'room_id': null}),
         isNull,
       );
-      final otherAccount = PushTarget(
-        userId: bob,
-        roomId: target.roomId,
-        eventId: target.eventId,
-        registrationId: target.registrationId,
-      );
-      expect(pushNotificationId(target), pushNotificationId(target));
-      expect(
-        pushNotificationId(target),
-        isNot(pushNotificationId(otherAccount)),
-      );
     },
   );
+
+  test('notification identity stays stable per room so messages aggregate', () {
+    const aliceRoom = '@alice:example.org';
+    // A per-event id or tag would post a new notification for every message
+    // instead of updating one conversation in place.
+    expect(
+      pushRoomNotificationId(aliceRoom, '!room:example.org'),
+      pushRoomNotificationId(aliceRoom, '!room:example.org'),
+    );
+    expect(
+      pushRoomNotificationId(aliceRoom, '!room:example.org'),
+      isNot(pushRoomNotificationId(aliceRoom, '!other:example.org')),
+    );
+    expect(
+      pushRoomNotificationId(aliceRoom, '!room:example.org'),
+      isNot(pushRoomNotificationId(bob, '!room:example.org')),
+    );
+    expect(
+      pushRoomTag(
+        userId: aliceRoom,
+        roomId: '!room:example.org',
+        registrationId: 'current',
+      ),
+      pushRoomTag(
+        userId: aliceRoom,
+        roomId: '!room:example.org',
+        registrationId: 'current',
+      ),
+    );
+    // A new registration must not inherit the previous one's notifications.
+    expect(
+      pushRoomTag(
+        userId: aliceRoom,
+        roomId: '!room:example.org',
+        registrationId: 'current',
+      ),
+      isNot(
+        pushRoomTag(
+          userId: aliceRoom,
+          roomId: '!room:example.org',
+          registrationId: 'rotated',
+        ),
+      ),
+    );
+  });
 
   test(
     'background delivery checks saved membership and removal markers',

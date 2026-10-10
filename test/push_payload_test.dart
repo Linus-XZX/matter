@@ -33,10 +33,7 @@ void main() {
 
   group('group chat', () {
     test('titles with the room and prefixes the sender in the body', () {
-      final preview = buildPushPreview(
-        event(roomName: '项目组'),
-        room: groupRoom,
-      );
+      final preview = buildPushPreview(event(roomName: '项目组'), room: groupRoom);
       expect(preview.title, '项目组');
       expect(preview.body, 'Alice：明天的会改到 10 点');
       expect(preview.groupTitle, '项目组');
@@ -92,10 +89,10 @@ void main() {
     });
 
     test('sticks to the sender name when the room is unnamed everywhere', () {
-      final preview = buildPushPreview(event(), room: const PushRoomInfo(
-        name: '',
-        isDirect: false,
-      ));
+      final preview = buildPushPreview(
+        event(),
+        room: const PushRoomInfo(name: '', isDirect: false),
+      );
       expect(preview.title, 'Alice');
     });
   });
@@ -138,11 +135,7 @@ void main() {
 
     test('ignores ciphertext that happens to look like a body', () {
       final preview = buildPushPreview(
-        event(
-          type: 'm.room.encrypted',
-          body: 'AwgAEnB1ZXN0...',
-          msgType: null,
-        ),
+        event(type: 'm.room.encrypted', body: 'AwgAEnB1ZXN0...', msgType: null),
         room: groupRoom,
       );
       expect(preview.body, 'Alice：已加密的消息');
@@ -186,14 +179,11 @@ void main() {
     test('treats blank and non-string fields as absent', () {
       // Direct chat so the sender prefix does not obscure the fallback under
       // test: the point is that a blank body and a numeric msgtype are dropped.
-      final preview = buildPushPreview(
-        {
-          ...event(msgType: null),
-          'content_body': '   ',
-          'content_msgtype': 42,
-        },
-        room: directRoom,
-      );
+      final preview = buildPushPreview({
+        ...event(msgType: null),
+        'content_body': '   ',
+        'content_msgtype': 42,
+      }, room: directRoom);
       expect(preview.body, genericBody);
     });
 
@@ -251,7 +241,10 @@ void main() {
         isNull,
       );
       expect(
-        (await directory.lookup('@alice:example.org', '!room:example.org'))?.name,
+        (await directory.lookup(
+          '@alice:example.org',
+          '!room:example.org',
+        ))?.name,
         'Alice 的房间',
       );
     });
@@ -262,7 +255,10 @@ void main() {
       ]);
       await clearPushRoomDirectory('@alice:example.org');
       expect(
-        await PushRoomDirectory().lookup('@alice:example.org', '!room:example.org'),
+        await PushRoomDirectory().lookup(
+          '@alice:example.org',
+          '!room:example.org',
+        ),
         isNull,
       );
     });
