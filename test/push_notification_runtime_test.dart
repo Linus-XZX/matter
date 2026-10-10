@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/push/fcm_push_runtime.dart';
 import 'package:matter/features/push/firebase_client_config.dart';
+import 'package:matter/features/push/push_avatar.dart';
 import 'package:matter/features/push/push_conversation.dart';
 import 'package:matter/features/push/push_providers.dart';
 import 'package:matter/features/push/push_room_directory.dart';
@@ -270,6 +271,61 @@ void main() {
     specifics = calls.last.arguments as Map;
     platform = specifics['platformSpecifics'] as Map;
     expect(platform['actions'], anyOf(isNull, isEmpty));
+  });
+
+  test('a repeated author is not re-encoded into the notification', () async {
+    // Seed real avatar bytes, otherwise the assertion would pass trivially
+    // with no icons at all.
+    await savePushRoomDirectory(target.userId, [
+      (
+        id: target.roomId,
+        name: '项目组',
+        roomType: 'group',
+        avatarMxc: 'mxc://example.org/room',
+        isEncrypted: false,
+      ),
+    ]);
+    await savePushSenderAvatars(target.userId, target.roomId, {
+      '@alice:example.org': 'mxc://example.org/alice',
+    });
+    final avatars = PushAvatarStore();
+    await avatars.save(
+      target.userId,
+      'mxc://example.org/room',
+      Uint8List.fromList([1, 2, 3]),
+    );
+    await avatars.save(
+      target.userId,
+      'mxc://example.org/alice',
+      Uint8List.fromList([4, 5, 6]),
+    );
+
+    final notifications = FlutterLocalNotificationsPlugin();
+    Map<String, dynamic> message(String eventId, String body) => {
+      ...target.toData(),
+      'event_id': eventId,
+      'type': 'm.room.message',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+      'content_body': body,
+      'content_msgtype': 'm.text',
+    };
+
+    await showMatrixPush(notifications, message(r'$a', 'a'));
+    await showMatrixPush(notifications, message(r'$b', 'b'));
+
+    final specifics =
+        (calls.last.arguments as Map)['platformSpecifics'] as Map;
+    final style = specifics['styleInformation'] as Map;
+    final messages = (style['messages'] as List).cast<Map>();
+    expect(messages, hasLength(2));
+    final icons = [
+      for (final entry in messages) (entry['person'] as Map)['icon'],
+    ];
+    // The platform channel marshals the bitmap per entry, so only the first
+    // occurrence of an author carries one.
+    expect(icons.first, isNotNull);
+    expect(icons.last, isNull);
   });
 
   test('a read room also drops its accumulated conversation', () async {

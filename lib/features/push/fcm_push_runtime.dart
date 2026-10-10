@@ -253,9 +253,12 @@ ByteArrayAndroidBitmap? _bitmap(Uint8List? bytes) =>
 /// Wrap fetched bytes as a `Person` icon, or null when unavailable.
 ///
 /// `Person.icon` takes an `AndroidIcon` rather than an `AndroidBitmap`, so the
-/// two helpers are not interchangeable.
-ByteArrayAndroidIcon? _icon(Uint8List? bytes) =>
-    bytes == null ? null : ByteArrayAndroidIcon(bytes);
+/// two helpers are not interchangeable. Pass [attach] as false to omit the
+/// icon for a repeated author: the platform channel marshals the bitmap once
+/// per entry, so resending identical bytes for every message of a
+/// conversation wastes work on a notification that Android collapses anyway.
+ByteArrayAndroidIcon? _icon(Uint8List? bytes, {bool attach = true}) =>
+    bytes == null || !attach ? null : ByteArrayAndroidIcon(bytes);
 
 /// Render accumulated messages as an Android conversation.
 ///
@@ -268,31 +271,38 @@ MessagingStyleInformation _conversationStyle({
   required String? senderId,
   required Uint8List? senderAvatar,
   required Uint8List? roomAvatar,
-}) => MessagingStyleInformation(
-  // Only used to label the user's own messages, which a push never contains;
-  // the account display name is not in the payload, so fall back to a label.
-  const Person(name: '我'),
-  // A direct chat has no conversation title: Android then shows the sender
-  // name alone, matching how the collapsed notification reads.
-  conversationTitle: isDirect ? null : preview.groupTitle,
-  groupConversation: !isDirect,
-  messages: [
-    for (final entry in conversation.entries)
-      Message(
-        entry.body,
-        DateTime.fromMillisecondsSinceEpoch(entry.receivedAtMillis),
-        Person(
-          name: entry.senderName.isEmpty ? null : entry.senderName,
-          key: entry.senderId.isEmpty ? null : entry.senderId,
-          // Only the newest message's author was resolved, so earlier history
-          // falls back to the room avatar rather than showing no icon.
-          icon: _icon(
-            entry.senderId == senderId ? senderAvatar ?? roomAvatar : roomAvatar,
+}) {
+  // Authors whose avatar has already been attached in this conversation.
+  final iconOwners = <String>{};
+  return MessagingStyleInformation(
+    // Only used to label the user's own messages, which a push never contains;
+    // the account display name is not in the payload, so fall back to a label.
+    const Person(name: '我'),
+    // A direct chat has no conversation title: Android then shows the sender
+    // name alone, matching how the collapsed notification reads.
+    conversationTitle: isDirect ? null : preview.groupTitle,
+    groupConversation: !isDirect,
+    messages: [
+      for (final entry in conversation.entries)
+        Message(
+          entry.body,
+          DateTime.fromMillisecondsSinceEpoch(entry.receivedAtMillis),
+          Person(
+            name: entry.senderName.isEmpty ? null : entry.senderName,
+            key: entry.senderId.isEmpty ? null : entry.senderId,
+            // Only the newest message's author was resolved, so earlier history
+            // falls back to the room avatar rather than showing no icon.
+            icon: _icon(
+              entry.senderId == senderId
+                  ? senderAvatar ?? roomAvatar
+                  : roomAvatar,
+              attach: iconOwners.add(entry.senderId),
+            ),
           ),
         ),
-      ),
-  ],
-);
+    ],
+  );
+}
 
 class FcmPushRuntime {
   final notifications = FlutterLocalNotificationsPlugin();

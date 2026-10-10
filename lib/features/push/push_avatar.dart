@@ -9,8 +9,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// every message of a conversation.
 const _maxCachedAvatars = 64;
 
-/// Reject anything large enough to notice in a notification payload.
-const _maxAvatarBytes = 512 * 1024;
+/// Reject anything an avatar cannot plausibly need. A 96x96 thumbnail is a
+/// few KB; the cap only guards against a misbehaving endpoint, and oversized
+/// bytes would be marshalled into the notification payload.
+const _maxAvatarBytes = 128 * 1024;
 
 const _accessTokenKeyPrefix = 'matrix_access_token_';
 
