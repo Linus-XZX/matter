@@ -9,17 +9,86 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// there is no group/direct flag in the push gateway API at all, so an
 /// unassisted payload cannot tell a direct chat from a group.
 class PushRoomInfo {
-  const PushRoomInfo({required this.name, required this.isDirect});
+  const PushRoomInfo({
+    required this.name,
+    required this.isDirect,
+    this.avatarMxc = '',
+    this.isEncrypted = false,
+  });
 
   final String name;
   final bool isDirect;
 
+  /// Room avatar as an `mxc://` URI, empty when the room has none.
+  final String avatarMxc;
+
+  /// Whether the room is encrypted. Sender avatars are skipped for encrypted
+  /// rooms, whose message authors are not fetched.
+  final bool isEncrypted;
+
   factory PushRoomInfo.fromJson(Map<String, dynamic> json) => PushRoomInfo(
     name: json['name'] as String? ?? '',
     isDirect: json['is_direct'] as bool? ?? false,
+    avatarMxc: json['avatar_mxc'] as String? ?? '',
+    isEncrypted: json['is_encrypted'] as bool? ?? false,
   );
 
-  Map<String, dynamic> toJson() => {'name': name, 'is_direct': isDirect};
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'is_direct': isDirect,
+    'avatar_mxc': avatarMxc,
+    'is_encrypted': isEncrypted,
+  };
+}
+
+/// Sender profiles per room, so avatars survive the background isolate.
+///
+/// The gateway never sends an avatar, and resolving one needs the member list,
+/// so the foreground persists what it has already loaded.
+String pushSenderAvatarKey(String userId) =>
+    'push_sender_avatars_${base64Url.encode(utf8.encode(userId))}';
+
+/// Record sender avatars for one room, replacing any previous list.
+Future<void> savePushSenderAvatars(
+  String userId,
+  String roomId,
+  Map<String, String> avatars,
+) async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString(pushSenderAvatarKey(userId));
+  Map<String, dynamic> all = {};
+  if (raw != null) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) all = decoded;
+    } on FormatException {
+      all = {};
+    }
+  }
+  all[roomId] = avatars;
+  await prefs.setString(pushSenderAvatarKey(userId), jsonEncode(all));
+}
+
+/// Sender avatar for one member of a room, or null when not yet observed.
+Future<String?> loadPushSenderAvatar(
+  String userId,
+  String roomId,
+  String senderId,
+) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  final raw = prefs.getString(pushSenderAvatarKey(userId));
+  if (raw == null) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map<String, dynamic>) return null;
+    final room = decoded[roomId];
+    if (room is! Map<String, dynamic>) return null;
+    final mxc = room[senderId];
+    return mxc is String && mxc.isNotEmpty ? mxc : null;
+  } on FormatException {
+    return null;
+  }
 }
 
 String pushRoomDirectoryKey(String userId) =>
@@ -71,7 +140,16 @@ class PushRoomDirectory {
 /// Persist the joined-room snapshot the push path reads.
 Future<void> savePushRoomDirectory(
   String userId,
-  Iterable<({String id, String name, String roomType})> rooms,
+  Iterable<
+    ({
+      String id,
+      String name,
+      String roomType,
+      String avatarMxc,
+      bool isEncrypted,
+    })
+  >
+  rooms,
 ) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString(
@@ -81,6 +159,8 @@ Future<void> savePushRoomDirectory(
         room.id: PushRoomInfo(
           name: room.name,
           isDirect: room.roomType == 'dm',
+          avatarMxc: room.avatarMxc,
+          isEncrypted: room.isEncrypted,
         ).toJson(),
     }),
   );

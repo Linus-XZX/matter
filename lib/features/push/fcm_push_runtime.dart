@@ -9,8 +9,10 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_client_config.dart';
+import 'push_avatar.dart';
 import 'push_conversation.dart';
 import 'push_payload.dart';
+import 'push_reply.dart';
 import 'push_room_directory.dart';
 import 'push_settings.dart';
 
@@ -19,6 +21,104 @@ final _roomDirectory = PushRoomDirectory();
 
 /// Accumulated per-room conversations, rebuilt on every background message.
 final _conversations = PushConversationStore();
+
+/// Fetched avatar bytes, cached across background isolate restarts.
+final _avatars = PushAvatarStore();
+
+/// Action id for the inline reply box on an Android notification.
+const replyActionId = 'matter.reply';
+
+/// Whether the event can be answered from the notification.
+///
+/// Replying to an encrypted room needs the SDK's Olm session and key store,
+/// which the notification path deliberately does not start, so the reply
+/// action is offered only for rooms whose message is sent as plaintext.
+bool supportsInlineReply(Map<String, dynamic> data, {PushRoomInfo? room}) =>
+    isMessageEvent(data) && !(room?.isEncrypted ?? false);
+
+/// Handle a reply typed into a notification.
+///
+/// Runs on the plugin's background isolate, so it is annotated as an entry
+/// point and reads only persisted state. Sending does not require the Rust
+/// client, so no Matrix client is started here.
+@pragma('vm:entry-point')
+Future<void> handleNotificationReply(NotificationResponse response) async {
+  if (response.actionId != replyActionId) return;
+  final input = response.input?.trim() ?? '';
+  final target = parsePushTargetPayload(response.payload);
+  if (target == null || input.isEmpty) return;
+  final room = await _roomDirectory.lookup(target.userId, target.roomId);
+  // Re-check here rather than trusting the action's presence: the room's
+  // encryption state may have changed since the notification was posted.
+  if (room?.isEncrypted ?? false) {
+    debugPrint('Refusing inline reply to an encrypted room');
+    return;
+  }
+  final sent = await sendNotificationReply(
+    userId: target.userId,
+    roomId: target.roomId,
+    body: input,
+  );
+  if (!sent) return;
+  // Drop the conversation so the reply does not leave a stale notification
+  // behind claiming the room is unread.
+  await _conversations.clearRoom(target.userId, target.roomId);
+}
+
+/// Decode a notification payload into a target.
+///
+/// Shared by the background reply handler and the runtime's own handlers.
+PushTarget? parsePushTargetPayload(String? payload) {
+  if (payload == null || payload.isEmpty) return null;
+  try {
+    final data = jsonDecode(payload);
+    return data is Map<String, dynamic> ? PushTarget.fromData(data) : null;
+  } on FormatException {
+    return null;
+  }
+}
+
+Future<Uint8List?> _roomAvatarBytes(
+  PushTarget target,
+  PushRoomInfo? room,
+  PushMediaSession? session,
+) async {
+  final mxc = room?.avatarMxc ?? '';
+  if (mxc.isEmpty) return null;
+  return loadAvatarBytes(
+    store: _avatars,
+    userId: target.userId,
+    mxc: mxc,
+    session: session,
+  );
+}
+
+/// Avatar for the author of an encrypted-room message.
+///
+/// Skipped for encrypted rooms: those authors are not resolved for the
+/// notification path, matching how other clients render a locked room.
+Future<Uint8List?> _senderAvatarBytes(
+  PushTarget target,
+  Map<String, dynamic> data,
+  PushRoomInfo? room,
+  PushMediaSession? session,
+) async {
+  if (room?.isEncrypted ?? false) return null;
+  final sender = pushSenderId(data);
+  if (sender == null) return null;
+  final mxc = await loadPushSenderAvatar(
+    target.userId,
+    target.roomId,
+    sender,
+  );
+  if (mxc == null) return null;
+  return loadAvatarBytes(
+    store: _avatars,
+    userId: target.userId,
+    mxc: mxc,
+    session: session,
+  );
+}
 
 const _channelId = 'matrix_messages';
 const _initializationSettings = InitializationSettings(
@@ -32,7 +132,13 @@ bool get fcmPushSupported =>
 Future<void> handleFcmBackgroundMessage(RemoteMessage message) async {
   await Firebase.initializeApp();
   final notifications = FlutterLocalNotificationsPlugin();
-  await notifications.initialize(settings: _initializationSettings);
+  // The reply handler must be registered on the isolate that owns the
+  // notification, so the typed text is delivered to the background isolate
+  // that the notification was posted from.
+  await notifications.initialize(
+    settings: _initializationSettings,
+    onDidReceiveBackgroundNotificationResponse: handleNotificationReply,
+  );
   await showMatrixPush(notifications, message.data);
 }
 
@@ -77,6 +183,12 @@ Future<void> showMatrixPush(
       receivedAtMillis: DateTime.now().millisecondsSinceEpoch,
     ),
   );
+  // One session lookup and one avatar fetch per message; both are cached, and
+  // a failure only costs the small icon.
+  final session = await loadPushMediaSession(target.userId);
+  final roomAvatar = await _roomAvatarBytes(target, room, session);
+  final senderAvatar = await _senderAvatarBytes(target, data, room, session);
+  final replyable = supportsInlineReply(data, room: room);
   await notifications.show(
     // Identity is stable per room: Android keys a notification by (tag, id),
     // so an event-specific tag would post a new notification per message
@@ -95,11 +207,30 @@ Future<void> showMatrixPush(
         // Group by room, not by account: Android collapses a conversation's
         // notifications together, which is what a chat notification should do.
         groupKey: 'matrix:${target.userId}:${target.roomId}',
+        // The large icon identifies the room at a glance. A direct chat shows
+        // the author instead, which is the more useful identity there.
+        largeIcon: isDirect
+            ? _bitmap(senderAvatar) ?? _bitmap(roomAvatar)
+            : _bitmap(roomAvatar),
         styleInformation: _conversationStyle(
           preview: preview,
           conversation: conversation,
           isDirect: isDirect,
+          senderId: pushSenderId(data),
+          senderAvatar: senderAvatar,
+          roomAvatar: roomAvatar,
         ),
+        actions: replyable
+            ? [
+                AndroidNotificationAction(
+                  replyActionId,
+                  '回复',
+                  showsUserInterface: false,
+                  // Typed text comes back as the action's input result.
+                  inputs: const [AndroidNotificationActionInput()],
+                ),
+              ]
+            : null,
         // Android's active-notification query exposes tags, not payloads.
         // A stable tag plus a stable id keeps one notification per room; the
         // latest event id travels in the payload, which Android ignores for
@@ -115,6 +246,17 @@ Future<void> showMatrixPush(
   );
 }
 
+/// Wrap fetched bytes as a notification large icon, or null when unavailable.
+ByteArrayAndroidBitmap? _bitmap(Uint8List? bytes) =>
+    bytes == null ? null : ByteArrayAndroidBitmap(bytes);
+
+/// Wrap fetched bytes as a `Person` icon, or null when unavailable.
+///
+/// `Person.icon` takes an `AndroidIcon` rather than an `AndroidBitmap`, so the
+/// two helpers are not interchangeable.
+ByteArrayAndroidIcon? _icon(Uint8List? bytes) =>
+    bytes == null ? null : ByteArrayAndroidIcon(bytes);
+
 /// Render accumulated messages as an Android conversation.
 ///
 /// The author is carried by each entry's [Person], which is why the stored
@@ -123,6 +265,9 @@ MessagingStyleInformation _conversationStyle({
   required PushPreview preview,
   required PushConversation conversation,
   required bool isDirect,
+  required String? senderId,
+  required Uint8List? senderAvatar,
+  required Uint8List? roomAvatar,
 }) => MessagingStyleInformation(
   // Only used to label the user's own messages, which a push never contains;
   // the account display name is not in the payload, so fall back to a label.
@@ -139,6 +284,11 @@ MessagingStyleInformation _conversationStyle({
         Person(
           name: entry.senderName.isEmpty ? null : entry.senderName,
           key: entry.senderId.isEmpty ? null : entry.senderId,
+          // Only the newest message's author was resolved, so earlier history
+          // falls back to the room avatar rather than showing no icon.
+          icon: _icon(
+            entry.senderId == senderId ? senderAvatar ?? roomAvatar : roomAvatar,
+          ),
         ),
       ),
   ],
@@ -168,10 +318,12 @@ class FcmPushRuntime {
         settings: _initializationSettings,
         onDidReceiveNotificationResponse: (response) =>
             _openPayload(response.payload),
+        // A reply arrives on the background isolate even while the app runs.
+        onDidReceiveBackgroundNotificationResponse: handleNotificationReply,
       );
       final launch = await notifications.getNotificationAppLaunchDetails();
       if (launch?.didNotificationLaunchApp ?? false) {
-        initialTarget = _parsePayload(launch?.notificationResponse?.payload);
+        initialTarget = parsePushTargetPayload(launch?.notificationResponse?.payload);
       }
       FirebaseMessaging.onMessage.listen((message) {
         unawaited(
@@ -204,18 +356,9 @@ class FcmPushRuntime {
     }
   }
 
-  PushTarget? _parsePayload(String? payload) {
-    if (payload == null || payload.isEmpty) return null;
-    try {
-      final data = jsonDecode(payload);
-      return data is Map<String, dynamic> ? PushTarget.fromData(data) : null;
-    } on FormatException {
-      return null;
-    }
-  }
 
   void _openPayload(String? payload) {
-    final target = _parsePayload(payload);
+    final target = parsePushTargetPayload(payload);
     if (target != null) _opened.add(target);
   }
 
@@ -229,7 +372,7 @@ class FcmPushRuntime {
         // The payload holds the latest event id; the tag is now stable per
         // room and carries no event, so it is only a fallback for older
         // notifications posted before this change.
-        if (_parsePayload(notification.payload ?? notification.tag)
+        if (parsePushTargetPayload(notification.payload ?? notification.tag)
             case final target?
             when target.userId == userId && target.roomId == roomId)
           target.eventId,
@@ -243,7 +386,7 @@ class FcmPushRuntime {
   ) async {
     final readEvents = eventIds.toSet();
     for (final notification in await notifications.getActiveNotifications()) {
-      final target = _parsePayload(notification.payload ?? notification.tag);
+      final target = parsePushTargetPayload(notification.payload ?? notification.tag);
       // One notification represents the whole conversation, so its payload
       // carries only the newest event. Cancelling it also drops the
       // accumulated messages, otherwise the next message would resurface

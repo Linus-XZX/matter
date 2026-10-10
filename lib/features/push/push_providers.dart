@@ -96,12 +96,40 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
     unawaited(
       savePushRoomDirectory(
         userId,
-        rooms
-            .where((room) => room.roomType != 'space')
-            .map(
-              (room) => (id: room.id, name: room.name, roomType: room.roomType),
-            ),
+        rooms.where((room) => room.roomType != 'space').map(
+          (room) => (
+            id: room.id,
+            name: room.name,
+            roomType: room.roomType,
+            avatarMxc: room.avatarUrl ?? '',
+            isEncrypted: room.isEncrypted,
+          ),
+        ),
       ),
+    );
+  }, fireImmediately: true);
+});
+
+/// Record room-member avatars for the rooms the user has opened.
+///
+/// The gateway payload has no avatar and resolving one needs the member list,
+/// which only the running client can read. Only watched rooms are recorded,
+/// because the push path only needs avatars for rooms that can notify.
+final pushSenderAvatarProvider = Provider<void>((ref) {
+  if (!pushSupported || !ref.watch(sessionReadyProvider)) return;
+  final userId = ref.watch(activeUserIdProvider);
+  final roomId = ref.watch(currentRoomIdProvider);
+  if (userId == null || roomId == null) return;
+  ref.listen(roomMembersProvider(roomId), (_, next) {
+    final members = next.asData?.value;
+    if (members == null) return;
+    unawaited(
+      savePushSenderAvatars(userId, roomId, {
+        for (final member in members)
+          if (member.avatarUrl case final mxc?
+              when mxc.startsWith('mxc://'))
+            member.id: mxc,
+      }),
     );
   }, fireImmediately: true);
 });
@@ -109,6 +137,7 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
 /// Kept alive at the app root, including the login page and account switches.
 final pushLifecycleProvider = Provider<void>((ref) {
   ref.watch(pushRoomDirectoryProvider);
+  ref.watch(pushSenderAvatarProvider);
   if (!pushSupported) return;
   final manager = ref.read(pushRegistrationManagerProvider);
   var disposed = false;

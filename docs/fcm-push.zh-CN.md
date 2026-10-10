@@ -82,7 +82,7 @@ FCM 网关应发送高优先级的 **data message**，不要添加 FCM 的 `noti
 
 Web 网关须支持 Web Push/VAPID。客户端在 Matrix pusher 的 `data` 中传递 `endpoint`、`p256dh` 和 `auth`，`pushkey` 使用订阅的 `p256dh`。请确认所用 Sygnal 版本或其他网关支持该模式；FCM 应用项不能接收浏览器订阅。
 
-两种方式都使用 Matrix 默认推送格式，Homeserver 会把非加密事件的内容交给网关。网关须将 `data.default_payload` 中的 `user_id`、`registration_id` 与 `room_id`、`event_id` 一同送达客户端，并保留事件的 `type` 和消息正文，否则客户端只能显示通用提示。FCM 支持 JSON 字符串形式的 `content`，也支持 Sygnal HTTP v1 转发的展开字段 `content_body`；有效的 `content.body` 优先。Web 的 `content` 可使用 JSON 对象或 JSON 字符串。浏览器 worker 接受这些字段组成的 JSON 对象，或位于 `notification` 内的对象。不保留账号路由数据的 Web 网关需要调整转发，否则通知会被拒绝。旧的 `event_id_only` 注册会在账号就绪或应用恢复前台时的注册刷新中更新。
+两种方式都使用 Matrix 默认推送格式，Homeserver 会把非加密事件的内容交给网关。网关须将 `data.default_payload` 中的 `user_id`、`registration_id` 与 `room_id`、`event_id` 一同送达客户端，并保留事件的 `type`、`sender_display_name`、`room_name` 和消息正文，否则通知无法说明是谁在哪个房间发了什么。FCM 支持 JSON 字符串形式的 `content`，也支持 Sygnal HTTP v1 转发的展开字段 `content_body`；有效的 `content.body` 优先。Web 的 `content` 可使用 JSON 对象或 JSON 字符串。浏览器 worker 接受这些字段组成的 JSON 对象，或位于 `notification` 内的对象。不保留账号路由数据的 Web 网关需要调整转发，否则通知会被拒绝。旧的 `event_id_only` 注册会在账号就绪或应用恢复前台时的注册刷新中更新。
 
 ## 用户设置与生命周期
 
@@ -90,7 +90,7 @@ Web 网关须支持 Web Push/VAPID。客户端在 Matrix pusher 的 `data` 中�
 
 浏览器的推送 worker 使用单独作用域，不替换 Flutter 的应用 worker。关闭某个账号只注销该账号的 pusher，浏览器订阅保留给其他账号使用。同一站点订阅只能使用一把 VAPID 公钥；发现不同公钥时报错，不会取消其他账号仍在使用的订阅。更换公钥需先关闭所有账号推送，再清除原有浏览器订阅。
 
-权限只在启用时请求。每个 Matrix 账号分别注册，`append=true` 保留共享同一安装或浏览器订阅的其他账号。Matter 在前台且有焦点时不显示系统通知，Web 以同一应用路径下可见且有焦点的窗口为准。非加密的 `m.room.message` 和 `m.sticker` 显示 `content.body`，加密事件或缺少正文的事件显示“你有一条新消息”，后台不做任何解密。点击通知时会重新检查当前设置，切换到所属账号并打开对应房间及事件。房间免打扰和服务器推送规则继续生效。
+权限只在启用时请求。每个 Matrix 账号分别注册，`append=true` 保留共享同一安装或浏览器订阅的其他账号。Matter 在前台且有焦点时不显示系统通知，Web 以同一应用路径下可见且有焦点的窗口为准。标题取房间名，缺失时回退到发送者；群聊正文加 `sender_display_name` 前缀，私聊只显示消息本身（Homeserver 会把对方昵称作为私聊的 `room_name`）。非文本消息按 msgtype 显示描述文案。加密事件只显示发送者、不显示正文：发送者属于网关已收到的明文信封元数据，后台不做任何解密。同一房间的消息汇总为一条会话式通知，逐条标注发送者，“回复”快捷操作只对非加密房间显示，因为加密房间回复需要设备上的 Olm 会话。点击通知时会重新检查当前设置，切换到所属账号并打开对应房间及事件。房间免打扰和服务器推送规则继续生效。
 
 打开房间或手动标记已读时，成功发送已读回执后才撤销该账号、该房间在操作开始时已有的通知，操作期间新到的消息保留。当前账号同步到房间未读数从正数降为零时也会清理该房间通知，以处理其他设备上的已读。回执失败不撤销任何通知。Android 用通知 tag 保存账号、房间和事件标识，因此清理逻辑也能识别后台进程创建的通知；升级前没有 tag 的旧通知无法按房间识别，需手动清除。
 

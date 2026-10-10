@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/markdown/markdown_source_store.dart';
+import '../features/push/push_avatar.dart';
 import '../features/push/push_conversation.dart';
 import '../features/push/push_room_directory.dart';
 import '../features/push/push_settings.dart';
@@ -816,6 +817,7 @@ Future<void> removeSession(String userId) async {
   await prefs.remove(pushSettingsKey(userId));
   await clearPushRoomDirectory(userId);
   await PushConversationStore().clearAccount(userId);
+  await PushAvatarStore().clearAccount(userId);
   await const MarkdownSourceStore().clearForUser(userId);
   for (final homeserver in removedHomeservers) {
     await clearAuthenticatedMediaCacheForSession(

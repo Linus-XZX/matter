@@ -164,7 +164,8 @@ void main() {
 
   test('a direct chat drops the sender prefix and groups per room', () async {
     await savePushRoomDirectory(target.userId, [
-      (id: target.roomId, name: 'Alice', roomType: 'dm'),
+      (id: target.roomId, name: 'Alice', roomType: 'dm',
+          avatarMxc: '', isEncrypted: false),
     ]);
     final notifications = FlutterLocalNotificationsPlugin();
     await showMatrixPush(notifications, {
@@ -234,6 +235,41 @@ void main() {
         ((entry as Map)['person'] as Map)['name'],
     ];
     expect(authors, ['Alice', 'Bob']);
+  });
+
+  test('a reply action is offered only for a plaintext room', () async {
+    final notifications = FlutterLocalNotificationsPlugin();
+    Map<String, dynamic> event() => {
+      ...target.toData(),
+      'type': 'm.room.message',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+      'content_body': '在吗',
+      'content_msgtype': 'm.text',
+    };
+
+    await showMatrixPush(notifications, event());
+    var specifics = calls.last.arguments as Map;
+    var platform = specifics['platformSpecifics'] as Map;
+    var actions = platform['actions'] as List;
+    expect(actions, hasLength(1));
+    expect((actions.single as Map)['id'], 'matter.reply');
+
+    // A reply to an encrypted room needs the SDK's Olm session, which the
+    // notification path deliberately never starts.
+    await savePushRoomDirectory(target.userId, [
+      (
+        id: target.roomId,
+        name: 'Secret',
+        roomType: 'group',
+        avatarMxc: '',
+        isEncrypted: true,
+      ),
+    ]);
+    await showMatrixPush(notifications, event());
+    specifics = calls.last.arguments as Map;
+    platform = specifics['platformSpecifics'] as Map;
+    expect(platform['actions'], anyOf(isNull, isEmpty));
   });
 
   test('a read room also drops its accumulated conversation', () async {
