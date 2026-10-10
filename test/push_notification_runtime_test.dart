@@ -14,6 +14,7 @@ import 'package:matter/features/push/fcm_push_runtime.dart';
 import 'package:matter/features/push/firebase_client_config.dart';
 import 'package:matter/features/push/push_avatar.dart';
 import 'package:matter/features/push/push_conversation.dart';
+import 'package:matter/features/push/push_notification_actions.dart';
 import 'package:matter/features/push/push_providers.dart';
 import 'package:matter/features/push/push_room_directory.dart';
 import 'package:matter/features/push/push_runtime.dart';
@@ -274,8 +275,8 @@ void main() {
     var specifics = calls.last.arguments as Map;
     var platform = specifics['platformSpecifics'] as Map;
     var actions = platform['actions'] as List;
-    expect(actions, hasLength(1));
-    expect((actions.single as Map)['id'], 'matter.reply');
+    expect(actions, hasLength(3));
+    expect((actions.first as Map)['id'], replyActionId);
 
     // A reply to an encrypted room needs the SDK's Olm session, which the
     // notification path deliberately never starts.
@@ -291,7 +292,15 @@ void main() {
     await showMatrixPush(notifications, event());
     specifics = calls.last.arguments as Map;
     platform = specifics['platformSpecifics'] as Map;
-    expect(platform['actions'], anyOf(isNull, isEmpty));
+    actions = platform['actions'] as List;
+    expect(actions.map((action) => (action as Map)['id']), [
+      markReadActionId,
+      muteActionId,
+    ]);
+    expect(
+      actions.every((action) => (action as Map)['cancelNotification'] == false),
+      isTrue,
+    );
   });
 
   test('every message retains its own sender avatar across updates', () async {
@@ -488,6 +497,411 @@ void main() {
     final specifics = show['platformSpecifics'] as Map;
     return {'id': show['id'], 'tag': specifics['tag']};
   }
+
+  test(
+    'room count comes from fresh sync, not an account badge or capped history',
+    () async {
+      final notifications = FlutterLocalNotificationsPlugin();
+      for (var i = 0; i < 10; i++) {
+        await showMatrixPush(notifications, {
+          ...target.toData(),
+          'event_id': '\$old$i',
+        });
+      }
+      await installReadSession();
+      await http.runWithClient(
+        () => showMatrixPush(notifications, {
+          ...target.toData(),
+          'unread': '999',
+        }),
+        () => MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/sync')
+                  ? {
+                      'rooms': {
+                        'join': {
+                          target.roomId: {
+                            'org.matrix.msc2654.unread_count': 180,
+                            'unread_notifications': {'notification_count': 125},
+                          },
+                        },
+                      },
+                    }
+                  : {'notifications': []},
+            ),
+            200,
+          ),
+        ),
+      );
+      final specifics =
+          (calls.lastWhere((call) => call.method == 'show').arguments
+                  as Map)['platformSpecifics']
+              as Map;
+      expect(specifics['number'], 180);
+      expect(specifics['subText'], '180 条未读消息');
+      expect(
+        ((specifics['styleInformation'] as Map)['messages'] as List),
+        hasLength(7),
+      );
+    },
+  );
+
+  test(
+    'counts-only updates refresh an existing room count without alerting',
+    () async {
+      await showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData());
+      active = [nativeShownNotification()];
+      await installReadSession();
+      calls.clear();
+      await http.runWithClient(
+        () => showMatrixPush(FlutterLocalNotificationsPlugin(), {
+          'user_id': target.userId,
+          'registration_id': 'current',
+          'unread': '1000',
+        }),
+        () => MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/sync')
+                  ? {
+                      'rooms': {
+                        'join': {
+                          target.roomId: {
+                            'unread_notifications': {'notification_count': 12},
+                          },
+                        },
+                      },
+                    }
+                  : {'notifications': []},
+            ),
+            200,
+          ),
+        ),
+      );
+      final specifics =
+          (calls.lastWhere((call) => call.method == 'show').arguments
+                  as Map)['platformSpecifics']
+              as Map;
+      expect(specifics['number'], 12);
+      expect(specifics['onlyAlertOnce'], isTrue);
+    },
+  );
+
+  NotificationResponse action(String id, {PushTarget? forTarget}) =>
+      NotificationResponse(
+        notificationResponseType:
+            NotificationResponseType.selectedNotificationAction,
+        actionId: id,
+        payload: jsonEncode((forTarget ?? target).toData()),
+      );
+
+  test(
+    'mark-read action preserves messages arriving during its HTTP write',
+    () async {
+      final notifications = FlutterLocalNotificationsPlugin();
+      await showMatrixPush(notifications, target.toData());
+      active = [nativeShownNotification()];
+      await installReadSession();
+      final started = Completer<void>();
+      final receipt = Completer<void>();
+      final pending = http.runWithClient(
+        () => handleNotificationAction(action(markReadActionId)),
+        () => MockClient((request) async {
+          if (request.method == 'POST') {
+            started.complete();
+            await receipt.future;
+          }
+          return http.Response('{}', 200);
+        }),
+      );
+      await started.future;
+      await showMatrixPush(notifications, {
+        ...target.toData(),
+        'event_id': r'$new',
+      }, fetchReadEvents: (user, ids) async => {});
+      active = [nativeShownNotification()];
+      receipt.complete();
+      await pending;
+      final remaining = await PushConversationStore().load(
+        target.userId,
+        target.roomId,
+      );
+      expect(remaining!.entries.map((entry) => entry.eventId), [r'$new']);
+      expect(
+        await PushConversationStore().wasRead(target.userId, target.eventId),
+        isTrue,
+      );
+      expect(
+        await PushConversationStore().wasRead(target.userId, r'$new'),
+        isFalse,
+      );
+      expect(calls.where((call) => call.method == 'cancel'), isEmpty);
+    },
+  );
+
+  test(
+    'an old mark-read action does not include newer history already present',
+    () async {
+      final notifications = FlutterLocalNotificationsPlugin();
+      for (final id in [target.eventId, r'$new']) {
+        await showMatrixPush(notifications, {
+          ...target.toData(),
+          'event_id': id,
+        });
+      }
+      active = [nativeShownNotification()];
+      await installReadSession();
+      await http.runWithClient(
+        () => handleNotificationAction(action(markReadActionId)),
+        () => MockClient((request) async => http.Response('{}', 200)),
+      );
+      expect(
+        (await PushConversationStore().load(
+          target.userId,
+          target.roomId,
+        ))!.latestEventId,
+        r'$new',
+      );
+      expect(
+        await PushConversationStore().wasRead(target.userId, r'$new'),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'failed notification writes leave the notification and history intact',
+    () async {
+      await showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData());
+      active = [nativeShownNotification()];
+      await installReadSession();
+      for (final id in [markReadActionId, muteActionId]) {
+        for (final failureAt in [1, 2]) {
+          var requests = 0;
+          await http.runWithClient(
+            () => handleNotificationAction(action(id)),
+            () => MockClient(
+              (request) async =>
+                  http.Response('{}', ++requests == failureAt ? 403 : 200),
+            ),
+          );
+          expect(calls.where((call) => call.method == 'cancel'), isEmpty);
+          expect(
+            await PushConversationStore().load(target.userId, target.roomId),
+            isNotNull,
+          );
+          expect(
+            await PushConversationStore().wasRead(
+              target.userId,
+              target.eventId,
+            ),
+            isFalse,
+          );
+          final prefs = await SharedPreferences.getInstance();
+          expect(
+            prefs.containsKey(pushRoomMuteKey(target.userId, target.roomId)),
+            isFalse,
+          );
+        }
+      }
+    },
+  );
+
+  test(
+    'mute action withdraws its room without reading it or touching another room',
+    () async {
+      final notifications = FlutterLocalNotificationsPlugin();
+      await showMatrixPush(notifications, target.toData());
+      active = [
+        nativeShownNotification(),
+        {
+          'id': 9,
+          'tag': pushRoomTag(
+            userId: target.userId,
+            roomId: '!other:example.org',
+            registrationId: 'current',
+          ),
+        },
+      ];
+      await installReadSession();
+      await http.runWithClient(
+        () => handleNotificationAction(action(muteActionId)),
+        () => MockClient((request) async => http.Response('{}', 200)),
+      );
+      expect(calls.where((call) => call.method == 'cancel'), hasLength(1));
+      expect(
+        await PushConversationStore().load(target.userId, target.roomId),
+        isNull,
+      );
+      expect(
+        await PushConversationStore().wasRead(target.userId, target.eventId),
+        isFalse,
+      );
+      calls.clear();
+      active = [];
+      // A queued push must stay suppressed even if server verification fails.
+      await showMatrixPush(
+        notifications,
+        target.toData(),
+        fetchReadEvents: (user, ids) async => {},
+      );
+      expect(calls.where((call) => call.method == 'show'), isEmpty);
+    },
+  );
+
+  test(
+    'a stale registration cannot trigger a server notification action',
+    () async {
+      await installReadSession();
+      var requests = 0;
+      await http.runWithClient(
+        () => handleNotificationAction(
+          NotificationResponse(
+            notificationResponseType:
+                NotificationResponseType.selectedNotificationAction,
+            actionId: markReadActionId,
+            payload: jsonEncode({...target.toData(), 'registration_id': 'old'}),
+          ),
+        ),
+        () => MockClient((request) async {
+          requests++;
+          return http.Response('{}', 200);
+        }),
+      );
+      expect(requests, 0);
+    },
+  );
+
+  Map<String, dynamic> serverRoomState(bool muted) => {
+    'rooms': {
+      'join': {
+        target.roomId: {
+          'unread_notifications': {'notification_count': 2},
+        },
+      },
+    },
+    'account_data': {
+      'events': [
+        {
+          'type': 'm.push_rules',
+          'content': {
+            'global': {
+              'override': [
+                if (muted)
+                  {
+                    'enabled': true,
+                    'actions': [],
+                    'conditions': [
+                      {
+                        'kind': 'event_match',
+                        'key': 'room_id',
+                        'pattern': target.roomId,
+                      },
+                    ],
+                  },
+              ],
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  test(
+    'a server mute withdraws queued notifications without recording reads',
+    () async {
+      await showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData());
+      active = [nativeShownNotification()];
+      await installReadSession();
+      calls.clear();
+      await http.runWithClient(
+        () =>
+            showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData()),
+        () => MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/sync')
+                  ? serverRoomState(true)
+                  : {'notifications': []},
+            ),
+            200,
+          ),
+        ),
+      );
+      expect(calls.where((call) => call.method == 'show'), isEmpty);
+      expect(calls.where((call) => call.method == 'cancel'), hasLength(1));
+      expect(
+        await PushConversationStore().wasRead(target.userId, target.eventId),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'server unmute clears a confirmed local mute and restores notifications',
+    () async {
+      await installReadSession();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(pushRoomMuteKey(target.userId, target.roomId), 1);
+      await http.runWithClient(
+        () =>
+            showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData()),
+        () => MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/sync')
+                  ? serverRoomState(false)
+                  : {'notifications': []},
+            ),
+            200,
+          ),
+        ),
+      );
+      expect(calls.where((call) => call.method == 'show'), hasLength(1));
+      expect(
+        prefs.containsKey(pushRoomMuteKey(target.userId, target.roomId)),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'an old sync cannot undo a mute acknowledged while its query is pending',
+    () async {
+      await showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData());
+      active = [nativeShownNotification()];
+      await installReadSession();
+      calls.clear();
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final pending = http.runWithClient(
+        () =>
+            showMatrixPush(FlutterLocalNotificationsPlugin(), target.toData()),
+        () => MockClient((request) async {
+          if (request.url.path.endsWith('/sync')) {
+            started.complete();
+            await release.future;
+            return http.Response(jsonEncode(serverRoomState(false)), 200);
+          }
+          return http.Response(jsonEncode({'notifications': []}), 200);
+        }),
+      );
+      await started.future;
+      await http.runWithClient(
+        () => handleNotificationAction(action(muteActionId)),
+        () => MockClient((request) async => http.Response('{}', 200)),
+      );
+      release.complete();
+      await pending;
+      expect(calls.where((call) => call.method == 'show'), isEmpty);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.containsKey(pushRoomMuteKey(target.userId, target.roomId)),
+        isTrue,
+      );
+    },
+  );
 
   test('a delayed event read on another client is never posted', () async {
     await showMatrixPush(
@@ -903,7 +1317,10 @@ void main() {
           (calls.lastWhere((call) => call.method == 'show').arguments
                   as Map)['platformSpecifics']
               as Map;
-      expect(specifics['actions'], isNull);
+      expect(
+        (specifics['actions'] as List).map((action) => (action as Map)['id']),
+        [markReadActionId, muteActionId],
+      );
       final style = specifics['styleInformation'] as Map;
       expect(
         (style['messages'] as List).map((entry) => (entry as Map)['text']),

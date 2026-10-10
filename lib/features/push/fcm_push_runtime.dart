@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_client_config.dart';
 import 'push_avatar.dart';
 import 'push_conversation.dart';
+import 'push_notification_actions.dart';
 import 'push_payload.dart';
 import 'push_read_state.dart';
 import 'push_reply.dart';
@@ -26,6 +27,8 @@ final _conversations = PushConversationStore();
 
 /// Action id for the inline reply box on an Android notification.
 const replyActionId = 'matter.reply';
+const markReadActionId = 'matter.mark_read';
+const muteActionId = 'matter.mute';
 
 /// Whether the event can be answered from the notification.
 ///
@@ -35,20 +38,51 @@ const replyActionId = 'matter.reply';
 bool supportsInlineReply(Map<String, dynamic> data, {PushRoomInfo? room}) =>
     isMessageEvent(data) && !(room?.isEncrypted ?? false);
 
-/// Handle a reply typed into a notification.
-///
-/// Runs on the plugin's background isolate, so it is annotated as an entry
-/// point and reads only persisted state. Sending does not require the Rust
-/// client, so no Matrix client is started here.
+// Preserve the callback name saved by notifications from earlier versions.
 @pragma('vm:entry-point')
-Future<void> handleNotificationReply(NotificationResponse response) async {
+Future<void> handleNotificationReply(NotificationResponse response) =>
+    handleNotificationAction(response);
+
+/// Handle notification actions on the owning account's background isolate.
+@pragma('vm:entry-point')
+Future<void> handleNotificationAction(NotificationResponse response) async {
+  final target = parsePushTargetPayload(response.payload);
+  if (target == null || !await acceptsPushTarget(target)) return;
+  if (response.actionId == markReadActionId ||
+      response.actionId == muteActionId) {
+    final conversation = await _conversations.load(
+      target.userId,
+      target.roomId,
+    );
+    final entries = conversation?.entries ?? <PushConversationEntry>[];
+    final boundary = entries.indexWhere(
+      (entry) => entry.eventId == target.eventId,
+    );
+    final covered = boundary < 0
+        ? [target.eventId]
+        : entries.take(boundary + 1).map((entry) => entry.eventId).toList();
+    final mute = response.actionId == muteActionId;
+    if (!await performNotificationRoomAction(target: target, mute: mute)) {
+      return;
+    }
+    final notifications = FlutterLocalNotificationsPlugin();
+    if (mute) {
+      await _dismissMutedPushRoom(notifications, target.userId, target.roomId);
+    } else {
+      await _cancelPushRoom(
+        notifications,
+        target.userId,
+        target.roomId,
+        covered,
+      );
+    }
+    return;
+  }
   if (response.actionId != replyActionId) return;
   final input = response.input?.trim() ?? '';
-  final target = parsePushTargetPayload(response.payload);
-  if (target == null || input.isEmpty) return;
+  if (input.isEmpty) return;
   final room = await _roomDirectory.lookup(target.userId, target.roomId);
-  // Re-check here rather than trusting the action's presence: the room's
-  // encryption state may have changed since the notification was posted.
+  // Re-check rather than trusting an old notification's action.
   if (room?.isEncrypted ?? false) {
     debugPrint('Refusing inline reply to an encrypted room');
     return;
@@ -58,10 +92,7 @@ Future<void> handleNotificationReply(NotificationResponse response) async {
     roomId: target.roomId,
     body: input,
   );
-  if (!sent) return;
-  // Drop the conversation so the reply does not leave a stale notification
-  // behind claiming the room is unread.
-  await _conversations.clearRoom(target.userId, target.roomId);
+  if (sent) await _conversations.clearRoom(target.userId, target.roomId);
 }
 
 /// Decode a notification payload into a target.
@@ -117,7 +148,7 @@ Future<void> handleFcmBackgroundMessage(RemoteMessage message) async {
   // that the notification was posted from.
   await notifications.initialize(
     settings: _initializationSettings,
-    onDidReceiveBackgroundNotificationResponse: handleNotificationReply,
+    onDidReceiveBackgroundNotificationResponse: handleNotificationAction,
   );
   await showMatrixPush(notifications, message.data);
 }
@@ -205,6 +236,14 @@ Future<void> showMatrixPush(
     for (final data in active) data['room_id'] as String,
     if (target != null) target.roomId,
   };
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  final muteVersions = {
+    for (final roomId in roomIds)
+      roomId: prefs.getInt(pushRoomMuteKey(userId, roomId)),
+  };
+  final unreadCounts = <String, int>{};
+  final serverMutes = <String, bool>{};
   final readRooms = <String>{};
   final read = fetchReadEvents != null
       ? await fetchReadEvents(userId, roomByEvent.keys.toSet())
@@ -214,9 +253,33 @@ Future<void> showMatrixPush(
           roomByEvent: roomByEvent,
           roomIds: roomIds,
           onReadRoom: readRooms.add,
+          onRoomUnreadCount: (roomId, count) => unreadCounts[roomId] = count,
+          onRoomMuted: (roomId, muted) => serverMutes[roomId] = muted,
         );
   if (!await _acceptsPushAccount(userId, registrationId)) return;
+  await prefs.reload();
+  for (final entry in serverMutes.entries) {
+    final key = pushRoomMuteKey(userId, entry.key);
+    // A mute acknowledged while this query was pending wins over its old data.
+    if (prefs.getInt(key) != muteVersions[entry.key]) continue;
+    if (entry.value) {
+      await prefs.setInt(
+        key,
+        muteVersions[entry.key] ?? DateTime.now().microsecondsSinceEpoch,
+      );
+    } else {
+      await prefs.remove(key);
+    }
+  }
+  final mutedRooms = {
+    for (final roomId in roomIds)
+      if (prefs.containsKey(pushRoomMuteKey(userId, roomId))) roomId,
+  };
   for (final roomId in roomIds) {
+    if (mutedRooms.contains(roomId)) {
+      await _dismissMutedPushRoom(notifications, userId, roomId);
+      continue;
+    }
     final covered = [
       for (final entry in roomByEvent.entries)
         if (entry.value == roomId &&
@@ -224,10 +287,34 @@ Future<void> showMatrixPush(
           entry.key,
     ];
     if (covered.isNotEmpty || readRooms.contains(roomId)) {
-      await _cancelPushRoom(notifications, userId, roomId, covered);
+      await _cancelPushRoom(
+        notifications,
+        userId,
+        roomId,
+        covered,
+        unreadCount: unreadCounts[roomId],
+      );
+    } else if (target?.roomId != roomId &&
+        unreadCounts.containsKey(roomId) &&
+        active.any((data) => data['room_id'] == roomId)) {
+      final remaining = await _conversations.load(userId, roomId);
+      if (remaining != null) {
+        await _showPushConversation(
+          notifications,
+          PushTarget(
+            userId: userId,
+            roomId: roomId,
+            eventId: remaining.latestEventId,
+            registrationId: registrationId,
+          ),
+          onlyAlertOnce: true,
+          unreadCount: unreadCounts[roomId],
+          isFocused: isFocused,
+        );
+      }
     }
   }
-  if (target == null) return;
+  if (target == null || mutedRooms.contains(target.roomId)) return;
   if (await _conversations.wasRead(userId, target.eventId) ||
       (isFocused?.call() ?? false)) {
     return;
@@ -237,6 +324,7 @@ Future<void> showMatrixPush(
     target,
     publishShortcut: publishShortcut,
     isFocused: isFocused,
+    unreadCount: unreadCounts[target.roomId],
   );
 }
 
@@ -244,6 +332,7 @@ Future<void> _showPushConversation(
   FlutterLocalNotificationsPlugin notifications,
   PushTarget target, {
   bool onlyAlertOnce = false,
+  int? unreadCount,
   bool Function()? isFocused,
   Future<String?> Function(String id, String title, String? avatarPath)?
   publishShortcut,
@@ -285,6 +374,7 @@ Future<void> _showPushConversation(
   final current = await _conversations.load(target.userId, target.roomId);
   if (current == null ||
       current.latestEventId != target.eventId ||
+      await _pushRoomMuted(target.userId, target.roomId) ||
       (isFocused?.call() ?? false)) {
     return;
   }
@@ -303,6 +393,8 @@ Future<void> _showPushConversation(
         importance: Importance.high,
         priority: Priority.high,
         onlyAlertOnce: onlyAlertOnce,
+        number: unreadCount,
+        subText: unreadCount == null ? null : '$unreadCount 条未读消息',
         visibility: NotificationVisibility.private,
         // Group by room, not by account: Android collapses a conversation's
         // notifications together, which is what a chat notification should do.
@@ -320,17 +412,28 @@ Future<void> _showPushConversation(
           isDirect: isDirect,
           senderAvatars: senderAvatars,
         ),
-        actions: replyable
-            ? [
-                AndroidNotificationAction(
-                  replyActionId,
-                  '回复',
-                  showsUserInterface: false,
-                  // Typed text comes back as the action's input result.
-                  inputs: const [AndroidNotificationActionInput()],
-                ),
-              ]
-            : null,
+        actions: [
+          if (replyable)
+            AndroidNotificationAction(
+              replyActionId,
+              '回复',
+              showsUserInterface: false,
+              semanticAction: SemanticAction.reply,
+              inputs: const [AndroidNotificationActionInput()],
+            ),
+          const AndroidNotificationAction(
+            markReadActionId,
+            '标记已读',
+            cancelNotification: false,
+            semanticAction: SemanticAction.markAsRead,
+          ),
+          const AndroidNotificationAction(
+            muteActionId,
+            '静音',
+            cancelNotification: false,
+            semanticAction: SemanticAction.mute,
+          ),
+        ],
         // Android's active-notification query exposes tags, not payloads.
         // A stable tag plus a stable id keeps one notification per room; the
         // latest event id travels in the payload, which Android ignores for
@@ -409,8 +512,9 @@ Future<void> _cancelPushRoom(
   FlutterLocalNotificationsPlugin notifications,
   String userId,
   String roomId,
-  List<String> eventIds,
-) async {
+  List<String> eventIds, {
+  int? unreadCount,
+}) async {
   final read = eventIds.toSet();
   // History is read state too, even after swiping the system notification away.
   await _conversations.markRead(userId, roomId, read);
@@ -438,7 +542,31 @@ Future<void> _cancelPushRoom(
           registrationId: registrationId,
         ),
         onlyAlertOnce: true,
+        unreadCount: unreadCount,
       );
+    }
+  }
+}
+
+Future<bool> _pushRoomMuted(String userId, String roomId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  return prefs.containsKey(pushRoomMuteKey(userId, roomId));
+}
+
+Future<void> _dismissMutedPushRoom(
+  FlutterLocalNotificationsPlugin notifications,
+  String userId,
+  String roomId,
+) async {
+  // Muting is not reading: discard history without recording read receipts.
+  await _conversations.clearRoom(userId, roomId);
+  for (final notification in await notifications.getActiveNotifications()) {
+    final data = _notificationData(notification);
+    if (data?['user_id'] == userId &&
+        data?['room_id'] == roomId &&
+        notification.id != null) {
+      await notifications.cancel(id: notification.id!, tag: notification.tag);
     }
   }
 }
@@ -465,10 +593,14 @@ class FcmPushRuntime {
       FirebaseMessaging.onBackgroundMessage(handleFcmBackgroundMessage);
       await notifications.initialize(
         settings: _initializationSettings,
-        onDidReceiveNotificationResponse: (response) =>
-            _openPayload(response.payload),
-        // A reply arrives on the background isolate even while the app runs.
-        onDidReceiveBackgroundNotificationResponse: handleNotificationReply,
+        onDidReceiveNotificationResponse: (response) {
+          if (response.actionId?.isNotEmpty ?? false) {
+            unawaited(handleNotificationAction(response));
+          } else {
+            _openPayload(response.payload);
+          }
+        },
+        onDidReceiveBackgroundNotificationResponse: handleNotificationAction,
       );
       final launch = await notifications.getNotificationAppLaunchDetails();
       if (launch?.didNotificationLaunchApp ?? false) {

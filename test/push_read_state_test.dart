@@ -21,6 +21,125 @@ void main() {
     'read': read,
   };
 
+  test('only valid scoped room counts are reported', () async {
+    final counts = <String, int>{};
+    await fetchReadPushEvents(
+      user,
+      {},
+      session: session,
+      roomIds: {
+        '!full:example.org',
+        '!fallback:example.org',
+        '!bad:example.org',
+        '!missing:example.org',
+      },
+      onRoomUnreadCount: (id, count) => counts[id] = count,
+      client: MockClient(
+        (request) async => http.Response(
+          jsonEncode({
+            'rooms': {
+              'join': {
+                '!full:example.org': {
+                  'org.matrix.msc2654.unread_count': 120,
+                  'unread_notifications': {'notification_count': 5},
+                },
+                '!fallback:example.org': {
+                  'org.matrix.msc2654.unread_count': -1,
+                  'unread_notifications': {'notification_count': 9},
+                },
+                '!bad:example.org': {
+                  'unread_notifications': {'notification_count': '7'},
+                },
+                '!missing:example.org': {},
+                '!other:example.org': {
+                  'unread_notifications': {'notification_count': 99},
+                },
+              },
+            },
+          }),
+          200,
+        ),
+      ),
+    );
+    expect(counts, {'!full:example.org': 120, '!fallback:example.org': 9});
+  });
+
+  test(
+    'mute status requires a valid rule list and an enabled whole-room override',
+    () async {
+      for (final overrides in [
+        <Map<String, dynamic>>[],
+        [
+          {
+            'enabled': true,
+            'actions': [],
+            'conditions': [
+              {
+                'kind': 'event_match',
+                'key': 'room_id',
+                'pattern': '!room:example.org',
+              },
+            ],
+          },
+        ],
+        [
+          {
+            'enabled': false,
+            'actions': [],
+            'conditions': [
+              {
+                'kind': 'event_match',
+                'key': 'room_id',
+                'pattern': '!room:example.org',
+              },
+            ],
+          },
+        ],
+      ]) {
+        final states = <String, bool>{};
+        await fetchReadPushEvents(
+          user,
+          {},
+          session: session,
+          roomIds: {'!room:example.org', '!other:example.org'},
+          onRoomMuted: (id, muted) => states[id] = muted,
+          client: MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'account_data': {
+                  'events': [
+                    {
+                      'type': 'm.push_rules',
+                      'content': {
+                        'global': {'override': overrides},
+                      },
+                    },
+                  ],
+                },
+              }),
+              200,
+            ),
+          ),
+        );
+        expect(
+          states['!room:example.org'],
+          overrides.isNotEmpty && overrides.first['enabled'] == true,
+        );
+        expect(states['!other:example.org'], isFalse);
+      }
+      final states = <String, bool>{};
+      await fetchReadPushEvents(
+        user,
+        {},
+        session: session,
+        roomIds: {'!room:example.org'},
+        onRoomMuted: (id, muted) => states[id] = muted,
+        client: MockClient((request) async => http.Response('{}', 200)),
+      );
+      expect(states, isEmpty);
+    },
+  );
+
   test(
     'only confirmed read events from the requested account are returned',
     () async {

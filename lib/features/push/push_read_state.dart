@@ -15,6 +15,8 @@ Future<Set<String>> fetchReadPushEvents(
   Map<String, String> roomByEvent = const {},
   Set<String> roomIds = const {},
   void Function(String roomId)? onReadRoom,
+  void Function(String roomId, int count)? onRoomUnreadCount,
+  void Function(String roomId, bool muted)? onRoomMuted,
 }) async {
   final read = <String>{};
   final scopedRooms = {...roomByEvent.values, ...roomIds};
@@ -43,7 +45,9 @@ Future<Set<String>> fetchReadPushEvents(
                 'account_data': {'types': []},
               },
               'presence': {'types': []},
-              'account_data': {'types': []},
+              'account_data': {
+                'types': ['m.push_rules'],
+              },
             }),
           },
         );
@@ -52,6 +56,34 @@ Future<Set<String>> fetchReadPushEvents(
             .timeout(const Duration(seconds: 5));
         if (response.statusCode == 200) {
           final body = jsonDecode(response.body);
+          final accountData = body is Map<String, dynamic>
+              ? body['account_data']
+              : null;
+          final events = accountData is Map<String, dynamic>
+              ? accountData['events']
+              : null;
+          if (events is List) {
+            for (final event in events) {
+              if (event is! Map<String, dynamic> ||
+                  event['type'] != 'm.push_rules') {
+                continue;
+              }
+              final content = event['content'];
+              final global = content is Map<String, dynamic>
+                  ? content['global']
+                  : null;
+              final overrides = global is Map<String, dynamic>
+                  ? global['override']
+                  : null;
+              if (overrides is! List) continue;
+              for (final roomId in scopedRooms) {
+                onRoomMuted?.call(
+                  roomId,
+                  overrides.any((rule) => _mutesRoom(rule, roomId)),
+                );
+              }
+            }
+          }
           final rooms = body is Map<String, dynamic> ? body['rooms'] : null;
           final joined = rooms is Map<String, dynamic> ? rooms['join'] : null;
           if (joined is Map<String, dynamic>) {
@@ -61,6 +93,20 @@ Future<Set<String>> fetchReadPushEvents(
               final counts = room is Map<String, dynamic>
                   ? room['unread_notifications']
                   : null;
+              final messageCount = room is Map<String, dynamic>
+                  ? room['org.matrix.msc2654.unread_count']
+                  : null;
+              final notificationCount = counts is Map<String, dynamic>
+                  ? counts['notification_count']
+                  : null;
+              // Prefer the server's full message count when supported. A push
+              // badge is account-wide, and the seven-entry history is bounded.
+              final count = messageCount is int && messageCount >= 0
+                  ? messageCount
+                  : notificationCount;
+              if (count is int && count >= 0) {
+                onRoomUnreadCount?.call(roomId, count);
+              }
               if (counts is Map<String, dynamic> &&
                   counts['notification_count'] == 0) {
                 readRooms.add(roomId);
@@ -116,4 +162,21 @@ Future<Set<String>> fetchReadPushEvents(
     ownedClient?.close();
   }
   return read;
+}
+
+bool _mutesRoom(dynamic rule, String roomId) {
+  if (rule is! Map<String, dynamic> || rule['enabled'] != true) return false;
+  final conditions = rule['conditions'];
+  final actions = rule['actions'];
+  if (conditions is! List ||
+      conditions.length != 1 ||
+      actions is! List ||
+      actions.contains('notify')) {
+    return false;
+  }
+  final condition = conditions.single;
+  return condition is Map<String, dynamic> &&
+      condition['kind'] == 'event_match' &&
+      condition['key'] == 'room_id' &&
+      condition['pattern'] == roomId;
 }
