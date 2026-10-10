@@ -1,31 +1,30 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Avatars are small; keep enough of them cached to avoid re-downloading on
-/// every message of a conversation.
-const _maxCachedAvatars = 64;
+/// Keep enough avatars on disk for the rooms and people that notify.
+const _maxCachedAvatars = 128;
 
-/// Reject anything an avatar cannot plausibly need. A 96x96 thumbnail is a
-/// few KB; the cap only guards against a misbehaving endpoint, and oversized
-/// bytes would be marshalled into the notification payload.
-const _maxAvatarBytes = 128 * 1024;
+/// Directory holding downloaded notification avatars.
+const _avatarDirName = 'matter_push_avatars';
 
 const _accessTokenKeyPrefix = 'matrix_access_token_';
 
 String _accessTokenKey(String userId) =>
     '$_accessTokenKeyPrefix${base64Url.encode(utf8.encode(userId))}';
 
-String pushAvatarCacheKey(String userId) =>
-    'push_avatars_${base64Url.encode(utf8.encode(userId))}';
+String pushAvatarIndexKey(String userId) =>
+    'push_avatar_files_${base64Url.encode(utf8.encode(userId))}';
 
-/// Host and token needed to fetch authenticated media for an account.
+/// Host and token needed to reach the homeserver outside the Rust client.
 ///
-/// The background isolate cannot start the Rust client, but it can read the
-/// session metadata the foreground already persists.
+/// Used for the inline reply, which posts over plain HTTP so it never has to
+/// start a second Matrix client in the background isolate.
 class PushMediaSession {
   const PushMediaSession({required this.homeserver, required this.accessToken});
 
@@ -62,38 +61,54 @@ Future<PushMediaSession?> loadPushMediaSession(String userId) async {
   return PushMediaSession(homeserver: homeserver, accessToken: token);
 }
 
-/// Thumbnail URL for an `mxc://` avatar.
+/// Absolute path of a notification avatar file, or null when not cached.
 ///
-/// Mirrors the Rust `mxc_to_thumbnail_http` helper: `mxc://server/id` maps to
-/// the authenticated media endpoint on the account's homeserver.
-String? mxcThumbnailUrl(
-  String mxc, {
-  required String homeserver,
-  int width = 96,
-  int height = 96,
-}) {
-  final uri = Uri.tryParse(mxc);
-  if (uri == null || uri.scheme != 'mxc') return null;
-  final server = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
-  final mediaId = uri.path.replaceFirst('/', '');
-  if (server.isEmpty || mediaId.isEmpty) return null;
-  final base = homeserver.trim().replaceFirst(RegExp(r'/+$'), '');
-  if (base.isEmpty) return null;
-  return '$base/_matrix/client/v1/media/thumbnail/$server/$mediaId'
-      '?width=$width&height=$height&method=scale';
+/// Only stored paths are returned, so the background isolate needs neither
+/// `path_provider` nor the network to resolve an avatar: the foreground wrote
+/// the file and the absolute path, and `BitmapFactory` decodes the file
+/// natively on the Android side.
+Future<String?> pushAvatarPath(String userId, String mxc) async {
+  if (mxc.isEmpty) return null;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  final raw = prefs.getString(pushAvatarIndexKey(userId));
+  if (raw == null) return null;
+  Map<String, dynamic> index;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map<String, dynamic>) return null;
+    index = decoded;
+  } on FormatException {
+    return null;
+  }
+  final path = index[mxc];
+  if (path is! String || path.isEmpty) return null;
+  // A stale path (cache cleared, app data moved) must not be handed to
+  // Android: decoding a missing file yields no icon and logs an error.
+  return await File(path).exists() ? path : null;
 }
 
-/// Fetches and caches avatars for notifications.
+/// Downloads and caches notification avatars on disk.
 ///
-/// Only unencrypted media is fetched. Matrix avatars are plain media, so no
-/// event content is decrypted here.
-class PushAvatarStore {
-  /// SharedPreferences caps a stored string at a few megabytes, so the byte
-  /// payloads are base64 encoded as values in one JSON object per account.
-  Future<Map<String, dynamic>> _loadRaw(String userId) async {
+/// Runs in the foreground, where the Rust client already holds a valid
+/// session, so avatar fetching never depends on reading credentials from the
+/// FCM background isolate.
+class PushAvatarCache {
+  PushAvatarCache({required this.download});
+
+  /// Fetch raw bytes for an `mxc://` URI, e.g. `rust.downloadMediaBytes`.
+  final Future<Uint8List?> Function(String mxc) download;
+
+  Future<String?> _directory() async {
+    final base = await getApplicationSupportDirectory();
+    final directory = Directory('${base.path}/$_avatarDirName');
+    if (!await directory.exists()) await directory.create(recursive: true);
+    return directory.path;
+  }
+
+  Future<Map<String, dynamic>> _loadIndex(String userId) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.reload();
-    final raw = prefs.getString(pushAvatarCacheKey(userId));
+    final raw = prefs.getString(pushAvatarIndexKey(userId));
     if (raw == null) return {};
     try {
       final decoded = jsonDecode(raw);
@@ -103,62 +118,87 @@ class PushAvatarStore {
     }
   }
 
-  /// Return cached avatar bytes for [mxc], or null when not cached yet.
-  Future<Uint8List?> cached(String userId, String mxc) async {
-    final entry = (await _loadRaw(userId))[mxc];
-    if (entry is! String) return null;
+  /// Ensures an avatar is on disk, deduplicating concurrent requests.
+  ///
+  /// The prefetch is driven by sync updates, so two runs can overlap and ask
+  /// for the same avatar before either has written it. Without this, both
+  /// would download and write the same file.
+  final Map<String, Future<String?>> _inFlight = {};
+
+  /// Ensure [mxc] is on disk and return its absolute path.
+  ///
+  /// Returns null when the avatar cannot be fetched; a missing avatar must
+  /// never fail a notification, so every error is swallowed.
+  Future<String?> ensure(String userId, String mxc) {
+    if (!mxc.startsWith('mxc://')) return Future.value();
+    final key = '$userId\n$mxc';
+    final pending = _inFlight[key];
+    if (pending != null) return pending;
+    final request = _ensure(userId, mxc);
+    _inFlight[key] = request;
+    // The callback uses a block body on purpose: `whenComplete` awaits the
+    // value it returns, and `remove` would hand back the very future being
+    // awaited, deadlocking the request.
+    return request.whenComplete(() {
+      _inFlight.remove(key);
+    });
+  }
+
+  Future<String?> _ensure(String userId, String mxc) async {
+    if (!mxc.startsWith('mxc://')) return null;
+    final cached = await pushAvatarPath(userId, mxc);
+    if (cached != null) return cached;
+
+    final bytes = await download(mxc);
+    if (bytes == null || bytes.isEmpty) return null;
     try {
-      return base64Decode(entry);
-    } on FormatException {
+      final directory = await _directory();
+      if (directory == null) return null;
+      // Name the file per account as well as per avatar. Content-addressing on
+      // the mxc alone would make two accounts share one file, so clearing one
+      // account's cache would delete a file the other still references.
+      final name = sha256.convert(utf8.encode('$userId\n$mxc')).toString();
+      final file = File('$directory/$name.img');
+      await file.writeAsBytes(bytes, flush: true);
+
+      final index = await _loadIndex(userId);
+      index[mxc] = file.path;
+      // Bound growth by dropping entries until the file count fits, deleting
+      // the files too so the cache cannot grow without limit on disk.
+      while (index.length > _maxCachedAvatars) {
+        final oldest = index.keys.first;
+        final path = index.remove(oldest);
+        if (path is String) {
+          try {
+            final stale = File(path);
+            if (await stale.exists()) await stale.delete();
+          } catch (error) {
+            debugPrint('Push avatar eviction failed: ${error.runtimeType}');
+          }
+        }
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(pushAvatarIndexKey(userId), jsonEncode(index));
+      return file.path;
+    } catch (error) {
+      debugPrint('Push avatar cache write failed: ${error.runtimeType}');
       return null;
     }
   }
 
-  Future<void> save(String userId, String mxc, Uint8List bytes) async {
-    final raw = await _loadRaw(userId);
-    raw[mxc] = base64Encode(bytes);
-    // Bound growth: drop arbitrary oldest-by-insertion entries. Avatars are
-    // interchangeable cache entries, so eviction order is not observable.
-    while (raw.length > _maxCachedAvatars) {
-      raw.remove(raw.keys.first);
+  /// Drop an account's cached avatars, files included.
+  Future<void> clearAccount(String userId) async {
+    final index = await _loadIndex(userId);
+    for (final path in index.values) {
+      if (path is! String) continue;
+      try {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      } catch (error) {
+        debugPrint('Push avatar cleanup failed: ${error.runtimeType}');
+      }
     }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(pushAvatarCacheKey(userId), jsonEncode(raw));
-  }
-
-  Future<void> clearAccount(String userId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(pushAvatarCacheKey(userId));
-  }
-}
-
-/// Fetch [mxc] for [userId], preferring the cache.
-///
-/// Returns null on any failure: a missing avatar must never block or fail a
-/// notification.
-Future<Uint8List?> loadAvatarBytes({
-  required PushAvatarStore store,
-  required String userId,
-  required String mxc,
-  PushMediaSession? session,
-}) async {
-  final cached = await store.cached(userId, mxc);
-  if (cached != null) return cached;
-  final media = session ?? await loadPushMediaSession(userId);
-  if (media == null) return null;
-  final url = mxcThumbnailUrl(mxc, homeserver: media.homeserver);
-  if (url == null) return null;
-  try {
-    final response = await http
-        .get(Uri.parse(url), headers: {'Authorization': 'Bearer ${media.accessToken}'})
-        .timeout(const Duration(seconds: 10));
-    if (response.statusCode != 200 || response.bodyBytes.isEmpty) return null;
-    if (response.bodyBytes.length > _maxAvatarBytes) return null;
-    final bytes = response.bodyBytes;
-    await store.save(userId, mxc, bytes);
-    return bytes;
-  } catch (error) {
-    debugPrint('Push avatar fetch failed: ${error.runtimeType}');
-    return null;
+    await prefs.remove(pushAvatarIndexKey(userId));
   }
 }

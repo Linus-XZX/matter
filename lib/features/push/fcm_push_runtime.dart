@@ -22,9 +22,6 @@ final _roomDirectory = PushRoomDirectory();
 /// Accumulated per-room conversations, rebuilt on every background message.
 final _conversations = PushConversationStore();
 
-/// Fetched avatar bytes, cached across background isolate restarts.
-final _avatars = PushAvatarStore();
-
 /// Action id for the inline reply box on an Android notification.
 const replyActionId = 'matter.reply';
 
@@ -78,46 +75,29 @@ PushTarget? parsePushTargetPayload(String? payload) {
   }
 }
 
-Future<Uint8List?> _roomAvatarBytes(
-  PushTarget target,
-  PushRoomInfo? room,
-  PushMediaSession? session,
-) async {
+/// Cached avatar file for a room, or null when none is known.
+///
+/// Only a path is read here: the foreground already downloaded the avatar, so
+/// the background isolate needs neither `path_provider` nor a network call.
+Future<String?> _roomAvatarPath(PushTarget target, PushRoomInfo? room) async {
   final mxc = room?.avatarMxc ?? '';
-  if (mxc.isEmpty) return null;
-  return loadAvatarBytes(
-    store: _avatars,
-    userId: target.userId,
-    mxc: mxc,
-    session: session,
-  );
+  return mxc.isEmpty ? null : pushAvatarPath(target.userId, mxc);
 }
 
-/// Avatar for the author of an encrypted-room message.
+/// Avatar file for the message author, or null when unavailable.
 ///
-/// Skipped for encrypted rooms: those authors are not resolved for the
-/// notification path, matching how other clients render a locked room.
-Future<Uint8List?> _senderAvatarBytes(
+/// Returned null for an encrypted room: those authors are not resolved for
+/// the notification path, matching how other clients render a locked room.
+Future<String?> _senderAvatarPath(
   PushTarget target,
   Map<String, dynamic> data,
   PushRoomInfo? room,
-  PushMediaSession? session,
 ) async {
   if (room?.isEncrypted ?? false) return null;
   final sender = pushSenderId(data);
   if (sender == null) return null;
-  final mxc = await loadPushSenderAvatar(
-    target.userId,
-    target.roomId,
-    sender,
-  );
-  if (mxc == null) return null;
-  return loadAvatarBytes(
-    store: _avatars,
-    userId: target.userId,
-    mxc: mxc,
-    session: session,
-  );
+  final mxc = await loadPushSenderAvatar(target.userId, sender);
+  return mxc == null ? null : pushAvatarPath(target.userId, mxc);
 }
 
 const _channelId = 'matrix_messages';
@@ -183,11 +163,10 @@ Future<void> showMatrixPush(
       receivedAtMillis: DateTime.now().millisecondsSinceEpoch,
     ),
   );
-  // One session lookup and one avatar fetch per message; both are cached, and
-  // a failure only costs the small icon.
-  final session = await loadPushMediaSession(target.userId);
-  final roomAvatar = await _roomAvatarBytes(target, room, session);
-  final senderAvatar = await _senderAvatarBytes(target, data, room, session);
+  // Avatar paths are read from cache written by the foreground: no session,
+  // no download and no `path_provider` are needed on this isolate.
+  final roomAvatar = await _roomAvatarPath(target, room);
+  final senderAvatar = await _senderAvatarPath(target, data, room);
   final replyable = supportsInlineReply(data, room: room);
   await notifications.show(
     // Identity is stable per room: Android keys a notification by (tag, id),
@@ -246,19 +225,22 @@ Future<void> showMatrixPush(
   );
 }
 
-/// Wrap fetched bytes as a notification large icon, or null when unavailable.
-ByteArrayAndroidBitmap? _bitmap(Uint8List? bytes) =>
-    bytes == null ? null : ByteArrayAndroidBitmap(bytes);
+/// Wrap an avatar file path as a notification large icon.
+///
+/// Android decodes the file natively, so no bytes cross the platform channel
+/// and the background isolate never needs to download or hold an avatar.
+FilePathAndroidBitmap? _bitmap(String? path) =>
+    path == null ? null : FilePathAndroidBitmap(path);
 
-/// Wrap fetched bytes as a `Person` icon, or null when unavailable.
+/// Wrap an avatar file path as a `Person` icon.
 ///
 /// `Person.icon` takes an `AndroidIcon` rather than an `AndroidBitmap`, so the
 /// two helpers are not interchangeable. Pass [attach] as false to omit the
-/// icon for a repeated author: the platform channel marshals the bitmap once
-/// per entry, so resending identical bytes for every message of a
-/// conversation wastes work on a notification that Android collapses anyway.
-ByteArrayAndroidIcon? _icon(Uint8List? bytes, {bool attach = true}) =>
-    bytes == null || !attach ? null : ByteArrayAndroidIcon(bytes);
+/// icon for a repeated author: sending the same file again for every message
+/// of a conversation makes Android decode it once per entry for a
+/// notification it collapses anyway.
+BitmapFilePathAndroidIcon? _icon(String? path, {bool attach = true}) =>
+    path == null || !attach ? null : BitmapFilePathAndroidIcon(path);
 
 /// Render accumulated messages as an Android conversation.
 ///
@@ -269,8 +251,8 @@ MessagingStyleInformation _conversationStyle({
   required PushConversation conversation,
   required bool isDirect,
   required String? senderId,
-  required Uint8List? senderAvatar,
-  required Uint8List? roomAvatar,
+  required String? senderAvatar,
+  required String? roomAvatar,
 }) {
   // Authors whose avatar has already been attached in this conversation.
   final iconOwners = <String>{};
@@ -333,7 +315,9 @@ class FcmPushRuntime {
       );
       final launch = await notifications.getNotificationAppLaunchDetails();
       if (launch?.didNotificationLaunchApp ?? false) {
-        initialTarget = parsePushTargetPayload(launch?.notificationResponse?.payload);
+        initialTarget = parsePushTargetPayload(
+          launch?.notificationResponse?.payload,
+        );
       }
       FirebaseMessaging.onMessage.listen((message) {
         unawaited(
@@ -366,7 +350,6 @@ class FcmPushRuntime {
     }
   }
 
-
   void _openPayload(String? payload) {
     final target = parsePushTargetPayload(payload);
     if (target != null) _opened.add(target);
@@ -396,7 +379,9 @@ class FcmPushRuntime {
   ) async {
     final readEvents = eventIds.toSet();
     for (final notification in await notifications.getActiveNotifications()) {
-      final target = parsePushTargetPayload(notification.payload ?? notification.tag);
+      final target = parsePushTargetPayload(
+        notification.payload ?? notification.tag,
+      );
       // One notification represents the whole conversation, so its payload
       // carries only the newest event. Cancelling it also drops the
       // accumulated messages, otherwise the next message would resurface

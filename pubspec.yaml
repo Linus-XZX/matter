@@ -92,6 +92,10 @@ dev_dependencies:
   # test/chat_provider_state_test.dart).
   shared_preferences_platform_interface: ^2.4.2
   file_selector_platform_interface: ^2.7.0
+  # Test-only: replace path_provider with a temp directory so the push avatar
+  # file cache can be exercised without a real platform.
+  path_provider_platform_interface: ^2.1.3
+  plugin_platform_interface: ^2.1.8
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

@@ -11,6 +11,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../src/rust/api/matrix/push.dart' as push;
 import 'fcm_push_runtime.dart';
 import 'firebase_client_config.dart';
+import 'push_avatar.dart';
 import 'push_room_directory.dart';
 import 'push_runtime.dart';
 import 'push_registration_manager.dart';
@@ -114,10 +115,7 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
           userId,
           jsonEncode({
             for (final room in snapshot)
-              room.id: {
-                'name': room.name,
-                'is_direct': room.roomType == 'dm',
-              },
+              room.id: {'name': room.name, 'is_direct': room.roomType == 'dm'},
           }),
         ),
       );
@@ -125,34 +123,68 @@ final pushRoomDirectoryProvider = Provider<void>((ref) {
   }, fireImmediately: true);
 });
 
-/// Record room-member avatars for the rooms the user has opened.
+/// Downloads notification avatars using the Rust client's authenticated
+/// session, which already holds valid credentials.
+final pushAvatarCacheProvider = Provider<PushAvatarCache>(
+  (ref) =>
+      PushAvatarCache(download: (mxc) => rust.downloadMediaBytes(mxcUrl: mxc)),
+);
+
+/// Download the avatars notifications need so the notification path can read
+/// them from disk.
 ///
-/// The gateway payload has no avatar and resolving one needs the member list,
-/// which only the running client can read. Only watched rooms are recorded,
-/// because the push path only needs avatars for rooms that can notify.
-final pushSenderAvatarProvider = Provider<void>((ref) {
+/// Fetching them in the FCM background isolate silently produced no avatars at
+/// all, because that isolate could not read the account's access token. Doing
+/// it here also reuses the session the Rust client already holds. Every
+/// download is cache-first, so a steady state only stats local files.
+final pushAvatarPrefetchProvider = Provider<void>((ref) {
   if (!pushSupported || !ref.watch(sessionReadyProvider)) return;
   final userId = ref.watch(activeUserIdProvider);
-  final roomId = ref.watch(currentRoomIdProvider);
-  if (userId == null || roomId == null) return;
-  ref.listen(roomMembersProvider(roomId), (_, next) {
-    final members = next.asData?.value;
-    if (members == null) return;
-    unawaited(
-      savePushSenderAvatars(userId, roomId, {
-        for (final member in members)
-          if (member.avatarUrl case final mxc?
-              when mxc.startsWith('mxc://'))
-            member.id: mxc,
-      }),
-    );
+  if (userId == null) return;
+  // Nothing here is observable unless a notification can be shown, and the
+  // contact scan below is expensive (it walks every joined room's member
+  // list), so an account with push off must not pay for any of it.
+  final settings = ref.watch(pushSettingsProvider(userId)).asData?.value;
+  if (settings == null || !settings.enabled) return;
+  final cache = ref.read(pushAvatarCacheProvider);
+
+  Future<void> prefetch(Iterable<String?> mxcs) async {
+    for (final mxc in mxcs) {
+      if (mxc != null && mxc.startsWith('mxc://')) {
+        await cache.ensure(userId, mxc);
+      }
+    }
+  }
+
+  // Every joined room's avatar. A direct chat usually has no room avatar of
+  // its own, so its sender avatar comes from the contact list below.
+  ref.listen(allChatRoomsProvider, (_, next) {
+    final rooms = next.asData?.value;
+    if (rooms == null) return;
+    unawaited(prefetch(rooms.map((room) => room.avatarUrl)));
+  }, fireImmediately: true);
+
+  // Sender avatars, recorded account-wide. The contact list spans every joined
+  // room, so a room the user never opened still has its senders' avatars
+  // available, which a per-room snapshot could not provide.
+  ref.listen(contactsProvider, (_, next) {
+    final contacts = next.asData?.value;
+    if (contacts == null) return;
+    unawaited(() async {
+      await savePushSenderAvatars(userId, {
+        for (final contact in contacts)
+          if (contact.avatarUrl case final mxc? when mxc.startsWith('mxc://'))
+            contact.id: mxc,
+      });
+      await prefetch(contacts.map((contact) => contact.avatarUrl));
+    }());
   }, fireImmediately: true);
 });
 
 /// Kept alive at the app root, including the login page and account switches.
 final pushLifecycleProvider = Provider<void>((ref) {
   ref.watch(pushRoomDirectoryProvider);
-  ref.watch(pushSenderAvatarProvider);
+  ref.watch(pushAvatarPrefetchProvider);
   if (!pushSupported) return;
   final manager = ref.read(pushRegistrationManagerProvider);
   var disposed = false;

@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +8,8 @@ import 'package:http/http.dart' as http;
 import 'package:matter/features/push/push_avatar.dart';
 import 'package:matter/features/push/push_reply.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/temp_path_provider.dart';
 
 /// Records requests and replies with a canned response.
 class _RecordingClient extends http.BaseClient {
@@ -33,156 +37,160 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const alice = '@alice:example.org';
+  const bob = '@bob:example.org';
   const room = '!room:example.org';
   const session = PushMediaSession(
     homeserver: 'https://matrix.example.org',
     accessToken: 'token',
   );
 
-  group('mxcThumbnailUrl', () {
-    test('maps an mxc URI to the authenticated media endpoint', () {
-      expect(
-        mxcThumbnailUrl('mxc://matrix.example.org/abc123', homeserver: 'https://matrix.example.org'),
-        'https://matrix.example.org/_matrix/client/v1/media/thumbnail/'
-        'matrix.example.org/abc123?width=96&height=96&method=scale',
-      );
-    });
+  late Directory root;
 
-    test('keeps a non-default media port, matching the Rust resolver', () {
-      expect(
-        mxcThumbnailUrl(
-          'mxc://media.example.org:8448/abc',
-          homeserver: 'https://matrix.example.org',
-        ),
-        contains('media.example.org:8448/abc'),
-      );
-    });
-
-    test('tolerates a trailing slash on the homeserver', () {
-      expect(
-        mxcThumbnailUrl(
-          'mxc://matrix.example.org/abc',
-          homeserver: 'https://matrix.example.org///',
-        ),
-        startsWith('https://matrix.example.org/_matrix/'),
-      );
-    });
-
-    test('rejects non-mxc input and missing identifiers', () {
-      for (final mxc in [
-        'https://example.org/avatar.png',
-        'mxc://',
-        'mxc://matrix.example.org',
-        'not a uri',
-      ]) {
-        expect(
-          mxcThumbnailUrl(mxc, homeserver: 'https://matrix.example.org'),
-          isNull,
-          reason: mxc,
-        );
-      }
-      expect(
-        mxcThumbnailUrl('mxc://matrix.example.org/a', homeserver: '   '),
-        isNull,
-      );
-    });
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    root = Directory.systemTemp.createTempSync('matter-avatars');
+    installTempPathProvider(root);
   });
 
-  group('PushAvatarStore', () {
-    setUp(() => SharedPreferences.setMockInitialValues({}));
+  tearDown(() {
+    if (root.existsSync()) root.deleteSync(recursive: true);
+  });
 
-    test('round-trips bytes and isolates accounts', () async {
-      final store = PushAvatarStore();
-      final bytes = Uint8List.fromList([1, 2, 3, 4]);
-      await store.save(alice, 'mxc://a/b', bytes);
-      expect(await PushAvatarStore().cached(alice, 'mxc://a/b'), bytes);
-      const bob = '@bob:example.org';
-      expect(await store.cached(bob, 'mxc://a/b'), isNull);
+  group('PushAvatarCache', () {
+    // Counts downloads so the cache-first path is observable.
+    late int downloads;
+    late PushAvatarCache cache;
+
+    setUp(() {
+      downloads = 0;
+      cache = PushAvatarCache(
+        download: (mxc) async {
+          downloads++;
+          return Uint8List.fromList([1, 2, 3]);
+        },
+      );
     });
 
-    test('returns null for unknown and corrupt entries', () async {
+    test('writes the avatar to a file and returns its path', () async {
+      final path = await cache.ensure(alice, 'mxc://example.org/avatar');
+      expect(path, isNotNull);
+      expect(File(path!).existsSync(), isTrue);
+      expect(File(path).readAsBytesSync(), [1, 2, 3]);
+    });
+
+    test(
+      'a second lookup is served from disk without downloading again',
+      () async {
+        final first = await cache.ensure(alice, 'mxc://example.org/avatar');
+        final second = await cache.ensure(alice, 'mxc://example.org/avatar');
+        expect(second, first);
+        expect(downloads, 1);
+      },
+    );
+
+    test('the recorded path is readable without any download', () async {
+      final written = await cache.ensure(alice, 'mxc://example.org/avatar');
+      // This is the only lookup the notification path performs.
+      expect(await pushAvatarPath(alice, 'mxc://example.org/avatar'), written);
+    });
+
+    test('keeps accounts separate', () async {
+      await cache.ensure(alice, 'mxc://example.org/avatar');
+      expect(await pushAvatarPath(bob, 'mxc://example.org/avatar'), isNull);
+    });
+
+    test('a failed download yields no path instead of failing', () async {
+      final failing = PushAvatarCache(download: (mxc) async => null);
+      expect(await failing.ensure(alice, 'mxc://example.org/avatar'), isNull);
+      // Non-mxc input never reaches the downloader.
+      expect(await failing.ensure(alice, 'https://example.org/a.png'), isNull);
+    });
+
+    test('concurrent requests for one avatar download it once', () async {
+      // The prefetch runs on sync updates, so two overlapping runs can ask for
+      // the same avatar before either has written it.
+      final gate = Completer<void>();
+      var calls = 0;
+      final slow = PushAvatarCache(
+        download: (mxc) async {
+          calls++;
+          await gate.future;
+          return Uint8List.fromList([7]);
+        },
+      );
+      final first = slow.ensure(alice, 'mxc://example.org/avatar');
+      final second = slow.ensure(alice, 'mxc://example.org/avatar');
+      gate.complete();
+      final paths = await Future.wait([first, second]);
+      expect(calls, 1);
+      expect(paths.first, paths.last);
+      // A later request is served from disk without downloading again.
+      expect(await slow.ensure(alice, 'mxc://example.org/avatar'), paths.first);
+      expect(calls, 1);
+    });
+
+    test('a stale file path is not handed to Android', () async {
+      final path = await cache.ensure(alice, 'mxc://example.org/avatar');
+      File(path!).deleteSync();
+      // Decoding a missing file shows no icon and logs an error, so the
+      // lookup must report the cache as cold.
+      expect(await pushAvatarPath(alice, 'mxc://example.org/avatar'), isNull);
+    });
+
+    test('recovers from a corrupt index', () async {
       SharedPreferences.setMockInitialValues({
-        pushAvatarCacheKey(alice): 'not json',
+        pushAvatarIndexKey(alice): 'not json',
       });
-      expect(await PushAvatarStore().cached(alice, 'mxc://a/b'), isNull);
+      expect(await pushAvatarPath(alice, 'mxc://example.org/avatar'), isNull);
+      expect(await cache.ensure(alice, 'mxc://example.org/avatar'), isNotNull);
     });
 
-    test('bounds the cache instead of growing without limit', () async {
-      final store = PushAvatarStore();
-      for (var i = 0; i < 80; i++) {
-        await store.save(alice, 'mxc://example.org/$i', Uint8List.fromList([i]));
+    test('bounds the cache and deletes the evicted files', () async {
+      String? firstPath;
+      for (var i = 0; i < 140; i++) {
+        final path = await cache.ensure(alice, 'mxc://example.org/$i');
+        firstPath ??= path;
       }
-      final raw = jsonDecode(
-        (await SharedPreferences.getInstance()).getString(
-          pushAvatarCacheKey(alice),
-        )!,
-      ) as Map<String, dynamic>;
-      expect(raw.length, lessThanOrEqualTo(64));
-      // The most recent entry is retained.
-      expect(raw.containsKey('mxc://example.org/79'), isTrue);
+      expect(File(firstPath!).existsSync(), isFalse);
+      // The newest entry survives.
+      expect(await pushAvatarPath(alice, 'mxc://example.org/139'), isNotNull);
     });
 
-    test('clearing an account drops only its avatars', () async {
-      final store = PushAvatarStore();
-      const bob = '@bob:example.org';
-      await store.save(alice, 'mxc://a/b', Uint8List.fromList([1]));
-      await store.save(bob, 'mxc://a/b', Uint8List.fromList([2]));
-      await store.clearAccount(alice);
-      expect(await store.cached(alice, 'mxc://a/b'), isNull);
-      expect(await store.cached(bob, 'mxc://a/b'), isNotNull);
-    });
-
-    test('a fetch failure never blocks the notification', () async {
-      final store = PushAvatarStore();
-      final bytes = await loadAvatarBytes(
-        store: store,
-        userId: alice,
-        mxc: 'not-an-mxc',
-        session: session,
-      );
-      expect(bytes, isNull);
-    });
-
-    test('serves from cache without needing a session', () async {
-      final store = PushAvatarStore();
-      await store.save(alice, 'mxc://a/b', Uint8List.fromList([9]));
-      expect(
-        await loadAvatarBytes(
-          store: store,
-          userId: alice,
-          mxc: 'mxc://a/b',
-          session: null,
-        ),
-        Uint8List.fromList([9]),
-      );
+    test('clearing an account deletes its files and leaves others', () async {
+      final alicePath = await cache.ensure(alice, 'mxc://example.org/avatar');
+      await cache.ensure(bob, 'mxc://example.org/avatar');
+      await cache.clearAccount(alice);
+      expect(File(alicePath!).existsSync(), isFalse);
+      expect(await pushAvatarPath(alice, 'mxc://example.org/avatar'), isNull);
+      expect(await pushAvatarPath(bob, 'mxc://example.org/avatar'), isNotNull);
     });
   });
 
   group('sendNotificationReply', () {
-    test('PUTs the text to the room send endpoint with an auth header', () async {
-      final client = _RecordingClient();
-      final sent = await sendNotificationReply(
-        userId: alice,
-        roomId: room,
-        body: '  在的  ',
-        session: session,
-        client: client,
-      );
-      expect(sent, isTrue);
-      final request = client.requests.single as http.Request;
-      expect(request.method, 'PUT');
-      expect(
-        request.url.path,
-        startsWith('/_matrix/client/v3/rooms/'),
-      );
-      expect(request.url.path, contains('/send/m.room.message/'));
-      expect(request.headers['Authorization'], 'Bearer token');
-      // The typed text is trimmed before sending.
-      expect(jsonDecode(client.bodies.single), {
-        'msgtype': 'm.text',
-        'body': '在的',
-      });
-    });
+    test(
+      'PUTs the text to the room send endpoint with an auth header',
+      () async {
+        final client = _RecordingClient();
+        final sent = await sendNotificationReply(
+          userId: alice,
+          roomId: room,
+          body: '  在的  ',
+          session: session,
+          client: client,
+        );
+        expect(sent, isTrue);
+        final request = client.requests.single as http.Request;
+        expect(request.method, 'PUT');
+        expect(request.url.path, startsWith('/_matrix/client/v3/rooms/'));
+        expect(request.url.path, contains('/send/m.room.message/'));
+        expect(request.headers['Authorization'], 'Bearer token');
+        // The typed text is trimmed before sending.
+        expect(jsonDecode(client.bodies.single), {
+          'msgtype': 'm.text',
+          'body': '在的',
+        });
+      },
+    );
 
     test('encodes the room id into the path', () async {
       final client = _RecordingClient();
@@ -193,13 +201,19 @@ void main() {
         session: session,
         client: client,
       );
-      expect(client.requests.single.url.path, contains(Uri.encodeComponent(room)));
+      expect(
+        client.requests.single.url.path,
+        contains(Uri.encodeComponent(room)),
+      );
     });
 
-    test('uses a fresh idempotency key per reply so retries cannot double-send', () {
-      final ids = {for (var i = 0; i < 50; i++) newReplyTransactionId()};
-      expect(ids, hasLength(50));
-    });
+    test(
+      'uses a fresh idempotency key per reply so retries cannot double-send',
+      () {
+        final ids = {for (var i = 0; i < 50; i++) newReplyTransactionId()};
+        expect(ids, hasLength(50));
+      },
+    );
 
     test('rejects blank text and a non-room id without any request', () async {
       final client = _RecordingClient();
@@ -223,28 +237,31 @@ void main() {
       expect(client.requests, isEmpty);
     });
 
-    test('reports failure on a non-2xx response and on a transport error', () async {
-      expect(
-        await sendNotificationReply(
-          userId: alice,
-          roomId: room,
-          body: 'hi',
-          session: session,
-          client: _RecordingClient(statusCode: 403),
-        ),
-        isFalse,
-      );
-      expect(
-        await sendNotificationReply(
-          userId: alice,
-          roomId: room,
-          body: 'hi',
-          session: session,
-          client: _RecordingClient(throwOnSend: true),
-        ),
-        isFalse,
-      );
-    });
+    test(
+      'reports failure on a non-2xx response and on a transport error',
+      () async {
+        expect(
+          await sendNotificationReply(
+            userId: alice,
+            roomId: room,
+            body: 'hi',
+            session: session,
+            client: _RecordingClient(statusCode: 403),
+          ),
+          isFalse,
+        );
+        expect(
+          await sendNotificationReply(
+            userId: alice,
+            roomId: room,
+            body: 'hi',
+            session: session,
+            client: _RecordingClient(throwOnSend: true),
+          ),
+          isFalse,
+        );
+      },
+    );
 
     test('without a session there is nothing to send with', () async {
       expect(

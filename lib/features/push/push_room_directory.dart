@@ -41,40 +41,41 @@ class PushRoomInfo {
   };
 }
 
-/// Sender profiles per room, so avatars survive the background isolate.
+/// Sender avatars for the whole account, keyed by MXID.
 ///
-/// The gateway never sends an avatar, and resolving one needs the member list,
-/// so the foreground persists what it has already loaded.
+/// A person has one avatar regardless of room, and the gateway never sends
+/// one, so the foreground persists what it loaded from the contact list. A
+/// per-room map would leave every room the user never opened without avatars.
 String pushSenderAvatarKey(String userId) =>
     'push_sender_avatars_${base64Url.encode(utf8.encode(userId))}';
 
-/// Record sender avatars for one room, replacing any previous list.
+/// Record sender avatars for an account, merging with what is already known.
+///
+/// An existing entry is kept when a sender has no avatar on their profile,
+/// so one avatar-less contact cannot erase a previously known avatar.
 Future<void> savePushSenderAvatars(
   String userId,
-  String roomId,
   Map<String, String> avatars,
 ) async {
   final prefs = await SharedPreferences.getInstance();
   final raw = prefs.getString(pushSenderAvatarKey(userId));
-  Map<String, dynamic> all = {};
+  final all = <String, dynamic>{};
   if (raw != null) {
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is Map<String, dynamic>) all = decoded;
+      if (decoded is Map<String, dynamic>) all.addAll(decoded);
     } on FormatException {
-      all = {};
+      all.clear();
     }
   }
-  all[roomId] = avatars;
+  avatars.forEach((senderId, mxc) {
+    if (mxc.startsWith('mxc://')) all[senderId] = mxc;
+  });
   await prefs.setString(pushSenderAvatarKey(userId), jsonEncode(all));
 }
 
-/// Sender avatar for one member of a room, or null when not yet observed.
-Future<String?> loadPushSenderAvatar(
-  String userId,
-  String roomId,
-  String senderId,
-) async {
+/// Avatar of one sender, or null when never observed or unknown.
+Future<String?> loadPushSenderAvatar(String userId, String senderId) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
   final raw = prefs.getString(pushSenderAvatarKey(userId));
@@ -82,9 +83,7 @@ Future<String?> loadPushSenderAvatar(
   try {
     final decoded = jsonDecode(raw);
     if (decoded is! Map<String, dynamic>) return null;
-    final room = decoded[roomId];
-    if (room is! Map<String, dynamic>) return null;
-    final mxc = room[senderId];
+    final mxc = decoded[senderId];
     return mxc is String && mxc.isNotEmpty ? mxc : null;
   } on FormatException {
     return null;
@@ -171,4 +170,5 @@ Future<void> savePushRoomDirectory(
 Future<void> clearPushRoomDirectory(String userId) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.remove(pushRoomDirectoryKey(userId));
+  await prefs.remove(pushSenderAvatarKey(userId));
 }

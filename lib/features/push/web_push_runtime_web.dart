@@ -19,7 +19,10 @@ external JSPromise<JSAny?> _updateAccount(
   JSBoolean enabled,
 );
 @JS('matterPush.updateRoomDirectory')
-external JSPromise<JSAny?> _updateRoomDirectory(JSString userId, JSString rooms);
+external JSPromise<JSAny?> _updateRoomDirectory(
+  JSString userId,
+  JSString rooms,
+);
 @JS('matterPush.roomNotificationEvents')
 external JSPromise<JSString> _roomNotificationEvents(
   JSString userId,

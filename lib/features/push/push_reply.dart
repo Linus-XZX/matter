@@ -20,6 +20,7 @@ Future<bool> sendNotificationReply({
   required String roomId,
   required String body,
   PushMediaSession? session,
+
   /// Injectable for tests; production uses the default client.
   http.Client? client,
 }) async {

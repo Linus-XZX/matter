@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -19,6 +20,8 @@ import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/temp_path_provider.dart';
 
 class _ReadApi implements RustLibApi {
   Completer<bool>? pending;
@@ -53,9 +56,14 @@ void main() {
   setUpAll(() => RustLib.initMock(api: api));
   tearDownAll(RustLib.dispose);
 
+  // Avatar files are written under the application support directory.
+  late Directory avatarRoot;
+
   setUp(() {
     AndroidFlutterLocalNotificationsPlugin.registerWith();
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    avatarRoot = Directory.systemTemp.createTempSync('matter-push-avatars');
+    installTempPathProvider(avatarRoot);
     fcmPushRuntime.configuration = const FirebaseClientConfig(
       apiKey: 'test',
       appId: 'test',
@@ -85,6 +93,7 @@ void main() {
   tearDown(() {
     debugDefaultTargetPlatformOverride = null;
     fcmPushRuntime.configuration = null;
+    if (avatarRoot.existsSync()) avatarRoot.deleteSync(recursive: true);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
@@ -120,15 +129,12 @@ void main() {
           'content_body': '展开后的正文',
         });
         final args = calls.last.arguments as Map;
-        expect(
-          args['body'],
-          switch (type) {
-            'm.room.message' => '消息正文',
-            // Ciphertext is never rendered as a body.
-            'm.room.encrypted' => '已加密的消息',
-            _ => '你有一条新消息',
-          },
-        );
+        expect(args['body'], switch (type) {
+          'm.room.message' => '消息正文',
+          // Ciphertext is never rendered as a body.
+          'm.room.encrypted' => '已加密的消息',
+          _ => '你有一条新消息',
+        });
       }
     },
   );
@@ -165,8 +171,13 @@ void main() {
 
   test('a direct chat drops the sender prefix and groups per room', () async {
     await savePushRoomDirectory(target.userId, [
-      (id: target.roomId, name: 'Alice', roomType: 'dm',
-          avatarMxc: '', isEncrypted: false),
+      (
+        id: target.roomId,
+        name: 'Alice',
+        roomType: 'dm',
+        avatarMxc: '',
+        isEncrypted: false,
+      ),
     ]);
     final notifications = FlutterLocalNotificationsPlugin();
     await showMatrixPush(notifications, {
@@ -186,57 +197,64 @@ void main() {
     expect(specifics['groupKey'], 'matrix:${target.userId}:${target.roomId}');
   });
 
-  test('the same room aggregates successive messages into one notification', () async {
-    final notifications = FlutterLocalNotificationsPlugin();
-    Map<String, dynamic> message(String eventId, String sender, String body) => {
-      ...target.toData(),
-      'event_id': eventId,
-      'type': 'm.room.message',
-      'room_name': '项目组',
-      'sender': sender,
-      'sender_display_name': sender.contains('alice') ? 'Alice' : 'Bob',
-      'content_body': body,
-      'content_msgtype': 'm.text',
-    };
+  test(
+    'the same room aggregates successive messages into one notification',
+    () async {
+      final notifications = FlutterLocalNotificationsPlugin();
+      Map<String, dynamic> message(
+        String eventId,
+        String sender,
+        String body,
+      ) => {
+        ...target.toData(),
+        'event_id': eventId,
+        'type': 'm.room.message',
+        'room_name': '项目组',
+        'sender': sender,
+        'sender_display_name': sender.contains('alice') ? 'Alice' : 'Bob',
+        'content_body': body,
+        'content_msgtype': 'm.text',
+      };
 
-    await showMatrixPush(
-      notifications,
-      message(r'$one', '@alice:example.org', '第一条'),
-    );
-    await showMatrixPush(
-      notifications,
-      message(r'$two', '@bob:example.org', '第二条'),
-    );
+      await showMatrixPush(
+        notifications,
+        message(r'$one', '@alice:example.org', '第一条'),
+      );
+      await showMatrixPush(
+        notifications,
+        message(r'$two', '@bob:example.org', '第二条'),
+      );
 
-    final shows = calls.where((call) => call.method == 'show').toList();
-    expect(shows, hasLength(2));
-    final first = shows.first.arguments as Map;
-    final second = shows.last.arguments as Map;
-    // A stable (tag, id) per room is what makes Android update in place
-    // rather than stack a separate notification per message.
-    expect(second['id'], first['id']);
-    final firstSpecifics = first['platformSpecifics'] as Map;
-    final secondSpecifics = second['platformSpecifics'] as Map;
-    expect(secondSpecifics['tag'], firstSpecifics['tag']);
-    expect(firstSpecifics['tag'], isNot(contains(r'$one')));
-    // The latest event travels in the payload, which Android ignores for
-    // identity but read-receipt cleanup relies on.
-    expect(second['payload'], contains(r'$two'));
-    final style = secondSpecifics['styleInformation'] as Map;
-    expect(style['messages'], hasLength(2));
-    expect(
-      (style['messages'] as List)
-          .map((entry) => (entry as Map)['text'])
-          .toList(),
-      ['第一条', '第二条'],
-    );
-    // Each entry is labelled by its own author, so the text stays prefix-free.
-    final authors = [
-      for (final entry in (style['messages'] as List))
-        ((entry as Map)['person'] as Map)['name'],
-    ];
-    expect(authors, ['Alice', 'Bob']);
-  });
+      final shows = calls.where((call) => call.method == 'show').toList();
+      expect(shows, hasLength(2));
+      final first = shows.first.arguments as Map;
+      final second = shows.last.arguments as Map;
+      // A stable (tag, id) per room is what makes Android update in place
+      // rather than stack a separate notification per message.
+      expect(second['id'], first['id']);
+      final firstSpecifics = first['platformSpecifics'] as Map;
+      final secondSpecifics = second['platformSpecifics'] as Map;
+      expect(secondSpecifics['tag'], firstSpecifics['tag']);
+      expect(firstSpecifics['tag'], isNot(contains(r'$one')));
+      // The latest event travels in the payload, which Android ignores for
+      // identity but read-receipt cleanup relies on.
+      expect(second['payload'], contains(r'$two'));
+      final style = secondSpecifics['styleInformation'] as Map;
+      expect(style['messages'], hasLength(2));
+      expect(
+        (style['messages'] as List)
+            .map((entry) => (entry as Map)['text'])
+            .toList(),
+        ['第一条', '第二条'],
+      );
+      // Each entry is labelled by its own author, so the text stays prefix-free.
+      final authors = [
+        for (final entry in (style['messages'] as List))
+          ((entry as Map)['person'] as Map)['name'],
+      ];
+      expect(authors, ['Alice', 'Bob']);
+    },
+  );
 
   test('a reply action is offered only for a plaintext room', () async {
     final notifications = FlutterLocalNotificationsPlugin();
@@ -274,7 +292,7 @@ void main() {
   });
 
   test('a repeated author is not re-encoded into the notification', () async {
-    // Seed real avatar bytes, otherwise the assertion would pass trivially
+    // Seed real avatar files, otherwise the assertion would pass trivially
     // with no icons at all.
     await savePushRoomDirectory(target.userId, [
       (
@@ -285,20 +303,14 @@ void main() {
         isEncrypted: false,
       ),
     ]);
-    await savePushSenderAvatars(target.userId, target.roomId, {
+    await savePushSenderAvatars(target.userId, {
       '@alice:example.org': 'mxc://example.org/alice',
     });
-    final avatars = PushAvatarStore();
-    await avatars.save(
-      target.userId,
-      'mxc://example.org/room',
-      Uint8List.fromList([1, 2, 3]),
+    final avatars = PushAvatarCache(
+      download: (mxc) async => Uint8List.fromList([1, 2, 3]),
     );
-    await avatars.save(
-      target.userId,
-      'mxc://example.org/alice',
-      Uint8List.fromList([4, 5, 6]),
-    );
+    await avatars.ensure(target.userId, 'mxc://example.org/room');
+    await avatars.ensure(target.userId, 'mxc://example.org/alice');
 
     final notifications = FlutterLocalNotificationsPlugin();
     Map<String, dynamic> message(String eventId, String body) => {
@@ -314,16 +326,15 @@ void main() {
     await showMatrixPush(notifications, message(r'$a', 'a'));
     await showMatrixPush(notifications, message(r'$b', 'b'));
 
-    final specifics =
-        (calls.last.arguments as Map)['platformSpecifics'] as Map;
+    final specifics = (calls.last.arguments as Map)['platformSpecifics'] as Map;
     final style = specifics['styleInformation'] as Map;
     final messages = (style['messages'] as List).cast<Map>();
     expect(messages, hasLength(2));
     final icons = [
       for (final entry in messages) (entry['person'] as Map)['icon'],
     ];
-    // The platform channel marshals the bitmap per entry, so only the first
-    // occurrence of an author carries one.
+    // The same author's avatar is attached once: resending it for every
+    // message makes Android decode the file again for each entry.
     expect(icons.first, isNotNull);
     expect(icons.last, isNull);
   });
@@ -340,11 +351,9 @@ void main() {
       'content_body': '在吗',
       'content_msgtype': 'm.text',
     });
-    await fcmPushRuntime.cancelRoomNotifications(
-      target.userId,
-      target.roomId,
-      [target.eventId],
-    );
+    await fcmPushRuntime.cancelRoomNotifications(target.userId, target.roomId, [
+      target.eventId,
+    ]);
     // Otherwise the next message would resurrect everything already read.
     expect(
       await PushConversationStore().load(target.userId, target.roomId),
@@ -370,14 +379,11 @@ void main() {
           'content_msgtype': 'm.text',
         });
         final args = calls.last.arguments as Map;
-        expect(
-          args['body'],
-          switch (type) {
-            'm.room.message' || 'm.sticker' => 'Sygnal 消息正文',
-            'm.room.encrypted' => '已加密的消息',
-            _ => '你有一条新消息',
-          },
-        );
+        expect(args['body'], switch (type) {
+          'm.room.message' || 'm.sticker' => 'Sygnal 消息正文',
+          'm.room.encrypted' => '已加密的消息',
+          _ => '你有一条新消息',
+        });
       }
     },
   );

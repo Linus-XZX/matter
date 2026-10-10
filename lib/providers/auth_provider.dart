@@ -817,7 +817,9 @@ Future<void> removeSession(String userId) async {
   await prefs.remove(pushSettingsKey(userId));
   await clearPushRoomDirectory(userId);
   await PushConversationStore().clearAccount(userId);
-  await PushAvatarStore().clearAccount(userId);
+  await PushAvatarCache(
+    download: (mxc) => rust.downloadMediaBytes(mxcUrl: mxc),
+  ).clearAccount(userId);
   await const MarkdownSourceStore().clearForUser(userId);
   for (final homeserver in removedHomeservers) {
     await clearAuthenticatedMediaCacheForSession(

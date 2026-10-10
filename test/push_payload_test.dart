@@ -203,10 +203,20 @@ void main() {
 
     test('round-trips the room snapshot the foreground writes', () async {
       await savePushRoomDirectory('@alice:example.org', [
-        (id: '!group:example.org', name: '项目组', roomType: 'group',
-            avatarMxc: '', isEncrypted: false),
-        (id: '!dm:example.org', name: 'Alice', roomType: 'dm',
-            avatarMxc: '', isEncrypted: false),
+        (
+          id: '!group:example.org',
+          name: '项目组',
+          roomType: 'group',
+          avatarMxc: '',
+          isEncrypted: false,
+        ),
+        (
+          id: '!dm:example.org',
+          name: 'Alice',
+          roomType: 'dm',
+          avatarMxc: '',
+          isEncrypted: false,
+        ),
       ]);
       final directory = PushRoomDirectory();
       final groupInfo = await directory.lookup(
@@ -235,8 +245,13 @@ void main() {
 
     test('keeps accounts isolated from one another', () async {
       await savePushRoomDirectory('@alice:example.org', [
-        (id: '!room:example.org', name: 'Alice 的房间', roomType: 'group',
-            avatarMxc: '', isEncrypted: false),
+        (
+          id: '!room:example.org',
+          name: 'Alice 的房间',
+          roomType: 'group',
+          avatarMxc: '',
+          isEncrypted: false,
+        ),
       ]);
       final directory = PushRoomDirectory();
       expect(
@@ -254,8 +269,13 @@ void main() {
 
     test('clearing an account drops its snapshot', () async {
       await savePushRoomDirectory('@alice:example.org', [
-        (id: '!room:example.org', name: '项目组', roomType: 'group',
-            avatarMxc: '', isEncrypted: false),
+        (
+          id: '!room:example.org',
+          name: '项目组',
+          roomType: 'group',
+          avatarMxc: '',
+          isEncrypted: false,
+        ),
       ]);
       await clearPushRoomDirectory('@alice:example.org');
       expect(

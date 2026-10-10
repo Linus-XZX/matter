@@ -24,18 +24,22 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
   group('PushConversation', () {
-    test('keeps messages oldest first so Android reads them chronologically', () {
-      final conversation = const PushConversation(
-        entries: [],
-        latestEventId: '',
-        updatedAtMillis: 0,
-      ).append(entry(1)).append(entry(2)).append(entry(3));
-      expect(
-        conversation.entries.map((e) => e.body),
-        ['消息 1', '消息 2', '消息 3'],
-      );
-      expect(conversation.latestEventId, r'$event3');
-    });
+    test(
+      'keeps messages oldest first so Android reads them chronologically',
+      () {
+        final conversation = const PushConversation(
+          entries: [],
+          latestEventId: '',
+          updatedAtMillis: 0,
+        ).append(entry(1)).append(entry(2)).append(entry(3));
+        expect(conversation.entries.map((e) => e.body), [
+          '消息 1',
+          '消息 2',
+          '消息 3',
+        ]);
+        expect(conversation.latestEventId, r'$event3');
+      },
+    );
 
     test('drops the oldest messages past the cap, not the newest', () {
       var conversation = const PushConversation(
@@ -48,7 +52,10 @@ void main() {
       }
       expect(conversation.entries, hasLength(maxMessagesPerConversation));
       // A long conversation must show what just arrived, not what came first.
-      expect(conversation.entries.last.body, '消息 ${maxMessagesPerConversation + 3}');
+      expect(
+        conversation.entries.last.body,
+        '消息 ${maxMessagesPerConversation + 3}',
+      );
       expect(conversation.entries.first.body, '消息 4');
     });
   });
@@ -78,18 +85,24 @@ void main() {
       expect((await store.load(bob, room))?.latestEventId, r'$event3');
     });
 
-    test('preserves the sender name so the style can label each message', () async {
-      final store = PushConversationStore();
-      await store.append(alice, room, entry(1));
-      await store.append(
-        alice,
-        room,
-        entry(2, senderName: 'Bob', senderId: bob),
-      );
-      final conversation = await store.load(alice, room);
-      expect(conversation?.entries.map((e) => e.senderName), ['Alice', 'Bob']);
-      expect(conversation?.entries.map((e) => e.senderId), [alice, bob]);
-    });
+    test(
+      'preserves the sender name so the style can label each message',
+      () async {
+        final store = PushConversationStore();
+        await store.append(alice, room, entry(1));
+        await store.append(
+          alice,
+          room,
+          entry(2, senderName: 'Bob', senderId: bob),
+        );
+        final conversation = await store.load(alice, room);
+        expect(conversation?.entries.map((e) => e.senderName), [
+          'Alice',
+          'Bob',
+        ]);
+        expect(conversation?.entries.map((e) => e.senderId), [alice, bob]);
+      },
+    );
 
     test('bounds stored rooms by dropping the quietest conversations', () async {
       final store = PushConversationStore();
@@ -146,14 +159,14 @@ void main() {
       );
     });
 
-    test('the tag carries no event, so one message does not spawn a new one', () {
-      String tag() => pushRoomTag(
-        userId: alice,
-        roomId: room,
-        registrationId: 'current',
-      );
-      expect(tag(), tag());
-      expect(tag(), isNot(contains(r'$event')));
-    });
+    test(
+      'the tag carries no event, so one message does not spawn a new one',
+      () {
+        String tag() =>
+            pushRoomTag(userId: alice, roomId: room, registrationId: 'current');
+        expect(tag(), tag());
+        expect(tag(), isNot(contains(r'$event')));
+      },
+    );
   });
 }
