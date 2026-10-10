@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/push/fcm_push_runtime.dart';
 import 'package:matter/features/push/firebase_client_config.dart';
 import 'package:matter/features/push/push_providers.dart';
+import 'package:matter/features/push/push_room_directory.dart';
 import 'package:matter/features/push/push_runtime.dart';
 import 'package:matter/features/push/push_settings.dart';
 import 'package:matter/providers/auth_provider.dart';
@@ -121,6 +122,61 @@ void main() {
       }
     },
   );
+
+  test('group messages title with the room and name the sender', () async {
+    final notifications = FlutterLocalNotificationsPlugin();
+    await showMatrixPush(notifications, {
+      ...target.toData(),
+      'type': 'm.room.message',
+      'room_name': '项目组',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+      'content_body': '明天的会改到 10 点',
+      'content_msgtype': 'm.text',
+    });
+    final args = calls.last.arguments as Map;
+    expect(args['title'], '项目组');
+    expect(args['body'], 'Alice：明天的会改到 10 点');
+  });
+
+  test('encrypted group events name the sender without a body', () async {
+    final notifications = FlutterLocalNotificationsPlugin();
+    await showMatrixPush(notifications, {
+      ...target.toData(),
+      'type': 'm.room.encrypted',
+      'room_name': '项目组',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+    });
+    final args = calls.last.arguments as Map;
+    expect(args['title'], '项目组');
+    expect(args['body'], 'Alice：已加密的消息');
+  });
+
+  test('a direct chat drops the sender prefix and groups per room', () async {
+    await savePushRoomDirectory(target.userId, [
+      (id: target.roomId, name: 'Alice', roomType: 'dm'),
+    ]);
+    final notifications = FlutterLocalNotificationsPlugin();
+    await showMatrixPush(notifications, {
+      ...target.toData(),
+      'type': 'm.room.message',
+      'sender': '@alice:example.org',
+      'sender_display_name': 'Alice',
+      'content_body': '在吗',
+      'content_msgtype': 'm.text',
+    });
+    final args = calls.last.arguments as Map;
+    expect(args['title'], 'Alice');
+    expect(args['body'], '在吗');
+    // Keyed by room so Android collapses one conversation together; the old
+    // account-wide key would merge every room into a single stack.
+    final specifics = args['platformSpecifics'] as Map;
+    expect(
+      specifics['groupKey'],
+      'matrix:${target.userId}:${target.roomId}',
+    );
+  });
 
   test(
     'Sygnal FCM v1 content_body is shown only for plaintext events',

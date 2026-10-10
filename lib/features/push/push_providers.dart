@@ -10,6 +10,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../src/rust/api/matrix/push.dart' as push;
 import 'fcm_push_runtime.dart';
 import 'firebase_client_config.dart';
+import 'push_room_directory.dart';
 import 'push_runtime.dart';
 import 'push_registration_manager.dart';
 import 'push_settings.dart';
@@ -78,8 +79,40 @@ final pushReadStateProvider = Provider<void>((ref) {
   }, fireImmediately: true);
 });
 
+/// Keep the room snapshot the background notification path reads in sync.
+///
+/// The push payload carries no direct/group flag and may omit a room name, so
+/// the payload alone cannot title a notification correctly. Persisting the
+/// joined-room list here lets the FCM background isolate read it without any
+/// access to the running Rust client.
+final pushRoomDirectoryProvider = Provider<void>((ref) {
+  if (!pushSupported || !ref.watch(sessionReadyProvider)) return;
+  final userId = ref.watch(activeUserIdProvider);
+  if (userId == null) return;
+  ref.listen(allChatRoomsProvider, (_, next) {
+    if (next.isLoading || next.hasError) return;
+    final rooms = next.asData?.value;
+    if (rooms == null) return;
+    unawaited(
+      savePushRoomDirectory(
+        userId,
+        rooms
+            .where((room) => room.roomType != 'space')
+            .map(
+              (room) => (
+                id: room.id,
+                name: room.name,
+                roomType: room.roomType,
+              ),
+            ),
+      ),
+    );
+  }, fireImmediately: true);
+});
+
 /// Kept alive at the app root, including the login page and account switches.
 final pushLifecycleProvider = Provider<void>((ref) {
+  ref.watch(pushRoomDirectoryProvider);
   if (!pushSupported) return;
   final manager = ref.read(pushRegistrationManagerProvider);
   var disposed = false;

@@ -10,7 +10,12 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_client_config.dart';
+import 'push_payload.dart';
+import 'push_room_directory.dart';
 import 'push_settings.dart';
+
+/// Per-account room metadata snapshot, shared with the notification path.
+final _roomDirectory = PushRoomDirectory();
 
 const _channelId = 'matrix_messages';
 const _initializationSettings = InitializationSettings(
@@ -61,30 +66,12 @@ Future<void> showMatrixPush(
       (isFocused?.call() ?? false)) {
     return;
   }
-  var body = '你有一条新消息';
-  if (data['type'] == 'm.room.message' || data['type'] == 'm.sticker') {
-    dynamic content = data['content'];
-    if (content is String) {
-      try {
-        content = jsonDecode(content);
-      } on FormatException {
-        content = null;
-      }
-    }
-    final flattenedBody = data['content_body'];
-    if (content is Map &&
-        content['body'] is String &&
-        (content['body'] as String).trim().isNotEmpty) {
-      body = content['body'] as String;
-    } else if (flattenedBody is String && flattenedBody.trim().isNotEmpty) {
-      // Sygnal flattens content fields for FCM HTTP v1.
-      body = flattenedBody;
-    }
-  }
+  final room = await _roomDirectory.lookup(target.userId, target.roomId);
+  final preview = buildPushPreview(data, room: room);
   await notifications.show(
     id: pushNotificationId(target),
-    title: 'Matter',
-    body: body,
+    title: preview.title,
+    body: preview.body,
     notificationDetails: NotificationDetails(
       android: AndroidNotificationDetails(
         _channelId,
@@ -93,7 +80,9 @@ Future<void> showMatrixPush(
         importance: Importance.high,
         priority: Priority.high,
         visibility: NotificationVisibility.private,
-        groupKey: 'matrix:${target.userId}',
+        // Group by room, not by account: Android collapses a conversation's
+        // notifications together, which is what a chat notification should do.
+        groupKey: 'matrix:${target.userId}:${target.roomId}',
         // Android's active-notification query exposes tags, not payloads.
         tag: jsonEncode(target.toData()),
       ),
