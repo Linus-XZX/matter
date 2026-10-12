@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../src/rust/api/matrix.dart' as rust;
 import 'fcm_push_runtime.dart';
+import 'push_read_state.dart';
 import 'push_settings.dart';
 import 'web_push_runtime_stub.dart'
     if (dart.library.js_interop) 'web_push_runtime_web.dart'
@@ -63,7 +64,6 @@ Future<void> _cancelRoomNotifications(
   String roomId,
   List<String> eventIds,
 ) async {
-  if (eventIds.isEmpty) return;
   try {
     if (kIsWeb) {
       await web_push.cancelRoomNotifications(userId, roomId, eventIds);
@@ -87,7 +87,7 @@ Future<bool> markRoomAsReadWithPushCleanup({
     roomId: roomId,
     explicit: explicit,
   );
-  if (!pushSupported || (!kIsWeb && fcmPushRuntime.configuration == null)) {
+  if (!pushSupported) {
     return writeReceipt();
   }
   return () async {
@@ -98,10 +98,41 @@ Future<bool> markRoomAsReadWithPushCleanup({
   }();
 }
 
-Future<void> dismissReadRoomPushes(String userId, String roomId) async {
-  final events = await _roomNotificationEvents(userId, roomId);
+Future<void> dismissReadRoomPushes(
+  String userId,
+  String roomId, {
+  String? throughEventId,
+}) async {
+  var events = await _roomNotificationEvents(userId, roomId);
+  if (!kIsWeb && throughEventId != null) {
+    final boundary = events.indexOf(throughEventId);
+    if (boundary >= 0) {
+      // A sync snapshot must not clear pushes for messages newer than it.
+      events = events.take(boundary + 1).toList();
+    } else {
+      final readRooms = <String>{};
+      final read = await fetchReadPushEvents(
+        userId,
+        events.toSet(),
+        roomByEvent: {for (final event in events) event: roomId},
+        roomIds: {roomId},
+        onReadRoom: readRooms.add,
+      );
+      if (!readRooms.contains(roomId)) {
+        events = events.where(read.contains).toList();
+        if (events.isEmpty) return;
+      }
+    }
+  }
   await _cancelRoomNotifications(userId, roomId, events);
 }
 
 Future<void> updatePushDeliveryState(String userId, PushSettings settings) =>
     web_push.updateAccount(userId, settings);
+
+/// Publish room metadata to the browser push worker.
+///
+/// A worker cannot read the app's local storage, so the direct/group flag and
+/// room names the notification needs are forwarded explicitly. No-op off Web.
+Future<void> updateWebPushRoomDirectory(String userId, String roomsJson) =>
+    web_push.updateRoomDirectory(userId, roomsJson);

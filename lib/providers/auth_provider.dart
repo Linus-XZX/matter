@@ -8,6 +8,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/markdown/markdown_source_store.dart';
+import '../features/push/push_avatar.dart';
+import '../features/push/push_conversation.dart';
+import '../features/push/push_room_directory.dart';
 import '../features/push/push_settings.dart';
 import '../src/rust/api/matrix.dart' as rust;
 import 'authenticated_media_cache.dart';
@@ -812,6 +815,11 @@ Future<void> removeSession(String userId) async {
   await clearCachedMessagesForNamespace(userId);
   await prefs.remove(ignoredUsersCacheKey(userId));
   await prefs.remove(pushSettingsKey(userId));
+  await clearPushRoomDirectory(userId);
+  await PushConversationStore().clearAccount(userId);
+  await PushAvatarCache(
+    download: (mxc) => rust.downloadMediaBytes(mxcUrl: mxc),
+  ).clearAccount(userId);
   await const MarkdownSourceStore().clearForUser(userId);
   for (final homeserver in removedHomeservers) {
     await clearAuthenticatedMediaCacheForSession(

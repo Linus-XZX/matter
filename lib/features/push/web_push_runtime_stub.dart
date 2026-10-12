@@ -10,6 +10,7 @@ Future<String> getToken(PushSettings settings) async =>
 Future<String> subscriptionJson() async =>
     throw UnsupportedError('Web Push 仅支持浏览器');
 Future<void> updateAccount(String userId, PushSettings settings) async {}
+Future<void> updateRoomDirectory(String userId, String roomsJson) async {}
 Future<List<String>> roomNotificationEvents(
   String userId,
   String roomId,

@@ -82,7 +82,7 @@ FCM 网关应发送高优先级的 **data message**，不要添加 FCM 的 `noti
 
 Web 网关须支持 Web Push/VAPID。客户端在 Matrix pusher 的 `data` 中传递 `endpoint`、`p256dh` 和 `auth`，`pushkey` 使用订阅的 `p256dh`。请确认所用 Sygnal 版本或其他网关支持该模式；FCM 应用项不能接收浏览器订阅。
 
-两种方式都使用 Matrix 默认推送格式，Homeserver 会把非加密事件的内容交给网关。网关须将 `data.default_payload` 中的 `user_id`、`registration_id` 与 `room_id`、`event_id` 一同送达客户端，并保留事件的 `type` 和消息正文，否则客户端只能显示通用提示。FCM 支持 JSON 字符串形式的 `content`，也支持 Sygnal HTTP v1 转发的展开字段 `content_body`；有效的 `content.body` 优先。Web 的 `content` 可使用 JSON 对象或 JSON 字符串。浏览器 worker 接受这些字段组成的 JSON 对象，或位于 `notification` 内的对象。不保留账号路由数据的 Web 网关需要调整转发，否则通知会被拒绝。旧的 `event_id_only` 注册会在账号就绪或应用恢复前台时的注册刷新中更新。
+两种方式都使用 Matrix 默认推送格式，Homeserver 会把非加密事件的内容交给网关。网关须将 `data.default_payload` 中的 `user_id`、`registration_id` 与 `room_id`、`event_id` 一同送达客户端，并保留事件的 `type`、`sender_display_name`、`room_name` 和消息正文，否则通知无法说明是谁在哪个房间发了什么。FCM 支持 JSON 字符串形式的 `content`，也支持 Sygnal HTTP v1 转发的展开字段 `content_body`；有效的 `content.body` 优先。Web 的 `content` 可使用 JSON 对象或 JSON 字符串。浏览器 worker 接受这些字段组成的 JSON 对象，或位于 `notification` 内的对象。不保留账号路由数据的 Web 网关需要调整转发，否则通知会被拒绝。旧的 `event_id_only` 注册会在账号就绪或应用恢复前台时的注册刷新中更新。
 
 ## 用户设置与生命周期
 
@@ -90,9 +90,19 @@ Web 网关须支持 Web Push/VAPID。客户端在 Matrix pusher 的 `data` 中�
 
 浏览器的推送 worker 使用单独作用域，不替换 Flutter 的应用 worker。关闭某个账号只注销该账号的 pusher，浏览器订阅保留给其他账号使用。同一站点订阅只能使用一把 VAPID 公钥；发现不同公钥时报错，不会取消其他账号仍在使用的订阅。更换公钥需先关闭所有账号推送，再清除原有浏览器订阅。
 
-权限只在启用时请求。每个 Matrix 账号分别注册，`append=true` 保留共享同一安装或浏览器订阅的其他账号。Matter 在前台且有焦点时不显示系统通知，Web 以同一应用路径下可见且有焦点的窗口为准。非加密的 `m.room.message` 和 `m.sticker` 显示 `content.body`，加密事件或缺少正文的事件显示“你有一条新消息”，后台不做任何解密。点击通知时会重新检查当前设置，切换到所属账号并打开对应房间及事件。房间免打扰和服务器推送规则继续生效。
+权限只在启用时请求。每个 Matrix 账号分别注册，`append=true` 保留共享同一安装或浏览器订阅的其他账号。Matter 在前台且有焦点时不显示系统通知，Web 以同一应用路径下可见且有焦点的窗口为准。标题取房间名，缺失时回退到发送者；群聊正文加 `sender_display_name` 前缀，私聊只显示消息本身（Homeserver 会把对方昵称作为私聊的 `room_name`）。非文本消息按 msgtype 显示描述文案。加密事件只显示发送者、不显示正文：发送者属于网关已收到的明文信封元数据，后台不做任何解密。同一房间的消息汇总为一条会话式通知，逐条标注发送者，“回复”快捷操作只对非加密房间显示，因为加密房间回复需要设备上的 Olm 会话。点击通知时会重新检查当前设置，切换到所属账号并打开对应房间及事件。房间免打扰和服务器推送规则继续生效。
 
-打开房间或手动标记已读时，成功发送已读回执后才撤销该账号、该房间在操作开始时已有的通知，操作期间新到的消息保留。当前账号同步到房间未读数从正数降为零时也会清理该房间通知，以处理其他设备上的已读。回执失败不撤销任何通知。Android 用通知 tag 保存账号、房间和事件标识，因此清理逻辑也能识别后台进程创建的通知；升级前没有 tag 的旧通知无法按房间识别，需手动清除。
+Android 在原生 FCM 服务内启动专用 Flutter 引擎，并等待现有通知处理完成。已经送达应用的后台 data 消息不再提交额外的 JobScheduler 任务，因此普通优先级消息不会因该任务的配额而积压到打开应用时才处理。消息到达应用之前仍受 FCM 优先级和系统休眠策略影响，聊天网关仍应使用高优先级。原始和实际投递优先级记录在 Android 的 `MatterPush` 日志中，不记录正文或令牌。
+
+Android 通知显示该房间的未读条数，优先使用服务器支持的完整未读消息计数，否则使用服务器的房间通知未读数；不使用账号总角标，也不把最多 7 条的展示历史当作总数。无法核实计数时不显示猜测数字。仅计数更新可静默刷新已有通知。
+
+每条 Android 会话通知提供“标记已读”和“静音”，加密房间同样可用；操作使用通知所属账号的已保存会话，不启动第二个 Matrix SDK 客户端。“标记已读”发送该通知事件的公开回执并清除未读标记，只清理到该事件的历史，保留之后的新消息。“静音”设置服务器房间覆盖规则并撤回该房间通知，不将消息标为已读。服务器确认前保留原通知以便重试。已确认的静音保存在本地以拦截排队推送，新的服务器规则可解除静音；过时的查询不能覆盖期间刚确认的静音。
+
+通知头像（房间头像，私聊用发送者头像）由前台在账号启用推送后预先下载到应用私有目录，通知里只传文件路径，由 Android 原生解码；查找头像不需要后台下载媒体，也不需要 `path_provider`。下载使用 Rust 客户端的已认证会话。缓存按账号保护已加入房间的头像，其他头像最多保留 128 个，超出时连同文件一起淘汰；并发预取串行更新缓存索引，避免互相覆盖路径。Android 会话快捷方式使用同一头像，让系统会话界面识别房间。加密房间不取发送者头像。头像缺失不会影响通知送达。
+
+Android 收到推送后使用账号已保存的会话核实已读状态：通过限定房间的 Matrix 同步识别全部已读的房间，并通过最近的 `/_matrix/client/v3/notifications` 记录识别逐条已读，包括其他客户端上的已读。仅更新计数的推送即使没有 `room_id`、`event_id`，也须保留 `user_id`、`registration_id` 和 `unread` 并送达应用，才能触发后台撤回。网络或会话不可用时，不会将尚未确认的事件视为已读。确认已读的事件 ID 会保存到本地，拦截延迟重试；即使系统通知已经划掉，也会清除已读历史。
+
+打开房间或手动标记已读时，成功发送回执后才撤销该账号、该房间在操作开始时已有的消息，操作期间新到的消息保留。同步到房间未读数为零时，首次快照也会清理通知；清理范围由快照的最后事件限定，避免过时快照误删更新的消息。部分消息已读时，静默重建通知，仅保留未读消息。回执失败不撤销通知。Android 的稳定 tag 标识账号和房间，保存的会话历史标识事件；清理也兼容旧的逐事件 tag。升级前没有 tag 的通知无法按房间识别，需手动清除。
 
 “推送已注册”表示 Homeserver 接受了 pusher，不证明网关或完整投递链路可用。关闭推送先保存本地停用状态，再注销远端 pusher；离线失败保留日志，之后在下次启动、账号就绪、Android 令牌更新和恢复前台时重试。令牌或应用 ID 变更先注册新 pusher，再删除旧 pusher。已发送但结果不确定的注册也会记录，以便后续清理。Android 被强行停止后，需要重新打开应用才能恢复 FCM 投递。
 
@@ -100,7 +110,7 @@ Web 网关须支持 Web Push/VAPID。客户端在 Matrix pusher 的 `data` 中�
 
 ```sh
 flutter analyze
-flutter test test/push_notification_runtime_test.dart test/firebase_client_config_test.dart test/push_registration_test.dart test/notification_settings_page_test.dart test/settings_account_switch_test.dart test/auth_provider_test.dart test/account_cache_regression_test.dart
+flutter test test/push_notification_actions_test.dart test/push_notification_runtime_test.dart test/firebase_client_config_test.dart test/push_registration_test.dart test/notification_settings_page_test.dart test/settings_account_switch_test.dart test/auth_provider_test.dart test/account_cache_regression_test.dart
 flutter test --platform chrome test/push_registration_test.dart
 node --test test/web_push_worker_test.mjs
 cd rust

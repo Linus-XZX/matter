@@ -641,6 +641,11 @@ void main() {
     final initialReadCalls = rustApi.markRoomAsReadCalls;
     container.read(roomAutoReadSuppressedProvider(room.id).notifier).value =
         true;
+    // The activation (auto-selected first room) now runs its receipt write
+    // through the push cleanup path, which snapshots notifications before
+    // writing; the room list is still reloading right after `_pumpApp`, so a
+    // tap here would land on the chat detail title instead of the list row.
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Project room').first);
     await tester.pump();
