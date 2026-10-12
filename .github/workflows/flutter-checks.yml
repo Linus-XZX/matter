@@ -24,7 +24,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.47.1
+          flutter-version: 3.47.7
           channel: stable
           cache: true
 
@@ -40,7 +40,7 @@ jobs:
             lib/src/rust/frb_generated.io.dart
             lib/src/rust/frb_generated.web.dart
             rust/src/frb_generated.rs
-          key: bridge-2.13.0-flutter-3.47.1-${{ hashFiles('rust/src/**/*.rs', 'rust/Cargo.toml', 'rust/Cargo.lock', 'lib/src/rust/api/**', 'flutter_rust_bridge.yaml', 'pubspec.lock') }}
+          key: bridge-2.13.0-flutter-3.47.7-${{ hashFiles('rust/src/**/*.rs', 'rust/Cargo.toml', 'rust/Cargo.lock', 'lib/src/rust/api/**', 'flutter_rust_bridge.yaml', 'pubspec.lock') }}
 
       - name: Set up Rust on cache miss
         if: steps.bridge-cache.outputs.cache-hit != 'true'

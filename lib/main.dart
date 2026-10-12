@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart' as material_ui;
 import 'package:path_provider/path_provider.dart';
 import 'app.dart';
 import 'features/app_update/app_update_service.dart';
@@ -347,6 +348,10 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       navigatorObservers: [chatRouteObserver],
       title: 'Matter',
       debugShowCheckedModeBanner: false,
+      // pro_image_editor 14's own app bars, dialogs and bottom sheets are built
+      // from the decoupled material_ui widgets, which look up MaterialLocalizations
+      // from material_ui and throw "No MaterialLocalizations found" without these.
+      localizationsDelegates: const [...material_ui.GlobalMaterialLocalizations.delegates],
       theme: theme,
       darkTheme: darkTheme,
       themeMode: themeMode,

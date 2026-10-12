@@ -19,8 +19,8 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 version: 0.1.10+9
 
 environment:
-  sdk: ^3.12.0
-  flutter: ">=3.47.1"
+  sdk: ^3.13.0
+  flutter: ">=3.47.7"
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -34,11 +34,11 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.9
+  cupertino_icons: ^2.0.0
   clock: ^1.1.1
   flutter_rust_bridge: ^2.13.0
   flutter_riverpod: ^3.3.2
-  google_fonts: ^8.1.0
+  google_fonts: ^9.0.0
   intl: ^0.20.3
   flutter_sticky_header: ^0.8.0
   shared_preferences: ^2.5.5
@@ -50,14 +50,18 @@ dependencies:
   flutter_image_compress: ^2.4.0
   flutter_secure_storage: ^11.0.0
   image: ^4.9.1
-  cached_network_image: ^3.4.1
+  cached_network_image: ^4.0.4
   video_player: ^2.12.0
   web: ^1.1.1
   markdown: ^7.3.1
   html: ^0.15.6
   http: ^1.6.0
   url_launcher: ^6.3.2
-  pro_image_editor: ^13.2.0
+  pro_image_editor: ^14.11.0
+  # Imported directly by chat_image_editor_page/avatar_crop_editor_page:
+  # pro_image_editor 14 renders with the decoupled material_ui package, whose
+  # ThemeData is not interchangeable with the SDK one.
+  material_ui: ^1.6.0
   flutter_cache_manager: ^3.4.1
   riverpod: ^3.3.2
   package_info_plus: ^10.2.0
