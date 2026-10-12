@@ -45,20 +45,16 @@ runs:
       shell: bash
       run: flutter pub get
 
-    # PRs restore the main branch's caches without uploading another SDK copy.
+    # Seed missing caches in PRs too, so later commits can restore them.
     - name: Save Flutter SDK
-      if: >-
-        github.ref == 'refs/heads/main' &&
-        steps.flutter-cache.outputs.cache-hit != 'true'
+      if: steps.flutter-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.tool_cache }}/flutter/${{ inputs.flutter-version }}
         key: ${{ steps.flutter-cache.outputs.cache-primary-key }}
 
     - name: Save pub dependencies
-      if: >-
-        github.ref == 'refs/heads/main' &&
-        steps.pub-cache.outputs.cache-hit != 'true'
+      if: steps.pub-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ~/.pub-cache
@@ -99,8 +95,6 @@ runs:
           rust/vendor/matrix-sdk-search -> target
         shared-key: ${{ inputs.rust-tests == 'true' && 'full-ci' || 'bridge' }}
         cache-bin: false
-        save-if: >-
-          ${{ github.ref == 'refs/heads/main' || inputs.rust-tests == 'true' }}
 
     - name: Install binary installer
       if: steps.bridge-cache.outputs.cache-hit != 'true'
