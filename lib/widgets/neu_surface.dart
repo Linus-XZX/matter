@@ -34,15 +34,30 @@ class NeuSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (context.isMaterial) {
+      return Material(
+        color: accent ? context.neu.accent : (color ?? context.neu.surface),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(radius),
+          side: borderColor == null
+              ? BorderSide.none
+              : BorderSide(color: borderColor!),
+        ),
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
+        ),
+      );
+    }
     return Container(
       width: width,
       height: height,
       padding: padding,
       decoration: NeuDecoration(
         colors: context.neu,
-        superellipseEnabled: ChatVisualSettingsScope.of(
-          context,
-        ).superellipseBorderEnabled,
+        superellipseEnabled: ChatVisualSettingsScope.of(context)
+            .superellipseBorderEnabled,
         depth: depth,
         radius: radius,
         color: color,
@@ -93,11 +108,36 @@ class _NeuButtonState extends State<NeuButton> {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      final style = ButtonStyle(
+        padding: WidgetStatePropertyAll(widget.padding),
+      );
+      final content = widget.icon == null
+          ? widget.child
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                widget.icon!,
+                const SizedBox(width: 8),
+                Flexible(child: widget.child),
+              ],
+            );
+      return widget.accent
+          ? FilledButton(
+              onPressed: widget.onPressed,
+              style: style,
+              child: content,
+            )
+          : FilledButton.tonal(
+              onPressed: widget.onPressed,
+              style: style,
+              child: content,
+            );
+    }
     final enabled = widget.onPressed != null;
     var child = DefaultTextStyle.merge(
-      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-        color: widget.accent ? colors.onAccent : colors.text,
-      ),
+      style: Theme.of(context).textTheme.labelLarge
+          ?.copyWith(color: widget.accent ? colors.onAccent : colors.text),
       child: IconTheme.merge(
         data: IconThemeData(
           size: 18,
@@ -133,9 +173,8 @@ class _NeuButtonState extends State<NeuButton> {
           padding: widget.padding,
           decoration: NeuDecoration(
             colors: colors,
-            superellipseEnabled: ChatVisualSettingsScope.of(
-              context,
-            ).superellipseBorderEnabled,
+            superellipseEnabled: ChatVisualSettingsScope.of(context)
+                .superellipseBorderEnabled,
             depth: !enabled
                 ? NeuDepth.flat
                 : _pressed
@@ -184,6 +223,40 @@ class _NeuIconButtonState extends State<NeuIconButton> {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      final style = IconButton.styleFrom(
+        minimumSize: Size.square(widget.size),
+        maximumSize: Size.square(widget.size),
+        padding: EdgeInsets.zero,
+        iconSize: widget.size * .44,
+      );
+      final icon = widget.badge
+          ? Badge(child: Icon(widget.icon))
+          : Icon(widget.icon);
+      if (widget.accent) {
+        return IconButton.filled(
+          style: style,
+          onPressed: widget.onPressed,
+          tooltip: widget.tooltip,
+          icon: icon,
+        );
+      }
+      if (widget.selected) {
+        return IconButton.filledTonal(
+          style: style,
+          isSelected: true,
+          onPressed: widget.onPressed,
+          tooltip: widget.tooltip,
+          icon: icon,
+        );
+      }
+      return IconButton(
+        style: style,
+        onPressed: widget.onPressed,
+        tooltip: widget.tooltip,
+        icon: icon,
+      );
+    }
     final enabled = widget.onPressed != null;
     final active = enabled && (widget.accent || widget.selected);
     final fg = active ? colors.onAccent : colors.textSecondary;
@@ -200,9 +273,8 @@ class _NeuIconButtonState extends State<NeuIconButton> {
         height: widget.size,
         decoration: NeuDecoration(
           colors: colors,
-          superellipseEnabled: ChatVisualSettingsScope.of(
-            context,
-          ).superellipseBorderEnabled,
+          superellipseEnabled: ChatVisualSettingsScope.of(context)
+              .superellipseBorderEnabled,
           depth: !enabled
               ? NeuDepth.flat
               : _pressed
@@ -271,6 +343,17 @@ class NeuChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (context.isMaterial) {
+      return GestureDetector(
+        onLongPress: onLongPress,
+        child: FilterChip(
+          label: Text(label),
+          selected: selected,
+          avatar: icon == null ? null : Icon(icon, size: 18),
+          onSelected: onTap == null ? null : (_) => onTap!(),
+        ),
+      );
+    }
     return Semantics(
       selected: selected,
       child: GestureDetector(

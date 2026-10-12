@@ -30,9 +30,14 @@ class ChatImageEditorPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final overlayIconBrightness =
+        context.isMaterial && Theme.of(context).brightness == Brightness.light
+        ? Brightness.dark
+        : Brightness.light;
     // pro_image_editor 14 renders with the decoupled `material_ui` package,
     // whose ThemeData is not interchangeable with the SDK one.
     final editorTheme = material_ui.ThemeData(
+      useMaterial3: true,
       brightness: Theme.of(context).brightness,
       scaffoldBackgroundColor: colors.base,
       colorScheme: material_ui.ColorScheme.fromSeed(
@@ -73,9 +78,9 @@ class ChatImageEditorPage extends StatelessWidget {
             bottomBarColor: colors.text,
             uiOverlayStyle: SystemUiOverlayStyle(
               statusBarColor: Colors.transparent,
-              statusBarIconBrightness: Brightness.light,
+              statusBarIconBrightness: overlayIconBrightness,
               systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: Brightness.light,
+              systemNavigationBarIconBrightness: overlayIconBrightness,
             ),
           ),
         ),
@@ -101,9 +106,9 @@ class ChatImageEditorPage extends StatelessWidget {
             initialColor: colors.accent,
             uiOverlayStyle: SystemUiOverlayStyle(
               statusBarColor: Colors.transparent,
-              statusBarIconBrightness: Brightness.light,
+              statusBarIconBrightness: overlayIconBrightness,
               systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: Brightness.light,
+              systemNavigationBarIconBrightness: overlayIconBrightness,
             ),
           ),
         ),
@@ -119,9 +124,9 @@ class ChatImageEditorPage extends StatelessWidget {
             helperLineColor: Colors.white54,
             uiOverlayStyle: SystemUiOverlayStyle(
               statusBarColor: Colors.transparent,
-              statusBarIconBrightness: Brightness.light,
+              statusBarIconBrightness: overlayIconBrightness,
               systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: Brightness.light,
+              systemNavigationBarIconBrightness: overlayIconBrightness,
             ),
           ),
         ),

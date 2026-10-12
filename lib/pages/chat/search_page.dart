@@ -136,6 +136,31 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    final searchField = NeuTextField(
+      key: const ValueKey('chat-search-field'),
+      controller: _controller,
+      focusNode: _focusNode,
+      hint: _isRoomSearch ? '搜索此聊天的消息' : '搜索消息或聊天',
+      radius: context.isMaterial ? 28 : NeuRadius.content,
+      leading: const Icon(Icons.search_rounded),
+      textInputAction: TextInputAction.search,
+      autofocus: false,
+      trailing: _query.isEmpty
+          ? null
+          : context.isMaterial
+          ? IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: '清除搜索',
+              onPressed: _clearQuery,
+            )
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _clearQuery,
+              child: const Icon(Icons.close_rounded),
+            ),
+      onChanged: _onQueryChanged,
+      onSubmitted: _onQuerySubmitted,
+    );
     final header = Padding(
       padding: const EdgeInsets.fromLTRB(
         NeuSpacing.sm,
@@ -152,26 +177,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
             onPressed: () => Navigator.of(context).maybePop(),
           ),
           const SizedBox(width: NeuSpacing.sm),
-          Expanded(
-            child: NeuTextField(
-              key: const ValueKey('chat-search-field'),
-              controller: _controller,
-              focusNode: _focusNode,
-              hint: _isRoomSearch ? '搜索此聊天的消息' : '搜索消息或聊天',
-              leading: const Icon(Icons.search_rounded),
-              textInputAction: TextInputAction.search,
-              autofocus: false,
-              trailing: _query.isEmpty
-                  ? null
-                  : GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _clearQuery,
-                      child: const Icon(Icons.close_rounded),
-                    ),
-              onChanged: _onQueryChanged,
-              onSubmitted: _onQuerySubmitted,
-            ),
-          ),
+          Expanded(child: searchField),
         ],
       ),
     );
@@ -194,7 +200,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     final headerHeight =
         _searchFieldRowHeight + (tabBar?.preferredSize.height ?? 0);
-    final topInset = viewPaddingTop + headerHeight;
+    final topInset = context.isMaterial ? 0.0 : viewPaddingTop + headerHeight;
 
     final messageSearchKey = ValueKey(
       Object.hash(
@@ -229,33 +235,47 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
 
     final scaffold = Scaffold(
       backgroundColor: colors.base,
+      appBar: context.isMaterial
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                tooltip: '返回',
+                onPressed: () => Navigator.of(context).maybePop(),
+              ),
+              toolbarHeight: _searchFieldRowHeight,
+              title: searchField,
+              bottom: tabBar,
+            )
+          : null,
       body: Stack(
         children: [
           Positioned.fill(child: body),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: topInset,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: topInset,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,结果从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: headerHeight,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [header, ?tabBar],
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: headerHeight,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [header, ?tabBar],
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );

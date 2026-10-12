@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../features/app_update/app_update_service.dart';
 import '../../features/app_update/update_dialog.dart';
 import '../../features/cache/image_cache_control.dart';
@@ -362,9 +363,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       }
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('关闭兼容模式失败：$error')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('关闭兼容模式失败：$error')));
       }
     } finally {
       if (mounted) {
@@ -396,9 +396,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('检查更新失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('检查更新失败：$error')));
     } finally {
       if (mounted) setState(() => _checkingForUpdate = false);
     }
@@ -413,9 +412,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       neuToast(context, saved ? '日志包已导出' : '已取消导出');
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导出日志包失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('导出日志包失败：$error')));
     } finally {
       if (mounted) setState(() => _exportingLogs = false);
     }
@@ -452,9 +450,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       await _loadCacheSize();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('清理缓存失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('清理缓存失败：$error')));
     } finally {
       if (mounted) setState(() => _clearingCache = false);
     }
@@ -578,6 +575,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     return Scaffold(
       backgroundColor: colors.base,
+      appBar: context.isMaterial ? AppBar(title: const Text('设置')) : null,
       body: Stack(
         children: [
           CustomScrollView(
@@ -586,11 +584,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               SliverPadding(
                 padding: EdgeInsets.fromLTRB(
                   NeuSpacing.lg,
-                  MediaQuery.viewPaddingOf(context).top +
-                      kToolbarHeight +
-                      NeuSpacing.lg,
+                  context.isMaterial
+                      ? NeuSpacing.lg
+                      : MediaQuery.viewPaddingOf(context).top +
+                            kToolbarHeight +
+                            NeuSpacing.lg,
                   NeuSpacing.lg,
-                  NeuSpacing.navClearance,
+                  context.isMaterial
+                      ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom
+                      : NeuSpacing.navClearance,
                 ),
                 sliver: SliverList.list(
                   children: [
@@ -632,9 +634,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                     currentUser != null
                                         ? currentUser.id
                                         : '点击登录你的 Matrix 账号',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodyMedium,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium,
                                   ),
                                 ],
                               ),
@@ -759,62 +761,64 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     ),
                     const SizedBox(height: NeuSpacing.xl),
                     _buildGroup(
-                      title: '性能設置',
+                      title: context.isMaterial ? '聊天外观' : '性能設置',
                       items: [
-                        _SettingItem(
-                          icon: Icons.blur_on_rounded,
-                          title: '模糊效果设置',
-                          subtitle: '配置渐进式模糊、图片背景与阴影优化',
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => const BlurSettingsPage(),
+                        if (!context.isMaterial) ...[
+                          _SettingItem(
+                            icon: Icons.blur_on_rounded,
+                            title: '模糊效果设置',
+                            subtitle: '配置渐进式模糊、图片背景与阴影优化',
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const BlurSettingsPage(),
+                              ),
                             ),
                           ),
-                        ),
-                        _buildChatVisualSwitch(
-                          icon: Icons.shield_moon_rounded,
-                          title: '消息气泡阴影',
-                          subtitle: '启用新拟物消息气泡的阴影',
-                          value: ref
-                              .watch(chatVisualSettingsProvider)
-                              .bubbleShadowsEnabled,
-                          onChanged: (value) => ref
-                              .read(chatVisualSettingsProvider.notifier)
-                              .setBubbleShadowsEnabled(value),
-                        ),
-                        _buildChatVisualSwitch(
-                          icon: Icons.rounded_corner,
-                          title: '超椭圆边框',
-                          subtitle: '全域使用超椭圆边框',
-                          value: ref
-                              .watch(chatVisualSettingsProvider)
-                              .superellipseBorderEnabled,
-                          onChanged: (value) => ref
-                              .read(chatVisualSettingsProvider.notifier)
-                              .setSuperellipseBorderEnabled(value),
-                        ),
-                        _buildChatVisualSwitch(
-                          icon: Icons.gradient_rounded,
-                          title: '气泡渐变',
-                          subtitle: '启用消息气泡的渐变填充',
-                          value: ref
-                              .watch(chatVisualSettingsProvider)
-                              .bubbleGradientEnabled,
-                          onChanged: (value) => ref
-                              .read(chatVisualSettingsProvider.notifier)
-                              .setBubbleGradientEnabled(value),
-                        ),
-                        _buildChatVisualSwitch(
-                          icon: Icons.blur_on_rounded,
-                          title: '短图片模糊背景',
-                          subtitle: '为较矮的图片气泡显示模糊背景',
-                          value: ref
-                              .watch(chatVisualSettingsProvider)
-                              .shortImageBlurredBackdropEnabled,
-                          onChanged: (value) => ref
-                              .read(chatVisualSettingsProvider.notifier)
-                              .setShortImageBlurredBackdropEnabled(value),
-                        ),
+                          _buildChatVisualSwitch(
+                            icon: Icons.shield_moon_rounded,
+                            title: '消息气泡阴影',
+                            subtitle: '启用新拟物消息气泡的阴影',
+                            value: ref
+                                .watch(chatVisualSettingsProvider)
+                                .bubbleShadowsEnabled,
+                            onChanged: (value) => ref
+                                .read(chatVisualSettingsProvider.notifier)
+                                .setBubbleShadowsEnabled(value),
+                          ),
+                          _buildChatVisualSwitch(
+                            icon: Icons.rounded_corner,
+                            title: '超椭圆边框',
+                            subtitle: '全域使用超椭圆边框',
+                            value: ref
+                                .watch(chatVisualSettingsProvider)
+                                .superellipseBorderEnabled,
+                            onChanged: (value) => ref
+                                .read(chatVisualSettingsProvider.notifier)
+                                .setSuperellipseBorderEnabled(value),
+                          ),
+                          _buildChatVisualSwitch(
+                            icon: Icons.gradient_rounded,
+                            title: '气泡渐变',
+                            subtitle: '启用消息气泡的渐变填充',
+                            value: ref
+                                .watch(chatVisualSettingsProvider)
+                                .bubbleGradientEnabled,
+                            onChanged: (value) => ref
+                                .read(chatVisualSettingsProvider.notifier)
+                                .setBubbleGradientEnabled(value),
+                          ),
+                          _buildChatVisualSwitch(
+                            icon: Icons.blur_on_rounded,
+                            title: '短图片模糊背景',
+                            subtitle: '为较矮的图片气泡显示模糊背景',
+                            value: ref
+                                .watch(chatVisualSettingsProvider)
+                                .shortImageBlurredBackdropEnabled,
+                            onChanged: (value) => ref
+                                .read(chatVisualSettingsProvider.notifier)
+                                .setShortImageBlurredBackdropEnabled(value),
+                          ),
+                        ],
                         _buildChatVisualSwitch(
                           icon: Icons.account_circle_rounded,
                           title: '消息头像吸附',
@@ -1033,34 +1037,36 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ],
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      '设置',
-                      style: Theme.of(context).textTheme.titleLarge,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        '设置',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -1094,6 +1100,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     AppThemeStyle.neuLight => '新拟物 · 浅色',
     AppThemeStyle.neuDark => '新拟物 · 深色',
     AppThemeStyle.neuSystem => '新拟物 · 跟随系统',
+    AppThemeStyle.materialLight => 'Material · 浅色',
+    AppThemeStyle.materialDark => 'Material · 深色',
+    AppThemeStyle.materialSystem => 'Material · 跟随系统',
   };
 
   Future<void> _showThemeStylePicker() async {
@@ -1127,10 +1136,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           padding: const EdgeInsets.fromLTRB(4, 0, 4, NeuSpacing.sm),
           child: Text(
             title,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.2,
-            ),
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 1.2),
           ),
         ),
         NeuSurface(
@@ -1201,6 +1208,15 @@ class _SettingItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      return ListTile(
+        leading: Icon(icon, color: iconColor),
+        title: Text(title),
+        subtitle: subtitle.isEmpty ? null : Text(subtitle),
+        trailing: trailing,
+        onTap: onTap,
+      );
+    }
     final textTheme = Theme.of(context).textTheme;
     final row = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),

@@ -15,6 +15,7 @@ final kEmojiFontFallback =
 /// 新拟物设计 tokens。所有页面统一从这里取色,保证明暗两套主题一致切换。
 class NeuColors extends ThemeExtension<NeuColors> {
   const NeuColors({
+    this.isMaterial = false,
     required this.base,
     required this.surface,
     required this.surfaceStrong,
@@ -36,6 +37,9 @@ class NeuColors extends ThemeExtension<NeuColors> {
     required this.highlightAlpha,
     required this.card,
   });
+
+  /// Selects Material rendering in shared presentation components.
+  final bool isMaterial;
 
   /// 页面基底(新拟物的"桌面")。
   final Color base;
@@ -150,6 +154,7 @@ class NeuColors extends ThemeExtension<NeuColors> {
     Color? accentSoft,
   }) {
     return NeuColors(
+      isMaterial: isMaterial,
       base: base,
       surface: surface,
       surfaceStrong: surfaceStrong,
@@ -203,6 +208,9 @@ class NeuSpacing {
 }
 
 extension NeuColorsX on BuildContext {
+  bool get isMaterial =>
+      Theme.of(this).extension<NeuColors>()?.isMaterial ?? false;
+
   NeuColors get neu => Theme.of(this).extension<NeuColors>()!;
 }
 

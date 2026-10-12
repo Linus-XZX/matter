@@ -1,7 +1,9 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
@@ -158,13 +160,36 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
 
     return Scaffold(
       backgroundColor: colors.base,
+      appBar: context.isMaterial
+          ? AppBar(
+              title: Text('日志 (${allLogs.length})'),
+              actions: [
+                IconButton(
+                  icon: Icon(
+                    _autoScroll
+                        ? Icons.vertical_align_bottom
+                        : Icons.vertical_align_top,
+                  ),
+                  tooltip: _autoScroll ? '自动滚动: 开' : '自动滚动: 关',
+                  onPressed: () => setState(() => _autoScroll = !_autoScroll),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: '清空日志',
+                  onPressed: allLogs.isEmpty ? null : _clearLogs,
+                ),
+              ],
+            )
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
             child: Padding(
               // 标题栏移到上方浮层,内容从它下方开始。
               padding: EdgeInsets.only(
-                top: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                top: context.isMaterial
+                    ? 0
+                    : MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
               ),
               child: Column(
                 children: [
@@ -181,6 +206,7 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
                           child: NeuTextField(
                             controller: _searchController,
                             hint: '搜索日志内容或标签',
+                            radius: context.isMaterial ? 28 : NeuRadius.content,
                             padding: const EdgeInsets.symmetric(horizontal: 12),
                             leading: const Icon(Icons.search_rounded),
                             trailing: _searchQuery.isEmpty
@@ -301,65 +327,67 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
             ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: NeuSpacing.sm,
-                    right: NeuSpacing.md,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 36,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          '日志 (${allLogs.length})',
-                          style: textTheme.titleLarge,
-                          overflow: TextOverflow.ellipsis,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(
+                      left: NeuSpacing.sm,
+                      right: NeuSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 36,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).maybePop(),
                         ),
-                      ),
-                      NeuIconButton(
-                        icon: _autoScroll
-                            ? Icons.vertical_align_bottom_rounded
-                            : Icons.vertical_align_top_rounded,
-                        size: 36,
-                        tooltip: _autoScroll ? '自动滚动: 开' : '自动滚动: 关',
-                        onPressed: () =>
-                            setState(() => _autoScroll = !_autoScroll),
-                      ),
-                      const SizedBox(width: NeuSpacing.xs),
-                      NeuIconButton(
-                        icon: Icons.delete_outline_rounded,
-                        size: 36,
-                        tooltip: '清空日志',
-                        onPressed: allLogs.isEmpty ? null : _clearLogs,
-                      ),
-                    ],
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            '日志 (${allLogs.length})',
+                            style: textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        NeuIconButton(
+                          icon: _autoScroll
+                              ? Icons.vertical_align_bottom_rounded
+                              : Icons.vertical_align_top_rounded,
+                          size: 36,
+                          tooltip: _autoScroll ? '自动滚动: 开' : '自动滚动: 关',
+                          onPressed: () =>
+                              setState(() => _autoScroll = !_autoScroll),
+                        ),
+                        const SizedBox(width: NeuSpacing.xs),
+                        NeuIconButton(
+                          icon: Icons.delete_outline_rounded,
+                          size: 36,
+                          tooltip: '清空日志',
+                          onPressed: allLogs.isEmpty ? null : _clearLogs,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );

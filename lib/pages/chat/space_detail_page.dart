@@ -139,6 +139,29 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: context.neu.base,
+      appBar: context.isMaterial
+          ? AppBar(
+              title: const Text('空间'),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip: '添加房间',
+                  onPressed: () => _showAddRoomDialog(context, ref),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.more_horiz_rounded),
+                  tooltip: '更多',
+                  onPressed: () => _showSpaceMenu(
+                    context,
+                    ref,
+                    details,
+                    detailsAsync.hasValue,
+                    allChildrenAsync.asData?.value,
+                  ),
+                ),
+              ],
+            )
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -146,7 +169,9 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
               child: ListView(
                 padding: EdgeInsets.fromLTRB(
                   NeuSpacing.lg,
-                  viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                  context.isMaterial
+                      ? NeuSpacing.sm
+                      : viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
                   NeuSpacing.lg,
                   NeuSpacing.xl,
                 ),
@@ -173,16 +198,16 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
                                 children: [
                                   Text(
                                     details.name,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleLarge,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge,
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
                                     details.id,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                   ),
@@ -268,9 +293,9 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
                                     Expanded(
                                       child: Text(
                                         member.name,
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.bodyLarge,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodyLarge,
                                       ),
                                     ),
                                   ],
@@ -325,68 +350,70 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
             ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: NeuSpacing.sm,
-                    right: NeuSpacing.md,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 40,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          '空间',
-                          style: Theme.of(context).textTheme.titleLarge,
-                          overflow: TextOverflow.ellipsis,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(
+                      left: NeuSpacing.sm,
+                      right: NeuSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 40,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).pop(),
                         ),
-                      ),
-                      NeuIconButton(
-                        icon: Icons.playlist_add_rounded,
-                        size: 40,
-                        tooltip: '添加房间',
-                        onPressed: () => _showAddRoomDialog(context, ref),
-                      ),
-                      const SizedBox(width: NeuSpacing.xs),
-                      NeuIconButton(
-                        icon: Icons.more_horiz_rounded,
-                        size: 40,
-                        tooltip: '更多',
-                        onPressed: () => _showSpaceMenu(
-                          context,
-                          ref,
-                          details,
-                          detailsAsync.hasValue,
-                          allChildrenAsync.asData?.value,
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            '空间',
+                            style: Theme.of(context).textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
-                    ],
+                        NeuIconButton(
+                          icon: Icons.playlist_add_rounded,
+                          size: 40,
+                          tooltip: '添加房间',
+                          onPressed: () => _showAddRoomDialog(context, ref),
+                        ),
+                        const SizedBox(width: NeuSpacing.xs),
+                        NeuIconButton(
+                          icon: Icons.more_horiz_rounded,
+                          size: 40,
+                          tooltip: '更多',
+                          onPressed: () => _showSpaceMenu(
+                            context,
+                            ref,
+                            details,
+                            detailsAsync.hasValue,
+                            allChildrenAsync.asData?.value,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -1320,10 +1347,8 @@ class _ActionSettingRow extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w500,
-                ),
+                style: Theme.of(context).textTheme.bodyLarge
+                    ?.copyWith(color: color, fontWeight: FontWeight.w500),
               ),
             ),
             Text(value, style: Theme.of(context).textTheme.bodySmall),

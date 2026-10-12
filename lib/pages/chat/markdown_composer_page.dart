@@ -172,13 +172,41 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
       },
       child: Scaffold(
         backgroundColor: colors.base,
+        appBar: context.isMaterial
+            ? AppBar(
+                title: const Text('Markdown'),
+                leading: NeuIconButton(
+                  icon: Icons.close_rounded,
+                  tooltip: '关闭',
+                  onPressed: _close,
+                ),
+                actions: [
+                  if (_sending)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: SizedBox.square(
+                        dimension: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    NeuIconButton(
+                      icon: Icons.send_rounded,
+                      tooltip: '发送',
+                      onPressed: _hasText ? _send : null,
+                    ),
+                ],
+              )
+            : null,
         body: Stack(
           children: [
             Positioned.fill(
               child: Padding(
                 // 标题栏移到上方浮层,编辑区从它下方开始。
                 padding: EdgeInsets.only(
-                  top: viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                  top: context.isMaterial
+                      ? NeuSpacing.lg
+                      : viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
                 ),
                 child: SafeArea(
                   top: false,
@@ -213,68 +241,70 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
               ),
             ),
             // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: viewPaddingTop + kToolbarHeight,
-              child: const TopFadeBlur(useShader: true),
-            ),
+            if (!context.isMaterial)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: viewPaddingTop + kToolbarHeight,
+                child: const TopFadeBlur(useShader: true),
+              ),
             // 标题栏移到上方浮层,编辑区从它下方穿过。
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                bottom: false,
-                child: SizedBox(
-                  height: kToolbarHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(
-                      left: NeuSpacing.sm,
-                      right: NeuSpacing.md,
-                    ),
-                    child: Row(
-                      children: [
-                        NeuIconButton(
-                          icon: Icons.close_rounded,
-                          size: 40,
-                          tooltip: '关闭',
-                          onPressed: _close,
-                        ),
-                        const SizedBox(width: NeuSpacing.sm),
-                        Expanded(
-                          child: Text(
-                            'Markdown',
-                            style: Theme.of(context).textTheme.titleLarge,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (_sending)
-                          Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SizedBox.square(
-                              dimension: 20,
-                              child: CircularProgressIndicator(
-                                color: colors.accent,
-                                strokeWidth: 2,
-                              ),
-                            ),
-                          )
-                        else
+            if (!context.isMaterial)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  bottom: false,
+                  child: SizedBox(
+                    height: kToolbarHeight,
+                    child: Padding(
+                      padding: const EdgeInsets.only(
+                        left: NeuSpacing.sm,
+                        right: NeuSpacing.md,
+                      ),
+                      child: Row(
+                        children: [
                           NeuIconButton(
-                            icon: Icons.send_rounded,
+                            icon: Icons.close_rounded,
                             size: 40,
-                            accent: true,
-                            tooltip: '发送',
-                            onPressed: _hasText ? _send : null,
+                            tooltip: '关闭',
+                            onPressed: _close,
                           ),
-                      ],
+                          const SizedBox(width: NeuSpacing.sm),
+                          Expanded(
+                            child: Text(
+                              'Markdown',
+                              style: Theme.of(context).textTheme.titleLarge,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (_sending)
+                            Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: SizedBox.square(
+                                dimension: 20,
+                                child: CircularProgressIndicator(
+                                  color: colors.accent,
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            )
+                          else
+                            NeuIconButton(
+                              icon: Icons.send_rounded,
+                              size: 40,
+                              accent: true,
+                              tooltip: '发送',
+                              onPressed: _hasText ? _send : null,
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -283,9 +313,8 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
 
   Widget _buildEditor() {
     final colors = context.neu;
-    final editorStyle = Theme.of(
-      context,
-    ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w400, height: 1.5);
+    final editorStyle = Theme.of(context).textTheme.titleMedium
+        ?.copyWith(fontWeight: FontWeight.w400, height: 1.5);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: TextField(
@@ -313,10 +342,8 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
   Widget _buildPreview() {
     final colors = context.neu;
     final textStyle =
-        Theme.of(context).textTheme.titleMedium?.copyWith(
-          fontWeight: FontWeight.w400,
-          height: 1.5,
-        ) ??
+        Theme.of(context).textTheme.titleMedium
+            ?.copyWith(fontWeight: FontWeight.w400, height: 1.5) ??
         const TextStyle(fontSize: 16, height: 1.5);
     final compiled = _composer.compile(_controller.text);
     final formattedBody = compiled.formattedBody;

@@ -141,7 +141,7 @@ class _PinnedMessagesStackState extends ConsumerState<PinnedMessagesStack> {
     _reportVisibleCount(visibleRows);
     final colors = context.neu;
     return GlassPanel(
-      radius: NeuRadius.surface,
+      radius: context.isMaterial ? 0 : NeuRadius.surface,
       child: SizedBox(
         key: const ValueKey('pinned-messages-stack'),
         height: rowHeight * visibleRows,

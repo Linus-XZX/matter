@@ -40,7 +40,7 @@ void main() {
     expect(find.byType(StickerPackPanel), findsOneWidget);
   });
 
-  testWidgets('input floats above a dimmed and blurred safe area', (
+  testWidgets('input respects safe area and appearance effects', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(400, 800);
@@ -78,15 +78,33 @@ void main() {
           .first,
     );
     expect(surfaceMargin.padding, const EdgeInsets.fromLTRB(10, 4, 10, 12));
-    expect(find.byType(BottomFadeBlur), findsOneWidget);
+    final material = tester.element(find.byType(MessageInput)).isMaterial;
+    expect(
+      find.byType(BottomFadeBlur),
+      material ? findsNothing : findsOneWidget,
+    );
 
     final backdropFilters = find.descendant(
       of: find.byType(MessageInput),
       matching: find.byType(BackdropFilter),
     );
-    // GlassPanel 一层 + BottomFadeBlur 的渐进模糊条带。
-    expect(backdropFilters, findsAtLeastNWidgets(3));
-    expect(tester.getBottomLeft(backdropFilters.first).dy, 800);
+    if (material) {
+      expect(backdropFilters, findsNothing);
+      final backgrounds = tester.widgetList<ColoredBox>(
+        find.descendant(
+          of: find.byType(MessageInput),
+          matching: find.byType(ColoredBox),
+        ),
+      );
+      final colors = tester.element(find.byType(MessageInput)).neu;
+      expect(backgrounds.any((box) => box.color == colors.glassFill), isTrue);
+      expect(colors.glassFill.a, closeTo(.88, .01));
+      expect(tester.getBottomLeft(find.byType(MessageInput)).dy, 800);
+    } else {
+      // GlassPanel 一层 + BottomFadeBlur 的渐进模糊条带。
+      expect(backdropFilters, findsAtLeastNWidgets(3));
+      expect(tester.getBottomLeft(backdropFilters.first).dy, 800);
+    }
   });
 
   testWidgets('plus toggles an inline attachment panel at picker height', (

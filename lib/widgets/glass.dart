@@ -39,6 +39,19 @@ class GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      return Material(
+        color: colors.glassFill.withValues(
+          alpha: (colors.glassFill.a * opacity).clamp(0, 1),
+        ),
+        borderRadius: BorderRadius.circular(radius),
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
+        ),
+      );
+    }
     final settings = ChatVisualSettingsScope.maybeOf(context);
     final blurEnabled = settings?.chatBlurEnabled ?? true;
     final shape =
@@ -108,6 +121,7 @@ class TopFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) return ColoredBox(color: colors.base);
     final settings = ChatVisualSettingsScope.maybeOf(context);
     if (!(settings?.chatBlurEnabled ?? true)) {
       return DecoratedBox(
@@ -167,6 +181,7 @@ class BottomFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) return const SizedBox.shrink();
     return LayoutBuilder(
       builder: (context, constraints) {
         final height = constraints.maxHeight;

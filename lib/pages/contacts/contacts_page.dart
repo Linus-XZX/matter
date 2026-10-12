@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
@@ -32,6 +33,7 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
 
     return Scaffold(
       backgroundColor: context.neu.base,
+      appBar: context.isMaterial ? AppBar(title: const Text('通讯录')) : null,
       body: Stack(
         children: [
           CustomScrollView(
@@ -39,8 +41,9 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
               // 标题栏移到上方浮层,这里只预留其高度。
               SliverToBoxAdapter(
                 child: SizedBox(
-                  height:
-                      MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                  height: context.isMaterial
+                      ? 0
+                      : MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
                 ),
               ),
               SliverToBoxAdapter(
@@ -53,6 +56,7 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                   ),
                   child: NeuTextField(
                     hint: '搜索联系人',
+                    radius: context.isMaterial ? 28 : NeuRadius.content,
                     leading: const Icon(Icons.search_rounded),
                     onChanged: (value) {
                       setState(() => _searchQuery = value.toLowerCase());
@@ -123,40 +127,46 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                   ),
                 ),
               ),
-              const SliverPadding(
-                padding: EdgeInsets.only(bottom: NeuSpacing.navClearance),
+              SliverPadding(
+                padding: EdgeInsets.only(
+                  bottom: context.isMaterial
+                      ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom
+                      : NeuSpacing.navClearance,
+                ),
               ),
             ],
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      '通讯录',
-                      style: Theme.of(context).textTheme.titleLarge,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        '通讯录',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -347,9 +357,8 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
         decoration: ShapeDecoration(
           color: _pressed ? context.neu.accentSoft : null,
           shape:
-              (ChatVisualSettingsScope.maybeOf(
-                    context,
-                  )?.superellipseBorderEnabled ??
+              (ChatVisualSettingsScope.maybeOf(context)
+                      ?.superellipseBorderEnabled ??
                   true)
               ? RoundedSuperellipseBorder(
                   borderRadius: BorderRadius.circular(NeuRadius.content),

@@ -3,6 +3,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/chat_provider.dart';
@@ -197,7 +198,11 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       key: ValueKey('msg-image:${widget.heroTag}'),
       imageUrl: url,
       imageBytes: bytes,
-      fit: widget.isSticker || needsShortImageBackdrop
+      fit:
+          widget.isSticker ||
+              needsShortImageBackdrop ||
+              (context.isMaterial &&
+                  _fittedBubbleSize(context).height < _minimumImageBubbleHeight)
           ? BoxFit.contain
           : BoxFit.cover,
       onLoaded: _handleMediaLoaded,
@@ -229,15 +234,13 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
                 key: ValueKey('image-blurred-background:${widget.heroTag}'),
                 imageFilter: ImageFilter.blur(
                   sigmaX:
-                      ChatVisualSettingsScope.of(
-                        context,
-                      ).imageBlurOptimizationEnabled
+                      ChatVisualSettingsScope.of(context)
+                          .imageBlurOptimizationEnabled
                       ? 8
                       : 14,
                   sigmaY:
-                      ChatVisualSettingsScope.of(
-                        context,
-                      ).imageBlurOptimizationEnabled
+                      ChatVisualSettingsScope.of(context)
+                          .imageBlurOptimizationEnabled
                       ? 8
                       : 14,
                 ),
@@ -465,10 +468,8 @@ class _ImageCaption extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.neu;
     final accent = isMe ? colors.onAccent : colors.accent;
-    final style = Theme.of(context).textTheme.bodyMedium!.copyWith(
-      color: isMe ? colors.onAccent : colors.text,
-      height: 1.35,
-    );
+    final style = Theme.of(context).textTheme.bodyMedium!
+        .copyWith(color: isMe ? colors.onAccent : colors.text, height: 1.35);
     return Container(
       key: const ValueKey('image-caption'),
       width: double.infinity,

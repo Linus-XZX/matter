@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../features/markdown/markdown_composer.dart';
 import '../../features/matrix_html/matrix_html_parser.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
@@ -57,6 +58,7 @@ Decoration neuBubbleDecoration(
   const offset = 3.8 * .7;
   final settings = ChatVisualSettingsScope.of(context);
   return ShapeDecoration(
+    color: context.isMaterial ? (isMe ? colors.accent : colors.card) : null,
     shape: settings.superellipseBorderEnabled
         ? RoundedSuperellipseBorder(borderRadius: borderRadius)
         : RoundedRectangleBorder(borderRadius: borderRadius),
@@ -113,9 +115,8 @@ List<BoxShadow> enabledNeuBubbleShadows(
       ? neuBubbleShadows(
           colors,
           offset: offset,
-          reduced: ChatVisualSettingsScope.of(
-            context,
-          ).shadowBlurOptimizationEnabled,
+          reduced: ChatVisualSettingsScope.of(context)
+              .shadowBlurOptimizationEnabled,
         )
       : const [];
 }
@@ -1095,9 +1096,8 @@ class MessageGroupWidget extends ConsumerWidget {
               Flexible(
                 child: Text(
                   message.content,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(height: 1.2),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(height: 1.2),
                   textAlign: TextAlign.center,
                 ),
               ),
@@ -2232,9 +2232,8 @@ class _ReactionChip extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: NeuDecoration(
           colors: colors,
-          superellipseEnabled: ChatVisualSettingsScope.of(
-            context,
-          ).superellipseBorderEnabled,
+          superellipseEnabled: ChatVisualSettingsScope.of(context)
+              .superellipseBorderEnabled,
           depth: NeuDepth.pressed,
           radius: NeuRadius.nav,
           intensity: .6,
@@ -2635,9 +2634,8 @@ class _ReadReceiptRowState extends ConsumerState<_ReadReceiptRow> {
           Expanded(
             child: Text(
               widget.reader.displayName,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+              style: Theme.of(context).textTheme.bodyLarge
+                  ?.copyWith(fontWeight: FontWeight.w600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

@@ -175,9 +175,8 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
 
   void _showError(Object error) {
     if (!_isCurrentAccount) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('操作失败：${error.toString()}')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('操作失败：${error.toString()}')));
   }
 
   String _recoveryLabel(String? state) {
@@ -202,6 +201,7 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      appBar: context.isMaterial ? AppBar(title: const Text('设备与加密')) : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -214,13 +214,17 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
                     },
                     // 悬浮标题栏让滚动视图从屏幕顶部开始,下拉指示器按标题栏
                     // 高度下移,否则会被标题栏挡住。
-                    edgeOffset: viewPaddingTop + kToolbarHeight,
+                    edgeOffset: context.isMaterial
+                        ? 0
+                        : viewPaddingTop + kToolbarHeight,
                     child: MaxContentWidth(
                       child: ListView(
                         physics: const AlwaysScrollableScrollPhysics(),
                         padding: EdgeInsets.fromLTRB(
                           NeuSpacing.lg,
-                          viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                          context.isMaterial
+                              ? NeuSpacing.sm
+                              : viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
                           NeuSpacing.lg,
                           32,
                         ),
@@ -236,49 +240,51 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
                   ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: NeuSpacing.sm,
-                    right: NeuSpacing.md,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 40,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          '设备与加密',
-                          style: Theme.of(context).textTheme.titleLarge,
-                          overflow: TextOverflow.ellipsis,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(
+                      left: NeuSpacing.sm,
+                      right: NeuSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 40,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).maybePop(),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            '设备与加密',
+                            style: Theme.of(context).textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -504,9 +510,8 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
   String _formatLastSeen(rust.AccountDevice device) {
     final timestamp = device.lastSeenTs;
     if (timestamp == null) return '无活动记录';
-    final time = DateTime.fromMillisecondsSinceEpoch(
-      timestamp.toInt(),
-    ).toLocal();
+    final time = DateTime.fromMillisecondsSinceEpoch(timestamp.toInt())
+        .toLocal();
     return DateFormat('yyyy-MM-dd HH:mm').format(time);
   }
 
@@ -856,9 +861,8 @@ class _VerificationDialogState extends State<_VerificationDialog> {
       await _poll();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('验证操作失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('验证操作失败：$error')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1043,10 +1047,8 @@ class _SectionTitle extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
       child: Text(
         text,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.2,
-        ),
+        style: Theme.of(context).textTheme.bodySmall
+            ?.copyWith(fontWeight: FontWeight.w700, letterSpacing: 1.2),
       ),
     );
   }
