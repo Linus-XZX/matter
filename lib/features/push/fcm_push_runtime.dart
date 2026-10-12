@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -138,6 +139,19 @@ const _initializationSettings = InitializationSettings(
 
 bool get fcmPushSupported =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+@pragma('vm:entry-point')
+void matterFcmBackgroundDispatcher() {
+  WidgetsFlutterBinding.ensureInitialized();
+  const channel = MethodChannel('moe.aks.matter/fcm_background');
+  channel.setMethodCallHandler((call) async {
+    if (call.method != 'message') throw MissingPluginException();
+    await handleFcmBackgroundMessage(
+      RemoteMessage(data: Map<String, dynamic>.from(call.arguments as Map)),
+    );
+  });
+  unawaited(channel.invokeMethod<void>('ready'));
+}
 
 @pragma('vm:entry-point')
 Future<void> handleFcmBackgroundMessage(RemoteMessage message) async {
@@ -590,7 +604,6 @@ class FcmPushRuntime {
       configuration = await FirebaseClientConfigStore().load();
       if (configuration == null) return;
       await Firebase.initializeApp(options: configuration!.options);
-      FirebaseMessaging.onBackgroundMessage(handleFcmBackgroundMessage);
       await notifications.initialize(
         settings: _initializationSettings,
         onDidReceiveNotificationResponse: (response) {
