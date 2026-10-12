@@ -22,8 +22,7 @@ use std::{
 
 use once_cell::sync::OnceCell;
 use ruma::{
-    EventId, OwnedEventId, OwnedRoomId, RoomId,
-    events::room::message::{OriginalSyncRoomMessageEvent, Relation},
+    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt,
 };
 use tantivy::{
     DateTime, Index, IndexReader, Order, ReloadPolicy, TantivyDocument, collector::TopDocs,
@@ -38,18 +37,97 @@ use crate::{
     writer::SearchIndexWriter,
 };
 
+/// The subset of an event's data required to index it and later retrieve it.
+///
+/// Produced by the matrix-sdk layer, which knows how to extract searchable text
+/// from each event type. This crate stays agnostic to Matrix event content.
+#[derive(Clone)]
+pub struct IndexableEvent {
+    /// The event's own id (primary key).
+    pub(crate) event_id: OwnedEventId,
+    /// The id used as the deletion key: the original event id for edits,
+    /// otherwise the event's own id.
+    pub(crate) original_event_id: OwnedEventId,
+    /// The sender of the event.
+    pub(crate) sender: OwnedUserId,
+    /// The origin server timestamp of the event.
+    ///
+    /// Please use the `matrix_sdk_common::TimelineEvent::timestamp` as much as
+    /// possible as it protects against malformed `origin_server_ts`. At worst,
+    /// use the `matrix_sdk_common::serde_helpers::extract_timestamp` function.
+    pub(crate) timestamp: Option<MilliSecondsSinceUnixEpoch>,
+    /// The text to index for this event.
+    pub(crate) body: String,
+}
+
+impl fmt::Debug for IndexableEvent {
+    /// Don't log bodies
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexableEvent")
+            .field("event_id", &self.event_id)
+            .field("original_event_id", &self.original_event_id)
+            .field("sender", &self.sender)
+            .field("timestamp", &self.timestamp)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Maximum value for the timestamp to not overflow when converted to
+/// nanoseconds by Tantivy. See [`IndexableEvent::new`] to learn more.
+const MAX_MILLISECONDS: u64 = (i64::MAX / 1_000_000).cast_unsigned();
+
+/// Run a closure that performs blocking I/O either on the Tokio blocking thread
+/// pool (if called from within a Tokio runtime) or directly on the current
+/// thread (e.g. in unit tests that do not set up a runtime).
+///
+/// Matter patch: Tantivy commits, reader reloads and merge-worker
+/// synchronization are blocking. Running them directly inside a Tokio runtime
+/// stalls async worker threads, so hand them to the blocking pool instead.
+fn block_in_place_or_direct<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(f),
+        Err(_) => f(),
+    }
+}
+
+impl IndexableEvent {
+    /// Create a new [`IndexableEvent`].
+    pub fn new(
+        event_id: OwnedEventId,
+        original_event_id: OwnedEventId,
+        sender: OwnedUserId,
+        mut timestamp: Option<MilliSecondsSinceUnixEpoch>,
+        body: String,
+    ) -> Self {
+        // Tantivy will transform the number of milliseconds to nanoseconds
+        // by multiplying by 1_000_000 [1]. If the number of milliseconds is too
+        // big, the multiplication will overflow.
+        //
+        // To avoid this panic, we cap the number of milliseconds to a maximum value.
+        //
+        // [1]: https://github.com/quickwit-oss/tantivy/blob/31ca1a8ba290b425f871d2e2384592045ec01b8d/common/src/datetime.rs#L62-L67
+        if let Some(timestamp) = &mut timestamp {
+            *timestamp = MilliSecondsSinceUnixEpoch(
+                timestamp.get().min(UInt::new_saturating(MAX_MILLISECONDS)),
+            );
+        }
+
+        Self { event_id, original_event_id, sender, timestamp, body }
+    }
+}
+
 /// A struct to represent the operations on a [`RoomIndex`]
 #[derive(Debug, Clone)]
 pub enum RoomIndexOperation {
     /// Add this event to the index.
-    Add(OriginalSyncRoomMessageEvent),
+    Add(IndexableEvent),
     /// Remove all documents in the index where
     /// `MatrixSearchIndexSchema::deletion_key()` matches this event id.
     Remove(OwnedEventId),
     /// Replace all documents in the index where
     /// `MatrixSearchIndexSchema::deletion_key()` matches this event id with
     /// the new event.
-    Edit(OwnedEventId, OriginalSyncRoomMessageEvent),
+    Edit(OwnedEventId, IndexableEvent),
     /// Do nothing.
     Noop,
 }
@@ -61,19 +139,17 @@ pub struct RoomIndex {
     schema: RoomMessageSchema,
     query_parser: QueryParser,
     room_id: OwnedRoomId,
+    /// Events added but not yet committed, mapping each document's primary key
+    /// (event id) to its deletion key (original event id). The deletion key is
+    /// needed so that a [`RoomIndex::remove`] in the same uncommitted batch,
+    /// which deletes by that key, can reconcile these entries too.
     uncommitted_adds: HashMap<OwnedEventId, OwnedEventId>,
     uncommitted_removes: HashSet<OwnedEventId>,
+    /// Cached [`IndexReader`].
+    ///
+    /// It is costly to create one, so let's keep it in memory when needed; see
+    /// [`RoomIndex::reader`] to learn more.
     reader: OnceCell<IndexReader>,
-}
-
-/// Run a closure that performs blocking I/O either on the Tokio blocking thread
-/// pool (if called from within a Tokio runtime) or directly on the current
-/// thread (e.g. in unit tests that do not set up a runtime).
-fn block_in_place_or_direct<T>(f: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(_) => tokio::task::block_in_place(f),
-        Err(_) => f(),
-    }
 }
 
 impl fmt::Debug for RoomIndex {
@@ -100,19 +176,21 @@ impl RoomIndex {
     }
 
     /// Get a [`SearchIndexWriter`] for this index.
-    fn get_writer(&self) -> Result<SearchIndexWriter, IndexError> {
+    fn writer(&self) -> Result<SearchIndexWriter, IndexError> {
         let writer = self.index.writer(TANTIVY_INDEX_MEMORY_BUDGET)?;
         Ok(SearchIndexWriter::new(writer, self.schema.clone()))
     }
 
-    /// Get a [`IndexReader`] for this index.
+    /// Get or create the cached [`IndexReader`] for this index.
+    ///
+    /// The reload policy is [`ReloadPolicy::Manual`]: we are the only writer of
+    /// this index, and every commit goes through
+    /// [`RoomIndex::commit_and_reload`], which reloads explicitly. Tantivy's
+    /// default policy would instead spawn one meta file watcher thread per
+    /// index, i.e. one per room, and panics if that thread cannot be spawned.
     fn reader(&self) -> Result<&IndexReader, IndexError> {
         self.reader.get_or_try_init(|| {
-            Ok(self
-                .index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::Manual)
-                .try_into()?)
+            Ok(self.index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?)
         })
     }
 
@@ -147,8 +225,8 @@ impl RoomIndex {
         Ok(last_commit_opstamp)
     }
 
-    /// Search the [`RoomIndex`] for some query, newest event first. Returns a
-    /// list of results with a maximum given length. If `pagination_offset` is
+    /// Search the [`RoomIndex`] for some query. Returns a list of
+    /// results with a maximum given length. If `pagination_offset` is
     /// set then the results will start there, i.e.
     ///
     /// if `max_number_of_results = 3` and `pagination_offset = 10`
@@ -159,7 +237,7 @@ impl RoomIndex {
         query: &str,
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
-    ) -> Result<Vec<OwnedEventId>, IndexError> {
+    ) -> Result<Vec<(f32, OwnedEventId)>, IndexError> {
         let query = self.query_parser.parse_query(query)?;
         let searcher = self.reader()?.searcher();
 
@@ -167,6 +245,11 @@ impl RoomIndex {
 
         let results = searcher.search(
             &query,
+            // Matter patch: order by the event date, newest first, instead of by
+            // relevance score. The caller pages through the index with
+            // `pagination_offset`, and a score-ordered index would page over an
+            // unstable order (Tantivy scores tie at 1.0 for the exact-term
+            // n-gram queries Matter builds), which can skip or repeat results.
             &TopDocs::with_limit(max_number_of_results)
                 .and_offset(offset)
                 .order_by_fast_field::<DateTime>(
@@ -174,17 +257,14 @@ impl RoomIndex {
                     Order::Desc,
                 ),
         )?;
-        let mut ret: Vec<OwnedEventId> = Vec::new();
+        let mut ret: Vec<(f32, OwnedEventId)> = Vec::new();
         let pk = self.schema.primary_key();
 
         for (_date, doc_address) in results {
             let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
-            match retrieved_doc
-                .get_first(pk)
-                .and_then(|maybe_value| maybe_value.as_str())
-            {
+            match retrieved_doc.get_first(pk).and_then(|maybe_value| maybe_value.as_str()) {
                 Some(value) => match OwnedEventId::try_from(value) {
-                    Ok(event_id) => ret.push(event_id),
+                    Ok(event_id) => ret.push((0.0, event_id)),
                     Err(err) => error!("error while parsing event_id from search result: {err:?}"),
                 },
                 _ => error!("unexpected value type while searching documents"),
@@ -194,36 +274,35 @@ impl RoomIndex {
         Ok(ret)
     }
 
-    fn get_events_to_be_removed(
-        &self,
-        event_id: &EventId,
-    ) -> Result<Vec<OwnedEventId>, IndexError> {
-        self.search(
-            format!(
-                "{}:\"{}\"",
-                self.schema.get_field_name(self.schema.deletion_key()),
-                escape_event_id_for_query(event_id.as_str())
-            )
-            .as_str(),
-            10000,
-            None,
-        )
+    fn events_to_be_removed(&self, event_id: &EventId) -> Result<Vec<OwnedEventId>, IndexError> {
+        Ok(self
+            .search(
+                format!(
+                    "{}:\"{}\"",
+                    self.schema.get_field_name(self.schema.deletion_key()),
+                    // Matter patch: escape the id so a malformed value cannot
+                    // break out of the quoted query term.
+                    escape_event_id_for_query(event_id.as_str())
+                )
+                .as_str(),
+                10000,
+                None,
+            )?
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect())
     }
 
     fn add(
         &mut self,
         writer: &mut SearchIndexWriter,
-        event: OriginalSyncRoomMessageEvent,
+        event: IndexableEvent,
     ) -> Result<(), IndexError> {
-        let deletion_key = match &event.content.relates_to {
-            Some(Relation::Replacement(replacement)) => replacement.event_id.clone(),
-            _ => event.event_id.clone(),
-        };
         if !self.contains(&event.event_id)? {
             writer.add(self.schema.make_doc(event.clone())?)?;
         }
         self.uncommitted_removes.remove(&event.event_id);
-        self.uncommitted_adds.insert(event.event_id, deletion_key);
+        self.uncommitted_adds.insert(event.event_id, event.original_event_id);
         Ok(())
     }
 
@@ -232,21 +311,26 @@ impl RoomIndex {
         writer: &mut SearchIndexWriter,
         event_id: OwnedEventId,
     ) -> Result<(), IndexError> {
-        let events = self.get_events_to_be_removed(&event_id)?;
+        let events = self.events_to_be_removed(&event_id)?;
 
         writer.remove(&event_id);
 
+        // Committed documents matching the deletion key.
         for event in events.into_iter() {
             self.uncommitted_adds.remove(&event);
             self.uncommitted_removes.insert(event);
         }
 
-        let uncommitted = self
+        // Uncommitted documents added in this same batch also get deleted by the
+        // term above, so reconcile them too. Otherwise `contains` would still
+        // report them as present and a subsequent re-add (e.g. from an edit)
+        // would be wrongly skipped, leaving the document deleted.
+        let uncommitted: Vec<_> = self
             .uncommitted_adds
             .iter()
             .filter(|(_, deletion_key)| **deletion_key == event_id)
             .map(|(primary_key, _)| primary_key.clone())
-            .collect::<Vec<_>>();
+            .collect();
         for event in uncommitted {
             self.uncommitted_adds.remove(&event);
             self.uncommitted_removes.insert(event);
@@ -300,10 +384,7 @@ impl RoomIndex {
                 }
                 IndexError::OpenDirectoryError(ref e) => match e {
                     // Retry
-                    OpenDirectoryError::IoError {
-                        io_error: _,
-                        directory_path: _,
-                    } => {
+                    OpenDirectoryError::IoError { io_error: _, directory_path: _ } => {
                         num_tries += 1;
                     }
                     // Bubble
@@ -342,7 +423,7 @@ impl RoomIndex {
     /// blocking async worker threads.
     pub fn execute(&mut self, operation: RoomIndexOperation) -> Result<(), IndexError> {
         block_in_place_or_direct(|| {
-            let mut writer = self.get_writer()?;
+            let mut writer = self.writer()?;
             self.execute_with_retry(&mut writer, &operation, 5)?;
             self.commit_and_reload(&mut writer)?;
             writer.wait_merging_threads()?;
@@ -363,7 +444,7 @@ impl RoomIndex {
     /// [`tokio::task::block_in_place`] when a Tokio runtime is present.
     pub fn bulk_execute(&mut self, operations: Vec<RoomIndexOperation>) -> Result<(), IndexError> {
         block_in_place_or_direct(|| {
-            let mut writer = self.get_writer()?;
+            let mut writer = self.writer()?;
             let mut operations = operations.into_iter();
             let mut next_operation = operations.next();
 
@@ -384,6 +465,8 @@ impl RoomIndex {
             format!(
                 "{}:\"{}\"",
                 self.schema.get_field_name(self.schema.primary_key()),
+                // Matter patch: escape the id so a malformed value cannot break
+                // out of the quoted query term.
                 escape_event_id_for_query(event_id.as_str())
             )
             .as_str(),
@@ -393,6 +476,8 @@ impl RoomIndex {
         match search_result {
             Ok(results) => Ok(!self.uncommitted_removes.contains(event_id)
                 && (!results.is_empty() || self.uncommitted_adds.contains_key(event_id))),
+            // Matter patch: propagate the error instead of silently assuming the
+            // event is already indexed (which would drop it from the index).
             Err(err) => {
                 warn!("Failed to check if event has been indexed: {err}");
                 Err(err)
@@ -417,20 +502,45 @@ mod tests {
         EventId, event_id,
         events::{
             AnySyncMessageLikeEvent,
-            room::message::{OriginalSyncRoomMessageEvent, RoomMessageEventContentWithoutRelation},
+            room::message::{
+                MessageType, OriginalSyncRoomMessageEvent, Relation,
+                RoomMessageEventContentWithoutRelation,
+            },
         },
         room_id, user_id,
     };
 
-    use crate::{
-        error::IndexError,
-        index::{RoomIndex, RoomIndexOperation, builder::RoomIndexBuilder},
+    use super::{
+        IndexableEvent, MAX_MILLISECONDS, MilliSecondsSinceUnixEpoch, RoomIndex,
+        RoomIndexOperation, UInt, builder::RoomIndexBuilder,
     };
+    use crate::error::IndexError;
+
+    /// Build an [`IndexableEvent`] from a text room message (tests only handle
+    /// text).
+    fn to_indexable(event: &OriginalSyncRoomMessageEvent) -> IndexableEvent {
+        let MessageType::Text(content) = &event.content.msgtype else {
+            panic!("test helper only supports text messages")
+        };
+        let original_event_id = match &event.content.relates_to {
+            Some(Relation::Replacement(replacement)) => replacement.event_id.clone(),
+            _ => event.event_id.clone(),
+        };
+
+        IndexableEvent::new(
+            event.event_id.clone(),
+            original_event_id,
+            event.sender.clone(),
+            Some(event.origin_server_ts),
+            content.body.clone(),
+        )
+    }
 
     /// Helper function to add a regular message to the index
     ///
     /// # Panic
-    /// Panics when event is not a [`OriginalSyncRoomMessageEvent`] with no
+    ///
+    /// Panics when event is not an [`OriginalSyncRoomMessageEvent`] with no
     /// relations.
     fn index_message(
         index: &mut RoomIndex,
@@ -440,7 +550,7 @@ mod tests {
             && let Some(ev) = ev.as_original()
             && ev.content.relates_to.is_none()
         {
-            return index.execute(RoomIndexOperation::Add(ev.clone()));
+            return index.execute(RoomIndexOperation::Add(to_indexable(ev)));
         }
         panic!("Event was not a relationless OriginalSyncRoomMessageEvent.")
     }
@@ -458,7 +568,7 @@ mod tests {
         event_id: &EventId,
         new: OriginalSyncRoomMessageEvent,
     ) -> Result<(), IndexError> {
-        index.execute(RoomIndexOperation::Edit(event_id.to_owned(), new))
+        index.execute(RoomIndexOperation::Edit(event_id.to_owned(), to_indexable(&new)))
     }
 
     #[test]
@@ -473,207 +583,89 @@ mod tests {
             .sender(user_id!("@user_id:localhost"))
             .into_any_sync_message_like_event();
 
-        index_message(&mut index, event).expect("failed to add event: {res:?}");
-    }
-
-    #[test]
-    fn test_cjk_substring_ngram_search() {
-        let room_id = room_id!("!room_id:localhost");
-        let event_id = event_id!("$event_id:localhost");
-        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
-        let event = EventFactory::new()
-            .text_msg("今晚八点开会")
-            .event_id(event_id)
-            .room(room_id)
-            .sender(user_id!("@user_id:localhost"))
-            .into_any_sync_message_like_event();
         index_message(&mut index, event).expect("failed to add event");
-
-        let results = index
-            .search("body_ngram:\"八点\"", 10, None)
-            .expect("CJK substring search failed");
-
-        assert_eq!(results, [event_id.to_owned()]);
     }
 
     #[test]
-    fn test_encrypted_index_survives_reopen() {
-        let directory = tempfile::tempdir().unwrap();
-        let room_id = room_id!("!room_id:localhost");
-        let event_id = event_id!("$persistent:localhost");
-        {
-            let mut index = RoomIndexBuilder::new_on_disk(directory.path().to_path_buf(), room_id)
-                .encrypted("device-secret")
-                .build()
-                .unwrap();
-            let event = EventFactory::new()
-                .text_msg("持久搜索消息")
-                .event_id(event_id)
-                .room(room_id)
-                .sender(user_id!("@user_id:localhost"))
-                .into_any_sync_message_like_event();
-            index_message(&mut index, event).unwrap();
-        }
-
-        let index = RoomIndexBuilder::new_on_disk(directory.path().to_path_buf(), room_id)
-            .encrypted("device-secret")
-            .build()
-            .unwrap();
-        let results = index.search("body_ngram:\"搜索\"", 10, None).unwrap();
-
-        assert_eq!(results, [event_id.to_owned()]);
-    }
-
-    #[test]
-    fn test_8000_message_query_stays_below_one_second() {
-        let directory = tempfile::tempdir().unwrap();
-        let room_id = room_id!("!room_id:localhost");
-        let sender = user_id!("@user_id:localhost");
-        let factory = EventFactory::new().room(room_id).sender(sender);
-        let operations = (0..8_000)
-            .map(|position| {
-                let event_id = EventId::parse(format!("$event{position}:localhost")).unwrap();
-                let body = if position % 1_000 == 0 {
-                    format!("第 {position} 条歇逼消息")
-                } else {
-                    format!("第 {position} 条普通消息")
-                };
-                let event = factory
-                    .text_msg(body)
-                    .event_id(&event_id)
-                    .into_any_sync_message_like_event();
-                let AnySyncMessageLikeEvent::RoomMessage(event) = event else {
-                    unreachable!();
-                };
-                RoomIndexOperation::Add(event.as_original().unwrap().clone())
-            })
-            .collect();
-        {
-            let mut index = RoomIndexBuilder::new_on_disk(directory.path().to_path_buf(), room_id)
-                .encrypted("device-secret")
-                .build()
-                .unwrap();
-            index.bulk_execute(operations).unwrap();
-        }
-        let index = RoomIndexBuilder::new_on_disk(directory.path().to_path_buf(), room_id)
-            .encrypted("device-secret")
-            .build()
-            .unwrap();
-
-        let started = std::time::Instant::now();
-        let results = index.search("body_ngram:\"歇逼\"", 30, None).unwrap();
-        let query_elapsed = started.elapsed();
-
-        assert_eq!(results.len(), 8);
-        assert!(
-            query_elapsed < std::time::Duration::from_secs(1),
-            "8k-message local query took {:?}",
-            query_elapsed
-        );
-        eprintln!("local query took {query_elapsed:?}");
-    }
-
-    #[test]
-    fn test_reader_is_cached_and_pagination_uses_raw_offset() {
-        let room_id = room_id!("!room_id:localhost");
-        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
-        let user_id = user_id!("@user_id:localhost");
-        let factory = EventFactory::new().room(room_id).sender(user_id);
-        for event_id in ["$one:localhost", "$two:localhost", "$three:localhost"] {
-            let event_id = EventId::parse(event_id).unwrap();
-            index_message(
-                &mut index,
-                factory
-                    .text_msg("shared search term")
-                    .event_id(&event_id)
-                    .into_any_sync_message_like_event(),
-            )
-            .unwrap();
-        }
-
-        let first_reader = index.reader().unwrap();
-        let second_reader = index.reader().unwrap();
-        assert!(std::ptr::eq(first_reader, second_reader));
-
-        let first_page = index.search("shared", 2, None).unwrap();
-        let second_page = index.search("shared", 2, Some(2)).unwrap();
-        let all = first_page
-            .into_iter()
-            .chain(second_page)
-            .collect::<HashSet<_>>();
-        assert_eq!(all.len(), 3);
-    }
-
-    #[test]
-    fn test_search_orders_recent_events_before_applying_offset() {
-        let room_id = room_id!("!room_id:localhost");
-        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
-        let factory = EventFactory::new()
-            .room(room_id)
-            .sender(user_id!("@user_id:localhost"));
-        for (event_id, timestamp) in [
-            (event_id!("$oldest:localhost"), 10),
-            (event_id!("$newest:localhost"), 30),
-            (event_id!("$middle:localhost"), 20),
-        ] {
-            index_message(
-                &mut index,
-                factory
-                    .text_msg("shared search term")
-                    .event_id(event_id)
-                    .server_ts(timestamp)
-                    .into_any_sync_message_like_event(),
-            )
-            .unwrap();
-        }
-
-        assert_eq!(
-            index.search("shared", 2, None).unwrap(),
-            [
-                event_id!("$newest:localhost").to_owned(),
-                event_id!("$middle:localhost").to_owned(),
-            ]
-        );
-        assert_eq!(
-            index.search("shared", 2, Some(2)).unwrap(),
-            [event_id!("$oldest:localhost").to_owned()]
-        );
-    }
-
-    #[test]
-    fn test_bulk_add_then_edit_keeps_only_the_edit() {
-        let room_id = room_id!("!room_id:localhost");
-        let old_event_id = event_id!("$old_event_id:localhost");
-        let new_event_id = event_id!("$new_event_id:localhost");
-        let factory = EventFactory::new()
-            .room(room_id)
-            .sender(user_id!("@user_id:localhost"));
-        let original = factory
-            .text_msg("old searchable body")
-            .event_id(old_event_id)
-            .into_original_sync_room_message_event();
-        let edit = factory
-            .text_msg("new searchable body")
-            .edit(
-                old_event_id,
-                RoomMessageEventContentWithoutRelation::text_plain("new searchable body"),
-            )
-            .event_id(new_event_id)
-            .into_original_sync_room_message_event();
-        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
+    fn test_add_event_with_no_timestamp() {
+        let mut index = RoomIndexBuilder::new_in_memory(room_id!("!r")).build();
 
         index
-            .bulk_execute(vec![
-                RoomIndexOperation::Add(original),
-                RoomIndexOperation::Edit(old_event_id.to_owned(), edit),
-            ])
-            .unwrap();
+            .execute(RoomIndexOperation::Add(IndexableEvent::new(
+                event_id!("$ev").to_owned(),
+                event_id!("$ev").to_owned(),
+                user_id!("@mnt_io:matrix.org").to_owned(),
+                None,
+                "body".to_owned(),
+            )))
+            .expect("failed to add event");
+    }
 
-        assert!(index.search("old", 10, None).unwrap().is_empty());
-        assert_eq!(
-            index.search("new", 10, None).unwrap(),
-            [new_event_id.to_owned()]
+    #[test]
+    fn test_add_event_with_raw_malformed_timestamp_must_not_panic() {
+        let mut index = RoomIndexBuilder::new_in_memory(room_id!("!r")).build();
+
+        index
+            .execute(RoomIndexOperation::Add(IndexableEvent::new(
+                event_id!("$ev").to_owned(),
+                event_id!("$ev").to_owned(),
+                user_id!("@mnt_io:matrix.org").to_owned(),
+                Some(MilliSecondsSinceUnixEpoch(UInt::new(151393755000000).unwrap())),
+                "body".to_owned(),
+            )))
+            .expect("failed to add event");
+    }
+
+    #[test]
+    fn test_add_event_with_malformed_timestamp_must_not_panic() {
+        let room_id = room_id!("!r");
+        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
+
+        let body = "body".to_owned();
+        let event = EventFactory::new()
+            .server_ts(151393755000000)
+            .text_msg(body.clone())
+            .event_id(event_id!("$ev"))
+            .room(room_id)
+            .sender(user_id!("@mnt_io:matrix.org"))
+            .into_event();
+
+        index
+            .execute(RoomIndexOperation::Add(IndexableEvent::new(
+                event.event_id().unwrap().to_owned(),
+                event.event_id().unwrap().to_owned(),
+                event.sender().unwrap(),
+                event.timestamp(),
+                body,
+            )))
+            .expect("failed to add event");
+    }
+
+    #[test]
+    fn test_indexable_event_timestamp_is_capped() {
+        let event_id = event_id!("$ev").to_owned();
+        let sender = user_id!("@mnt_io:matrix.org").to_owned();
+        let body = "body".to_owned();
+
+        // Not capped.
+        let event = IndexableEvent::new(
+            event_id.clone(),
+            event_id.clone(),
+            sender.clone(),
+            Some(MilliSecondsSinceUnixEpoch(UInt::new(MAX_MILLISECONDS).unwrap())),
+            body.clone(),
         );
+        assert_eq!(event.timestamp.unwrap().get(), UInt::new(MAX_MILLISECONDS).unwrap());
+
+        // Capped!
+        let event = IndexableEvent::new(
+            event_id.clone(),
+            event_id,
+            sender,
+            Some(MilliSecondsSinceUnixEpoch(UInt::new(MAX_MILLISECONDS + 42).unwrap())),
+            body,
+        );
+        assert_eq!(event.timestamp.unwrap().get(), UInt::new(MAX_MILLISECONDS).unwrap());
     }
 
     #[test]
@@ -696,9 +688,7 @@ mod tests {
 
         index_message(
             &mut index,
-            f.text_msg("All new words")
-                .event_id(event_id_2)
-                .into_any_sync_message_like_event(),
+            f.text_msg("All new words").event_id(event_id_2).into_any_sync_message_like_event(),
         )?;
 
         index_message(
@@ -708,10 +698,8 @@ mod tests {
                 .into_any_sync_message_like_event(),
         )?;
 
-        let result = index
-            .search("sentence", 10, None)
-            .expect("search failed with: {result:?}");
-        let result: HashSet<_> = result.iter().collect();
+        let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
+        let result: HashSet<_> = result.iter().map(|(_, id)| id).collect();
 
         let true_value = [event_id_1.to_owned(), event_id_3.to_owned()];
         let true_value: HashSet<_> = true_value.iter().collect();
@@ -726,20 +714,11 @@ mod tests {
         let room_id = room_id!("!room_id:localhost");
         let index = RoomIndexBuilder::new_in_memory(room_id).build();
 
-        let result = index
-            .search("sentence", 10, None)
-            .expect("search failed with: {result:?}");
+        let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
 
         assert!(result.is_empty(), "search result not empty: {result:?}");
 
         Ok(())
-    }
-
-    #[test]
-    fn test_escape_event_id_for_query() {
-        assert_eq!(super::escape_event_id_for_query("$foo"), "$foo");
-        assert_eq!(super::escape_event_id_for_query("$a\\b"), "$a\\\\b");
-        assert_eq!(super::escape_event_id_for_query("$a\"b"), "$a\\\"b");
     }
 
     #[test]
@@ -749,10 +728,7 @@ mod tests {
 
         let event_id = event_id!("$event_id:localhost");
 
-        assert!(
-            !index.contains(event_id).unwrap(),
-            "Index should not contain event"
-        );
+        assert!(!index.contains(event_id).unwrap(), "Index should not contain event");
     }
 
     #[test]
@@ -770,10 +746,7 @@ mod tests {
 
         index_message(&mut index, event)?;
 
-        assert!(
-            index.contains(event_id).unwrap(),
-            "Index should contain event"
-        );
+        assert!(index.contains(event_id).unwrap(), "Index should contain event");
 
         Ok(())
     }
@@ -793,22 +766,14 @@ mod tests {
 
         index_message(&mut index, event.clone())?;
 
-        assert!(
-            index.contains(event_id).unwrap(),
-            "Index should contain event"
-        );
+        assert!(index.contains(event_id).unwrap(), "Index should contain event");
 
         // indexing again should do nothing
         index_message(&mut index, event)?;
 
-        assert!(
-            index.contains(event_id).unwrap(),
-            "Index should still contain event"
-        );
+        assert!(index.contains(event_id).unwrap(), "Index should still contain event");
 
-        let result = index
-            .search("sentence", 10, None)
-            .expect("search failed with: {result:?}");
+        let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
 
         assert_eq!(result.len(), 1, "Index should have ignored second indexing");
 
@@ -824,24 +789,16 @@ mod tests {
         let user_id = user_id!("@user_id:localhost");
         let f = EventFactory::new().room(room_id).sender(user_id);
 
-        let event = f
-            .text_msg("This is a sentence")
-            .event_id(event_id)
-            .into_any_sync_message_like_event();
+        let event =
+            f.text_msg("This is a sentence").event_id(event_id).into_any_sync_message_like_event();
 
         index_message(&mut index, event)?;
 
-        assert!(
-            index.contains(event_id).unwrap(),
-            "Index should contain event"
-        );
+        assert!(index.contains(event_id).unwrap(), "Index should contain event");
 
         index_remove(&mut index, event_id)?;
 
-        assert!(
-            !index.contains(event_id).unwrap(),
-            "Index should not contain event"
-        );
+        assert!(!index.contains(event_id).unwrap(), "Index should not contain event");
 
         Ok(())
     }
@@ -862,10 +819,7 @@ mod tests {
 
         index_message(&mut index, old_event)?;
 
-        assert!(
-            index.contains(old_event_id).unwrap(),
-            "Index should contain event"
-        );
+        assert!(index.contains(old_event_id).unwrap(), "Index should contain event");
 
         let new_event_id = event_id!("$new_event_id:localhost");
         let edit = f
@@ -879,23 +833,80 @@ mod tests {
 
         index_edit(&mut index, old_event_id, edit)?;
 
-        assert!(
-            !index.contains(old_event_id).unwrap(),
-            "Index should not contain old event"
-        );
-        assert!(
-            index.contains(new_event_id).unwrap(),
-            "Index should contain edited event"
-        );
+        assert!(!index.contains(old_event_id).unwrap(), "Index should not contain old event");
+        assert!(index.contains(new_event_id).unwrap(), "Index should contain edited event");
 
         Ok(())
     }
 
     #[test]
+    fn test_bulk_add_then_edit_same_event_keeps_it_indexed() -> Result<(), Box<dyn Error>> {
+        let room_id = room_id!("!room_id:localhost");
+        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
+
+        let original_id = event_id!("$original:localhost");
+        let edit_id = event_id!("$edit:localhost");
+        let user_id = user_id!("@user_id:localhost");
+        let f = EventFactory::new().room(room_id).sender(user_id);
+
+        let edit = f
+            .text_msg("* brand new sentence")
+            .edit(
+                original_id,
+                RoomMessageEventContentWithoutRelation::text_plain("brand new sentence"),
+            )
+            .event_id(edit_id)
+            .into_original_sync_room_message_event();
+        let edit = to_indexable(&edit);
+
+        // An original and its edit arriving in the same batch produce an `Add`
+        // and an `Edit` of the same document. The `Edit`'s removal must not drop
+        // the document added earlier in the same uncommitted batch.
+        index.bulk_execute(vec![
+            RoomIndexOperation::Add(edit.clone()),
+            RoomIndexOperation::Edit(original_id.to_owned(), edit),
+        ])?;
+
+        assert!(index.contains(edit_id).unwrap(), "Edited document should be indexed");
+
+        let result = index.search("sentence", 10, None)?;
+        assert_eq!(result.len(), 1, "Search should find the edited document, got {result:?}");
+        assert_eq!(result[0].1, edit_id, "unexpected event id: {result:?}");
+
+        Ok(())
+    }
+
+    /// Matter patch: CJK text has no spaces, so a substring query only works
+    /// against the dedicated `body_ngram` field.
+    #[test]
+    fn test_cjk_substring_ngram_search() -> Result<(), IndexError> {
+        let room_id = room_id!("!room_id:localhost");
+        let event_id = event_id!("$event_id:localhost");
+        let mut index = RoomIndexBuilder::new_in_memory(room_id).build();
+        let event = EventFactory::new()
+            .text_msg("今晚八点开会")
+            .event_id(event_id)
+            .room(room_id)
+            .sender(user_id!("@user_id:localhost"))
+            .into_any_sync_message_like_event();
+        index_message(&mut index, event).expect("failed to add event");
+
+        let results = index.search("body_ngram:\"八点\"", 10, None)?;
+
+        assert_eq!(results.len(), 1, "CJK substring search failed: {results:?}");
+        assert_eq!(results[0].1, event_id.to_owned());
+
+        Ok(())
+    }
+
+    /// Matter patch: the blocking-I/O helper must work even without a Tokio
+    /// runtime, e.g. in unit tests.
+    #[test]
     fn test_block_in_place_or_direct_without_runtime() {
         assert_eq!(super::block_in_place_or_direct(|| 42), 42);
     }
 
+    /// Matter patch: and it must keep working from inside a Tokio runtime.
     #[test]
     fn test_block_in_place_or_direct_inside_tokio_runtime() {
         let rt = tokio::runtime::Runtime::new().expect("multi-thread runtime");

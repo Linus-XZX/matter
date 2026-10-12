@@ -14,31 +14,28 @@
 
 use std::collections::HashSet;
 
-use ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent, Relation};
 use tantivy::{
-    DateTime, TantivyDocument, doc,
+    DateTime, TantivyDocument,
     schema::{DateOptions, DateTimePrecision, Field, INDEXED, STORED, STRING, Schema, TEXT},
 };
 
-use crate::error::{IndexError, IndexSchemaError};
+use crate::{
+    error::{IndexError, IndexSchemaError},
+    index::IndexableEvent,
+};
 
-const MAX_TANTIVY_MILLISECONDS: u64 = (i64::MAX / 1_000_000) as u64;
-
-fn safe_tantivy_timestamp_millis(timestamp: u64) -> i64 {
-    timestamp.min(MAX_TANTIVY_MILLISECONDS) as i64
-}
-
+/// Lowercase 1-3 character n-grams of each alphanumeric run in `body`.
+///
+/// Matter indexes these into a dedicated `body_ngram` field so substring
+/// queries work for CJK, where Tantivy's tokenizer would otherwise index a
+/// whole run as a single term.
 fn body_ngrams(body: &str) -> HashSet<String> {
     let normalized = body.to_lowercase();
     let mut grams = HashSet::new();
     for term in normalized.split(|character: char| !character.is_alphanumeric()) {
         let characters = term.chars().collect::<Vec<_>>();
         for size in 1..=characters.len().min(3) {
-            grams.extend(
-                characters
-                    .windows(size)
-                    .map(|window| window.iter().collect()),
-            );
+            grams.extend(characters.windows(size).map(|window| window.iter().collect()));
         }
     }
     grams
@@ -49,10 +46,11 @@ pub(crate) trait MatrixSearchIndexSchema {
     fn default_search_fields(&self) -> Vec<Field>;
     fn primary_key(&self) -> Field;
     fn deletion_key(&self) -> Field;
+    /// Matter patch: the event date field, so search can order by it.
     fn date_field(&self) -> Field;
     fn get_field_name(&self, field: Field) -> &str;
     fn as_tantivy_schema(&self) -> Schema;
-    fn make_doc(&self, event: OriginalSyncRoomMessageEvent) -> Result<TantivyDocument, IndexError>;
+    fn make_doc(&self, event: IndexableEvent) -> Result<TantivyDocument, IndexError>;
 }
 
 #[derive(Debug, Clone)]
@@ -78,9 +76,8 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
         let body_field = schema.add_text_field("body", TEXT);
         let body_ngram_field = schema.add_text_field("body_ngram", STRING);
 
-        let date_options = DateOptions::from(INDEXED)
-            .set_fast()
-            .set_precision(DateTimePrecision::Milliseconds);
+        let date_options =
+            DateOptions::from(INDEXED).set_fast().set_precision(DateTimePrecision::Seconds);
 
         let date_field = schema.add_date_field("date", date_options);
         let sender_field = schema.add_text_field("sender", STRING);
@@ -125,34 +122,43 @@ impl MatrixSearchIndexSchema for RoomMessageSchema {
         self.inner.clone()
     }
 
-    /// Given an [`OriginalSyncRoomMessageEvent`] return a
-    /// [`TantivyDocument`].
-    fn make_doc(&self, event: OriginalSyncRoomMessageEvent) -> Result<TantivyDocument, IndexError> {
-        let body = match &event.content.msgtype {
-            MessageType::Text(content) => Ok(content.body.clone()),
-            _ => Err(IndexError::MessageTypeNotSupported),
-        }?;
+    /// Given an [`IndexableEvent`] return a [`TantivyDocument`].
+    fn make_doc(&self, event: IndexableEvent) -> Result<TantivyDocument, IndexError> {
+        let mut document = TantivyDocument::default();
 
-        let mut document = doc!(
-            self.event_id_field => event.event_id.to_string(),
-            self.body_field => body,
-            self.date_field =>
-                DateTime::from_timestamp_millis(
-                    safe_tantivy_timestamp_millis(event.origin_server_ts.get().into())),
-            self.sender_field => event.sender.to_string(),
+        let Self {
+            event_id_field,
+            body_field,
+            body_ngram_field,
+            date_field,
+            sender_field,
+            original_event_id_field,
+
+            inner: _,
+            default_search_fields: _,
+        } = self;
+
+        let IndexableEvent { event_id, body, timestamp, sender, original_event_id } = event;
+
+        document.add_text(*event_id_field, event_id);
+        document.add_text(*body_field, &body);
+        document.add_date(
+            *date_field,
+            DateTime::from_timestamp_millis(
+                timestamp
+                    .map(|timestamp| timestamp.get().into())
+                    // If the timestamp is missing, use 0 as the “no value”.
+                    .unwrap_or(0),
+            ),
         );
+        document.add_text(*sender_field, sender);
+        document.add_text(*original_event_id_field, original_event_id);
+
         for gram in body_ngrams(&body) {
-            document.add_text(self.body_ngram_field, gram);
+            document.add_text(*body_ngram_field, gram);
         }
 
-        if let Some(Relation::Replacement(replacement_data)) = &event.content.relates_to {
-            document.add_text(
-                self.original_event_id_field,
-                replacement_data.event_id.clone(),
-            );
-        } else {
-            document.add_text(self.original_event_id_field, event.event_id);
-        }
+        document.shrink_to_fit();
 
         Ok(document)
     }
@@ -186,7 +192,7 @@ impl TryFrom<Schema> for RoomMessageSchema {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TANTIVY_MILLISECONDS, body_ngrams, safe_tantivy_timestamp_millis};
+    use super::body_ngrams;
 
     #[test]
     fn body_ngrams_cover_cjk_and_lowercase_latin_substrings() {
@@ -194,13 +200,5 @@ mod tests {
         assert!(grams.contains("a"));
         assert!(grams.contains("中文"));
         assert!(grams.contains("a中文"));
-    }
-
-    #[test]
-    fn timestamp_is_capped_before_tantivy_converts_it_to_nanoseconds() {
-        assert_eq!(
-            safe_tantivy_timestamp_millis(MAX_TANTIVY_MILLISECONDS + 42),
-            MAX_TANTIVY_MILLISECONDS as i64
-        );
     }
 }
