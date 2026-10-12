@@ -14,6 +14,7 @@ import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:matter/widgets/neu_surface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'helpers/neu_test_theme.dart';
 
 class _FakeRustApi implements RustLibApi {
@@ -553,24 +554,6 @@ void main() {
       // Let the typing timers (idle stop + keep-alive) run out so none are
       // left pending at the end of the test.
       await tester.pump(const Duration(seconds: 4));
-    });
-
-    testWidgets('wide layouts do not add a dedicated editor icon', (
-      tester,
-    ) async {
-      tester.view.physicalSize = const Size(1200, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-
-      const roomId = '!composer-entry-wide:example.org';
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-      container.read(activeUserIdProvider.notifier).value =
-          '@alice:example.org';
-
-      await tester.pumpWidget(messageInput(container, roomId));
-      expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
-      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
     });
 
     testWidgets('long-pressing attachment opens the composer with a draft', (

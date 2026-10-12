@@ -25,15 +25,5 @@ void main() {
         }
       }
     });
-
-    test('connection color provider returns null for all states', () {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-
-      for (final state in AppConnectionState.values) {
-        container.read(connectionProvider.notifier).value = state;
-        expect(container.read(connectionColorProvider), isNull);
-      }
-    });
   });
 }

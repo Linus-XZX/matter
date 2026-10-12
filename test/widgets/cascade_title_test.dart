@@ -4,18 +4,6 @@ import 'package:matter/widgets/cascade_title.dart';
 
 void main() {
   group('CascadeTitle', () {
-    testWidgets('renders the initial text', (tester) async {
-      await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(
-            body: CascadeTitle(text: 'Home', style: TextStyle(fontSize: 20)),
-          ),
-        ),
-      );
-
-      expect(find.text('Home'), findsOneWidget);
-    });
-
     testWidgets('cross-fades to new text', (tester) async {
       await tester.pumpWidget(
         const MaterialApp(
@@ -24,6 +12,7 @@ void main() {
           ),
         ),
       );
+      expect(find.text('Home'), findsOneWidget);
 
       await tester.pumpWidget(
         const MaterialApp(
@@ -70,13 +59,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('Home'), findsOneWidget);
-      expect(
-        find.descendant(
-          of: find.byType(CascadeTitle),
-          matching: find.byType(AnimatedBuilder),
-        ),
-        findsNothing,
-      );
+      expect(tester.binding.hasScheduledFrame, isFalse);
     });
   });
 }
