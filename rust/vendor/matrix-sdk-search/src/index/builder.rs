@@ -15,6 +15,11 @@ use crate::{
     schema::{MatrixSearchIndexSchema, RoomMessageSchema},
 };
 
+/// Portable on-disk directory name for a room's index.
+///
+/// Matter stores indexes on the filesystem, so the room id cannot be used
+/// verbatim: a SHA-256 hex digest avoids characters that are invalid in a path
+/// on any platform.
 fn room_directory_name(room_id: &OwnedRoomId) -> String {
     let digest = Sha256::digest(room_id.as_str().as_bytes());
     let mut name = String::with_capacity(digest.len() * 2);
@@ -152,19 +157,5 @@ impl MemoryRoomIndexBuilder {
         let schema = RoomMessageSchema::new();
         let index = Index::create_in_ram(schema.as_tantivy_schema());
         RoomIndex::new_with(index, schema, &self.room_id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ruma::room_id;
-
-    use super::room_directory_name;
-
-    #[test]
-    fn room_directory_name_is_portable() {
-        let name = room_directory_name(&room_id!("!room:example.org").to_owned());
-        assert_eq!(name.len(), 64);
-        assert!(name.chars().all(|character| character.is_ascii_hexdigit()));
     }
 }

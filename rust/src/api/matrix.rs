@@ -1,3 +1,4 @@
+use crate::http_client::matrix_client_builder;
 use flutter_rust_bridge::frb;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use log::{info, warn};
@@ -46,6 +47,7 @@ use tokio::task::JoinHandle;
 pub mod notifications;
 pub mod push;
 mod sdk_timeline;
+mod sticker_packs;
 
 // ── App-wide log system ─────────────────────────────────────────────
 
@@ -2277,6 +2279,21 @@ impl RoomSubscriptionState {
     }
 }
 
+/// Parse the currently desired room ids into owned [`RoomId`]s.
+///
+/// Sliding Sync 0.19 replaced the incremental `subscribe_to_rooms` /
+/// `unsubscribe_to_rooms` pair with the declarative `set_room_subscriptions`,
+/// which drops every subscription not present in the given slice. Callers must
+/// therefore pass the *whole* desired set, not just the room being changed.
+fn desired_room_ids(
+    desired: &HashMap<String, HashSet<String>>,
+) -> Vec<matrix_sdk::ruma::OwnedRoomId> {
+    desired
+        .keys()
+        .filter_map(|room_id| matrix_sdk::ruma::RoomId::parse(room_id.as_str()).ok())
+        .collect()
+}
+
 fn receipt_extension_for_subscribed_rooms(
 ) -> matrix_sdk::ruma::api::client::sync::sync_events::v5::request::Receipts {
     use matrix_sdk::ruma::api::client::sync::sync_events::v5::request::{
@@ -3508,7 +3525,7 @@ async fn finalize_pending() -> Result<String, String> {
                 format!("finalize_pending: creating client in {}", sdk_dir.display()),
             );
             info!("finalize_pending: creating client in {}", sdk_dir.display());
-            let new_client = match Client::builder()
+            let new_client = match matrix_client_builder()?
                 .handle_refresh_tokens()
                 .homeserver_url(url)
                 .with_encryption_settings(encryption_settings())
@@ -3983,10 +4000,6 @@ fn room_display_name(room: &matrix_sdk::Room) -> String {
     }
 }
 
-fn usage_allows_sticker(usage: &BTreeSet<ruma::events::image_pack::PackUsage>) -> bool {
-    usage.is_empty() || usage.contains(&ruma::events::image_pack::PackUsage::Sticker)
-}
-
 fn uint_to_i32(value: Option<matrix_sdk::ruma::UInt>) -> Option<i32> {
     value.map(|value| i32::try_from(u64::from(value)).unwrap_or(i32::MAX))
 }
@@ -4002,188 +4015,6 @@ fn sticker_info_dimensions(
     info: &matrix_sdk::ruma::events::room::ImageInfo,
 ) -> (Option<i32>, Option<i32>) {
     (uint_to_i32(info.width), uint_to_i32(info.height))
-}
-
-fn pack_image_to_sticker(
-    shortcode: String,
-    image: ruma::events::image_pack::PackImage,
-    pack_allows_sticker: bool,
-) -> Option<Sticker> {
-    let image_allows_sticker = if image.usage.is_empty() {
-        pack_allows_sticker
-    } else {
-        usage_allows_sticker(&image.usage)
-    };
-    if !image_allows_sticker {
-        return None;
-    }
-
-    let body = image
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|body| !body.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| shortcode.clone());
-    let image_url = image.url.to_string();
-    let thumbnail_url = None;
-    let mime_type = image.info.as_ref().and_then(|info| info.mimetype.clone());
-    let width = image.info.as_ref().and_then(|info| uint_to_i32(info.width));
-    let height = image
-        .info
-        .as_ref()
-        .and_then(|info| uint_to_i32(info.height));
-
-    Some(Sticker {
-        id: shortcode.clone(),
-        shortcode,
-        body,
-        image_url,
-        thumbnail_url,
-        mime_type,
-        width,
-        height,
-    })
-}
-
-fn room_image_pack_to_sticker_pack(
-    room: &matrix_sdk::Room,
-    state_key: String,
-    content: ruma::events::image_pack::RoomImagePackEventContent,
-) -> Option<StickerPack> {
-    let pack_allows_sticker = content
-        .pack
-        .as_ref()
-        .is_none_or(|pack| usage_allows_sticker(&pack.usage));
-    let mut stickers = content
-        .images
-        .into_iter()
-        .filter_map(|(shortcode, image)| {
-            pack_image_to_sticker(shortcode, image, pack_allows_sticker)
-        })
-        .collect::<Vec<_>>();
-    if stickers.is_empty() {
-        return None;
-    }
-    stickers.sort_by_key(|a| a.body.to_lowercase());
-
-    let title = content
-        .pack
-        .as_ref()
-        .and_then(|pack| pack.display_name.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            let trimmed = state_key.trim();
-            if trimmed.is_empty() {
-                room_display_name(room)
-            } else {
-                trimmed.to_string()
-            }
-        });
-    let avatar_url = content
-        .pack
-        .as_ref()
-        .and_then(|pack| pack.avatar_url.as_ref().map(ToString::to_string))
-        .or_else(|| room.avatar_url().map(|url| url.to_string()));
-    let normalized_state_key = if state_key.trim().is_empty() {
-        "default".to_string()
-    } else {
-        state_key
-    };
-
-    Some(StickerPack {
-        id: format!("room:{}:{normalized_state_key}", room.room_id()),
-        title,
-        avatar_url,
-        source: "room".to_string(),
-        stickers,
-    })
-}
-
-async fn load_room_sticker_packs(
-    room: &matrix_sdk::Room,
-    enabled_state_keys: Option<&std::collections::HashSet<String>>,
-) -> Result<Vec<StickerPack>, String> {
-    let room_pack_events = room
-        .get_state_events_static::<ruma::events::image_pack::RoomImagePackEventContent>()
-        .await
-        .map_err(|e| {
-            api_err(
-                "rooms",
-                format!(
-                    "Failed to load sticker packs for room {}: {e}",
-                    room.room_id()
-                ),
-            )
-        })?;
-
-    let mut packs = Vec::new();
-    for raw_pack in room_pack_events {
-        let Ok(pack_event) = raw_pack.deserialize() else {
-            continue;
-        };
-        let (state_key, content) = match pack_event {
-            matrix_sdk::deserialized_responses::SyncOrStrippedState::Sync(
-                matrix_sdk::ruma::events::SyncStateEvent::Original(event),
-            ) => (event.state_key, event.content),
-            _ => continue,
-        };
-
-        if let Some(enabled_state_keys) = enabled_state_keys {
-            if !enabled_state_keys.contains(state_key.as_str()) {
-                continue;
-            }
-        }
-
-        if let Some(pack) = room_image_pack_to_sticker_pack(room, state_key, content) {
-            packs.push(pack);
-        }
-    }
-
-    Ok(packs)
-}
-
-fn account_image_pack_to_sticker_pack(
-    content: ruma::events::image_pack::AccountImagePackEventContent,
-) -> Option<StickerPack> {
-    let pack_allows_sticker = content
-        .pack
-        .as_ref()
-        .is_none_or(|pack| usage_allows_sticker(&pack.usage));
-    let mut stickers = content
-        .images
-        .into_iter()
-        .filter_map(|(shortcode, image)| {
-            pack_image_to_sticker(shortcode, image, pack_allows_sticker)
-        })
-        .collect::<Vec<_>>();
-    if stickers.is_empty() {
-        return None;
-    }
-    stickers.sort_by_key(|a| a.body.to_lowercase());
-
-    let title = content
-        .pack
-        .as_ref()
-        .and_then(|pack| pack.display_name.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "我的贴纸".to_string());
-    let avatar_url = content
-        .pack
-        .as_ref()
-        .and_then(|pack| pack.avatar_url.as_ref().map(ToString::to_string));
-
-    Some(StickerPack {
-        id: "user:default".to_string(),
-        title,
-        avatar_url,
-        source: "user".to_string(),
-        stickers,
-    })
 }
 
 #[frb]
@@ -4299,8 +4130,8 @@ pub struct Reaction {
     pub key: String,
     /// User IDs that sent this reaction (excluding duplicates).
     pub senders: Vec<String>,
-    /// Event id of the reaction event the current user sent for this key, if
-    /// any. Used to toggle (redact) the user's own reaction.
+    /// Legacy cache field, retained for compatibility. SDK 0.19 snapshots
+    /// leave this unset; toggling uses the SDK timeline's reaction state.
     pub my_event_id: Option<String>,
 }
 
@@ -4645,7 +4476,7 @@ pub async fn create_client(
         *pending = None;
     }
 
-    let client = Client::builder()
+    let client = matrix_client_builder()?
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
@@ -5385,7 +5216,7 @@ pub async fn resume_session_with_password(
             search_index_key,
         )
     };
-    let client = Client::builder()
+    let client = matrix_client_builder()?
         .handle_refresh_tokens()
         .homeserver_url(&context.homeserver_url)
         .with_encryption_settings(encryption_settings())
@@ -5875,7 +5706,7 @@ pub async fn restore_session(
         )
     };
 
-    let client = Client::builder()
+    let client = matrix_client_builder()?
         .handle_refresh_tokens()
         .homeserver_url(url)
         .with_encryption_settings(encryption_settings())
@@ -7012,15 +6843,13 @@ async fn try_start_sliding_sync(
                     }
                     sub_state.active = Some(sliding_sync.clone());
                     sub_state.active_generation = Some(generation);
-                    for room_id in sub_state.desired.keys() {
-                        if let Ok(parsed) = matrix_sdk::ruma::RoomId::parse(room_id.as_str()) {
-                            sliding_sync.subscribe_to_rooms(
-                                &[&parsed],
-                                Some(live_room_subscription()),
-                                false,
-                            );
-                        }
-                    }
+                    let owned = desired_room_ids(&sub_state.desired);
+                    let refs = owned.iter().map(|id| id.as_ref()).collect::<Vec<_>>();
+                    sliding_sync.set_room_subscriptions(
+                        &refs,
+                        Some(live_room_subscription()),
+                        false,
+                    );
                     drop(sub_state);
 
                     let stream = sliding_sync.sync();
@@ -7469,7 +7298,8 @@ pub async fn subscribe_room_for_receipts(
     room_id: String,
     account_user_id: Option<String>,
 ) -> Result<String, String> {
-    let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
+    // Reject a malformed room id up front; the desired set is keyed by string.
+    matrix_sdk::ruma::RoomId::parse(room_id.as_str())
         .map_err(|e| api_err("sync", format!("无效的房间 ID: {e}")))?;
     let subscription_id = NEXT_ROOM_SUBSCRIPTION_ID
         .fetch_add(1, Ordering::Relaxed)
@@ -7484,7 +7314,9 @@ pub async fn subscribe_room_for_receipts(
     let first_subscriber = state.add_desired(&room_id, subscription_id.clone());
     if first_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
-            sliding_sync.subscribe_to_rooms(&[&parsed], Some(live_room_subscription()), true);
+            let owned = desired_room_ids(&state.desired);
+            let refs = owned.iter().map(|id| id.as_ref()).collect::<Vec<_>>();
+            sliding_sync.set_room_subscriptions(&refs, Some(live_room_subscription()), true);
         }
     }
     Ok(subscription_id)
@@ -7507,7 +7339,8 @@ pub async fn unsubscribe_room_for_receipts(
     subscription_id: String,
     account_user_id: Option<String>,
 ) -> Result<(), String> {
-    let parsed = matrix_sdk::ruma::RoomId::parse(room_id.clone())
+    // Reject a malformed room id up front; the desired set is keyed by string.
+    matrix_sdk::ruma::RoomId::parse(room_id.as_str())
         .map_err(|e| api_err("sync", format!("无效的房间 ID: {e}")))?;
     let (_subscription_user, mut state) = lock_subscription_state(
         &SUBSCRIPTION_USER,
@@ -7519,7 +7352,9 @@ pub async fn unsubscribe_room_for_receipts(
     let last_subscriber = state.remove_desired(&room_id, &subscription_id);
     if last_subscriber {
         if let Some(sliding_sync) = state.active.as_ref() {
-            sliding_sync.unsubscribe_to_rooms(&[&parsed], true);
+            let owned = desired_room_ids(&state.desired);
+            let refs = owned.iter().map(|id| id.as_ref()).collect::<Vec<_>>();
+            sliding_sync.set_room_subscriptions(&refs, Some(live_room_subscription()), true);
         }
     }
     Ok(())
@@ -8537,76 +8372,7 @@ pub async fn get_sticker_packs(room_id: String) -> Result<Vec<StickerPack>, Stri
         .get_room(&parsed_room_id)
         .ok_or_else(|| api_err("media", format!("房间不存在: {room_id}")))?;
 
-    let imported_room_packs = client
-        .account()
-        .account_data::<ruma::events::image_pack::ImagePackRoomsEventContent>()
-        .await
-        .map_err(|e| {
-            api_err(
-                "media",
-                format!("Failed to load image-pack room mapping: {e}"),
-            )
-        })?
-        .and_then(|raw| raw.deserialize().ok())
-        .map(|content| {
-            content
-                .rooms
-                .into_iter()
-                .map(|(source_room_id, packs)| {
-                    (
-                        source_room_id.to_string(),
-                        packs
-                            .keys()
-                            .map(|state_key| state_key.to_string())
-                            .collect::<std::collections::HashSet<_>>(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let mut packs = Vec::new();
-    let mut seen_pack_ids = std::collections::HashSet::new();
-
-    for pack in load_room_sticker_packs(&room, None).await? {
-        if seen_pack_ids.insert(pack.id.clone()) {
-            packs.push(pack);
-        }
-    }
-
-    for (source_room_id, enabled_state_keys) in imported_room_packs {
-        let parsed_source_room_id = match matrix_sdk::ruma::RoomId::parse(source_room_id.clone()) {
-            Ok(room_id) => room_id,
-            Err(_) => continue,
-        };
-        let Some(source_room) = client.get_room(&parsed_source_room_id) else {
-            continue;
-        };
-
-        for pack in load_room_sticker_packs(&source_room, Some(&enabled_state_keys)).await? {
-            if seen_pack_ids.insert(pack.id.clone()) {
-                packs.push(pack);
-            }
-        }
-    }
-
-    if let Some(user_pack_raw) = client
-        .account()
-        .account_data::<ruma::events::image_pack::AccountImagePackEventContent>()
-        .await
-        .map_err(|e| api_err("media", format!("Failed to load user sticker pack: {e}")))?
-    {
-        if let Ok(user_pack_content) = user_pack_raw.deserialize() {
-            if let Some(pack) = account_image_pack_to_sticker_pack(user_pack_content) {
-                if seen_pack_ids.insert(pack.id.clone()) {
-                    packs.push(pack);
-                }
-            }
-        }
-    }
-
-    packs.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-    Ok(packs)
+    sticker_packs::get_sticker_packs(&client, &room).await
 }
 
 fn build_mentions(
@@ -14139,7 +13905,7 @@ async fn search_messages_with_client(
             room_succeeded = true;
             let raw_exhausted = event_ids.len() < batch_size;
             raw_offset = raw_offset.saturating_add(event_ids.len());
-            for event_id in event_ids {
+            for (_score, event_id) in event_ids {
                 // Search hits come from the local EventCache-backed index. Read that
                 // cache first so offline or server-rejected /event requests don't
                 // discard otherwise valid matches.

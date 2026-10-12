@@ -1,20 +1,16 @@
 # Matter patches
 
-This directory vendors `matrix-sdk-search` 0.18.0 from crates.io. Keep the
-crate version unchanged so Cargo's `matrix-sdk` dependency resolves to this
-compatible implementation.
+This directory vendors `matrix-sdk-search` 0.19.1 from crates.io. Keep the
+crate version aligned with the exact pin in `rust/Cargo.toml` so Cargo uses
+this compatible implementation.
 
 Matter-specific changes:
 
 - Index message bodies with lowercase 1-3 character n-grams and query exact
   grams, providing fast CJK, Latin, and mixed-language substring search.
 - Order matching events by timestamp before applying pagination offsets.
-- Cache one manual-reload `IndexReader` per room, backported from upstream
-  `main`, to avoid a watcher thread per query.
-- Reconcile add-then-edit operations inside one uncommitted batch, also
-  backported from upstream.
-- Wait for Tantivy merge workers after both single and bulk writes.
-- Cap timestamps before Tantivy converts milliseconds to nanoseconds.
+- Wait for Tantivy merge workers after single writes (bulk writes do this
+  upstream).
 - Use portable SHA-256 room directory names for optional on-disk stores.
 - Harden the optional encrypted store: full-width authenticated IVs, exclusive
   key creation, decrypted file handles, and non-panicking writer cleanup.
@@ -32,6 +28,11 @@ Matter-specific changes:
   - `RoomIndex::execute`/`bulk_execute` run their blocking Tantivy work via
     `tokio::task::block_in_place` when called inside a Tokio runtime so async
     worker threads are not blocked.
+
+Upstream 0.19.1 now includes the cached manual-reload `IndexReader`,
+add-then-edit reconciliation within one uncommitted batch, bulk-write merge
+worker synchronization, and the timestamp cap before conversion to
+nanoseconds. These no longer require Matter patches.
 
 The application selects `SearchIndexStoreKind::EncryptedDirectory` with a
 random per-account passphrase kept in the platform Keychain/Keystore. Search

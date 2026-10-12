@@ -18,8 +18,8 @@ use matrix_sdk::{
     Client, Room,
 };
 use matrix_sdk_ui::timeline::{
-    EventTimelineItem, MembershipChange, MsgLikeKind, Profile, ReactionStatus, Timeline,
-    TimelineBuilder, TimelineDetails, TimelineEventFocusThreadMode, TimelineFocus, TimelineItem,
+    EventTimelineItem, MembershipChange, MsgLikeKind, Profile, Timeline, TimelineBuilder,
+    TimelineDetails, TimelineEventFocusThreadMode, TimelineFocus, TimelineItem,
     TimelineItemContent, TimelineReadReceiptTracking,
 };
 use once_cell::sync::Lazy;
@@ -220,7 +220,7 @@ pub(super) async fn toggle_reaction(
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(item) = timeline.item_by_event_id(&event_id).await {
-                let reactions = timeline_reactions(&item, my_user_id.as_deref());
+                let reactions = timeline_reactions(&item);
                 let has_reacted = reactions.iter().any(|reaction| {
                     reaction.key == key
                         && my_user_id
@@ -374,12 +374,14 @@ pub(super) async fn get_pinned_messages(room: &Room) -> Result<Vec<ChatMessage>,
         .map(|event_id| event_id.as_ref())
         .collect();
 
-    let (room_event_cache, _event_cache_drop_handles) = room
+    let (pinned_events_cache, _event_cache_drop_handles) = room
+        .client()
         .event_cache()
+        .pinned_events(room.room_id())
         .await
         .map_err(|error| api_err("pinned", format!("加载置顶消息失败: {error}")))?;
-    let (events, mut updates) = room_event_cache
-        .subscribe_to_pinned_events()
+    let (events, mut updates) = pinned_events_cache
+        .subscribe()
         .await
         .map_err(|error| api_err("pinned", format!("加载置顶消息失败: {error}")))?;
     let mut events: matrix_sdk_ui::eyeball_im::Vector<_> = events.into();
@@ -934,12 +936,12 @@ async fn convert_snapshot(room: &Room, items: &[Arc<TimelineItem>]) -> Vec<ChatM
                     let (unthreaded, main) = tokio::join!(
                         room.load_user_receipt(
                             EventReceiptType::Read,
-                            ReceiptThread::Unthreaded,
+                            &ReceiptThread::Unthreaded,
                             &user_id,
                         ),
                         room.load_user_receipt(
                             EventReceiptType::Read,
-                            ReceiptThread::Main,
+                            &ReceiptThread::Main,
                             &user_id,
                         ),
                     );
@@ -1226,7 +1228,7 @@ fn timeline_item_to_message(
         },
         _ => return None,
     };
-    message.reactions = timeline_reactions(item, my_user_id);
+    message.reactions = timeline_reactions(item);
     Some(message)
 }
 
@@ -1602,7 +1604,7 @@ fn original_message_body(item: &EventTimelineItem) -> Option<String> {
     Some(message.as_original()?.content.msgtype.body().to_owned())
 }
 
-fn timeline_reactions(item: &EventTimelineItem, my_user_id: Option<&str>) -> Vec<Reaction> {
+fn timeline_reactions(item: &EventTimelineItem) -> Vec<Reaction> {
     item.content()
         .reactions()
         .into_iter()
@@ -1610,12 +1612,9 @@ fn timeline_reactions(item: &EventTimelineItem, my_user_id: Option<&str>) -> Vec
         .map(|(key, by_sender)| Reaction {
             key: key.clone(),
             senders: by_sender.keys().map(ToString::to_string).collect(),
-            my_event_id: my_user_id
-                .and_then(|user_id| by_sender.get(user_id))
-                .and_then(|reaction| match &reaction.status {
-                    ReactionStatus::RemoteToRemote(event_id) => Some(event_id.to_string()),
-                    _ => None,
-                }),
+            // SDK 0.19 keeps reaction event IDs private; toggling is handled
+            // by Timeline::toggle_reaction, including unsent local echoes.
+            my_event_id: None,
         })
         .collect()
 }
