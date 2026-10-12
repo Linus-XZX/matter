@@ -1,12 +1,10 @@
 name: Flutter and Rust Tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
-  group: full-ci-${{ github.event.pull_request.number || github.ref }}
+  group: full-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -17,31 +15,16 @@ env:
 
 jobs:
   flutter-and-rust-tests:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Set up Flutter and bridge
+        uses: ./.github/actions/setup-flutter-bridge
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - name: Get Flutter dependencies
-        run: flutter pub get
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Generate Flutter Rust Bridge bindings
-        run: |
-          cargo install flutter_rust_bridge_codegen@2.13.0 cargo-expand
-          flutter_rust_bridge_codegen generate
+          rust-tests: 'true'
 
       - name: Analyze Dart code
         run: flutter analyze
@@ -53,10 +36,14 @@ jobs:
         run: cargo test --manifest-path rust/Cargo.toml --locked
 
       - name: Test vendored search crate
-        run: cargo test --manifest-path rust/vendor/matrix-sdk-search/Cargo.toml
+        run: >-
+          cargo test --manifest-path rust/vendor/matrix-sdk-search/Cargo.toml
+          --locked
 
       - name: Clippy application Rust crate
         run: cargo clippy --manifest-path rust/Cargo.toml --locked
 
       - name: Clippy vendored search crate
-        run: cargo clippy --manifest-path rust/vendor/matrix-sdk-search/Cargo.toml --locked
+        run: >-
+          cargo clippy --manifest-path rust/vendor/matrix-sdk-search/Cargo.toml
+          --locked

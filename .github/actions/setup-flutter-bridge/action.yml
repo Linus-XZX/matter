@@ -1,0 +1,121 @@
+name: Set up Flutter and bridge
+description: Prepare Flutter dependencies and generated bindings for CI.
+
+inputs:
+  flutter-version:
+    description: Flutter SDK version
+    required: true
+  rust-tests:
+    description: Prepare Rust tests and Clippy even when bindings are cached
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Restore Flutter SDK
+      id: flutter-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.tool_cache }}/flutter/${{ inputs.flutter-version }}
+        key: >-
+          flutter-sdk-v1-${{ runner.os }}-${{ runner.arch }}-${{
+            inputs.flutter-version }}
+
+    - name: Restore pub dependencies
+      id: pub-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.pub-cache
+        key: >-
+          flutter-pub-v1-${{ runner.os }}-${{ inputs.flutter-version }}-${{
+            hashFiles('pubspec.lock') }}
+        restore-keys: >-
+          flutter-pub-v1-${{ runner.os }}-${{ inputs.flutter-version }}-
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ inputs.flutter-version }}
+        channel: stable
+        cache: false
+        cache-path: >-
+          ${{ runner.tool_cache }}/flutter/${{ inputs.flutter-version }}
+
+    - name: Get Flutter dependencies
+      shell: bash
+      run: flutter pub get
+
+    # PRs restore the main branch's caches without uploading another SDK copy.
+    - name: Save Flutter SDK
+      if: >-
+        github.ref == 'refs/heads/main' &&
+        steps.flutter-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.tool_cache }}/flutter/${{ inputs.flutter-version }}
+        key: ${{ steps.flutter-cache.outputs.cache-primary-key }}
+
+    - name: Save pub dependencies
+      if: >-
+        github.ref == 'refs/heads/main' &&
+        steps.pub-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.pub-cache
+        key: ${{ steps.pub-cache.outputs.cache-primary-key }}
+
+    - name: Restore generated bridge bindings
+      id: bridge-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          lib/src/rust
+          rust/src/frb_generated.rs
+        key: >-
+          bridge-v2-${{ runner.os }}-${{ inputs.flutter-version }}-2.13.0-${{
+            hashFiles('rust/src/**/*.rs', '!rust/src/frb_generated.rs',
+              'rust/Cargo.toml', 'rust/Cargo.lock', 'rust/.cargo/config.toml',
+              'rust/vendor/**/*.rs', 'rust/vendor/**/Cargo.toml',
+              'rust/vendor/**/Cargo.lock', '!rust/vendor/**/target/**',
+              'lib/src/rust/api/**', 'flutter_rust_bridge.yaml',
+              'pubspec.lock') }}
+
+    - name: Set up Rust
+      if: >-
+        inputs.rust-tests == 'true' ||
+        steps.bridge-cache.outputs.cache-hit != 'true'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Cache Rust dependencies and build artifacts
+      if: >-
+        inputs.rust-tests == 'true' ||
+        steps.bridge-cache.outputs.cache-hit != 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          rust -> target
+          rust/vendor/matrix-sdk-search -> target
+        shared-key: ${{ inputs.rust-tests == 'true' && 'full-ci' || 'bridge' }}
+        cache-bin: false
+        save-if: >-
+          ${{ github.ref == 'refs/heads/main' || inputs.rust-tests == 'true' }}
+
+    - name: Install binary installer
+      if: steps.bridge-cache.outputs.cache-hit != 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-binstall
+
+    - name: Install prebuilt bridge tools
+      if: steps.bridge-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        cargo binstall flutter_rust_bridge_codegen@2.13.0 cargo-expand@1.0.127
+        --no-confirm --disable-strategies compile
+
+    - name: Generate bridge bindings
+      if: steps.bridge-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: flutter_rust_bridge_codegen generate
