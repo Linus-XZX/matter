@@ -6,81 +6,30 @@ import 'package:matter/widgets/app_avatar.dart';
 import '../helpers/neu_test_theme.dart';
 
 void main() {
-  group('AppAvatar', () {
-    testWidgets('shows a single-letter initial for one-word names', (
-      tester,
-    ) async {
+  testWidgets('avatar initials and size follow the supplied fallback', (
+    tester,
+  ) async {
+    for (final (fallback, initials, size) in [
+      ('Alice', 'A', 32.0),
+      ('Alice Smith', 'AS', 48.0),
+      ('Alice  Bob', 'AB', 64.0),
+      ('', '?', 32.0),
+    ]) {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
             theme: neuTestTheme(),
-            home: const Scaffold(body: AppAvatar(fallback: 'Alice')),
+            home: Scaffold(
+              body: AppAvatar(fallback: fallback, size: size),
+            ),
           ),
         ),
       );
       await tester.pump();
 
-      expect(find.text('A'), findsOneWidget);
-    });
-
-    testWidgets('shows two-letter initials for multi-word names', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: const Scaffold(body: AppAvatar(fallback: 'Alice Smith')),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('AS'), findsOneWidget);
-    });
-
-    testWidgets('collapses whitespace when building initials', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: const Scaffold(body: AppAvatar(fallback: 'Alice  Bob')),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('AB'), findsOneWidget);
+      expect(find.text(initials), findsOneWidget, reason: fallback);
+      expect(tester.getSize(find.byType(AppAvatar)), Size(size, size));
       expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('shows question mark for empty fallback', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: const Scaffold(body: AppAvatar(fallback: '')),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('?'), findsOneWidget);
-    });
-
-    testWidgets('renders at the requested size', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: const Scaffold(body: AppAvatar(fallback: 'A', size: 64)),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      final size = tester.getSize(find.byType(AppAvatar));
-      expect(size, const Size(64, 64));
-    });
+    }
   });
 }

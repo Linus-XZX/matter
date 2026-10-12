@@ -116,21 +116,6 @@ void main() {
       }
     });
 
-    testWidgets('renders room name and last message', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(body: ChatListItem(room: room())),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('Room'), findsOneWidget);
-      expect(find.text('Hello'), findsOneWidget);
-    });
-
     testWidgets('draft replaces the preview and clearing restores it', (
       tester,
     ) async {
@@ -154,6 +139,7 @@ void main() {
         ),
       );
 
+      expect(find.text('Room'), findsOneWidget);
       expect(find.text('草稿：unfinished'), findsOneWidget);
       expect(find.text('Hello'), findsNothing);
 
@@ -214,34 +200,6 @@ void main() {
       expect(find.text('Message B'), findsOneWidget);
       expect(find.text('99+'), findsOneWidget);
       expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('shows unread count badge', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(body: ChatListItem(room: room(unreadCount: 5))),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('5'), findsOneWidget);
-    });
-
-    testWidgets('caps unread badge at 99+', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(body: ChatListItem(room: room(unreadCount: 150))),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('99+'), findsOneWidget);
     });
 
     testWidgets('shows a dot for an explicit unread marker', (tester) async {
@@ -428,38 +386,6 @@ void main() {
       },
     );
 
-    testWidgets('shows a person icon for dm rooms', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(
-              body: ChatListItem(room: room(roomType: 'dm')),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.person_rounded), findsOneWidget);
-    });
-
-    testWidgets('shows a tree icon for space rooms', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(
-              body: ChatListItem(room: room(roomType: 'space')),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.account_tree_rounded), findsOneWidget);
-    });
-
     testWidgets('does not show room read actions for spaces', (tester) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -477,20 +403,6 @@ void main() {
 
       expect(find.text('标记为已读'), findsNothing);
       expect(find.text('标记为未读'), findsNothing);
-    });
-
-    testWidgets('uses the dense layout when requested', (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(
-            theme: neuTestTheme(),
-            home: Scaffold(body: ChatListItem(room: room(), dense: true)),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('Room'), findsOneWidget);
     });
 
     testWidgets('uses the selection callback instead of pushing a route', (

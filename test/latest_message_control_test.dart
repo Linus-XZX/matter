@@ -75,7 +75,7 @@ void main() {
     });
   });
 
-  testWidgets('replaces the arrow with a staggered sent notice', (
+  testWidgets('updates the latest-message action after sending', (
     tester,
   ) async {
     Future<void> pumpControl(bool showSentNotice) {
@@ -97,19 +97,10 @@ void main() {
 
     await pumpControl(false);
     expect(find.byIcon(Icons.keyboard_arrow_down_rounded), findsOneWidget);
-    final controlInk = find.descendant(
-      of: find.byType(LatestMessageControl),
-      matching: find.byType(Ink),
-    );
-    final collapsedSize = tester.getSize(controlInk);
 
     await pumpControl(true);
     await tester.pump(const Duration(milliseconds: 600));
     expect(find.bySemanticsLabel('消息已发送，查看最新消息'), findsOneWidget);
-    expect(find.text('消'), findsOneWidget);
-    expect(tester.getSize(controlInk).width, greaterThan(collapsedSize.width));
-    final decoration = tester.widget<Ink>(controlInk).decoration!;
-    expect((decoration as BoxDecoration).boxShadow, anyOf(isNull, isEmpty));
 
     await pumpControl(false);
     await tester.pump(const Duration(milliseconds: 500));

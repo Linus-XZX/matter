@@ -9,21 +9,19 @@ TextEditingValue _selected(String text, int start, int end) => TextEditingValue(
 
 void main() {
   group('toggleMarkdownWrap', () {
-    test('wraps a selection with the marker', () {
-      final result = toggleMarkdownWrap(_selected('hello world', 6, 11), '**');
-      expect(result.text, 'hello **world**');
-      expect(result.selection.baseOffset, 8);
-      expect(result.selection.extentOffset, 13);
-    });
-
-    test('removes markers sitting immediately outside the selection', () {
-      final result = toggleMarkdownWrap(
-        _selected('hello **world**', 8, 13),
-        '**',
-      );
-      expect(result.text, 'hello world');
-      expect(result.selection.baseOffset, 6);
-      expect(result.selection.extentOffset, 11);
+    test('wraps and unwraps selections with each supported marker', () {
+      for (final marker in ['**', '*', '~~', '||']) {
+        final result = toggleMarkdownWrap(
+          _selected('hello world', 6, 11),
+          marker,
+        );
+        expect(result.text, 'hello ${marker}world$marker', reason: marker);
+        expect(result.selection.baseOffset, 6 + marker.length);
+        expect(result.selection.extentOffset, 11 + marker.length);
+        final unwrapped = toggleMarkdownWrap(result, marker);
+        expect(unwrapped.text, 'hello world');
+        expect(unwrapped.selection, _selected('hello world', 6, 11).selection);
+      }
     });
 
     test('removes markers included in the selection itself', () {
@@ -54,26 +52,6 @@ void main() {
       expect(result.text, 'a **world** b');
       expect(result.selection.baseOffset, 4);
       expect(result.selection.extentOffset, 9);
-    });
-
-    test('italic marker wraps the selection', () {
-      final result = toggleMarkdownWrap(_selected('hello world', 6, 11), '*');
-      expect(result.text, 'hello *world*');
-    });
-
-    test('strikethrough marker wraps the selection', () {
-      final result = toggleMarkdownWrap(_selected('hello world', 6, 11), '~~');
-      expect(result.text, 'hello ~~world~~');
-    });
-
-    test('spoiler marker wraps and unwraps the selection', () {
-      final wrapped = toggleMarkdownWrap(_selected('hello world', 6, 11), '||');
-      expect(wrapped.text, 'hello ||world||');
-      final unwrapped = toggleMarkdownWrap(
-        _selected(wrapped.text, 8, 13),
-        '||',
-      );
-      expect(unwrapped.text, 'hello world');
     });
 
     test('selection covering only whitespace is left unchanged', () {
@@ -191,11 +169,21 @@ void main() {
   });
 
   group('markdownWrapActive', () {
-    test('is active for a selection inside the markers', () {
-      expect(
-        markdownWrapActive(_selected('hello **world**', 8, 13), '**'),
-        isTrue,
-      );
+    test('is active inside each supported marker', () {
+      for (final marker in ['**', '*', '~~', '||']) {
+        expect(
+          markdownWrapActive(
+            _selected(
+              '${marker}world$marker',
+              marker.length,
+              5 + marker.length,
+            ),
+            marker,
+          ),
+          isTrue,
+          reason: marker,
+        );
+      }
     });
 
     test('is active for a selection that includes the markers', () {
@@ -222,14 +210,6 @@ void main() {
 
     test('italic is inactive inside bold markers (pressing would stack)', () {
       expect(markdownWrapActive(_selected('**bold**', 2, 6), '*'), isFalse);
-    });
-
-    test('italic is active inside italic markers', () {
-      expect(markdownWrapActive(_selected('*italic*', 1, 7), '*'), isTrue);
-    });
-
-    test('spoiler is active inside spoiler markers', () {
-      expect(markdownWrapActive(_selected('||hide||', 2, 6), '||'), isTrue);
     });
 
     test('is active for a partial selection inside formatted text', () {
@@ -284,21 +264,6 @@ void main() {
       return state;
     }
 
-    testWidgets('appends format buttons for an editable selection', (
-      tester,
-    ) async {
-      final controller = TextEditingController(text: 'hello world');
-      addTearDown(controller.dispose);
-      await showToolbar(
-        tester,
-        controller,
-        const TextSelection(baseOffset: 0, extentOffset: 5),
-      );
-      for (final format in markdownToolbarFormats) {
-        expect(find.text(format.label), findsOneWidget);
-      }
-    });
-
     testWidgets('omits format buttons when the field is read-only', (
       tester,
     ) async {
@@ -315,7 +280,9 @@ void main() {
       }
     });
 
-    testWidgets('format button wraps the selected text', (tester) async {
+    testWidgets('format buttons are available and wrap the selected text', (
+      tester,
+    ) async {
       final controller = TextEditingController(text: 'hello world');
       addTearDown(controller.dispose);
       await showToolbar(
@@ -323,6 +290,9 @@ void main() {
         controller,
         const TextSelection(baseOffset: 6, extentOffset: 11),
       );
+      for (final format in markdownToolbarFormats) {
+        expect(find.text(format.label), findsOneWidget);
+      }
       await tester.tap(find.text('加粗'));
       await tester.pumpAndSettle();
       expect(controller.text, 'hello **world**');
