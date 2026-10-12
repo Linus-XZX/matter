@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart' as material_ui;
 import 'package:pro_image_editor/pro_image_editor.dart';
 
 import '../../theme/neu_colors.dart';
@@ -29,9 +30,14 @@ class ChatImageEditorPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
-    final editorTheme = Theme.of(context).copyWith(
+    // pro_image_editor 14 renders with the decoupled `material_ui` package,
+    // whose ThemeData is not interchangeable with the SDK one.
+    final editorTheme = material_ui.ThemeData(
+      brightness: Theme.of(context).brightness,
       scaffoldBackgroundColor: colors.base,
-      colorScheme: Theme.of(context).colorScheme.copyWith(
+      colorScheme: material_ui.ColorScheme.fromSeed(
+        seedColor: colors.accent,
+        brightness: Theme.of(context).brightness,
         primary: colors.accent,
         secondary: colors.accent,
         surface: colors.surface,

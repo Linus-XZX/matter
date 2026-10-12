@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart' as material_ui;
 import 'package:pro_image_editor/pro_image_editor.dart';
 
 import '../../theme/neu_colors.dart';
@@ -15,9 +16,14 @@ class AvatarCropEditorPage extends StatelessWidget {
     final colors = context.neu;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final overlayIconBrightness = dark ? Brightness.light : Brightness.dark;
-    final editorTheme = Theme.of(context).copyWith(
+    // pro_image_editor 14 renders with the decoupled `material_ui` package,
+    // whose ThemeData is not interchangeable with the SDK one.
+    final editorTheme = material_ui.ThemeData(
+      brightness: Theme.of(context).brightness,
       scaffoldBackgroundColor: colors.base,
-      colorScheme: Theme.of(context).colorScheme.copyWith(
+      colorScheme: material_ui.ColorScheme.fromSeed(
+        seedColor: colors.accent,
+        brightness: Theme.of(context).brightness,
         primary: colors.accent,
         surface: colors.surfaceStrong,
         onSurface: colors.text,
