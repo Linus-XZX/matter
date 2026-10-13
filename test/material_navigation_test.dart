@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/app.dart';
+import 'package:matter/pages/settings/material_color_settings_page.dart';
+import 'package:matter/providers/material_color_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/theme_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
@@ -27,12 +29,15 @@ class _ThemeHarness extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final style = ref.watch(appThemeStyleProvider);
+    final colors = style.isMaterial
+        ? ref.watch(materialColorSchemesProvider)
+        : null;
     return MaterialApp(
       theme: style.isMaterial
-          ? buildMaterialTheme(Brightness.light)
+          ? buildMaterialTheme(Brightness.light, colorScheme: colors!.light)
           : buildNeuTheme(NeuColors.light, Brightness.light),
       darkTheme: style.isMaterial
-          ? buildMaterialTheme(Brightness.dark)
+          ? buildMaterialTheme(Brightness.dark, colorScheme: colors!.dark)
           : buildNeuTheme(NeuColors.dark, Brightness.dark),
       themeMode: style.themeMode,
       home: const MatterApp(),
@@ -119,6 +124,11 @@ void main() {
         }
         expect(find.text('消息头像吸附'), findsOneWidget);
         expect(find.text('消息气泡阴影'), findsNothing);
+        await tester.tap(find.text('Material 配色'));
+        await tester.pumpAndSettle();
+        expect(find.byType(MaterialColorSettingsPage), findsOneWidget);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('主题'));
         await tester.pumpAndSettle();
         expect(find.text('Material · 跟随系统'), findsOneWidget);
@@ -126,6 +136,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(container.read(appThemeStyleProvider), AppThemeStyle.neuSystem);
         expect(find.byType(NavigationBar), findsNothing);
+        expect(find.text('Material 配色'), findsNothing);
         await tester.tap(find.text('主题'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Material · 深色'));

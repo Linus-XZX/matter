@@ -28,6 +28,7 @@ import '../login/login_page.dart';
 import 'encryption_page.dart';
 import 'blur_settings_page.dart';
 import 'log_viewer_page.dart';
+import 'material_color_settings_page.dart';
 import 'notification_settings_page.dart';
 import 'profile_edit_page.dart';
 
@@ -740,6 +741,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           ),
                           onTap: _showThemeStylePicker,
                         ),
+                        if (context.isMaterial)
+                          _SettingItem(
+                            icon: Icons.palette_outlined,
+                            title: 'Material 配色',
+                            subtitle: '系统取色 · 主题色 · 浅色与深色背景',
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) =>
+                                    const MaterialColorSettingsPage(),
+                              ),
+                            ),
+                          ),
                         _SettingItem(
                           icon: Icons.notifications_rounded,
                           title: '通知',

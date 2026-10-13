@@ -19,6 +19,7 @@ import 'pages/chat/chat_detail_page.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/chat_visual_settings_provider.dart';
+import 'providers/material_color_provider.dart';
 import 'providers/mutable_state.dart';
 import 'providers/theme_provider.dart';
 import 'src/rust/api/matrix.dart' as rust;
@@ -139,7 +140,8 @@ class _AppRoot extends ConsumerStatefulWidget {
   ConsumerState<_AppRoot> createState() => _AppRootState();
 }
 
-class _AppRootState extends ConsumerState<_AppRoot> {
+class _AppRootState extends ConsumerState<_AppRoot>
+    with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
   bool _credentialCompatibilityDialogShown = false;
   CurrentUser? _reloginUser;
@@ -153,11 +155,27 @@ class _AppRootState extends ConsumerState<_AppRoot> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.hasSessions) {
       _restoring = true;
       _restoreSessionsInBackground();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _runStartupPrompts());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        ref.read(appThemeStyleProvider).isMaterial &&
+        ref.read(materialColorSettingsProvider).followSystem) {
+      ref.invalidate(systemMaterialColorsProvider);
+    }
   }
 
   Future<void> _runStartupPrompts() async {
@@ -333,14 +351,20 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     final showMainApp = isLoggedIn || _restoring;
     if (isLoggedIn) _resumeSession = false;
     final themeStyle = ref.watch(appThemeStyleProvider);
-    _syncSystemOverlayStyle(themeStyle);
+    final materialColors = themeStyle.isMaterial
+        ? ref.watch(materialColorSchemesProvider)
+        : null;
 
     final theme = themeStyle.isMaterial
-        ? buildMaterialTheme(Brightness.light)
+        ? buildMaterialTheme(
+            Brightness.light,
+            colorScheme: materialColors!.light,
+          )
         : buildNeuTheme(NeuColors.light, Brightness.light);
     final darkTheme = themeStyle.isMaterial
-        ? buildMaterialTheme(Brightness.dark)
+        ? buildMaterialTheme(Brightness.dark, colorScheme: materialColors!.dark)
         : buildNeuTheme(NeuColors.dark, Brightness.dark);
+    _syncSystemOverlayStyle(themeStyle, theme, darkTheme);
     final themeMode = themeStyle.themeMode;
 
     return MaterialApp(
@@ -382,26 +406,28 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     );
   }
 
-  (AppThemeStyle, Brightness)? _lastOverlayStyle;
+  (AppThemeStyle, Brightness, Color)? _lastOverlayStyle;
 
-  /// 状态栏/导航栏图标亮度跟随主题明暗（启动时 main() 里先按系统明暗设一次）。
-  void _syncSystemOverlayStyle(AppThemeStyle style) {
+  /// 状态栏/导航栏图标亮度跟随主题明暗，底色跟随当前配色。
+  void _syncSystemOverlayStyle(
+    AppThemeStyle style,
+    ThemeData theme,
+    ThemeData darkTheme,
+  ) {
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
-    final overlayStyle = (style, platformBrightness);
+    final isDark = switch (style.themeMode) {
+      ThemeMode.dark => true,
+      ThemeMode.light => false,
+      ThemeMode.system => platformBrightness == Brightness.dark,
+    };
+    final navColor = style.isMaterial
+        ? (isDark ? darkTheme : theme).colorScheme.surface
+        : (isDark ? NeuColors.dark.base : NeuColors.light.base);
+    final overlayStyle = (style, platformBrightness, navColor);
     if (_lastOverlayStyle == overlayStyle) return;
     _lastOverlayStyle = overlayStyle;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final isDark = switch (style.themeMode) {
-        ThemeMode.dark => true,
-        ThemeMode.light => false,
-        ThemeMode.system => platformBrightness == Brightness.dark,
-      };
-      final navColor = style.isMaterial
-          ? buildMaterialTheme(isDark ? Brightness.dark : Brightness.light)
-                .colorScheme
-                .surface
-          : (isDark ? NeuColors.dark.base : NeuColors.light.base);
       SystemChrome.setSystemUIOverlayStyle(
         SystemUiOverlayStyle(
           statusBarColor: Colors.transparent,
