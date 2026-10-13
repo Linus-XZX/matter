@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,62 +8,16 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/message_ordering.dart';
 import '../../src/rust/api/matrix.dart' as rust;
+import '../../theme/neu_colors.dart';
 import 'file_download_saver.dart';
 import 'file_message_bubble.dart' show sanitizeAttachmentFilename;
 import 'forward_message_sheet.dart';
 import 'image_loading_policy.dart';
 import 'image_media.dart';
+import 'image_viewer_media.dart';
 import 'image_zoom_frame.dart';
 
-typedef ImageHistoryLoader =
-    Future<({List<rust.ChatMessage> messages, bool hasMore})> Function();
-
-class ImageViewerSource {
-  final Object heroTag;
-  final rust.ChatMessage? message;
-  final String? imageUrl;
-  final String? mediaSourceJson;
-  final String? previewUrl;
-  final Uint8List? imageBytes;
-  final int? width;
-  final int? height;
-  final int? fileSize;
-  final String? mimeType;
-  final String? filename;
-
-  const ImageViewerSource({
-    required this.heroTag,
-    this.message,
-    this.imageUrl,
-    this.mediaSourceJson,
-    this.previewUrl,
-    this.imageBytes,
-    this.width,
-    this.height,
-    this.fileSize,
-    this.mimeType,
-    this.filename,
-  });
-
-  factory ImageViewerSource.fromMessage(rust.ChatMessage message) =>
-      ImageViewerSource(
-        heroTag: 'image-preview:${message.id}',
-        message: message,
-        imageUrl: message.imageUrl,
-        mediaSourceJson: message.mediaSourceJson,
-        width: message.imageWidth,
-        height: message.imageHeight,
-        fileSize: message.fileSize,
-        mimeType: message.mimeType,
-        filename: message.filename ?? message.content,
-      );
-
-  String get id => message?.id ?? heroTag.toString();
-  double get aspectRatio =>
-      width != null && height != null && width! > 0 && height! > 0
-      ? width! / height!
-      : 1;
-}
+export 'image_viewer_media.dart' show ImageHistoryLoader, ImageViewerSource;
 
 class ChatImageViewer extends ConsumerStatefulWidget {
   final ImageViewerSource initialSource;
@@ -71,6 +25,7 @@ class ChatImageViewer extends ConsumerStatefulWidget {
   final Animation<double> animation;
   final String? roomId;
   final ValueChanged<String>? onMessageJumpRequested;
+  final ValueChanged<rust.ChatMessage>? onMessageReplyRequested;
   final ValueChanged<rust.ChatRoom>? onMessageForwarded;
   final ImageHistoryLoader? loadOlderImages;
 
@@ -81,6 +36,7 @@ class ChatImageViewer extends ConsumerStatefulWidget {
     this.messages = const [],
     this.roomId,
     this.onMessageJumpRequested,
+    this.onMessageReplyRequested,
     this.onMessageForwarded,
     this.loadOlderImages,
   });
@@ -97,6 +53,20 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
   bool _zoomed = false;
   bool _loadingOlder = false;
   late bool _hasMore;
+  final _mediaById = <String, ImageViewerMedia>{};
+  final _downloading = <String>{};
+  final _forwarding = <String>{};
+  ImageViewerMedia? _menuMedia;
+
+  ImageViewerMedia _mediaFor(ImageViewerSource source) =>
+      _mediaById.putIfAbsent(source.id, () => ImageViewerMedia(source, ref));
+
+  void _releaseMedia(ImageViewerMedia media) {
+    if (identical(_mediaById[media.source.id], media)) {
+      _mediaById.remove(media.source.id);
+    }
+    media.dispose();
+  }
 
   List<ImageViewerSource> _imageSources(Iterable<rust.ChatMessage> messages) {
     final images =
@@ -135,6 +105,10 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
   @override
   void dispose() {
     _pages.dispose();
+    for (final media in _mediaById.values) {
+      media.dispose();
+    }
+    _mediaById.clear();
     super.dispose();
   }
 
@@ -169,9 +143,9 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
         _index = nextIndex;
         _hasMore = history.hasMore;
       });
-      _pages.jumpToPage(nextIndex);
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
+      _pages.jumpToPage(nextIndex);
       if (nextIndex > 0) {
         await _pages.previousPage(
           duration: const Duration(milliseconds: 220),
@@ -187,14 +161,228 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
     }
   }
 
+  Future<void> _download(ImageViewerMedia media) async {
+    final source = media.source;
+    if (_downloading.contains(source.id)) return;
+    setState(() => _downloading.add(source.id));
+    final account = ref.read(activeUserIdProvider);
+    try {
+      final bytes =
+          media.bytes ??
+          (source.mediaSourceJson != null
+              ? await rust.downloadMediaSourceBytes(
+                  mediaSourceJson: source.mediaSourceJson!,
+                  maxSizeBytes: 128 * 1024 * 1024,
+                )
+              : source.imageUrl != null
+              ? await rust.downloadMediaBytes(mxcUrl: source.imageUrl!)
+              : null);
+      if (!mounted || ref.read(activeUserIdProvider) != account) return;
+      if (bytes == null || bytes.isEmpty) throw StateError('图片不可用');
+      final filename = sanitizeAttachmentFilename(
+        source.filename ?? 'image.png',
+      );
+      final saved = await saveDownloadedFile(filename: filename, bytes: bytes);
+      if (mounted && saved) _notify('图片已保存');
+    } catch (error) {
+      if (mounted) _notify('下载失败: $error');
+    } finally {
+      if (mounted) setState(() => _downloading.remove(source.id));
+    }
+  }
+
+  Future<void> _forward(ImageViewerMedia media) async {
+    final source = media.source;
+    if (_forwarding.contains(source.id)) return;
+    setState(() => _forwarding.add(source.id));
+    try {
+      final room = await showForwardMessageSheet(
+        context: context,
+        sourceRoomId: widget.roomId!,
+        message: source.message!,
+      );
+      if (mounted && room != null) {
+        _notify('已转发到 ${room.name}');
+        widget.onMessageForwarded?.call(room);
+      }
+    } finally {
+      if (mounted) setState(() => _forwarding.remove(source.id));
+    }
+  }
+
+  void _jump(ImageViewerMedia media) {
+    Navigator.of(context).pop();
+    widget.onMessageJumpRequested?.call(media.source.id);
+  }
+
+  void _reply(ImageViewerMedia media) {
+    Navigator.of(context).pop();
+    widget.onMessageReplyRequested?.call(media.source.message!);
+  }
+
   void _notify(String text) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+
+  Widget _buildToolbar(BuildContext context, ImageViewerMedia media) {
+    final colors = context.neu;
+    final source = media.source;
+    final busy =
+        media.original == OriginalImageState.resolving ||
+        media.original == OriginalImageState.loading;
+    final label = switch (media.original) {
+      OriginalImageState.thumbnail => '原图',
+      OriginalImageState.resolving || OriginalImageState.loading => '加载',
+      OriginalImageState.loaded => '高清',
+      OriginalImageState.failed => '重试',
+    };
+    final originalTooltip = switch (media.original) {
+      OriginalImageState.thumbnail => '查看原图',
+      OriginalImageState.resolving || OriginalImageState.loading => '正在加载原图',
+      OriginalImageState.loaded => '已加载原图',
+      OriginalImageState.failed => '原图加载失败，点击重试',
+    };
+    final showOriginal =
+        source.imageUrl?.startsWith('mxc://') == true &&
+        !shouldAutoLoadOriginal(
+          fileSize: source.fileSize,
+          mimeType: source.mimeType,
+          filename: source.filename,
+        );
+    final canForward =
+        widget.roomId != null &&
+        source.message != null &&
+        !isLocalOutgoingMessage(source.id);
+    final canJump =
+        widget.onMessageJumpRequested != null && source.message != null;
+    final canReply =
+        widget.onMessageReplyRequested != null &&
+        source.message != null &&
+        !isLocalOutgoingMessage(source.id);
+    return AppBar(
+      backgroundColor: colors.base.withValues(alpha: 1),
+      foregroundColor: colors.text,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      leading: IconButton(
+        tooltip: '关闭',
+        onPressed: () => Navigator.of(context).pop(),
+        icon: const Icon(CupertinoIcons.chevron_back, size: 22),
+      ),
+      actions: [
+        if (showOriginal)
+          Tooltip(
+            message: originalTooltip,
+            child: SizedBox(
+              width: 56,
+              height: 48,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  foregroundColor: media.original == OriginalImageState.failed
+                      ? colors.error
+                      : colors.text,
+                  disabledForegroundColor: colors.textSecondary,
+                ),
+                onPressed: busy || media.original == OriginalImageState.loaded
+                    ? null
+                    : media.loadOriginal,
+                child: busy
+                    ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          color: colors.text,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : Text(label),
+              ),
+            ),
+          ),
+        IconButton(
+          tooltip: '下载',
+          onPressed: _downloading.contains(source.id)
+              ? null
+              : () => _download(media),
+          icon: _downloading.contains(source.id)
+              ? SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    color: colors.text,
+                    strokeWidth: 2,
+                  ),
+                )
+              : const Icon(CupertinoIcons.arrow_down_to_line, size: 22),
+        ),
+        if (canReply || canForward || canJump || _menuMedia != null)
+          PopupMenuButton<_ViewerAction>(
+            key: const ValueKey('image-viewer-more'),
+            tooltip: '更多操作',
+            icon: const Icon(CupertinoIcons.ellipsis, size: 22),
+            onOpened: () => _menuMedia = media,
+            onCanceled: () => setState(() => _menuMedia = null),
+            onSelected: (action) {
+              final target = _menuMedia ?? media;
+              setState(() => _menuMedia = null);
+              switch (action) {
+                case _ViewerAction.reply:
+                  _reply(target);
+                case _ViewerAction.forward:
+                  unawaited(_forward(target));
+                case _ViewerAction.jump:
+                  _jump(target);
+              }
+            },
+            itemBuilder: (context) => [
+              if (canReply)
+                const PopupMenuItem(
+                  value: _ViewerAction.reply,
+                  child: Row(
+                    children: [
+                      Icon(CupertinoIcons.arrowshape_turn_up_left, size: 20),
+                      SizedBox(width: 12),
+                      Text('回复'),
+                    ],
+                  ),
+                ),
+              if (canForward)
+                PopupMenuItem(
+                  value: _ViewerAction.forward,
+                  enabled: !_forwarding.contains(source.id),
+                  child: const Row(
+                    children: [
+                      Icon(CupertinoIcons.arrowshape_turn_up_right, size: 20),
+                      SizedBox(width: 12),
+                      Text('转发'),
+                    ],
+                  ),
+                ),
+              if (canJump)
+                const PopupMenuItem(
+                  value: _ViewerAction.jump,
+                  child: Row(
+                    children: [
+                      Icon(CupertinoIcons.chat_bubble_text, size: 20),
+                      SizedBox(width: 12),
+                      Text('转到消息'),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     ref.listen(activeUserIdProvider, (_, next) {
       if (next != _account) Navigator.of(context).pop();
     });
+    final media = _mediaFor(_sources[_index]);
+    final toolbarHeight = MediaQuery.paddingOf(context).top + kToolbarHeight;
     return AnimatedBuilder(
       animation: widget.animation,
       builder: (context, _) => Scaffold(
@@ -203,49 +391,64 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
         ),
         body: Stack(
           children: [
-            DismissibleImageGallery(
-              enabled: !_zoomed,
-              onClose: () => Navigator.of(context).pop(),
-              child: NotificationListener<OverscrollNotification>(
-                onNotification: (notification) {
-                  if (notification.overscroll < -10 &&
-                      notification.dragDetails != null &&
-                      _index == 0 &&
-                      _hasMore) {
-                    unawaited(_previous());
-                  }
-                  return false;
-                },
-                child: PageView.builder(
-                  controller: _pages,
-                  physics: _zoomed
-                      ? const NeverScrollableScrollPhysics()
-                      : const PageScrollPhysics(),
-                  itemCount: _sources.length,
-                  findChildIndexCallback: (key) {
-                    final index = _sources.indexWhere(
-                      (source) => ValueKey(source.id) == key,
-                    );
-                    return index < 0 ? null : index;
+            Positioned.fill(
+              top: toolbarHeight,
+              child: DismissibleImageGallery(
+                enabled: !_zoomed,
+                onClose: () => Navigator.of(context).pop(),
+                child: NotificationListener<OverscrollNotification>(
+                  onNotification: (notification) {
+                    if (notification.overscroll < -10 &&
+                        notification.dragDetails != null &&
+                        _index == 0 &&
+                        _hasMore) {
+                      unawaited(_previous());
+                    }
+                    return false;
                   },
-                  onPageChanged: (index) => setState(() {
-                    _index = index;
-                    _zoomed = false;
-                  }),
-                  itemBuilder: (context, index) => _ImageViewerPage(
-                    key: ValueKey(_sources[index].id),
-                    source: _sources[index],
-                    roomId: widget.roomId,
-                    active: index == _index,
-                    onZoomChanged: (zoomed) {
-                      if (index == _index && _zoomed != zoomed) {
-                        setState(() => _zoomed = zoomed);
-                      }
+                  child: PageView.builder(
+                    controller: _pages,
+                    physics: _zoomed
+                        ? const NeverScrollableScrollPhysics()
+                        : const PageScrollPhysics(),
+                    itemCount: _sources.length,
+                    findChildIndexCallback: (key) {
+                      final index = _sources.indexWhere(
+                        (source) => ValueKey(source.id) == key,
+                      );
+                      return index < 0 ? null : index;
                     },
-                    onMessageJumpRequested: widget.onMessageJumpRequested,
-                    onMessageForwarded: widget.onMessageForwarded,
+                    onPageChanged: (index) => setState(() {
+                      _index = index;
+                      _zoomed = false;
+                    }),
+                    itemBuilder: (context, index) {
+                      final pageMedia = _mediaFor(_sources[index]);
+                      return _ImageViewerPage(
+                        key: ValueKey(_sources[index].id),
+                        media: pageMedia,
+                        active: index == _index,
+                        onDispose: () => _releaseMedia(pageMedia),
+                        onZoomChanged: (zoomed) {
+                          if (index == _index && _zoomed != zoomed) {
+                            setState(() => _zoomed = zoomed);
+                          }
+                        },
+                      );
+                    },
                   ),
                 ),
+              ),
+            ),
+            Positioned(
+              key: const ValueKey('image-viewer-toolbar'),
+              top: 0,
+              left: 0,
+              right: 0,
+              height: toolbarHeight,
+              child: ListenableBuilder(
+                listenable: media,
+                builder: (context, _) => _buildToolbar(context, media),
               ),
             ),
             Positioned(
@@ -271,8 +474,9 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
                             ),
                           )
                         : const Icon(
-                            Icons.chevron_left_rounded,
+                            CupertinoIcons.chevron_left,
                             color: Colors.white,
+                            size: 22,
                           ),
                   ),
                   Text(
@@ -288,8 +492,9 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
                           )
                         : null,
                     icon: const Icon(
-                      Icons.chevron_right_rounded,
+                      CupertinoIcons.chevron_right,
                       color: Colors.white,
+                      size: 22,
                     ),
                   ),
                 ],
@@ -302,333 +507,100 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
   }
 }
 
-enum _OriginalState { thumbnail, resolving, loading, loaded, failed }
+enum _ViewerAction { reply, forward, jump }
 
-class _ImageViewerPage extends ConsumerStatefulWidget {
-  final ImageViewerSource source;
-  final String? roomId;
+class _ImageViewerPage extends StatefulWidget {
+  final ImageViewerMedia media;
   final bool active;
   final ValueChanged<bool> onZoomChanged;
-  final ValueChanged<String>? onMessageJumpRequested;
-  final ValueChanged<rust.ChatRoom>? onMessageForwarded;
+  final VoidCallback onDispose;
 
   const _ImageViewerPage({
     super.key,
-    required this.source,
-    required this.roomId,
+    required this.media,
     required this.active,
     required this.onZoomChanged,
-    this.onMessageJumpRequested,
-    this.onMessageForwarded,
+    required this.onDispose,
   });
 
   @override
-  ConsumerState<_ImageViewerPage> createState() => _ImageViewerPageState();
+  State<_ImageViewerPage> createState() => _ImageViewerPageState();
 }
 
-class _ImageViewerPageState extends ConsumerState<_ImageViewerPage> {
-  late String? _url;
-  late Uint8List? _bytes;
-  _OriginalState _original = _OriginalState.thumbnail;
-  bool _downloading = false;
-  bool _forwarding = false;
-  bool _resolveFailed = false;
+class _ImageViewerPageState extends State<_ImageViewerPage> {
+  @override
+  void dispose() {
+    widget.onDispose();
+    super.dispose();
+  }
 
   @override
-  void initState() {
-    super.initState();
-    _url = widget.source.previewUrl;
-    _bytes = widget.source.imageBytes;
-    _resolveImage();
-  }
-
-  Future<void> _resolveImage() async {
-    final source = widget.source;
-    _resolveFailed = false;
-    if (_bytes != null) {
-      _original = _OriginalState.loaded;
-      return;
-    }
-    if (source.imageUrl == null && source.mediaSourceJson != null) {
-      setState(() => _original = _OriginalState.resolving);
-      try {
-        final bytes = await rust.downloadMediaSourceBytes(
-          mediaSourceJson: source.mediaSourceJson!,
-          maxSizeBytes: 64 * 1024 * 1024,
-        );
-        if (!mounted) return;
-        setState(() {
-          _bytes = bytes;
-          _original = _OriginalState.loading;
-        });
-      } catch (_) {
-        if (mounted) setState(() => _original = _OriginalState.failed);
-      }
-      return;
-    }
-    final rawUrl = source.imageUrl;
-    if (rawUrl == null) return;
-    if (!rawUrl.startsWith('mxc://')) {
-      setState(() {
-        _url = rawUrl;
-        _original = _OriginalState.loading;
-      });
-      return;
-    }
-    if (cachedOriginalMxcUrl(ref, rawUrl) != null ||
-        shouldAutoLoadOriginal(
-          fileSize: source.fileSize,
-          mimeType: source.mimeType,
-          filename: source.filename,
-        )) {
-      await _loadOriginal();
-      return;
-    }
-    if (source.previewUrl != null) return;
-    final url = await resolveMxcUrl(
-      ref,
-      rawUrl,
-      width: 1600,
-      height: 1200,
-      useOriginalIfCached: true,
-    );
-    if (!mounted) return;
-    setState(() {
-      _url = cachedOriginalMxcUrl(ref, rawUrl) ?? source.previewUrl ?? url;
-      _resolveFailed = _url == null;
-      if (cachedOriginalMxcUrl(ref, rawUrl) != null) {
-        _original = _OriginalState.loading;
-      }
-    });
-  }
-
-  Future<void> _loadOriginal() async {
-    if (_original == _OriginalState.resolving ||
-        _original == _OriginalState.loading ||
-        _original == _OriginalState.loaded) {
-      return;
-    }
-    setState(() => _original = _OriginalState.resolving);
-    final url = await resolveMxcUrlFull(ref, widget.source.imageUrl);
-    if (!mounted) return;
-    setState(() {
-      if (url == null || url.isEmpty) {
-        _original = _OriginalState.failed;
-      } else {
-        _url = url;
-        _original = _OriginalState.loading;
-      }
-    });
-  }
-
-  Future<void> _download() async {
-    if (_downloading) return;
-    setState(() => _downloading = true);
-    final account = ref.read(activeUserIdProvider);
-    try {
-      final source = widget.source;
-      final bytes =
-          _bytes ??
-          (source.mediaSourceJson != null
-              ? await rust.downloadMediaSourceBytes(
-                  mediaSourceJson: source.mediaSourceJson!,
-                  maxSizeBytes: 128 * 1024 * 1024,
-                )
-              : source.imageUrl != null
-              ? await rust.downloadMediaBytes(mxcUrl: source.imageUrl!)
-              : null);
-      if (!mounted || ref.read(activeUserIdProvider) != account) return;
-      if (bytes == null || bytes.isEmpty) throw StateError('图片不可用');
-      final filename = sanitizeAttachmentFilename(
-        source.filename ?? 'image.png',
-      );
-      final saved = await saveDownloadedFile(filename: filename, bytes: bytes);
-      if (mounted && saved) _notify('图片已保存');
-    } catch (error) {
-      if (mounted) _notify('下载失败: $error');
-    } finally {
-      if (mounted) setState(() => _downloading = false);
-    }
-  }
-
-  Future<void> _forward() async {
-    if (_forwarding) return;
-    setState(() => _forwarding = true);
-    try {
-      final room = await showForwardMessageSheet(
-        context: context,
-        sourceRoomId: widget.roomId!,
-        message: widget.source.message!,
-      );
-      if (mounted && room != null) {
-        _notify('已转发到 ${room.name}');
-        widget.onMessageForwarded?.call(room);
-      }
-    } finally {
-      if (mounted) setState(() => _forwarding = false);
-    }
-  }
-
-  void _jump() {
-    Navigator.of(context).pop();
-    widget.onMessageJumpRequested?.call(widget.source.id);
-  }
-
-  void _notify(String message) =>
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
-
-  @override
-  Widget build(BuildContext context) {
-    final busy =
-        _original == _OriginalState.resolving ||
-        _original == _OriginalState.loading;
-    final label = switch (_original) {
-      _OriginalState.thumbnail => '原图',
-      _OriginalState.resolving => '获取中',
-      _OriginalState.loading => '加载中',
-      _OriginalState.loaded => '已原图',
-      _OriginalState.failed => '重试原图',
-    };
-    final displayedUrl = _url;
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: ZoomableImageFrame(
-            active: widget.active,
-            onZoomChanged: widget.onZoomChanged,
-            child: SizedBox.expand(
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: widget.source.aspectRatio,
-                  child: HeroMode(
-                    enabled: widget.active,
-                    child: Hero(
-                      tag: widget.source.heroTag,
-                      createRectTween: (begin, end) =>
-                          RectTween(begin: begin, end: end),
-                      flightShuttleBuilder: roundedImageFlightShuttle,
-                      child: HeroImageClip(
-                        borderRadius: BorderRadius.zero,
-                        child: ChatMediaImage(
-                          imageUrl: displayedUrl,
-                          imageBytes: _bytes,
-                          fit: BoxFit.contain,
-                          onLoaded: () {
-                            if (mounted &&
-                                _url == displayedUrl &&
-                                _original == _OriginalState.loading) {
-                              setState(() => _original = _OriginalState.loaded);
-                            }
-                          },
-                          onError: () {
-                            if (mounted &&
-                                _url == displayedUrl &&
-                                _original == _OriginalState.loading) {
-                              setState(() => _original = _OriginalState.failed);
-                            }
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        if (_url == null && _bytes == null)
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: widget.media,
+    builder: (context, _) {
+      final media = widget.media;
+      final source = media.source;
+      final displayedUrl = media.url;
+      return Stack(
+        children: [
           Positioned.fill(
-            child: Center(
-              child: _resolveFailed || _original == _OriginalState.failed
-                  ? TextButton.icon(
-                      onPressed: _resolveImage,
-                      icon: const Icon(
-                        Icons.refresh_rounded,
-                        color: Colors.white,
-                      ),
-                      label: const Text(
-                        '重新加载图片',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                    )
-                  : const CircularProgressIndicator(
-                      color: Colors.white,
-                      strokeWidth: 2,
-                    ),
-            ),
-          ),
-        Positioned(
-          top: MediaQuery.paddingOf(context).top,
-          left: 0,
-          right: 0,
-          child: AppBar(
-            backgroundColor: Colors.transparent,
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            leading: IconButton(
-              tooltip: '关闭',
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.close_rounded, color: Colors.white),
-            ),
-            actions: [
-              if (widget.source.imageUrl?.startsWith('mxc://') == true)
-                TextButton.icon(
-                  onPressed: busy || _original == _OriginalState.loaded
-                      ? null
-                      : _loadOriginal,
-                  icon: busy
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                            strokeWidth: 2,
+            child: ZoomableImageFrame(
+              active: widget.active,
+              onZoomChanged: widget.onZoomChanged,
+              child: SizedBox.expand(
+                child: Center(
+                  child: AspectRatio(
+                    aspectRatio: source.aspectRatio,
+                    child: HeroMode(
+                      enabled: widget.active,
+                      child: Hero(
+                        tag: source.heroTag,
+                        createRectTween: (begin, end) =>
+                            RectTween(begin: begin, end: end),
+                        flightShuttleBuilder: roundedImageFlightShuttle,
+                        child: HeroImageClip(
+                          borderRadius: BorderRadius.zero,
+                          child: ChatMediaImage(
+                            imageUrl: displayedUrl,
+                            imageBytes: media.bytes,
+                            fit: BoxFit.contain,
+                            onLoaded: () => media.markLoaded(displayedUrl),
+                            onError: () => media.markFailed(displayedUrl),
                           ),
-                        )
-                      : Icon(
-                          _original == _OriginalState.loaded
-                              ? Icons.check_circle_rounded
-                              : Icons.hd_rounded,
-                          color: Colors.white,
                         ),
-                  label: Text(
-                    label,
-                    style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
                   ),
-                ),
-              IconButton(
-                tooltip: '下载',
-                onPressed: _downloading ? null : _download,
-                icon: Icon(
-                  _downloading
-                      ? Icons.downloading_rounded
-                      : Icons.download_rounded,
-                  color: Colors.white,
                 ),
               ),
-              if (widget.roomId != null &&
-                  widget.source.message != null &&
-                  !isLocalOutgoingMessage(widget.source.id))
-                IconButton(
-                  tooltip: '转发',
-                  onPressed: _forwarding ? null : _forward,
-                  icon: const Icon(Icons.forward_rounded, color: Colors.white),
-                ),
-              if (widget.onMessageJumpRequested != null &&
-                  widget.source.message != null)
-                IconButton(
-                  tooltip: '转到该图片',
-                  onPressed: _jump,
-                  icon: const Icon(
-                    Icons.chat_bubble_outline_rounded,
-                    color: Colors.white,
-                  ),
-                ),
-            ],
+            ),
           ),
-        ),
-      ],
-    );
-  }
+          if (media.url == null && media.bytes == null)
+            Positioned.fill(
+              child: Center(
+                child:
+                    media.resolveFailed ||
+                        media.original == OriginalImageState.failed
+                    ? TextButton.icon(
+                        onPressed: media.resolveImage,
+                        icon: const Icon(
+                          CupertinoIcons.arrow_clockwise,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                        label: const Text(
+                          '重新加载图片',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      )
+                    : const CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
 }

@@ -467,6 +467,8 @@ class MessageGroupWidget extends ConsumerWidget {
             galleryMessages: messageIndex.values,
             loadOlderImages: loadOlderImages,
             onMessageJumpRequested: onMessageJumpRequested,
+            onMessageReplyRequested: (replyMessage) =>
+                _startReply(context, ref, replyMessage),
             onMessageForwarded: onMessageForwarded,
             caption: message.caption,
             captionFormattedBody: message.captionFormattedBody,

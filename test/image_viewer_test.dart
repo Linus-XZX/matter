@@ -7,9 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/image_viewer.dart';
+import 'package:matter/pages/chat/image_message_bubble.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/message_cache_persistence.dart';
 import 'package:matter/pages/chat/message_group.dart';
+import 'package:matter/pages/chat/message_input.dart'
+    show editingDraftProvider, editingSendInFlightProvider;
 import 'package:matter/providers/mutable_state.dart';
 import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
@@ -124,8 +127,10 @@ Future<void> pumpImages(
   WidgetTester tester,
   List<rust.ChatMessage> messages, {
   ValueChanged<String>? onJump,
+  VoidCallback? onReply,
   ImageHistoryLoader? loadOlder,
   String account = 'image-tester',
+  bool dark = true,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -150,7 +155,7 @@ Future<void> pumpImages(
         ),
       ],
       child: MaterialApp(
-        theme: neuTestTheme(),
+        theme: neuTestTheme(dark: dark),
         home: Scaffold(
           body: MessageGroupWidget(
             group: MessageGroup(
@@ -163,6 +168,7 @@ Future<void> pumpImages(
             messageIndex: {for (final message in messages) message.id: message},
             showAvatar: false,
             onMessageJumpRequested: onJump,
+            onReplyRequested: onReply,
             loadOlderImages: loadOlder,
           ),
         ),
@@ -177,6 +183,60 @@ Future<void> openImage(WidgetTester tester, String id) async {
   await tester.tap(find.byKey(ValueKey('msg-image:image-preview:$id')));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 500));
+  final toolbar = find.byKey(const ValueKey('image-viewer-toolbar'));
+  final appBar = tester.widget<AppBar>(
+    find.descendant(of: toolbar, matching: find.byType(AppBar)),
+  );
+  final background = appBar.backgroundColor!;
+  final foreground = appBar.foregroundColor!;
+  expect(background.a, 1);
+  final backgroundLuminance = background.computeLuminance();
+  final foregroundLuminance = foreground.computeLuminance();
+  final lighter = backgroundLuminance > foregroundLuminance
+      ? backgroundLuminance
+      : foregroundLuminance;
+  final darker = backgroundLuminance < foregroundLuminance
+      ? backgroundLuminance
+      : foregroundLuminance;
+  expect((lighter + .05) / (darker + .05), greaterThanOrEqualTo(4.5));
+  final toolbarRect = tester.getRect(toolbar);
+  expect(toolbarRect.top, 0);
+  expect(
+    toolbarRect.height,
+    kToolbarHeight + MediaQuery.paddingOf(tester.element(toolbar)).top,
+  );
+  final imageViewport = tester.getRect(
+    find.descendant(
+      of: find.byKey(ValueKey(id)),
+      matching: find.byType(InteractiveViewer),
+    ),
+  );
+  expect(imageViewport.top, greaterThanOrEqualTo(toolbarRect.bottom));
+}
+
+Future<void> chooseImageAction(
+  WidgetTester tester,
+  String id,
+  String action,
+) async {
+  expect(find.byKey(ValueKey(id)), findsOneWidget);
+  final toolbar = find.byKey(const ValueKey('image-viewer-toolbar'));
+  final menuState = tester.state(
+    find.descendant(
+      of: toolbar,
+      matching: find.byWidgetPredicate((widget) => widget is PopupMenuButton),
+    ),
+  );
+  await tester.tap(
+    find.descendant(of: toolbar, matching: find.byTooltip('更多操作')),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+  expect(menuState.mounted, isTrue);
+  await tester.tap(find.text(action));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+  await tester.pump();
 }
 
 void main() {
@@ -322,19 +382,14 @@ void main() {
     expect(scrolling.position.isScrollingNotifier.value, isFalse);
     await tester.tap(
       find.descendant(
-        of: find.byKey(const ValueKey('older')),
+        of: find.byKey(const ValueKey('image-viewer-toolbar')),
         matching: find.byTooltip('下载'),
       ),
     );
     await tester.pump();
     expect(api.downloads, ['mxc://example.org/older']);
     expect(suggestedName, 'older.png');
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(const ValueKey('older')),
-        matching: find.byTooltip('转发'),
-      ),
-    );
+    await chooseImageAction(tester, 'older', '转发');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(
@@ -392,11 +447,155 @@ void main() {
       await tester.pump();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
-      await tester.tap(find.byTooltip('转到该图片').hitTestable());
+      await chooseImageAction(tester, 'older', '转到消息');
       await tester.pump();
+      expect(
+        find.byWidgetPredicate((widget) => widget is PopupMenuItem),
+        findsNothing,
+      );
+      expect(find.byType(ChatImageViewer), findsNothing);
       expect(jumped, 'older');
     },
   );
+
+  testWidgets('reply quotes the selected gallery image and opens the input', (
+    tester,
+  ) async {
+    final older = imageMessage('older', encrypted: true);
+    final latest = imageMessage('latest');
+    var replyRequests = 0;
+    await pumpImages(tester, [older, latest], onReply: () => replyRequests++);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MessageGroupWidget)),
+    );
+    const key = (roomId: '!room:example.org', userId: 'image-tester');
+    const otherKey = (roomId: '!room:example.org', userId: 'another-account');
+    container.read(editingMessageProvider(key).notifier).value = latest;
+    container.read(editingDraftProvider(key).notifier).value = (
+      editingId: latest.id,
+      text: 'unfinished edit',
+    );
+    container.read(replyingToProvider(otherKey).notifier).value = latest;
+    await openImage(tester, 'latest');
+    await tester.drag(find.byType(PageView), const Offset(650, 0));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await chooseImageAction(tester, 'older', '回复');
+    expect(find.byType(ChatImageViewer), findsNothing);
+    expect(container.read(replyingToProvider(key)), same(older));
+    expect(container.read(editingMessageProvider(key)), isNull);
+    expect(container.read(editingDraftProvider(key)), isNull);
+    expect(container.read(replyingToProvider(otherKey)), same(latest));
+    expect(replyRequests, 1);
+  });
+
+  testWidgets('image reply preserves an edit being sent', (tester) async {
+    final image = imageMessage('latest');
+    var replyRequests = 0;
+    await pumpImages(tester, [image], onReply: () => replyRequests++);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MessageGroupWidget)),
+    );
+    const key = (roomId: '!room:example.org', userId: 'image-tester');
+    container.read(editingMessageProvider(key).notifier).value = image;
+    container.read(editingSendInFlightProvider(key).notifier).value = image.id;
+    await openImage(tester, 'latest');
+    await chooseImageAction(tester, 'latest', '回复');
+    expect(container.read(replyingToProvider(key)), isNull);
+    expect(container.read(editingMessageProvider(key)), same(image));
+    expect(container.read(editingSendInFlightProvider(key)), image.id);
+    expect(replyRequests, 0);
+    expect(find.text('编辑正在发送，请稍候'), findsOneWidget);
+  });
+
+  testWidgets('unsent local images do not offer reply', (tester) async {
+    const id = 'local_outgoing_pending:photo';
+    await pumpImages(tester, [imageMessage(id)], onJump: (_) {});
+    await tester.tap(find.byType(ImageMessageBubble));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('回复'), findsNothing);
+    expect(find.text('转到消息'), findsOneWidget);
+  });
+
+  testWidgets('open menu keeps its target while history changes the page', (
+    tester,
+  ) async {
+    final history =
+        Completer<({List<rust.ChatMessage> messages, bool hasMore})>();
+    String? jumped;
+    await pumpImages(
+      tester,
+      [imageMessage('latest')],
+      onJump: (id) => jumped = id,
+      loadOlder: () => history.future,
+    );
+    await openImage(tester, 'latest');
+    await tester.tap(find.byTooltip('加载更早图片'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    history.complete((
+      messages: [
+        imageMessage('older', size: 512 * 1024),
+        imageMessage('latest'),
+      ],
+      hasMore: false,
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('1 / 2'), findsOneWidget);
+    expect(find.byTooltip('查看原图'), findsNothing);
+    await tester.tap(find.text('转到消息'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(jumped, 'latest');
+    expect(find.byType(ChatImageViewer), findsNothing);
+  });
+
+  testWidgets('toolbar and counter stay fixed while dragging images', (
+    tester,
+  ) async {
+    await pumpImages(tester, [imageMessage('older'), imageMessage('latest')]);
+    await openImage(tester, 'latest');
+    final toolbar = find.byKey(const ValueKey('image-viewer-toolbar'));
+    final counter = find.text('2 / 2');
+    final image = find.descendant(
+      of: find.byKey(const ValueKey('latest')),
+      matching: find.byType(InteractiveViewer),
+    );
+    final toolbarRect = tester.getRect(toolbar);
+    final counterRect = tester.getRect(counter);
+    final imageRect = tester.getRect(image);
+    final vertical = await tester.startGesture(imageRect.center);
+    await vertical.moveBy(const Offset(0, 20));
+    await tester.pump(const Duration(milliseconds: 16));
+    await vertical.moveBy(const Offset(0, 40));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(tester.getRect(image), isNot(imageRect));
+    expect(tester.getRect(counter), counterRect);
+    expect(tester.getRect(toolbar), toolbarRect);
+    await vertical.cancel();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final horizontal = await tester.startGesture(imageRect.center);
+    await horizontal.moveBy(const Offset(20, 0));
+    await tester.pump(const Duration(milliseconds: 16));
+    await horizontal.moveBy(const Offset(80, 0));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(tester.getRect(image).left, greaterThan(imageRect.left));
+    expect(tester.getRect(counter), counterRect);
+    expect(tester.getRect(toolbar), toolbarRect);
+    await horizontal.cancel();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  });
 
   testWidgets(
     'drag dismisses at 1x and zooming keeps drag and paging in the image',
@@ -440,6 +639,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       api.originalPending!.complete('https://example.org/original/latest');
       await tester.pump();
+      expect(find.byTooltip('查看原图'), findsOneWidget);
+      expect(find.byTooltip('正在加载原图'), findsNothing);
       expect(
         tester
             .widget<CachedNetworkImage>(
@@ -464,9 +665,9 @@ void main() {
       await tester.pump();
       api.originalPending!.complete(null);
       await tester.pump();
-      expect(find.text('重试原图'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
       api.originalPending = null;
-      await tester.tap(find.text('重试原图'));
+      await tester.tap(find.text('重试'));
       await tester.pump();
       expect(
         find.byWidgetPredicate(
@@ -500,8 +701,15 @@ void main() {
   testWidgets('viewed original is reused after closing and reopening', (
     tester,
   ) async {
-    await pumpImages(tester, [imageMessage('remember')]);
+    await tester.binding.setSurfaceSize(const Size(320, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    tester.view.padding = const FakeViewPadding(top: 24);
+    addTearDown(tester.view.resetPadding);
+    await pumpImages(tester, [imageMessage('remember')], dark: false);
     await openImage(tester, 'remember');
+    final qualityWidth = tester
+        .getSize(find.widgetWithText(TextButton, '原图'))
+        .width;
     await tester.tap(find.text('原图'));
     await tester.pump();
     final full = find.byWidgetPredicate(
@@ -514,8 +722,15 @@ void main() {
     image.imageBuilder!(tester.element(full), MemoryImage(pixel));
     await tester.pump();
     await tester.pump();
-    expect(find.text('已原图'), findsOneWidget);
-    await tester.tap(find.byIcon(Icons.close_rounded));
+    expect(find.text('高清'), findsOneWidget);
+    expect(
+      tester.getSize(find.widgetWithText(TextButton, '高清')).width,
+      qualityWidth,
+    );
+    expect(qualityWidth, lessThanOrEqualTo(56));
+    expect(find.text('转发'), findsNothing);
+    expect(find.text('转到消息'), findsNothing);
+    await tester.tap(find.byTooltip('关闭'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     await tester.pump();
@@ -531,6 +746,9 @@ void main() {
     await pumpImages(tester, [imageMessage('small', size: 512 * 1024)]);
     expect(api.originals, ['mxc://example.org/small']);
     expect(api.thumbnails, isEmpty);
+    await openImage(tester, 'small');
+    expect(find.byType(TextButton), findsNothing);
+    expect(find.byTooltip('下载'), findsOneWidget);
   });
 
   testWidgets('GIF uses the larger automatic original threshold', (
@@ -541,6 +759,8 @@ void main() {
     ]);
     expect(api.originals, ['mxc://example.org/gif']);
     expect(api.thumbnails, isEmpty);
+    await openImage(tester, 'gif');
+    expect(find.byType(TextButton), findsNothing);
   });
 
   testWidgets('swiping selects another image and jump targets that message', (
@@ -576,12 +796,7 @@ void main() {
     }
     await tester.pump();
     expect(scrolling.position.isScrollingNotifier.value, isFalse);
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(const ValueKey('older')),
-        matching: find.byTooltip('转到该图片'),
-      ),
-    );
+    await chooseImageAction(tester, 'older', '转到消息');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     expect(jumped, 'older');

@@ -33,6 +33,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final Iterable<rust.ChatMessage> galleryMessages;
   final ImageHistoryLoader? loadOlderImages;
   final ValueChanged<String>? onMessageJumpRequested;
+  final ValueChanged<rust.ChatMessage>? onMessageReplyRequested;
   final ValueChanged<rust.ChatRoom>? onMessageForwarded;
   final String? caption;
   final String? captionFormattedBody;
@@ -60,6 +61,7 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     this.galleryMessages = const [],
     this.loadOlderImages,
     this.onMessageJumpRequested,
+    this.onMessageReplyRequested,
     this.onMessageForwarded,
     this.caption,
     this.captionFormattedBody,
@@ -334,6 +336,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
             roomId: widget.roomId,
             animation: animation,
             onMessageJumpRequested: widget.onMessageJumpRequested,
+            onMessageReplyRequested: widget.onMessageReplyRequested,
             onMessageForwarded: widget.onMessageForwarded,
             loadOlderImages: widget.loadOlderImages,
           ),
