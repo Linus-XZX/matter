@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
+
 import '../../features/push/push_runtime.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
@@ -17,6 +18,7 @@ import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
@@ -1065,9 +1067,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
       }
     } catch (error) {
       if (!mounted || generation != _messageJumpGeneration) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('无法跳转到该消息: $error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('无法跳转到该消息: $error')));
     }
   }
 
@@ -1385,9 +1386,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         _olderLoadBlockedByError = true;
         _automaticOlderLoadBlocked = true;
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('加载更早消息失败: $error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('加载更早消息失败: $error')));
     }
   }
 
@@ -1953,7 +1953,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     // the timeline's oldest-end clearance are measured from its bottom edge.
     // Prefer the measured panel height (CJK title metrics can exceed the
     // estimate and would otherwise eat the gap above the pinned stack).
-    final headerInset = _measuredHeaderHeight != null
+    final headerInset = context.isMaterial
+        ? mediaQuery.padding.top + kToolbarHeight
+        : _measuredHeaderHeight != null
         ? _measuredHeaderHeight! + _headerBottomGap
         : mediaQuery.padding.top + _headerChromeHeight;
     final inputChromeHeight =
@@ -2022,7 +2024,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         },
         child: Scaffold(
           resizeToAvoidBottomInset: false,
+          extendBodyBehindAppBar: context.isMaterial,
           backgroundColor: colors.base,
+          appBar: context.isMaterial
+              ? _buildMaterialTopBar(headerSubtitle)
+              : null,
           body: Stack(
             children: [
               Positioned.fill(child: ColoredBox(color: colors.base)),
@@ -2225,30 +2231,32 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
               ),
               // 渐变模糊层:柔和过渡从浮动顶栏下方滚过的消息,
               // 避免在视口上缘被硬裁切。
-              Positioned(
-                left: 0,
-                top: 0,
-                right: 0,
-                height: headerInset,
-                child: const TopFadeBlur(useShader: true),
-              ),
-              // Floating glass header — the only persistent glass layer.
-              Positioned(
-                left: 0,
-                top: 0,
-                right: 0,
-                child: _MeasuredSize(
-                  onChanged: (size) {
-                    if (_measuredHeaderHeight == size.height) return;
-                    setState(() => _measuredHeaderHeight = size.height);
-                  },
-                  child: _buildTopBar(headerSubtitle),
+              if (!context.isMaterial)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  height: headerInset,
+                  child: const TopFadeBlur(useShader: true),
                 ),
-              ),
+              // Floating glass header — the only persistent glass layer.
+              if (!context.isMaterial)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  child: _MeasuredSize(
+                    onChanged: (size) {
+                      if (_measuredHeaderHeight == size.height) return;
+                      setState(() => _measuredHeaderHeight = size.height);
+                    },
+                    child: _buildTopBar(headerSubtitle),
+                  ),
+                ),
               Positioned(
-                left: 12,
+                left: context.isMaterial ? 0 : 12,
                 top: headerInset,
-                right: 12,
+                right: context.isMaterial ? 0 : 12,
                 child: PinnedMessagesStack(
                   roomId: widget.roomId,
                   onMessageTap: (messageId) =>
@@ -2395,6 +2403,67 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   /// Floating glass top bar: back/avatar/title plus the room actions. The
   /// only persistent glass layer on this page (see GlassPanel discipline).
+  AppBar _buildMaterialTopBar(String subtitle) {
+    final compact = MediaQuery.sizeOf(context).width < _headerCompactBreakpoint;
+    return buildFloatingAppBar(
+      automaticallyImplyLeading: !widget.embedded,
+      titleSpacing: widget.embedded ? 16 : 0,
+      title: Row(
+        children: [
+          AppAvatar(fallback: _roomName, size: 36, url: _avatarUrl),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _roomName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        NeuIconButton(
+          icon: Icons.search_rounded,
+          tooltip: '搜索消息',
+          onPressed: () => unawaited(_openMessageSearch()),
+        ),
+        if (!compact)
+          IconButton(
+            icon: const Icon(Icons.push_pin_outlined),
+            tooltip: '置顶消息',
+            onPressed: () => unawaited(_openPinnedMessages()),
+          ),
+        if (widget.embedded && widget.onToggleDetailsPanel != null)
+          IconButton(
+            icon: const Icon(Icons.people_outline),
+            tooltip: widget.detailsPanelOpen ? '隐藏详情' : '显示详情',
+            isSelected: widget.detailsPanelOpen,
+            onPressed: widget.onToggleDetailsPanel,
+          ),
+        IconButton(
+          icon: const Icon(Icons.more_vert_rounded),
+          tooltip: '更多',
+          onPressed: compact
+              ? _showMoreActions
+              : () => _showRoomDetails(context),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTopBar(String subtitle) {
     final colors = context.neu;
     return SafeArea(

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../theme/neu_colors.dart';
+
 @immutable
 class ChatVisualSettings {
   final bool chatBlurEnabled;
@@ -233,16 +235,21 @@ class ChatVisualSettingsScope extends InheritedWidget {
   });
 
   static ChatVisualSettings of(BuildContext context) {
-    return context
-            .dependOnInheritedWidgetOfExactType<ChatVisualSettingsScope>()
-            ?.settings ??
-        const ChatVisualSettings();
+    return maybeOf(context) ?? const ChatVisualSettings();
   }
 
   static ChatVisualSettings? maybeOf(BuildContext context) {
-    return context
+    final settings = context
         .dependOnInheritedWidgetOfExactType<ChatVisualSettingsScope>()
         ?.settings;
+    if (!context.isMaterial) return settings;
+    return (settings ?? const ChatVisualSettings()).copyWith(
+      chatBlurEnabled: false,
+      superellipseBorderEnabled: false,
+      bubbleShadowsEnabled: false,
+      bubbleGradientEnabled: false,
+      shortImageBlurredBackdropEnabled: false,
+    );
   }
 
   @override

@@ -148,7 +148,8 @@ void main() {
   }
 
   Future<void> tapVisible(WidgetTester tester, Finder finder) async {
-    await tester.ensureVisible(finder);
+    // Center the target in the content area, below the floating toolbar.
+    await Scrollable.ensureVisible(tester.element(finder), alignment: .5);
     await tester.pumpAndSettle();
     await tester.tap(finder);
     await tester.pumpAndSettle();

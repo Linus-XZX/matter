@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/session_credential_store.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
@@ -595,11 +597,22 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     return PopScope(
       canPop: !widget.addingAccount || (!_isLoading && !_hasCompletedRustLogin),
       child: Scaffold(
-        appBar: widget.addingAccount ? AppBar(title: const Text('添加账号')) : null,
+        extendBodyBehindAppBar: widget.addingAccount,
+        appBar: widget.addingAccount
+            ? buildFloatingAppBar(title: const Text('添加账号'))
+            : null,
         backgroundColor: context.neu.base,
         body: SafeArea(
+          top: !widget.addingAccount,
           child: CustomScrollView(
             slivers: [
+              if (widget.addingAccount)
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height:
+                        MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                  ),
+                ),
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(
@@ -649,10 +662,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
           const SizedBox(height: 22),
           Text(
             'Matter',
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-              letterSpacing: -1,
-            ),
+            style: Theme.of(context).textTheme.headlineMedium
+                ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -1),
           ),
           const SizedBox(height: NeuSpacing.sm),
           Text('Matrix 客户端', style: Theme.of(context).textTheme.bodyMedium),
@@ -663,6 +674,24 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   Widget _buildModeChips() {
     const labels = ['登录', '注册', 'Token'];
+    if (context.isMaterial) {
+      return SegmentedButton<int>(
+        segments: [
+          for (var i = 0; i < labels.length; i++)
+            ButtonSegment(value: i, label: Text(labels[i])),
+        ],
+        selected: {_tabIndex},
+        onSelectionChanged: _isLoading || _hasCompletedRustLogin
+            ? null
+            : (selection) {
+                setState(() {
+                  _tabIndex = selection.first;
+                  _uiaaSession = null;
+                  _clearError();
+                });
+              },
+      );
+    }
     return Wrap(
       alignment: WrapAlignment.center,
       spacing: NeuSpacing.sm,
@@ -917,9 +946,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
           Expanded(
             child: Text(
               _error!,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: colors.error),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: colors.error),
             ),
           ),
           const SizedBox(width: NeuSpacing.sm),

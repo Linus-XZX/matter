@@ -8,6 +8,8 @@ import 'package:matter/pages/chat/message_group.dart';
 import 'package:matter/pages/chat/send_flight.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart';
+import 'package:matter/theme/neu_colors.dart';
+
 import 'helpers/neu_test_theme.dart';
 
 void main() {
@@ -180,7 +182,7 @@ void main() {
     expect(captionRect.top, closeTo(imageRect.bottom, 0.1));
   });
 
-  testWidgets('short panoramic image uses a blurred minimum-height backdrop', (
+  testWidgets('short panoramic image keeps minimum height and theme backdrop', (
     tester,
   ) async {
     const message = ChatMessage(
@@ -225,12 +227,19 @@ void main() {
     );
     await tester.pump();
 
+    final material = tester.element(find.byType(MessageGroupWidget)).isMaterial;
     expect(
       find.byKey(
         const ValueKey(r'image-blurred-background:image-preview:$panorama'),
       ),
-      findsOneWidget,
+      material ? findsNothing : findsOneWidget,
     );
+    if (material) {
+      expect(
+        tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).fit,
+        BoxFit.contain,
+      );
+    }
 
     final imageRect = tester.getRect(
       find.byKey(const ValueKey(r'msg-image:image-preview:$panorama')),
@@ -811,8 +820,13 @@ void main() {
     BorderRadius radiusFor(Key key) {
       final container = tester.widget<Container>(find.byKey(key));
       final decoration = container.decoration! as ShapeDecoration;
-      final shape = decoration.shape as RoundedSuperellipseBorder;
-      return shape.borderRadius as BorderRadius;
+      return switch (decoration.shape) {
+        RoundedSuperellipseBorder(:final borderRadius) =>
+          borderRadius as BorderRadius,
+        RoundedRectangleBorder(:final borderRadius) =>
+          borderRadius as BorderRadius,
+        _ => throw StateError('Expected a rounded bubble'),
+      };
     }
 
     final firstRadius = radiusFor(const ValueKey(r'text-bubble:$group-first'));

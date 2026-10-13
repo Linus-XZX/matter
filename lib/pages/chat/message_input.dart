@@ -1,8 +1,10 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
+
 import '../../features/markdown/markdown_composer.dart';
 import '../../features/markdown/markdown_format_toolbar.dart';
 import '../../features/markdown/markdown_text_editing_controller.dart';
@@ -1302,11 +1304,8 @@ class MessageInputState extends ConsumerState<MessageInput> {
                 text,
                 maxLines: 5,
                 overflow: TextOverflow.clip,
-                style:
-                    Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      decoration: TextDecoration.none,
-                    ) ??
-                    const TextStyle(decoration: TextDecoration.none),
+                // The flight supplies the text color as its background changes.
+                style: const TextStyle(decoration: TextDecoration.none),
               ),
             ),
           ),
@@ -1589,18 +1588,18 @@ class MessageInputState extends ConsumerState<MessageInput> {
                                       option.title,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.titleSmall,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall,
                                     ),
                                     if (option.subtitle case final subtitle?)
                                       Text(
                                         subtitle,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.labelSmall,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelSmall,
                                       ),
                                   ],
                                 ),
@@ -1716,12 +1715,18 @@ class MessageInputState extends ConsumerState<MessageInput> {
                 ),
               ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+              padding: context.isMaterial
+                  ? const EdgeInsets.all(4)
+                  : const EdgeInsets.fromLTRB(10, 4, 10, 12),
               child: GlassPanel(
                 key: const ValueKey('message-input-surface'),
                 radius: NeuRadius.nav,
+                opacity: context.isMaterial ? 0 : 1,
                 blur: 18,
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                padding: EdgeInsets.symmetric(
+                  horizontal: context.isMaterial ? 0 : 6,
+                  vertical: 4,
+                ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
@@ -1739,7 +1744,7 @@ class MessageInputState extends ConsumerState<MessageInput> {
                           ? _showKeyboard
                           : _togglePicker,
                     ),
-                    const SizedBox(width: 6),
+                    SizedBox(width: context.isMaterial ? 2 : 6),
                     Expanded(
                       child: Container(
                         key: _textFieldKey,
@@ -1747,18 +1752,20 @@ class MessageInputState extends ConsumerState<MessageInput> {
                           minHeight: 44,
                           maxHeight: 120,
                         ),
-                        decoration: NeuDecoration(
-                          colors: colors,
-                          superellipseEnabled: ChatVisualSettingsScope.of(
-                            context,
-                          ).superellipseBorderEnabled,
-                          depth: NeuDepth.pressed,
-                          radius: NeuRadius.content,
-                          intensity: .85,
-                          borderColor: _focusNode.hasFocus
-                              ? colors.accent
-                              : null,
-                        ),
+                        decoration: context.isMaterial
+                            ? null
+                            : NeuDecoration(
+                                colors: colors,
+                                superellipseEnabled: ChatVisualSettingsScope.of(
+                                  context,
+                                ).superellipseBorderEnabled,
+                                depth: NeuDepth.pressed,
+                                radius: NeuRadius.content,
+                                intensity: .85,
+                                borderColor: _focusNode.hasFocus
+                                    ? colors.accent
+                                    : null,
+                              ),
                         child: TextField(
                           controller: _controller,
                           focusNode: _focusNode,
@@ -1775,7 +1782,12 @@ class MessageInputState extends ConsumerState<MessageInput> {
                               horizontal: 14,
                               vertical: 11,
                             ),
-                            border: InputBorder.none,
+                            border: context.isMaterial
+                                ? OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(28),
+                                    borderSide: BorderSide.none,
+                                  )
+                                : InputBorder.none,
                             isDense: true,
                           ),
                           maxLines: null,
@@ -1787,9 +1799,9 @@ class MessageInputState extends ConsumerState<MessageInput> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    SizedBox(width: context.isMaterial ? 2 : 6),
                     SizedBox(
-                      width: 94,
+                      width: context.isMaterial ? 92 : 94,
                       height: 44,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.end,
@@ -1926,6 +1938,9 @@ class MessageInputState extends ConsumerState<MessageInput> {
       ),
     );
 
+    if (context.isMaterial) {
+      return ColoredBox(color: colors.glassFill, child: input);
+    }
     return ClipRect(
       child: Stack(
         alignment: Alignment.bottomCenter,
@@ -2009,9 +2024,8 @@ class MessageInputState extends ConsumerState<MessageInput> {
       padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
       decoration: NeuDecoration(
         colors: colors,
-        superellipseEnabled: ChatVisualSettingsScope.of(
-          context,
-        ).superellipseBorderEnabled,
+        superellipseEnabled: ChatVisualSettingsScope.of(context)
+            .superellipseBorderEnabled,
         depth: NeuDepth.pressed,
         radius: NeuRadius.button,
         intensity: .7,
@@ -2072,9 +2086,8 @@ class MessageInputState extends ConsumerState<MessageInput> {
       padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
       decoration: NeuDecoration(
         colors: colors,
-        superellipseEnabled: ChatVisualSettingsScope.of(
-          context,
-        ).superellipseBorderEnabled,
+        superellipseEnabled: ChatVisualSettingsScope.of(context)
+            .superellipseBorderEnabled,
         depth: NeuDepth.pressed,
         radius: NeuRadius.button,
         intensity: .7,

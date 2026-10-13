@@ -14,6 +14,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_decoration.dart';
@@ -1294,9 +1295,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                       // dialog may already be in its exit animation —
                                       // popping then would pop the page below it.
                                       if (dialogContext.mounted &&
-                                          ModalRoute.of(
-                                                dialogContext,
-                                              )?.isCurrent ==
+                                          ModalRoute.of(dialogContext)
+                                                  ?.isCurrent ==
                                               true) {
                                         Navigator.of(dialogContext).pop();
                                       }
@@ -1319,9 +1319,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                         // not stuck in its non-dismissible in-flight
                                         // state.
                                         if (dialogContext.mounted &&
-                                            ModalRoute.of(
-                                                  dialogContext,
-                                                )?.isCurrent ==
+                                            ModalRoute.of(dialogContext)
+                                                    ?.isCurrent ==
                                                 true) {
                                           Navigator.of(dialogContext).pop();
                                         }
@@ -1330,9 +1329,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                       // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致）。
                                       if (!_accountActive()) {
                                         if (dialogContext.mounted &&
-                                            ModalRoute.of(
-                                                  dialogContext,
-                                                )?.isCurrent ==
+                                            ModalRoute.of(dialogContext)
+                                                    ?.isCurrent ==
                                                 true) {
                                           Navigator.of(dialogContext).pop();
                                         }
@@ -1473,9 +1471,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                     children: [
                       Text(
                         '加载已忽略用户失败',
-                        style: Theme.of(
-                          sheetContext,
-                        ).textTheme.bodyMedium?.copyWith(color: colors.error),
+                        style: Theme.of(sheetContext).textTheme.bodyMedium
+                            ?.copyWith(color: colors.error),
                       ),
                       const SizedBox(height: 12),
                       NeuButton(
@@ -1503,9 +1500,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                       padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
                       child: Text(
                         _ignoredUsersSheetError!,
-                        style: Theme.of(
-                          sheetContext,
-                        ).textTheme.bodyMedium?.copyWith(color: colors.error),
+                        style: Theme.of(sheetContext).textTheme.bodyMedium
+                            ?.copyWith(color: colors.error),
                       ),
                     ),
                   for (var index = 0; index < ignoredUsers.length; index++) ...[
@@ -1521,9 +1517,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                 ignoredUsers[index],
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: Theme.of(
-                                  sheetContext,
-                                ).textTheme.bodyLarge,
+                                style: Theme.of(sheetContext)
+                                    .textTheme
+                                    .bodyLarge,
                               ),
                             ),
                           ),
@@ -1812,6 +1808,28 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(
+              title: const Text('房间管理'),
+              actions: [
+                if (_saving)
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: SizedBox.square(
+                      dimension: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else
+                  IconButton(
+                    icon: const Icon(Icons.save_outlined),
+                    tooltip: '保存房间信息',
+                    onPressed: details == null ? null : _saveDetails,
+                  ),
+              ],
+            )
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -1838,18 +1856,16 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                     ),
                   )
                 : Padding(
-                    // CustomScrollView has no `padding` parameter; pad the
-                    // viewport itself with the insets the ListView used to
-                    // carry, plus the floating header's height so the first
-                    // card starts below the title.
-                    padding: EdgeInsets.fromLTRB(
-                      16,
-                      viewPaddingTop + kToolbarHeight + 8,
-                      16,
-                      32,
-                    ),
+                    // Reserve the header inside the scrollable so cards can
+                    // pass underneath it without clipping at its bottom edge.
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
                     child: CustomScrollView(
                       slivers: [
+                        SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: viewPaddingTop + kToolbarHeight + 8,
+                          ),
+                        ),
                         SliverToBoxAdapter(
                           child: _section(
                             title: '房间信息',
@@ -1967,17 +1983,17 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                                   activeThumbColor: context.neu.accent,
                                   title: Text(
                                     '免打扰',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodyLarge,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyLarge,
                                   ),
                                   subtitle: Text(
                                     _mutedLoadError == null
                                         ? '不接收此房间的推送通知'
                                         : '通知设置加载/更新失败，点击重试',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall,
                                   ),
                                   value: _muted,
                                   onChanged:
@@ -2304,23 +2320,28 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                   ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
-          // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(height: kToolbarHeight, child: _header(details)),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
             ),
-          ),
+          // 标题栏移到上方浮层,滚动内容从它下方穿过。
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: _header(details),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -2338,9 +2359,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       ),
       title: Text(
         request.displayName,
-        style: Theme.of(
-          context,
-        ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+        style: Theme.of(context).textTheme.bodyLarge
+            ?.copyWith(fontWeight: FontWeight.w600),
       ),
       subtitle: Text(
         request.reason?.isNotEmpty == true
@@ -2385,9 +2405,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
       ),
       title: Text(
         member.name,
-        style: Theme.of(
-          context,
-        ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+        style: Theme.of(context).textTheme.bodyLarge
+            ?.copyWith(fontWeight: FontWeight.w600),
       ),
       subtitle: Text(member.id, style: Theme.of(context).textTheme.bodySmall),
       trailing: isCurrentUser
@@ -2475,9 +2494,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     return DecoratedSliver(
       decoration: NeuDecoration(
         colors: colors,
-        superellipseEnabled: ChatVisualSettingsScope.of(
-          context,
-        ).superellipseBorderEnabled,
+        superellipseEnabled: ChatVisualSettingsScope.of(context)
+            .superellipseBorderEnabled,
         color: colors.card,
         radius: NeuRadius.surface,
       ),
@@ -2543,9 +2561,8 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
             Expanded(
               child: Text(
                 label,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyLarge?.copyWith(color: color),
+                style: Theme.of(context).textTheme.bodyLarge
+                    ?.copyWith(color: color),
               ),
             ),
             if (saving)

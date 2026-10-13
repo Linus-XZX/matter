@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'features/push/push_runtime.dart';
 import 'pages/chat/chat_detail_page.dart';
 import 'pages/chat/chat_page.dart';
@@ -19,6 +20,7 @@ import 'src/rust/api/matrix.dart' as rust;
 import 'theme/neu_colors.dart';
 import 'widgets/app_avatar.dart';
 import 'widgets/glass.dart';
+import 'widgets/material_tab_navigation_bar.dart';
 import 'widgets/mobile_tab_view.dart';
 import 'widgets/neu_action.dart';
 import 'widgets/neu_surface.dart';
@@ -137,17 +139,15 @@ class _MatterAppState extends ConsumerState<MatterApp> {
       if (accepted) {
         await rust.acceptDeviceVerification();
         if (!mounted) return;
-        await Navigator.of(
-          context,
-        ).push(MaterialPageRoute(builder: (_) => const EncryptionPage()));
+        await Navigator.of(context)
+            .push(MaterialPageRoute(builder: (_) => const EncryptionPage()));
       } else {
         await rust.cancelDeviceVerification(mismatch: false);
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('处理设备验证失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('处理设备验证失败：$error')));
     }
   }
 
@@ -440,6 +440,61 @@ class _MatterAppState extends ConsumerState<MatterApp> {
 
   Widget _buildMobileLayout() {
     final navigationIndex = ref.watch(navigationIndexProvider);
+    if (context.isMaterial) {
+      return Scaffold(
+        extendBody: true,
+        body: MobileTabView(
+          key: ValueKey(ref.watch(activeUserIdProvider)),
+          index: navigationIndex,
+          position: _tabPosition,
+          onChanged: _onItemTapped,
+          children: [
+            _pages[0],
+            const SpacePage(showFloatingActionButton: false),
+            _pages[2],
+            _pages[3],
+          ],
+        ),
+        // Keep the FAB with the navigation bar and snack bars so Scaffold can
+        // position it above both, including the system's bottom safe area.
+        floatingActionButton: navigationIndex == 1
+            ? FloatingActionButton.extended(
+                tooltip: '添加空间',
+                onPressed: () => SpacePage.showSpaceActions(context),
+                icon: const Icon(Icons.add),
+                label: const Text('添加空间'),
+              )
+            : null,
+        bottomNavigationBar: MaterialTabNavigationBar(
+          key: const ValueKey('material-dock'),
+          position: _tabPosition,
+          selectedIndex: navigationIndex,
+          onDestinationSelected: _onItemTapped,
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: '聊天',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.account_tree_outlined),
+              selectedIcon: Icon(Icons.account_tree),
+              label: '空间',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.people_outline),
+              selectedIcon: Icon(Icons.people),
+              label: '通讯录',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings),
+              label: '设置',
+            ),
+          ],
+        ),
+      );
+    }
     return Scaffold(
       extendBody: true,
       body: MobileTabView(
@@ -553,6 +608,27 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         navigationIndex == 0 &&
         selectedRoom != null;
 
+    Widget withTabTransition(Widget child) {
+      if (!context.isMaterial) return child;
+      return AnimatedSwitcher(
+        key: ValueKey(ref.watch(activeUserIdProvider)),
+        duration: const Duration(milliseconds: 240),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          fit: StackFit.expand,
+          children: [
+            for (final previous in previousChildren)
+              IgnorePointer(
+                child: ExcludeFocus(child: ExcludeSemantics(child: previous)),
+              ),
+            ?currentChild,
+          ],
+        ),
+        child: KeyedSubtree(key: ValueKey(navigationIndex), child: child),
+      );
+    }
+
     return Scaffold(
       body: Row(
         children: [
@@ -567,62 +643,64 @@ class _MatterAppState extends ConsumerState<MatterApp> {
           ),
           const VerticalDivider(width: 1, thickness: 1),
           Expanded(
-            child: navigationIndex == 0
-                ? Row(
-                    children: [
-                      SizedBox(width: 348, child: _buildDesktopRoomList()),
-                      const VerticalDivider(width: 1, thickness: 1),
-                      Expanded(
-                        child: selectedRoom == null
-                            ? const _DesktopEmptyChat()
-                            : ChatDetailPage(
-                                key: ValueKey(selectedRoom.id),
-                                roomId: selectedRoom.id,
-                                roomName: selectedRoom.name,
-                                avatarUrl: selectedRoom.avatarUrl,
-                                nameEventId: selectedRoom.nameEventId,
-                                avatarEventId: selectedRoom.avatarEventId,
-                                isDm: selectedRoom.roomType == 'dm',
-                                subtitle: hasUnread
-                                    ? (selectedRoom.unreadCount > 0
-                                          ? '${selectedRoom.unreadCount} 条未读消息'
-                                          : '已标记未读')
-                                    : '在线',
-                                embedded: true,
-                                detailsPanelOpen: showRoomDetails,
-                                onToggleDetailsPanel: canShowRoomDetails
-                                    ? () => setState(
-                                        () => _showRoomDetails =
-                                            !_showRoomDetails,
-                                      )
-                                    : null,
-                                onRoomLeft: _clearSelectedRoom,
-                                onRoomDetailsChanged:
-                                    _updateSelectedRoomDetails,
-                                onRegisterRoomDetailsHandler:
-                                    _registerDesktopRoomDetailsHandler,
-                              ),
-                      ),
-                      if (showRoomDetails) ...[
+            child: withTabTransition(
+              navigationIndex == 0
+                  ? Row(
+                      children: [
+                        SizedBox(width: 348, child: _buildDesktopRoomList()),
                         const VerticalDivider(width: 1, thickness: 1),
-                        SizedBox(
-                          width: 300,
-                          child: DesktopRoomDetailsPanel(
-                            roomId: selectedRoom.id,
-                            roomName: selectedRoom.name,
-                            avatarUrl: selectedRoom.avatarUrl,
-                            onRoomLeft: _clearSelectedRoom,
-                            // Route through the selected page's handler so
-                            // the edit arms its sync-echo tracker (the page
-                            // then forwards to _updateSelectedRoomDetails).
-                            onRoomDetailsChanged: (patch) =>
-                                _desktopRoomDetailsHandler?.call(patch),
-                          ),
+                        Expanded(
+                          child: selectedRoom == null
+                              ? const _DesktopEmptyChat()
+                              : ChatDetailPage(
+                                  key: ValueKey(selectedRoom.id),
+                                  roomId: selectedRoom.id,
+                                  roomName: selectedRoom.name,
+                                  avatarUrl: selectedRoom.avatarUrl,
+                                  nameEventId: selectedRoom.nameEventId,
+                                  avatarEventId: selectedRoom.avatarEventId,
+                                  isDm: selectedRoom.roomType == 'dm',
+                                  subtitle: hasUnread
+                                      ? (selectedRoom.unreadCount > 0
+                                            ? '${selectedRoom.unreadCount} 条未读消息'
+                                            : '已标记未读')
+                                      : '在线',
+                                  embedded: true,
+                                  detailsPanelOpen: showRoomDetails,
+                                  onToggleDetailsPanel: canShowRoomDetails
+                                      ? () => setState(
+                                          () => _showRoomDetails =
+                                              !_showRoomDetails,
+                                        )
+                                      : null,
+                                  onRoomLeft: _clearSelectedRoom,
+                                  onRoomDetailsChanged:
+                                      _updateSelectedRoomDetails,
+                                  onRegisterRoomDetailsHandler:
+                                      _registerDesktopRoomDetailsHandler,
+                                ),
                         ),
+                        if (showRoomDetails) ...[
+                          const VerticalDivider(width: 1, thickness: 1),
+                          SizedBox(
+                            width: 300,
+                            child: DesktopRoomDetailsPanel(
+                              roomId: selectedRoom.id,
+                              roomName: selectedRoom.name,
+                              avatarUrl: selectedRoom.avatarUrl,
+                              onRoomLeft: _clearSelectedRoom,
+                              // Route through the selected page's handler so
+                              // the edit arms its sync-echo tracker (the page
+                              // then forwards to _updateSelectedRoomDetails).
+                              onRoomDetailsChanged: (patch) =>
+                                  _desktopRoomDetailsHandler?.call(patch),
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
-                  )
-                : MaxContentWidth(child: _pages[navigationIndex]),
+                    )
+                  : MaxContentWidth(child: _pages[navigationIndex]),
+            ),
           ),
         ],
       ),
@@ -702,9 +780,8 @@ class _DesktopEmptyRoomList extends StatelessWidget {
       child: Center(
         child: Text(
           '选择一个空间',
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: neu.textTertiary),
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: neu.textTertiary),
         ),
       ),
     );
@@ -736,6 +813,89 @@ class _DesktopSidebar extends ConsumerWidget {
     final isRoomsPage = navigationIndex == 0;
     final me = ref.watch(currentUserProvider);
 
+    if (context.isMaterial) {
+      return NavigationRail(
+        selectedIndex: isRoomsPage
+            ? switch (roomSource) {
+                _DesktopRoomSource.directMessages => 0,
+                _DesktopRoomSource.ungroupedRooms => 1,
+                _DesktopRoomSource.space => null,
+              }
+            : navigationIndex + 1,
+        onDestinationSelected: (index) {
+          if (index == 0) {
+            onDirectMessagesSelected();
+          } else if (index == 1) {
+            onUngroupedRoomsSelected();
+          } else {
+            onNavigate(index - 1);
+          }
+        },
+        leading: IconButton(
+          tooltip: '个人资料与设置',
+          onPressed: () => onNavigate(3),
+          icon: AppAvatar(
+            fallback: me?.displayName ?? '',
+            size: 40,
+            url: me?.avatarUrl,
+          ),
+        ),
+        trailing: Expanded(
+          child: SizedBox(
+            width: 72,
+            child: spacesAsync.when(
+              data: (spaces) => ListView(
+                children: [
+                  for (final space in spaces)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: IconButton.filledTonal(
+                        tooltip: space.name,
+                        isSelected: isRoomsPage && selectedSpaceId == space.id,
+                        onPressed: () => onSpaceSelected(space),
+                        icon: AppAvatar(
+                          fallback: space.name,
+                          size: 32,
+                          url: space.avatarUrl,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (_, _) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+        destinations: const [
+          NavigationRailDestination(
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person),
+            label: Text('私聊'),
+          ),
+          NavigationRailDestination(
+            icon: Icon(Icons.forum_outlined),
+            selectedIcon: Icon(Icons.forum),
+            label: Text('未归属群组'),
+          ),
+          NavigationRailDestination(
+            icon: Icon(Icons.workspaces_outline),
+            selectedIcon: Icon(Icons.workspaces),
+            label: Text('空间'),
+          ),
+          NavigationRailDestination(
+            icon: Icon(Icons.people_outline),
+            selectedIcon: Icon(Icons.people),
+            label: Text('通讯录'),
+          ),
+          NavigationRailDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: Text('设置'),
+          ),
+        ],
+      );
+    }
     return SizedBox(
       width: 76,
       child: SafeArea(

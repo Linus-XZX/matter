@@ -5,6 +5,7 @@ import '../../providers/chat_provider.dart';
 import '../../providers/hidden_rooms_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/neu_action.dart';
 import 'chat_detail_page.dart';
 
@@ -40,9 +41,8 @@ class _HiddenRoomsPageState extends ConsumerState<HiddenRoomsPage> {
     final hidden = ref.read(hiddenRoomsProvider.notifier);
     return Scaffold(
       backgroundColor: context.neu.base,
-      appBar: AppBar(
-        backgroundColor: context.neu.base,
-        elevation: 0,
+      extendBodyBehindAppBar: true,
+      appBar: buildFloatingAppBar(
         title: Text('隐藏的聊天', style: Theme.of(context).textTheme.titleLarge),
         actions: [
           if (_selectionMode)
@@ -65,7 +65,12 @@ class _HiddenRoomsPageState extends ConsumerState<HiddenRoomsPage> {
             return const Center(child: Text('暂无隐藏的聊天'));
           }
           return ListView.separated(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+            padding: EdgeInsets.fromLTRB(
+              16,
+              MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 8,
+              16,
+              96,
+            ),
             itemCount: hiddenRooms.length,
             separatorBuilder: (_, _) => const Divider(height: 1),
             itemBuilder: (context, index) {
