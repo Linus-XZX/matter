@@ -1715,13 +1715,18 @@ class MessageInputState extends ConsumerState<MessageInput> {
                 ),
               ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+              padding: context.isMaterial
+                  ? const EdgeInsets.all(4)
+                  : const EdgeInsets.fromLTRB(10, 4, 10, 12),
               child: GlassPanel(
                 key: const ValueKey('message-input-surface'),
                 radius: NeuRadius.nav,
                 opacity: context.isMaterial ? 0 : 1,
                 blur: 18,
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                padding: EdgeInsets.symmetric(
+                  horizontal: context.isMaterial ? 0 : 6,
+                  vertical: 4,
+                ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
@@ -1739,7 +1744,7 @@ class MessageInputState extends ConsumerState<MessageInput> {
                           ? _showKeyboard
                           : _togglePicker,
                     ),
-                    const SizedBox(width: 6),
+                    SizedBox(width: context.isMaterial ? 2 : 6),
                     Expanded(
                       child: Container(
                         key: _textFieldKey,
@@ -1794,9 +1799,9 @@ class MessageInputState extends ConsumerState<MessageInput> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    SizedBox(width: context.isMaterial ? 2 : 6),
                     SizedBox(
-                      width: 94,
+                      width: context.isMaterial ? 92 : 94,
                       height: 44,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.end,

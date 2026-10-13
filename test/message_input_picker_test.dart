@@ -40,10 +40,11 @@ void main() {
     expect(find.byType(StickerPackPanel), findsOneWidget);
   });
 
+  final inputWidths = ValueVariant<double>({320, 400});
   testWidgets('input respects safe area and appearance effects', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(400, 800);
+    tester.view.physicalSize = Size(inputWidths.currentValue!, 800);
     tester.view.devicePixelRatio = 1;
     tester.view.padding = const FakeViewPadding(bottom: 34);
     addTearDown(tester.view.resetPhysicalSize);
@@ -65,20 +66,22 @@ void main() {
     );
     expect(surface.radius, NeuRadius.nav);
     expect(surface.blur, 18);
-    expect(
-      surface.padding,
-      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-    );
-    final surfaceMargin = tester.widget<Padding>(
-      find
-          .ancestor(
-            of: find.byKey(const ValueKey('message-input-surface')),
-            matching: find.byType(Padding),
-          )
-          .first,
-    );
-    expect(surfaceMargin.padding, const EdgeInsets.fromLTRB(10, 4, 10, 12));
     final material = tester.element(find.byType(MessageInput)).isMaterial;
+    if (!material) {
+      expect(
+        surface.padding,
+        const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      );
+      final surfaceMargin = tester.widget<Padding>(
+        find
+            .ancestor(
+              of: find.byKey(const ValueKey('message-input-surface')),
+              matching: find.byType(Padding),
+            )
+            .first,
+      );
+      expect(surfaceMargin.padding, const EdgeInsets.fromLTRB(10, 4, 10, 12));
+    }
     expect(
       find.byType(BottomFadeBlur),
       material ? findsNothing : findsOneWidget,
@@ -89,6 +92,11 @@ void main() {
       matching: find.byType(BackdropFilter),
     );
     if (material) {
+      // Material needs no shadow clearance: most of the row is for composing.
+      expect(
+        tester.getSize(find.byType(TextField).first).width,
+        greaterThan(tester.getSize(find.byType(MessageInput)).width - 160),
+      );
       expect(backdropFilters, findsNothing);
       final backgrounds = tester.widgetList<ColoredBox>(
         find.descendant(
@@ -105,7 +113,7 @@ void main() {
       expect(backdropFilters, findsAtLeastNWidgets(3));
       expect(tester.getBottomLeft(backdropFilters.first).dy, 800);
     }
-  });
+  }, variant: inputWidths);
 
   testWidgets('plus toggles an inline attachment panel at picker height', (
     tester,
