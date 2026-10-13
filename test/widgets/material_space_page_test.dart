@@ -257,6 +257,44 @@ void main() {
     );
   }
 
+  for (final layout in [
+    (width: 320.0, bottom: 0.0, fullApp: true),
+    (width: 400.0, bottom: 34.0, fullApp: true),
+    (width: 1200.0, bottom: 34.0, fullApp: true),
+    (width: 320.0, bottom: 34.0, fullApp: false),
+  ]) {
+    testWidgets('space add menu remains reachable at $layout', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.padding = FakeViewPadding(bottom: layout.bottom);
+      tester.view.viewPadding = FakeViewPadding(bottom: layout.bottom);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPadding);
+      addTearDown(tester.view.resetViewPadding);
+      api.spaces = [const rust.Space(id: '!space:example.org', name: '工作空间')];
+      await _pumpPage(
+        tester,
+        api,
+        width: layout.width,
+        fullApp: layout.fullApp,
+      );
+      final fab = find.byType(FloatingActionButton);
+      final navigation = find.byType(NavigationBar);
+      final bottomEdge = navigation.evaluate().isNotEmpty
+          ? tester.getTopLeft(navigation).dy
+          : 700 - layout.bottom;
+      expect(
+        tester.getBottomLeft(fab).dy,
+        closeTo(bottomEdge - kFloatingActionButtonMargin, .1),
+      );
+      await tester.tap(fab);
+      await tester.pumpAndSettle();
+      expect(find.text('创建空间'), findsOneWidget);
+      expect(find.text('加入空间'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   testWidgets('long space names fit a narrow directory with enlarged text', (
     tester,
   ) async {
@@ -275,7 +313,7 @@ void main() {
   testWidgets(
     'empty create action and populated add menu refresh the directory',
     (tester) async {
-      await _pumpPage(tester, api, rooms: [_room]);
+      await _pumpPage(tester, api, fullApp: true, rooms: [_room]);
       expect(find.text('还没有加入空间'), findsOneWidget);
       expect(find.text('其他房间'), findsOneWidget);
       expect(find.widgetWithText(FloatingActionButton, '添加空间'), findsOneWidget);

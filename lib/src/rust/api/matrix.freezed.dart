@@ -21,7 +21,7 @@ mixin _$SyncEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent);
 }
 
 
@@ -30,7 +30,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SyncEvent()';
+    return 'SyncEvent()';
 }
 
 
@@ -222,7 +222,7 @@ class SyncEvent_SyncCompleted extends SyncEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_SyncCompleted);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_SyncCompleted);
 }
 
 
@@ -231,7 +231,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SyncEvent.syncCompleted()';
+    return 'SyncEvent.syncCompleted()';
 }
 
 
@@ -254,7 +254,7 @@ class SyncEvent_FullRefreshRequired extends SyncEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_FullRefreshRequired);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_FullRefreshRequired);
 }
 
 
@@ -263,7 +263,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SyncEvent.fullRefreshRequired()';
+    return 'SyncEvent.fullRefreshRequired()';
 }
 
 
@@ -286,7 +286,7 @@ class SyncEvent_RoomListChanged extends SyncEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_RoomListChanged);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_RoomListChanged);
 }
 
 
@@ -295,7 +295,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SyncEvent.roomListChanged()';
+    return 'SyncEvent.roomListChanged()';
 }
 
 
@@ -323,16 +323,18 @@ $SyncEvent_MessageSentCopyWith<SyncEvent_MessageSent> get copyWith => _$SyncEven
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_MessageSent&&(identical(other.roomId, roomId) || other.roomId == roomId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_MessageSent&&(identical(other.roomId, roomId) || other.roomId == roomId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,roomId);
+int get hashCode {
+    return Object.hash(runtimeType,roomId);
+}
 
 @override
 String toString() {
-  return 'SyncEvent.messageSent(roomId: $roomId)';
+    return 'SyncEvent.messageSent(roomId: $roomId)';
 }
 
 
@@ -375,7 +377,7 @@ as String,
 
 class SyncEvent_MessageRedacted extends SyncEvent {
   const SyncEvent_MessageRedacted({required this.roomId, required this.eventId}): super._();
-
+  
 
  final  String roomId;
  final  String eventId;
@@ -390,16 +392,18 @@ $SyncEvent_MessageRedactedCopyWith<SyncEvent_MessageRedacted> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_MessageRedacted&&(identical(other.roomId, roomId) || other.roomId == roomId)&&(identical(other.eventId, eventId) || other.eventId == eventId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_MessageRedacted&&(identical(other.roomId, roomId) || other.roomId == roomId)&&(identical(other.eventId, eventId) || other.eventId == eventId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,roomId,eventId);
+int get hashCode {
+    return Object.hash(runtimeType,roomId,eventId);
+}
 
 @override
 String toString() {
-  return 'SyncEvent.messageRedacted(roomId: $roomId, eventId: $eventId)';
+    return 'SyncEvent.messageRedacted(roomId: $roomId, eventId: $eventId)';
 }
 
 
@@ -457,16 +461,18 @@ $SyncEvent_PinnedMessagesChangedCopyWith<SyncEvent_PinnedMessagesChanged> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_PinnedMessagesChanged&&(identical(other.roomId, roomId) || other.roomId == roomId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_PinnedMessagesChanged&&(identical(other.roomId, roomId) || other.roomId == roomId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,roomId);
+int get hashCode {
+    return Object.hash(runtimeType,roomId);
+}
 
 @override
 String toString() {
-  return 'SyncEvent.pinnedMessagesChanged(roomId: $roomId)';
+    return 'SyncEvent.pinnedMessagesChanged(roomId: $roomId)';
 }
 
 
@@ -523,16 +529,18 @@ $SyncEvent_RoomMembersChangedCopyWith<SyncEvent_RoomMembersChanged> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_RoomMembersChanged&&(identical(other.roomId, roomId) || other.roomId == roomId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_RoomMembersChanged&&(identical(other.roomId, roomId) || other.roomId == roomId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,roomId);
+int get hashCode {
+    return Object.hash(runtimeType,roomId);
+}
 
 @override
 String toString() {
-  return 'SyncEvent.roomMembersChanged(roomId: $roomId)';
+    return 'SyncEvent.roomMembersChanged(roomId: $roomId)';
 }
 
 
@@ -584,7 +592,7 @@ class SyncEvent_IgnoredUsersChanged extends SyncEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_IgnoredUsersChanged);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SyncEvent_IgnoredUsersChanged);
 }
 
 
@@ -593,7 +601,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SyncEvent.ignoredUsersChanged()';
+    return 'SyncEvent.ignoredUsersChanged()';
 }
 
 

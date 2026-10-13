@@ -22,7 +22,9 @@ import 'material_space_content.dart';
 import 'space_detail_page.dart';
 
 class SpacePage extends ConsumerWidget {
-  const SpacePage({super.key});
+  const SpacePage({super.key, this.showFloatingActionButton = true});
+
+  final bool showFloatingActionButton;
 
   /// Map a failed write's error to the unified timeout wording (same
   /// discipline as the room management page): a queue-wait timeout means
@@ -48,10 +50,10 @@ class SpacePage extends ConsumerWidget {
               ),
             )
           : null,
-      floatingActionButton: context.isMaterial
+      floatingActionButton: context.isMaterial && showFloatingActionButton
           ? FloatingActionButton.extended(
               tooltip: '添加空间',
-              onPressed: () => _showSpaceActions(context),
+              onPressed: () => showSpaceActions(context),
               icon: const Icon(Icons.add),
               label: const Text('添加空间'),
             )
@@ -201,7 +203,7 @@ class SpacePage extends ConsumerWidget {
                       size: 56,
                       accent: true,
                       tooltip: '新建空间',
-                      onPressed: () => _showSpaceActions(context),
+                      onPressed: () => showSpaceActions(context),
                     ),
                   ),
               ],
@@ -209,7 +211,7 @@ class SpacePage extends ConsumerWidget {
     );
   }
 
-  void _showSpaceActions(BuildContext context) {
+  static void showSpaceActions(BuildContext context) {
     // The Builder below provides the sheet's own context, which is unmounted
     // once the sheet is dismissed. The create/join dialogs opened from here
     // keep the PAGE context for their async completion paths (their writes
@@ -255,7 +257,7 @@ class SpacePage extends ConsumerWidget {
     );
   }
 
-  void _showCreateSpaceDialog(BuildContext context) {
+  static void _showCreateSpaceDialog(BuildContext context) {
     // Account snapshot captured when the dialog OPENS: a switch while the
     // dialog is up must not redirect the write to the new account (same
     // discipline as every other P0 write path).
@@ -445,7 +447,7 @@ class SpacePage extends ConsumerWidget {
     );
   }
 
-  void _showJoinSpaceDialog(BuildContext context) {
+  static void _showJoinSpaceDialog(BuildContext context) {
     // Account snapshot captured when the dialog OPENS: a switch while the
     // dialog is up must not redirect the write to the new account.
     final container = ProviderScope.containerOf(context, listen: false);
