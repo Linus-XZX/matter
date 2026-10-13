@@ -8,6 +8,7 @@ import '../../providers/chat_provider.dart';
 import '../../providers/session_credential_store.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_field.dart';
 import '../../widgets/neu_surface.dart';
@@ -596,11 +597,22 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     return PopScope(
       canPop: !widget.addingAccount || (!_isLoading && !_hasCompletedRustLogin),
       child: Scaffold(
-        appBar: widget.addingAccount ? AppBar(title: const Text('添加账号')) : null,
+        extendBodyBehindAppBar: widget.addingAccount,
+        appBar: widget.addingAccount
+            ? buildFloatingAppBar(title: const Text('添加账号'))
+            : null,
         backgroundColor: context.neu.base,
         body: SafeArea(
+          top: !widget.addingAccount,
           child: CustomScrollView(
             slivers: [
+              if (widget.addingAccount)
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height:
+                        MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                  ),
+                ),
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(

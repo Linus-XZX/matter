@@ -9,6 +9,7 @@ import 'package:matter/src/rust/frb_generated.dart';
 import 'package:matter/theme/material_theme.dart';
 import 'package:matter/theme/neu_colors.dart';
 import 'package:matter/theme/neu_theme.dart';
+import 'package:matter/widgets/glass.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _RustApi implements RustLibApi {
@@ -97,6 +98,22 @@ void main() {
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 300));
           expect(find.byType(AppBar), findsOneWidget);
+          final appBar = find.byType(AppBar);
+          expect(
+            tester.widget<AppBar>(appBar).backgroundColor,
+            Colors.transparent,
+          );
+          expect(
+            find.descendant(of: appBar, matching: find.byType(TopFadeBlur)),
+            findsOneWidget,
+          );
+          final scaffold = find
+              .ancestor(of: appBar, matching: find.byType(Scaffold))
+              .first;
+          expect(
+            tester.widget<Scaffold>(scaffold).extendBodyBehindAppBar,
+            isTrue,
+          );
           expect(find.text(destination.label), findsWidgets);
           expect(tester.takeException(), isNull);
         }

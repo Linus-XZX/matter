@@ -14,6 +14,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_decoration.dart';
@@ -1807,8 +1808,9 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               title: const Text('房间管理'),
               actions: [
                 if (_saving)
@@ -1854,20 +1856,16 @@ class _RoomManagementPageState extends ConsumerState<RoomManagementPage> {
                     ),
                   )
                 : Padding(
-                    // CustomScrollView has no `padding` parameter; pad the
-                    // viewport itself with the insets the ListView used to
-                    // carry, plus the floating header's height so the first
-                    // card starts below the title.
-                    padding: EdgeInsets.fromLTRB(
-                      16,
-                      context.isMaterial
-                          ? 8
-                          : viewPaddingTop + kToolbarHeight + 8,
-                      16,
-                      32,
-                    ),
+                    // Reserve the header inside the scrollable so cards can
+                    // pass underneath it without clipping at its bottom edge.
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
                     child: CustomScrollView(
                       slivers: [
+                        SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: viewPaddingTop + kToolbarHeight + 8,
+                          ),
+                        ),
                         SliverToBoxAdapter(
                           child: _section(
                             title: '房间信息',

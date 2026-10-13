@@ -6,6 +6,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_action.dart';
@@ -320,7 +321,10 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('新建聊天')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('新建聊天'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -328,9 +332,7 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
               child: ListView(
                 padding: EdgeInsets.fromLTRB(
                   NeuSpacing.lg,
-                  context.isMaterial
-                      ? NeuSpacing.sm
-                      : viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                  viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
                   NeuSpacing.lg,
                   NeuSpacing.xl,
                 ),

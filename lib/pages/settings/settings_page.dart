@@ -19,6 +19,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
@@ -575,7 +576,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('设置')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('设置'))
+          : null,
       body: Stack(
         children: [
           CustomScrollView(
@@ -584,11 +588,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               SliverPadding(
                 padding: EdgeInsets.fromLTRB(
                   NeuSpacing.lg,
-                  context.isMaterial
-                      ? NeuSpacing.lg
-                      : MediaQuery.viewPaddingOf(context).top +
-                            kToolbarHeight +
-                            NeuSpacing.lg,
+                  MediaQuery.viewPaddingOf(context).top +
+                      kToolbarHeight +
+                      NeuSpacing.lg,
                   NeuSpacing.lg,
                   context.isMaterial
                       ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom

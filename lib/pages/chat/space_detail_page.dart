@@ -10,6 +10,7 @@ import '../../src/rust/api/matrix.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
 import '../../widgets/avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_action.dart';
@@ -106,10 +107,8 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
     if (_accountSwitched || !_accountActive()) {
       return Scaffold(
         backgroundColor: context.neu.base,
-        appBar: AppBar(
-          backgroundColor: context.neu.base,
-          elevation: 0,
-          scrolledUnderElevation: 0,
+        extendBodyBehindAppBar: true,
+        appBar: buildFloatingAppBar(
           leading: IconButton(
             icon: Icon(Icons.arrow_back_rounded, color: context.neu.text),
             onPressed: () => Navigator.of(context).pop(),
@@ -139,8 +138,9 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: context.neu.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               title: const Text('空间'),
               actions: [
                 IconButton(
@@ -169,9 +169,7 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
               child: ListView(
                 padding: EdgeInsets.fromLTRB(
                   NeuSpacing.lg,
-                  context.isMaterial
-                      ? NeuSpacing.sm
-                      : viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                  viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
                   NeuSpacing.lg,
                   NeuSpacing.xl,
                 ),

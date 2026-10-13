@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_decoration.dart';
@@ -170,7 +171,10 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('个人资料')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('个人资料'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -180,9 +184,7 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
                     child: SingleChildScrollView(
                       padding: EdgeInsets.fromLTRB(
                         NeuSpacing.lg,
-                        context.isMaterial
-                            ? NeuSpacing.lg
-                            : viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                        viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
                         NeuSpacing.lg,
                         NeuSpacing.lg,
                       ),

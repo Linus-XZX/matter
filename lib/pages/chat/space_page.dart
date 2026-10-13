@@ -10,6 +10,7 @@ import '../../providers/chat_visual_settings_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
 import '../../widgets/cascade_title.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
@@ -37,8 +38,9 @@ class SpacePage extends ConsumerWidget {
 
     return Scaffold(
       backgroundColor: context.neu.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               title: CascadeTitle(
                 text: titleText,
                 style: Theme.of(context).textTheme.titleLarge!,
@@ -59,11 +61,10 @@ class SpacePage extends ConsumerWidget {
               // 标题栏移到上方浮层,这里只预留其高度。
               SliverToBoxAdapter(
                 child: SizedBox(
-                  height: context.isMaterial
-                      ? NeuSpacing.md
-                      : MediaQuery.viewPaddingOf(context).top +
-                            kToolbarHeight +
-                            NeuSpacing.md,
+                  height:
+                      MediaQuery.viewPaddingOf(context).top +
+                      kToolbarHeight +
+                      NeuSpacing.md,
                 ),
               ),
               spacesAsync.when(

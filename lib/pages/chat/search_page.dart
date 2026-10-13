@@ -8,6 +8,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
@@ -200,7 +201,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     final headerHeight =
         _searchFieldRowHeight + (tabBar?.preferredSize.height ?? 0);
-    final topInset = context.isMaterial ? 0.0 : viewPaddingTop + headerHeight;
+    final topInset = viewPaddingTop + headerHeight;
 
     final messageSearchKey = ValueKey(
       Object.hash(
@@ -235,8 +236,9 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
 
     final scaffold = Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               leading: IconButton(
                 icon: const Icon(Icons.arrow_back),
                 tooltip: '返回',

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_field.dart';
@@ -160,8 +161,9 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
 
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               title: Text('日志 (${allLogs.length})'),
               actions: [
                 IconButton(
@@ -187,9 +189,7 @@ class _LogViewerPageState extends ConsumerState<LogViewerPage> {
             child: Padding(
               // 标题栏移到上方浮层,内容从它下方开始。
               padding: EdgeInsets.only(
-                top: context.isMaterial
-                    ? 0
-                    : MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
+                top: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
               ),
               child: Column(
                 children: [

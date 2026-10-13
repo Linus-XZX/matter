@@ -8,6 +8,7 @@ import '../../features/markdown/markdown_format_toolbar.dart';
 import '../../features/markdown/markdown_text_editing_controller.dart';
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 
@@ -172,8 +173,9 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
       },
       child: Scaffold(
         backgroundColor: colors.base,
+        extendBodyBehindAppBar: context.isMaterial,
         appBar: context.isMaterial
-            ? AppBar(
+            ? buildFloatingAppBar(
                 title: const Text('Markdown'),
                 leading: NeuIconButton(
                   icon: Icons.close_rounded,
@@ -204,9 +206,7 @@ class _MarkdownComposerPageState extends ConsumerState<MarkdownComposerPage> {
               child: Padding(
                 // 标题栏移到上方浮层,编辑区从它下方开始。
                 padding: EdgeInsets.only(
-                  top: context.isMaterial
-                      ? NeuSpacing.lg
-                      : viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                  top: viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
                 ),
                 child: SafeArea(
                   top: false,

@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
@@ -364,7 +365,10 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('置顶消息')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('置顶消息'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(child: _buildBody(ignoredUserIdsAsync)),
@@ -425,9 +429,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     final colors = context.neu;
     // 悬浮标题栏让滚动视图从屏幕顶部开始:下拉指示器按标题栏高度下移,
     // 列表顶部同样预留这段内边距,行才不会被标题栏压住。
-    final topInset = context.isMaterial
-        ? 0.0
-        : MediaQuery.viewPaddingOf(context).top + kToolbarHeight;
+    final topInset = MediaQuery.viewPaddingOf(context).top + kToolbarHeight;
     if (_loading && _messages == null) {
       return Center(
         child: CircularProgressIndicator(color: colors.accent, strokeWidth: 2),
@@ -511,7 +513,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.fromLTRB(
           context.isMaterial ? 0 : NeuSpacing.lg,
-          context.isMaterial ? 0 : topInset + NeuSpacing.md,
+          topInset + (context.isMaterial ? 0 : NeuSpacing.md),
           context.isMaterial ? 0 : NeuSpacing.lg,
           NeuSpacing.xl,
         ),

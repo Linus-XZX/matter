@@ -10,6 +10,7 @@ import '../../features/push/push_runtime.dart';
 import '../../features/push/push_settings.dart';
 import '../../src/rust/api/matrix/notifications.dart';
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
@@ -86,9 +87,8 @@ class _NotificationSettingsPageState
   }
 
   void _showPreferenceError(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _saveRule(
@@ -337,9 +337,9 @@ class _NotificationSettingsPageState
     final pushSettings = ref.watch(pushSettingsProvider(widget.userId));
     return Scaffold(
       backgroundColor: context.neu.base,
-      appBar: AppBar(
+      extendBodyBehindAppBar: true,
+      appBar: buildFloatingAppBar(
         title: const Text('通知设置'),
-        backgroundColor: context.neu.base,
         actions: [
           NeuIconButton(
             tooltip: '刷新通知偏好',
@@ -351,18 +351,23 @@ class _NotificationSettingsPageState
       ),
       body: MaxContentWidth(
         child: RefreshIndicator(
+          edgeOffset: MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
           onRefresh: _refreshPreferences,
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+            padding: EdgeInsets.fromLTRB(
+              16,
+              MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 8,
+              16,
+              32,
+            ),
             children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 0, 4, 16),
                 child: Text(
                   '当前账号：${widget.userId}\n设置哪些消息和事件需要提醒。修改后自动保存，并同步到其他设备。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: context.neu.textSecondary,
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: context.neu.textSecondary),
                 ),
               ),
               if (value == null && preferences.isLoading)
@@ -520,8 +525,7 @@ class _NotificationSettingsPageState
             mode: true,
           ),
           const _InlineMessage(
-            text:
-                '这里设置聊天的默认提醒范围；已单独设置的房间使用自己的通知设置。邀请、通话等事件按下方选项提醒。后台未解密的消息可能无法识别提及和关键词。',
+            text: '这里设置聊天的默认提醒范围；已单独设置的房间使用自己的通知设置。邀请、通话等事件按下方选项提醒。后台未解密的消息可能无法识别提及和关键词。',
           ),
         ],
       ),
@@ -660,8 +664,7 @@ class _NotificationSettingsPageState
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const _InlineMessage(
-                  text:
-                      '此处配置当前设备的推送接入，与上方账号通知偏好分别保存。Matter 不提供默认网关；非加密消息可显示正文，加密消息显示通用提示，点击通知可打开对应聊天。',
+                  text: '此处配置当前设备的推送接入，与上方账号通知偏好分别保存。Matter 不提供默认网关；非加密消息可显示正文，加密消息显示通用提示，点击通知可打开对应聊天。',
                 ),
                 DropdownButtonFormField<PushBackend>(
                   initialValue: _backend,
@@ -732,8 +735,7 @@ class _NotificationSettingsPageState
                     validator: (value) => validateVapidPublicKey(value ?? ''),
                   ),
                   const _InlineMessage(
-                    text:
-                        '浏览器须支持 Web Push，站点须使用 HTTPS；网关须支持 Web Push/VAPID，并保留账号路由数据。',
+                    text: '浏览器须支持 Web Push，站点须使用 HTTPS；网关须支持 Web Push/VAPID，并保留账号路由数据。',
                   ),
                 ],
                 if (fcmPushSupported) ...[
@@ -750,8 +752,7 @@ class _NotificationSettingsPageState
                     child: const Text('导入 google-services.json'),
                   ),
                   const _InlineMessage(
-                    text:
-                        'Android 需要 Google Play 服务。Firebase 项目由此安装的所有账号共享，更换项目会关闭并注销所有 Android 推送；网关的 FCM 项目必须与这里一致。',
+                    text: 'Android 需要 Google Play 服务。Firebase 项目由此安装的所有账号共享，更换项目会关闭并注销所有 Android 推送；网关的 FCM 项目必须与这里一致。',
                   ),
                   if (fcmPushRuntime.configurationChanged)
                     const _InlineMessage(
@@ -799,9 +800,8 @@ class _SettingsGroup extends StatelessWidget {
           padding: const EdgeInsets.only(left: 4, bottom: 8),
           child: Text(
             title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleSmall?.copyWith(color: context.neu.textSecondary),
+            style: Theme.of(context).textTheme.titleSmall
+                ?.copyWith(color: context.neu.textSecondary),
           ),
         ),
         NeuSurface(

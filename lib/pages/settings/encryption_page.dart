@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import '../../providers/auth_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_decoration.dart';
@@ -194,14 +195,18 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
     if (ref.watch(activeUserIdProvider) != _accountUserId) {
       return Scaffold(
         backgroundColor: colors.base,
-        appBar: AppBar(title: const Text('设备与加密')),
+        extendBodyBehindAppBar: true,
+        appBar: buildFloatingAppBar(title: const Text('设备与加密')),
         body: const Center(child: Text('当前账号已切换，请返回设置重新打开')),
       );
     }
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('设备与加密')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('设备与加密'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -214,17 +219,13 @@ class _EncryptionPageState extends ConsumerState<EncryptionPage> {
                     },
                     // 悬浮标题栏让滚动视图从屏幕顶部开始,下拉指示器按标题栏
                     // 高度下移,否则会被标题栏挡住。
-                    edgeOffset: context.isMaterial
-                        ? 0
-                        : viewPaddingTop + kToolbarHeight,
+                    edgeOffset: viewPaddingTop + kToolbarHeight,
                     child: MaxContentWidth(
                       child: ListView(
                         physics: const AlwaysScrollableScrollPhysics(),
                         padding: EdgeInsets.fromLTRB(
                           NeuSpacing.lg,
-                          context.isMaterial
-                              ? NeuSpacing.sm
-                              : viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
+                          viewPaddingTop + kToolbarHeight + NeuSpacing.sm,
                           NeuSpacing.lg,
                           32,
                         ),

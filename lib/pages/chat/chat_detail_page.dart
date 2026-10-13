@@ -18,6 +18,7 @@ import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
@@ -2404,7 +2405,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
   /// only persistent glass layer on this page (see GlassPanel discipline).
   AppBar _buildMaterialTopBar(String subtitle) {
     final compact = MediaQuery.sizeOf(context).width < _headerCompactBreakpoint;
-    return AppBar(
+    return buildFloatingAppBar(
       automaticallyImplyLeading: !widget.embedded,
       titleSpacing: widget.embedded ? 16 : 0,
       title: Row(

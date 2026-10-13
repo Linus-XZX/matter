@@ -8,6 +8,7 @@ import '../../providers/chat_visual_settings_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
@@ -25,7 +26,71 @@ class ContactsPage extends ConsumerStatefulWidget {
 }
 
 class _ContactsPageState extends ConsumerState<ContactsPage> {
+  final _scrollController = ScrollController();
+  final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
+  final _searchCollapse = ValueNotifier(0.0);
+  bool _headerSearchVisible = false;
   String _searchQuery = '';
+
+  static const _searchBarExtent = 56.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_syncSearchCollapse);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    _searchCollapse.dispose();
+    super.dispose();
+  }
+
+  void _syncSearchCollapse() {
+    final offset = _scrollController.hasClients
+        ? _scrollController.offset
+        : 0.0;
+    _searchCollapse.value = (offset / _searchBarExtent).clamp(0.0, 1.0);
+    final show = _headerSearchVisible
+        ? offset >= _searchBarExtent - 16
+        : offset >= _searchBarExtent;
+    if (show != _headerSearchVisible) {
+      setState(() => _headerSearchVisible = show);
+    }
+  }
+
+  Future<void> _revealSearch() async {
+    if (_scrollController.hasClients) {
+      await _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    if (mounted) _searchFocusNode.requestFocus();
+  }
+
+  Widget _buildHeaderSearchEntry() {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        child: _headerSearchVisible
+            ? NeuIconButton(
+                key: const ValueKey('contacts-header-search-entry'),
+                icon: Icons.search_rounded,
+                tooltip: '搜索联系人',
+                onPressed: _revealSearch,
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -33,108 +98,141 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
 
     return Scaffold(
       backgroundColor: context.neu.base,
-      appBar: context.isMaterial ? AppBar(title: const Text('通讯录')) : null,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(
+              title: const Text('通讯录'),
+              actions: [_buildHeaderSearchEntry()],
+            )
+          : null,
       body: Stack(
         children: [
-          CustomScrollView(
-            slivers: [
-              // 标题栏移到上方浮层,这里只预留其高度。
-              SliverToBoxAdapter(
-                child: SizedBox(
-                  height: context.isMaterial
-                      ? 0
-                      : MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
-                ),
-              ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    NeuSpacing.lg,
-                    NeuSpacing.xs,
-                    NeuSpacing.lg,
-                    NeuSpacing.sm,
-                  ),
-                  child: NeuTextField(
-                    hint: '搜索联系人',
-                    radius: context.isMaterial ? 28 : NeuRadius.content,
-                    leading: const Icon(Icons.search_rounded),
-                    onChanged: (value) {
-                      setState(() => _searchQuery = value.toLowerCase());
-                    },
+          NotificationListener<ScrollMetricsNotification>(
+            onNotification: (notification) {
+              if (notification.depth == 0) _syncSearchCollapse();
+              return false;
+            },
+            child: CustomScrollView(
+              controller: _scrollController,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              slivers: [
+                // 标题栏移到上方浮层,这里只预留其高度。
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height:
+                        MediaQuery.viewPaddingOf(context).top + kToolbarHeight,
                   ),
                 ),
-              ),
-              contactsAsync.when(
-                data: (contacts) {
-                  final filtered = _searchQuery.isEmpty
-                      ? contacts
-                      : contacts
-                            .where(
-                              (c) =>
-                                  c.name.toLowerCase().contains(_searchQuery) ||
-                                  c.status.toLowerCase().contains(_searchQuery),
-                            )
-                            .toList();
+                SliverToBoxAdapter(
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: _searchCollapse,
+                    builder: (context, collapse, child) => Opacity(
+                      opacity: 1 - collapse,
+                      child: IgnorePointer(
+                        ignoring: collapse == 1,
+                        child: ExcludeFocus(
+                          excluding: collapse == 1,
+                          child: child!,
+                        ),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        NeuSpacing.lg,
+                        NeuSpacing.xs,
+                        NeuSpacing.lg,
+                        NeuSpacing.sm,
+                      ),
+                      child: NeuTextField(
+                        key: const ValueKey('contacts-search-entry'),
+                        controller: _searchController,
+                        focusNode: _searchFocusNode,
+                        hint: '搜索联系人',
+                        radius: context.isMaterial ? 28 : NeuRadius.content,
+                        leading: const Icon(Icons.search_rounded),
+                        onChanged: (value) {
+                          setState(() => _searchQuery = value.toLowerCase());
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+                contactsAsync.when(
+                  data: (contacts) {
+                    final filtered = _searchQuery.isEmpty
+                        ? contacts
+                        : contacts
+                              .where(
+                                (c) =>
+                                    c.name.toLowerCase().contains(
+                                      _searchQuery,
+                                    ) ||
+                                    c.status.toLowerCase().contains(
+                                      _searchQuery,
+                                    ),
+                              )
+                              .toList();
 
-                  if (filtered.isEmpty) {
-                    return const SliverToBoxAdapter(
-                      child: Padding(
-                        padding: EdgeInsets.all(NeuSpacing.xl),
-                        child: _EmptyView(),
+                    if (filtered.isEmpty) {
+                      return const SliverToBoxAdapter(
+                        child: Padding(
+                          padding: EdgeInsets.all(NeuSpacing.xl),
+                          child: _EmptyView(),
+                        ),
+                      );
+                    }
+
+                    return SliverPadding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: NeuSpacing.lg,
+                      ),
+                      sliver: SliverList.separated(
+                        itemCount: filtered.length,
+                        // 与条目内边距对齐:水平 8 + 头像 48 + 间隔 14。
+                        separatorBuilder: (context, index) =>
+                            const ChatListDivider(indent: 8 + 48 + 14),
+                        itemBuilder: (context, index) {
+                          final contact = filtered[index];
+                          return _ContactTile(
+                            key: ValueKey(contact.id),
+                            contact: contact,
+                          );
+                        },
                       ),
                     );
-                  }
-
-                  return SliverPadding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: NeuSpacing.lg,
+                  },
+                  loading: () => SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(NeuSpacing.xl),
+                      child: Center(
+                        child: CircularProgressIndicator(
+                          color: context.neu.accent,
+                          strokeWidth: 2,
+                        ),
+                      ),
                     ),
-                    sliver: SliverList.separated(
-                      itemCount: filtered.length,
-                      // 与条目内边距对齐:水平 8 + 头像 48 + 间隔 14。
-                      separatorBuilder: (context, index) =>
-                          const ChatListDivider(indent: 8 + 48 + 14),
-                      itemBuilder: (context, index) {
-                        final contact = filtered[index];
-                        return _ContactTile(
-                          key: ValueKey(contact.id),
-                          contact: contact,
-                        );
-                      },
-                    ),
-                  );
-                },
-                loading: () => SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.all(NeuSpacing.xl),
-                    child: Center(
-                      child: CircularProgressIndicator(
-                        color: context.neu.accent,
-                        strokeWidth: 2,
+                  ),
+                  error: (err, _) => SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(NeuSpacing.xl),
+                      child: Center(
+                        child: SelectableText(
+                          '加载失败: $err',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
                       ),
                     ),
                   ),
                 ),
-                error: (err, _) => SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.all(NeuSpacing.xl),
-                    child: Center(
-                      child: SelectableText(
-                        '加载失败: $err',
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                    ),
+                SliverPadding(
+                  padding: EdgeInsets.only(
+                    bottom: context.isMaterial
+                        ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom
+                        : NeuSpacing.navClearance,
                   ),
                 ),
-              ),
-              SliverPadding(
-                padding: EdgeInsets.only(
-                  bottom: context.isMaterial
-                      ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom
-                      : NeuSpacing.navClearance,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
           if (!context.isMaterial)
@@ -154,14 +252,18 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                 bottom: false,
                 child: SizedBox(
                   height: kToolbarHeight,
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text(
-                        '通讯录',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '通讯录',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                        ),
+                        _buildHeaderSearchEntry(),
+                      ],
                     ),
                   ),
                 ),

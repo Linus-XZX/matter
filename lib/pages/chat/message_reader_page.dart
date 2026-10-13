@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 
@@ -45,8 +46,9 @@ class MessageReaderPage extends StatelessWidget {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
-          ? AppBar(
+          ? buildFloatingAppBar(
               title: const Text('阅读'),
               leading: IconButton(
                 icon: const Icon(Icons.close),
@@ -61,9 +63,7 @@ class MessageReaderPage extends StatelessWidget {
             child: SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(
                 20,
-                context.isMaterial
-                    ? NeuSpacing.lg
-                    : viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
+                viewPaddingTop + kToolbarHeight + NeuSpacing.lg,
                 20,
                 NeuSpacing.lg,
               ),
