@@ -4182,10 +4182,12 @@ pub struct ChatMessage {
     pub media_source_json: Option<String>,
     pub image_width: Option<i32>,
     pub image_height: Option<i32>,
-    /// Original filename for file/audio attachments.
+    /// Original filename for media attachments.
     pub filename: Option<String>,
-    /// Declared file size in bytes for file/audio attachments.
+    /// Declared file size in bytes for media attachments.
     pub file_size: Option<i32>,
+    /// MIME type declared by the media event.
+    pub mime_type: Option<String>,
     /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
     pub geo_uri: Option<String>,
     /// Poll data when `msg_type == Poll`.
@@ -8336,6 +8338,7 @@ fn unable_to_decrypt_message(
         image_height: None,
         filename: None,
         file_size: None,
+        mime_type: None,
         geo_uri: None,
         poll: None,
         in_reply_to: None,

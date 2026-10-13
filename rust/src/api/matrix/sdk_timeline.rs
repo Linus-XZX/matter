@@ -1144,6 +1144,7 @@ fn timeline_item_to_message(
                         image_height,
                         filename: None,
                         file_size: None,
+                        mime_type: content.info.mimetype.clone(),
                         geo_uri: None,
                         poll: None,
                         in_reply_to,
@@ -1189,6 +1190,7 @@ fn timeline_item_to_message(
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1217,6 +1219,7 @@ fn timeline_item_to_message(
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1336,6 +1339,12 @@ fn message_to_chat_message(
             result.media_source_json = serde_json::to_string(&image.source).ok();
             result.image_width = image_width;
             result.image_height = image_height;
+            result.filename = Some(image.filename().to_string());
+            result.file_size = image
+                .info
+                .as_deref()
+                .and_then(|info| uint_to_i32(info.size));
+            result.mime_type = image.info.as_deref().and_then(|info| info.mimetype.clone());
             result
         }
         RumaMessageType::Video(video) => {
@@ -1503,6 +1512,7 @@ fn base_message(
         image_height: None,
         filename: None,
         file_size: None,
+        mime_type: None,
         geo_uri: None,
         poll: None,
         in_reply_to,
@@ -1803,6 +1813,7 @@ mod tests {
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,

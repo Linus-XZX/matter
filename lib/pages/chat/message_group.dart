@@ -27,6 +27,7 @@ import 'message_input.dart'
 import 'file_message_bubble.dart';
 import 'forward_message_sheet.dart';
 import 'image_message_bubble.dart';
+import 'image_viewer.dart' show ImageHistoryLoader;
 import 'link_preview.dart';
 import 'location_message_bubble.dart';
 import 'message_insert_animation.dart';
@@ -159,6 +160,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final ValueChanged<String>? onMentionRequested;
   final ValueChanged<String>? onMessageJumpRequested;
   final ValueChanged<ChatRoom>? onMessageForwarded;
+  final ImageHistoryLoader? loadOlderImages;
 
   const MessageGroupWidget({
     super.key,
@@ -181,6 +183,7 @@ class MessageGroupWidget extends ConsumerWidget {
     this.onMentionRequested,
     this.onMessageJumpRequested,
     this.onMessageForwarded,
+    this.loadOlderImages,
   });
 
   static const double _avatarSize = 36.0;
@@ -456,6 +459,15 @@ class MessageGroupWidget extends ConsumerWidget {
             mediaSourceJson: message.mediaSourceJson,
             imageWidth: message.imageWidth,
             imageHeight: message.imageHeight,
+            fileSize: message.fileSize,
+            mimeType: message.mimeType,
+            filename: message.filename ?? message.content,
+            message: message,
+            roomId: roomId,
+            galleryMessages: messageIndex.values,
+            loadOlderImages: loadOlderImages,
+            onMessageJumpRequested: onMessageJumpRequested,
+            onMessageForwarded: onMessageForwarded,
             caption: message.caption,
             captionFormattedBody: message.captionFormattedBody,
             mentionDisplayNames: mentionDisplayNames,

@@ -1274,11 +1274,14 @@ class ChatMessage {
   final int? imageWidth;
   final int? imageHeight;
 
-  /// Original filename for file/audio attachments.
+  /// Original filename for media attachments.
   final String? filename;
 
-  /// Declared file size in bytes for file/audio attachments.
+  /// Declared file size in bytes for media attachments.
   final int? fileSize;
+
+  /// MIME type declared by the media event.
+  final String? mimeType;
 
   /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
   final String? geoUri;
@@ -1324,6 +1327,7 @@ class ChatMessage {
     this.imageHeight,
     this.filename,
     this.fileSize,
+    this.mimeType,
     this.geoUri,
     this.poll,
     this.inReplyTo,
@@ -1354,6 +1358,7 @@ class ChatMessage {
       imageHeight.hashCode ^
       filename.hashCode ^
       fileSize.hashCode ^
+      mimeType.hashCode ^
       geoUri.hashCode ^
       poll.hashCode ^
       inReplyTo.hashCode ^
@@ -1386,6 +1391,7 @@ class ChatMessage {
           imageHeight == other.imageHeight &&
           filename == other.filename &&
           fileSize == other.fileSize &&
+          mimeType == other.mimeType &&
           geoUri == other.geoUri &&
           poll == other.poll &&
           inReplyTo == other.inReplyTo &&

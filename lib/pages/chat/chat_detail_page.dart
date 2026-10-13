@@ -1391,6 +1391,16 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     }
   }
 
+  Future<({List<ChatMessage> messages, bool hasMore})>
+  _loadImageHistory() async {
+    await _loadOlderMessages();
+    if (!mounted) return (messages: <ChatMessage>[], hasMore: false);
+    if (_olderLoadBlockedByError) throw StateError('历史消息加载失败，请重试');
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return (messages: <ChatMessage>[], hasMore: false);
+    return (messages: _messageIndex.values.toList(), hasMore: _hasMoreMessages);
+  }
+
   void _retryOlderMessages() {
     setState(() {
       _olderLoadBlockedByError = false;
@@ -1822,6 +1832,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           onMessageJumpRequested: (messageId) =>
               unawaited(_jumpToMessage(messageId)),
           onMessageForwarded: _showForwardNotice,
+          loadOlderImages: _loadImageHistory,
         );
       case _TimelineEntryType.date:
         return DateSeparator(

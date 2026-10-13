@@ -1,6 +1,8 @@
 import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../src/rust/api/matrix.dart' as rust;
 import 'message_ordering.dart';
 
@@ -83,6 +85,7 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'imageHeight': message.imageHeight,
     'filename': message.filename,
     'fileSize': message.fileSize,
+    'mimeType': message.mimeType,
     'geoUri': message.geoUri,
     'poll': message.poll == null
         ? null
@@ -213,6 +216,7 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     imageHeight: (map['imageHeight'] as num?)?.toInt(),
     filename: map['filename'] as String?,
     fileSize: (map['fileSize'] as num?)?.toInt(),
+    mimeType: map['mimeType'] as String?,
     geoUri: map['geoUri'] as String?,
     poll: poll,
     inReplyTo: map['inReplyTo'] as String?,

@@ -388,6 +388,7 @@ rust.ChatMessage _acceptedEditedMessage(
   imageHeight: original.imageHeight,
   filename: original.filename,
   fileSize: original.fileSize,
+  mimeType: original.mimeType,
   geoUri: original.geoUri,
   poll: original.poll,
   inReplyTo: original.inReplyTo,
