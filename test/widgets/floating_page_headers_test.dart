@@ -33,7 +33,7 @@ void main() {
   for (final brightness in Brightness.values) {
     for (final example in [
       (page: const ContactsPage(), marker: '搜索联系人'),
-      (page: const SpacePage(), marker: '当前账号还没有可浏览的空间。'),
+      (page: const SpacePage(), marker: '还没有加入空间'),
       (page: const CreateChatPage(), marker: '输入 @用户 ID 发起私聊'),
       (
         page: const MessageReaderPage(html: '<p>First line</p>'),
