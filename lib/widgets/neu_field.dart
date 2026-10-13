@@ -40,6 +40,35 @@ class NeuTextField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      final border = OutlineInputBorder(
+        borderRadius: BorderRadius.circular(radius),
+        borderSide: BorderSide.none,
+      );
+      return TextField(
+        controller: controller,
+        focusNode: focusNode,
+        obscureText: obscureText,
+        maxLines: maxLines,
+        autofocus: autofocus,
+        textInputAction: textInputAction,
+        onChanged: onChanged,
+        onSubmitted: onSubmitted,
+        decoration: InputDecoration(
+          hintText: hint,
+          prefixIcon: leading,
+          suffixIcon: trailing,
+          border: border,
+          enabledBorder: border,
+          focusedBorder: border.copyWith(
+            borderSide: BorderSide(
+              color: Theme.of(context).colorScheme.primary,
+              width: 2,
+            ),
+          ),
+        ),
+      );
+    }
     return Focus(
       onFocusChange: (_) {},
       child: Builder(
@@ -50,9 +79,8 @@ class NeuTextField extends StatelessWidget {
             padding: padding,
             decoration: NeuDecoration(
               colors: colors,
-              superellipseEnabled: ChatVisualSettingsScope.of(
-                context,
-              ).superellipseBorderEnabled,
+              superellipseEnabled: ChatVisualSettingsScope.of(context)
+                  .superellipseBorderEnabled,
               depth: NeuDepth.pressed,
               radius: radius,
               intensity: .85,

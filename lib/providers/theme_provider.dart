@@ -1,8 +1,27 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 主题风格：新拟物明/暗/跟随系统。
-enum AppThemeStyle { neuLight, neuDark, neuSystem }
+/// Appearance and brightness are persisted together; existing values stay valid.
+enum AppThemeStyle {
+  neuLight,
+  neuDark,
+  neuSystem,
+  materialLight,
+  materialDark,
+  materialSystem;
+
+  bool get isMaterial => switch (this) {
+    materialLight || materialDark || materialSystem => true,
+    _ => false,
+  };
+
+  ThemeMode get themeMode => switch (this) {
+    neuLight || materialLight => ThemeMode.light,
+    neuDark || materialDark => ThemeMode.dark,
+    neuSystem || materialSystem => ThemeMode.system,
+  };
+}
 
 class AppThemeStyleNotifier extends Notifier<AppThemeStyle> {
   static const _prefsKey = 'app_theme_style';

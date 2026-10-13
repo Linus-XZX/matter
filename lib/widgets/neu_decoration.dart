@@ -50,7 +50,7 @@ class NeuDecoration extends Decoration {
   // Let repaint boundaries (including lazy-list rows) raster-cache the blur
   // operations instead of rasterizing both shadows on every scrolling frame.
   @override
-  bool get isComplex => depth != NeuDepth.flat;
+  bool get isComplex => !colors.isMaterial && depth != NeuDepth.flat;
 
   @override
   BoxPainter createBoxPainter([VoidCallback? onChanged]) =>
@@ -103,6 +103,31 @@ class _NeuPainter extends BoxPainter {
     if (rect.isEmpty) return;
 
     final c = decoration.colors;
+    if (c.isMaterial) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          offset & size,
+          Radius.circular(decoration.radius),
+        ),
+        Paint()
+          ..color = decoration.accent
+              ? c.accent
+              : (decoration.color ?? c.surface),
+      );
+      if (decoration.borderColor case final borderColor?) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            (offset & size).deflate(.6),
+            Radius.circular(decoration.radius),
+          ),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.2
+            ..color = borderColor,
+        );
+      }
+      return;
+    }
     final d = 3.8 * decoration.intensity;
     final sigma = d * 1.15;
     if (_size != size) {

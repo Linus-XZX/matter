@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'action_failure_message.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_action.dart';
@@ -166,9 +168,8 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                   padding: const EdgeInsets.only(top: 12),
                   child: Text(
                     groupNameError!,
-                    style: Theme.of(
-                      ctx,
-                    ).textTheme.bodyMedium?.copyWith(color: ctx.neu.error),
+                    style: Theme.of(ctx).textTheme.bodyMedium
+                        ?.copyWith(color: ctx.neu.error),
                   ),
                 ),
             ],
@@ -202,9 +203,8 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
                   padding: const EdgeInsets.only(top: 12),
                   child: Text(
                     joinError!,
-                    style: Theme.of(
-                      ctx,
-                    ).textTheme.bodyMedium?.copyWith(color: ctx.neu.error),
+                    style: Theme.of(ctx).textTheme.bodyMedium
+                        ?.copyWith(color: ctx.neu.error),
                   ),
                 ),
             ],
@@ -321,6 +321,10 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('新建聊天'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -385,48 +389,50 @@ class _CreateChatPageState extends ConsumerState<CreateChatPage> {
             ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    NeuSpacing.sm,
-                    NeuSpacing.sm,
-                    NeuSpacing.lg,
-                    NeuSpacing.xs,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 40,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Text(
-                        '新建聊天',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                    ],
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      NeuSpacing.sm,
+                      NeuSpacing.sm,
+                      NeuSpacing.lg,
+                      NeuSpacing.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 40,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
+                        const SizedBox(width: NeuSpacing.sm),
+                        Text(
+                          '新建聊天',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );

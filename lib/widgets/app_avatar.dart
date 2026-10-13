@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../providers/authenticated_media_cache.dart';
 import '../providers/auth_provider.dart';
 import '../providers/chat_provider.dart';
@@ -79,6 +80,7 @@ class _AppAvatarState extends ConsumerState<AppAvatar> {
   @override
   Widget build(BuildContext context) {
     final url = _resolvedUrl;
+    final radius = context.isMaterial ? widget.size / 2 : widget.radius;
 
     if (url == null || url.isEmpty) {
       return _buildFallback(context);
@@ -95,7 +97,7 @@ class _AppAvatarState extends ConsumerState<AppAvatar> {
       height: widget.size,
       decoration: BoxDecoration(
         color: context.neu.surfaceStrong,
-        borderRadius: BorderRadius.circular(widget.radius),
+        borderRadius: BorderRadius.circular(radius),
       ),
       clipBehavior: Clip.antiAlias,
       child: _AuthenticatedImage(
@@ -118,14 +120,20 @@ class _AppAvatarState extends ConsumerState<AppAvatar> {
       width: widget.size,
       height: widget.size,
       decoration: BoxDecoration(
-        color: context.neu.surfaceStrong,
-        borderRadius: BorderRadius.circular(widget.radius),
+        color: context.isMaterial
+            ? Theme.of(context).colorScheme.secondaryContainer
+            : context.neu.surfaceStrong,
+        borderRadius: BorderRadius.circular(
+          context.isMaterial ? widget.size / 2 : widget.radius,
+        ),
       ),
       child: Center(
         child: Text(
           _initials,
           style: TextStyle(
-            color: context.neu.accent,
+            color: context.isMaterial
+                ? Theme.of(context).colorScheme.onSecondaryContainer
+                : context.neu.accent,
             fontSize: widget.size * 0.38,
             fontWeight: FontWeight.w700,
           ),

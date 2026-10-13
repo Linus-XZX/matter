@@ -12,6 +12,32 @@ Future<T?> showNeuSheet<T>({
   required Widget child,
   double maxWidth = 420,
 }) {
+  if (context.isMaterial) {
+    return showModalBottomSheet<T>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight:
+                  (MediaQuery.sizeOf(sheetContext).height * .85 -
+                          MediaQuery.viewInsetsOf(sheetContext).bottom)
+                      .clamp(0.0, double.infinity),
+            ),
+            child: SingleChildScrollView(child: child),
+          ),
+        ),
+      ),
+    );
+  }
   return showModalBottomSheet<T>(
     context: context,
     backgroundColor: Colors.transparent,
@@ -70,6 +96,14 @@ class NeuSheetItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      return ListTile(
+        leading: Icon(icon, color: color),
+        title: Text(label, style: TextStyle(color: color)),
+        trailing: trailing,
+        onTap: onTap,
+      );
+    }
     return InkWell(
       borderRadius: BorderRadius.circular(NeuRadius.button),
       onTap: onTap,
@@ -82,10 +116,8 @@ class NeuSheetItem extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  fontWeight: FontWeight.w500,
-                  color: color,
-                ),
+                style: Theme.of(context).textTheme.bodyLarge
+                    ?.copyWith(fontWeight: FontWeight.w500, color: color),
               ),
             ),
             ?trailing,
@@ -120,6 +152,30 @@ Future<bool> showNeuConfirm(
   bool danger = false,
   bool barrierDismissible = true,
 }) async {
+  if (context.isMaterial) {
+    return await showDialog<bool>(
+          context: context,
+          barrierDismissible: barrierDismissible,
+          builder: (ctx) => AlertDialog(
+            title: Text(title),
+            content: SingleChildScrollView(child: Text(message)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text(cancelLabel),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: danger
+                    ? TextButton.styleFrom(foregroundColor: ctx.neu.error)
+                    : null,
+                child: Text(confirmLabel),
+              ),
+            ],
+          ),
+        ) ==
+        true;
+  }
   final confirmed = await showDialog<bool>(
     context: context,
     barrierDismissible: barrierDismissible,
@@ -190,6 +246,41 @@ Future<String?> showNeuPrompt(
   return showDialog<String>(
     context: context,
     builder: (ctx) {
+      if (ctx.isMaterial) {
+        return AlertDialog(
+          title: Text(title),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (message != null) ...[
+                  Text(message),
+                  const SizedBox(height: 16),
+                ],
+                NeuTextField(
+                  controller: controller,
+                  hint: hint,
+                  maxLines: multiline ? 3 : maxLines,
+                  obscureText: obscureText,
+                  autofocus: true,
+                  onSubmitted: (value) => Navigator.of(ctx).pop(value),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(controller.text),
+              child: Text(confirmLabel),
+            ),
+          ],
+        );
+      }
       return Dialog(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -248,6 +339,12 @@ Future<String?> showNeuPrompt(
 
 /// 统一的原型提示:超椭圆浮层 SnackBar,新拟物配色。
 void neuToast(BuildContext context, String message) {
+  if (context.isMaterial) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+    return;
+  }
   final colors = context.neu;
   final superellipseEnabled =
       ChatVisualSettingsScope.maybeOf(context)?.superellipseBorderEnabled ??
@@ -258,9 +355,8 @@ void neuToast(BuildContext context, String message) {
       SnackBar(
         content: Text(
           message,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: colors.text),
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: colors.text),
         ),
         backgroundColor: colors.surfaceStrong,
         elevation: 0,

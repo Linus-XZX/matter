@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/hidden_rooms_provider.dart';
 import '../../src/rust/api/matrix.dart';
@@ -46,9 +48,19 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   final ScrollController _scrollController = ScrollController();
   final ValueNotifier<double> _searchCollapse = ValueNotifier(0);
   bool _headerSearchVisible = false;
+  ({
+    String? userId,
+    String? spaceId,
+    bool directMessagesOnly,
+    bool ungroupedRoomsOnly,
+    HiddenRoomsState hiddenRooms,
+    AsyncValue<Set<String>>? ignoredUsers,
+  })?
+  _loadedRoomsScope;
+  List<ChatRoom>? _loadedRooms;
 
-  /// 头部内容高度:上下 padding 12 + 8,行高由 44 的图标按钮决定。
-  static const double _headerHeight = 64;
+  /// Material 使用标准工具栏高度;新拟物包含上下 padding 12 + 8。
+  double get _headerHeight => context.isMaterial ? kToolbarHeight : 64;
 
   /// 搜索栏条目高度(顶部间距 + 凹陷输入框),滚动此距离后完全折叠。
   static const double _searchBarExtent = 56;
@@ -67,8 +79,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   void _syncSearchCollapse() {
-    if (!_scrollController.hasClients) return;
-    final offset = _scrollController.offset;
+    final offset = _scrollController.hasClients
+        ? _scrollController.offset
+        : 0.0;
     _searchCollapse.value = (offset / _searchBarExtent).clamp(0.0, 1.0);
     // 头部图标的显隐是时间动画(见 _buildHeader),加少量迟滞避免
     // 滚动位置停在阈值附近时反复触发。
@@ -81,15 +94,13 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   void _openSearch() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => const ChatSearchPage()));
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const ChatSearchPage()));
   }
 
   void _openCreateChat() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => const CreateChatPage()));
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const CreateChatPage()));
   }
 
   // 只读入口:点击进入独立搜索页。
@@ -98,17 +109,66 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       key: const ValueKey('open-chat-search'),
       label: '搜索消息或聊天',
       onTap: _openSearch,
-      child: const ExcludeFocus(
+      child: ExcludeFocus(
         child: ExcludeSemantics(
           child: IgnorePointer(
-            child: NeuTextField(hint: '搜索消息或聊天', leading: Icon(Icons.search)),
+            child: NeuTextField(
+              hint: '搜索消息或聊天',
+              radius: context.isMaterial ? 28 : NeuRadius.content,
+              leading: const Icon(Icons.search),
+            ),
           ),
         ),
       ),
     );
   }
 
+  Widget _buildHeaderSearchEntry() {
+    // 搜索栏滚出后用时间动画显示入口,避免慢拖时宽度长期停在中间态。
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        child: _headerSearchVisible
+            ? NeuIconButton(
+                key: const ValueKey('header-search-entry'),
+                icon: Icons.search_rounded,
+                tooltip: '搜索',
+                onPressed: _openSearch,
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
+
   Widget _buildHeader(String titleText, {required bool hasHiddenRooms}) {
+    if (context.isMaterial) {
+      return AppBar(
+        automaticallyImplyLeading: false,
+        backgroundColor: widget.embedded ? null : Colors.transparent,
+        title: CascadeTitle(
+          text: titleText,
+          style: Theme.of(context).textTheme.titleLarge!,
+        ),
+        actions: [
+          _buildHeaderSearchEntry(),
+          if (hasHiddenRooms)
+            IconButton(
+              icon: const Icon(Icons.visibility_off_outlined),
+              tooltip: '隐藏的聊天',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const HiddenRoomsPage()),
+              ),
+            ),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined),
+            tooltip: '新聊天',
+            onPressed: _openCreateChat,
+          ),
+        ],
+      );
+    }
     return SafeArea(
       bottom: false,
       child: Padding(
@@ -121,23 +181,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                 style: Theme.of(context).textTheme.titleLarge!,
               ),
             ),
-            // 搜索栏滚出视口后,在头部露出等价的搜索入口。显隐用
-            // 时间动画而非滚动驱动,避免慢拖时宽度裁切长期停在中间态。
-            AnimatedSize(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOutCubic,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: _headerSearchVisible
-                    ? NeuIconButton(
-                        key: const ValueKey('header-search-entry'),
-                        icon: Icons.search_rounded,
-                        tooltip: '搜索',
-                        onPressed: _openSearch,
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ),
+            _buildHeaderSearchEntry(),
             if (hasHiddenRooms)
               NeuIconButton(
                 icon: Icons.visibility_off_outlined,
@@ -160,23 +204,25 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   Widget _buildRooms(
     AsyncValue<List<ChatRoom>> roomsAsync, {
     required bool underHeader,
+    required bool keepPreviousRooms,
   }) {
     final colors = context.neu;
     final topInset = MediaQuery.viewPaddingOf(context).top;
+    final headerHeight = _headerHeight;
 
     // 空列表、加载、错误状态下搜索栏仍固定显示在头部下方。
     Widget withSearchEntry(Widget child) {
-      if (_headerSearchVisible) {
-        // 列表消失后滚动状态失效,收起头部的搜索图标。
+      if (_searchCollapse.value != 0 || _headerSearchVisible) {
+        // 列表消失后滚动状态失效,同步搜索栏和头部图标。
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && _headerSearchVisible) {
-            setState(() => _headerSearchVisible = false);
+          if (mounted && !_scrollController.hasClients) {
+            _syncSearchCollapse();
           }
         });
       }
       return Column(
         children: [
-          SizedBox(height: topInset + _headerHeight),
+          SizedBox(height: topInset + headerHeight),
           Padding(
             padding: const EdgeInsets.fromLTRB(
               NeuSpacing.lg,
@@ -191,9 +237,18 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       );
     }
 
-    return roomsAsync.when(
+    // Riverpod's whenData drops the previous value on AsyncLoading, so the
+    // derived inbox state needs this page's last rendered snapshot.
+    final roomsForDisplay = keepPreviousRooms && roomsAsync.isLoading
+        ? AsyncData(_loadedRooms!)
+        : roomsAsync;
+    return roomsForDisplay.when(
+      skipLoadingOnReload: keepPreviousRooms,
+      skipLoadingOnRefresh: keepPreviousRooms,
       data: (rooms) {
-        if (widget.onRoomSelected != null && widget.selectedRoomId == null) {
+        if (!roomsAsync.isLoading &&
+            widget.onRoomSelected != null &&
+            widget.selectedRoomId == null) {
           final firstJoinedRoom = rooms.where(
             (room) => room.roomState == 'joined',
           );
@@ -238,10 +293,17 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               NeuSpacing.xl,
             ),
             itemCount: rooms.length,
+            findItemIndexCallback: (key) {
+              final index = rooms.indexWhere(
+                (room) => ValueKey(room.id) == key,
+              );
+              return index < 0 ? null : index;
+            },
             separatorBuilder: (_, _) => const ChatListDivider(),
             itemBuilder: (context, index) {
               final room = rooms[index];
               return ChatListItem(
+                key: ValueKey(room.id),
                 room: room,
                 isSelected: room.id == widget.selectedRoomId,
                 onRoomSelected: widget.onRoomSelected,
@@ -251,37 +313,53 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         }
         // 列表全高滚动、内容从头部的渐变模糊下方穿过;搜索栏是列表第一项,
         // 随滚动渐隐,滚出后头部露出搜索图标。
-        return ListView.separated(
-          controller: _scrollController,
-          padding: EdgeInsets.fromLTRB(
-            NeuSpacing.lg,
-            topInset + _headerHeight,
-            NeuSpacing.lg,
-            NeuSpacing.navClearance,
-          ),
-          itemCount: rooms.length + 1,
-          separatorBuilder: (_, index) => index == 0
-              ? const SizedBox(height: NeuSpacing.sm)
-              : const ChatListDivider(),
-          itemBuilder: (context, index) {
-            if (index == 0) {
-              return ValueListenableBuilder<double>(
-                valueListenable: _searchCollapse,
-                builder: (context, collapse, child) =>
-                    Opacity(opacity: 1 - collapse, child: child),
-                child: Padding(
-                  padding: const EdgeInsets.only(top: NeuSpacing.xs),
-                  child: _buildSearchEntry(),
-                ),
-              );
-            }
-            final room = rooms[index - 1];
-            return ChatListItem(
-              room: room,
-              isSelected: room.id == widget.selectedRoomId,
-              onRoomSelected: widget.onRoomSelected,
-            );
+        return NotificationListener<ScrollMetricsNotification>(
+          onNotification: (notification) {
+            // 恢复滚动位置或布局纠正偏移时不会触发控制器监听。
+            if (notification.depth == 0) _syncSearchCollapse();
+            return false;
           },
+          child: ListView.separated(
+            controller: _scrollController,
+            padding: EdgeInsets.fromLTRB(
+              NeuSpacing.lg,
+              topInset + headerHeight,
+              NeuSpacing.lg,
+              context.isMaterial
+                  ? 80 + MediaQuery.paddingOf(context).bottom
+                  : NeuSpacing.navClearance,
+            ),
+            itemCount: rooms.length + 1,
+            findItemIndexCallback: (key) {
+              final index = rooms.indexWhere(
+                (room) => ValueKey(room.id) == key,
+              );
+              return index < 0 ? null : index + 1;
+            },
+            separatorBuilder: (_, index) => index == 0
+                ? const SizedBox(height: NeuSpacing.sm)
+                : const ChatListDivider(),
+            itemBuilder: (context, index) {
+              if (index == 0) {
+                return ValueListenableBuilder<double>(
+                  valueListenable: _searchCollapse,
+                  builder: (context, collapse, child) =>
+                      Opacity(opacity: 1 - collapse, child: child),
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: NeuSpacing.xs),
+                    child: _buildSearchEntry(),
+                  ),
+                );
+              }
+              final room = rooms[index - 1];
+              return ChatListItem(
+                key: ValueKey(room.id),
+                room: room,
+                isSelected: room.id == widget.selectedRoomId,
+                onRoomSelected: widget.onRoomSelected,
+              );
+            },
+          ),
         );
       },
       loading: () {
@@ -331,7 +409,23 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     }
     final connectionLabel = ref.watch(connectionLabelProvider);
     final allRooms = ref.watch(allChatRoomsProvider).asData?.value;
-    ref.watch(hiddenRoomsProvider);
+    final roomsScope = (
+      userId: ref.watch(activeUserIdProvider),
+      spaceId: widget.spaceId,
+      directMessagesOnly: widget.directMessagesOnly,
+      ungroupedRoomsOnly: widget.ungroupedRoomsOnly,
+      hiddenRooms: ref.watch(hiddenRoomsProvider),
+      ignoredUsers: ref.exists(ignoredUserIdsProvider)
+          ? ref.watch(ignoredUserIdsProvider)
+          : null,
+    );
+    // Keep the existing list during a background fetch, but not when its
+    // account, visibility or room scope changes.
+    if (!roomsAsync.isLoading && roomsAsync.hasValue && !roomsAsync.hasError) {
+      _loadedRoomsScope = roomsScope;
+      _loadedRooms = roomsAsync.requireValue;
+    }
+    final keepPreviousRooms = _loadedRoomsScope == roomsScope;
     final hiddenRooms = ref.read(hiddenRoomsProvider.notifier);
     final hasHiddenRooms = allRooms?.any(hiddenRooms.isHidden) ?? false;
 
@@ -356,7 +450,13 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               ),
               child: _buildSearchEntry(),
             ),
-            Expanded(child: _buildRooms(roomsAsync, underHeader: false)),
+            Expanded(
+              child: _buildRooms(
+                roomsAsync,
+                underHeader: false,
+                keepPreviousRooms: keepPreviousRooms,
+              ),
+            ),
           ],
         ),
       );
@@ -366,7 +466,13 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     return Scaffold(
       body: Stack(
         children: [
-          Positioned.fill(child: _buildRooms(roomsAsync, underHeader: true)),
+          Positioned.fill(
+            child: _buildRooms(
+              roomsAsync,
+              underHeader: true,
+              keepPreviousRooms: keepPreviousRooms,
+            ),
+          ),
           // 渐变模糊头部:柔和过渡从下方滚过的内容,避免硬裁切感。
           Positioned(
             top: 0,
@@ -379,6 +485,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             top: 0,
             left: 0,
             right: 0,
+            height: topInset + _headerHeight,
             child: _buildHeader(titleText, hasHiddenRooms: hasHiddenRooms),
           ),
         ],

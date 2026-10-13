@@ -39,6 +39,27 @@ class _NeuActionState extends State<NeuAction> {
   @override
   Widget build(BuildContext context) {
     final enabled = widget.onTap != null;
+    if (context.isMaterial) {
+      return Semantics(
+        label: widget.label,
+        selected: widget.selected,
+        toggled: widget.toggled,
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            onTap: widget.onTap,
+            onLongPress: enabled ? widget.onLongPress : null,
+            onSecondaryTap: enabled ? widget.onSecondaryTap : null,
+            onHighlightChanged: widget.onPressedChanged,
+            borderRadius: BorderRadius.circular(widget.radius),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              child: widget.child,
+            ),
+          ),
+        ),
+      );
+    }
     return Semantics(
       button: widget.toggled == null,
       enabled: enabled,
@@ -83,9 +104,8 @@ class _NeuActionState extends State<NeuAction> {
             foregroundDecoration: enabled && _focusVisible
                 ? ShapeDecoration(
                     shape:
-                        (ChatVisualSettingsScope.maybeOf(
-                              context,
-                            )?.superellipseBorderEnabled ??
+                        (ChatVisualSettingsScope.maybeOf(context)
+                                ?.superellipseBorderEnabled ??
                             true)
                         ? RoundedSuperellipseBorder(
                             borderRadius: BorderRadius.circular(widget.radius),

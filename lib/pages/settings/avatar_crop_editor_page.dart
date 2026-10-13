@@ -19,6 +19,7 @@ class AvatarCropEditorPage extends StatelessWidget {
     // pro_image_editor 14 renders with the decoupled `material_ui` package,
     // whose ThemeData is not interchangeable with the SDK one.
     final editorTheme = material_ui.ThemeData(
+      useMaterial3: true,
       brightness: Theme.of(context).brightness,
       scaffoldBackgroundColor: colors.base,
       colorScheme: material_ui.ColorScheme.fromSeed(

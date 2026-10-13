@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/max_content_width.dart';
 import '../../widgets/neu_decoration.dart';
@@ -113,9 +114,8 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('头像更新失败: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('头像更新失败: $e')));
       }
     }
   }
@@ -142,9 +142,8 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('昵称更新失败: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('昵称更新失败: $e')));
       }
     }
   }
@@ -172,6 +171,10 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('个人资料'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
@@ -301,49 +304,51 @@ class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
                   ),
           ),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: NeuSpacing.sm,
-                    right: NeuSpacing.md,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 40,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          '个人资料',
-                          style: textTheme.titleLarge,
-                          overflow: TextOverflow.ellipsis,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(
+                      left: NeuSpacing.sm,
+                      right: NeuSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 40,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).maybePop(),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            '个人资料',
+                            style: textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );

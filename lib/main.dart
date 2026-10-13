@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart' as material_ui;
 import 'package:path_provider/path_provider.dart';
+
 import 'app.dart';
 import 'features/app_update/app_update_service.dart';
 import 'features/app_update/update_dialog.dart';
@@ -18,11 +19,13 @@ import 'pages/chat/chat_detail_page.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/chat_visual_settings_provider.dart';
+import 'providers/material_color_provider.dart';
 import 'providers/mutable_state.dart';
 import 'providers/theme_provider.dart';
 import 'src/rust/api/matrix.dart' as rust;
 import 'src/rust/frb_generated.dart';
 import 'theme/neu_colors.dart';
+import 'theme/material_theme.dart';
 import 'theme/neu_theme.dart';
 
 Future<void> main() async {
@@ -137,7 +140,8 @@ class _AppRoot extends ConsumerStatefulWidget {
   ConsumerState<_AppRoot> createState() => _AppRootState();
 }
 
-class _AppRootState extends ConsumerState<_AppRoot> {
+class _AppRootState extends ConsumerState<_AppRoot>
+    with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
   bool _credentialCompatibilityDialogShown = false;
   CurrentUser? _reloginUser;
@@ -151,11 +155,27 @@ class _AppRootState extends ConsumerState<_AppRoot> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.hasSessions) {
       _restoring = true;
       _restoreSessionsInBackground();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _runStartupPrompts());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        ref.read(appThemeStyleProvider).isMaterial &&
+        ref.read(materialColorSettingsProvider).followSystem) {
+      ref.invalidate(systemMaterialColorsProvider);
+    }
   }
 
   Future<void> _runStartupPrompts() async {
@@ -183,18 +203,16 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       if (!mounted) return;
       final messageContext = _navigatorKey.currentContext;
       if (messageContext != null && messageContext.mounted) {
-        ScaffoldMessenger.maybeOf(
-          messageContext,
-        )?.showSnackBar(const SnackBar(content: Text('兼容模式已启用')));
+        ScaffoldMessenger.maybeOf(messageContext)
+            ?.showSnackBar(const SnackBar(content: Text('兼容模式已启用')));
       }
     } catch (error) {
       _credentialCompatibilityDialogShown = false;
       if (!mounted) return;
       final messageContext = _navigatorKey.currentContext;
       if (messageContext != null && messageContext.mounted) {
-        ScaffoldMessenger.maybeOf(
-          messageContext,
-        )?.showSnackBar(SnackBar(content: Text('启用兼容模式失败：$error')));
+        ScaffoldMessenger.maybeOf(messageContext)
+            ?.showSnackBar(SnackBar(content: Text('启用兼容模式失败：$error')));
       }
     }
   }
@@ -333,15 +351,21 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     final showMainApp = isLoggedIn || _restoring;
     if (isLoggedIn) _resumeSession = false;
     final themeStyle = ref.watch(appThemeStyleProvider);
-    _syncSystemOverlayStyle(themeStyle);
+    final materialColors = themeStyle.isMaterial
+        ? ref.watch(materialColorSchemesProvider)
+        : null;
 
-    final neuLight = buildNeuTheme(NeuColors.light, Brightness.light);
-    final neuDark = buildNeuTheme(NeuColors.dark, Brightness.dark);
-    final (theme, darkTheme, themeMode) = switch (themeStyle) {
-      AppThemeStyle.neuLight => (neuLight, neuDark, ThemeMode.light),
-      AppThemeStyle.neuDark => (neuLight, neuDark, ThemeMode.dark),
-      AppThemeStyle.neuSystem => (neuLight, neuDark, ThemeMode.system),
-    };
+    final theme = themeStyle.isMaterial
+        ? buildMaterialTheme(
+            Brightness.light,
+            colorScheme: materialColors!.light,
+          )
+        : buildNeuTheme(NeuColors.light, Brightness.light);
+    final darkTheme = themeStyle.isMaterial
+        ? buildMaterialTheme(Brightness.dark, colorScheme: materialColors!.dark)
+        : buildNeuTheme(NeuColors.dark, Brightness.dark);
+    _syncSystemOverlayStyle(themeStyle, theme, darkTheme);
+    final themeMode = themeStyle.themeMode;
 
     return MaterialApp(
       navigatorKey: _navigatorKey,
@@ -351,7 +375,9 @@ class _AppRootState extends ConsumerState<_AppRoot> {
       // pro_image_editor 14's own app bars, dialogs and bottom sheets are built
       // from the decoupled material_ui widgets, which look up MaterialLocalizations
       // from material_ui and throw "No MaterialLocalizations found" without these.
-      localizationsDelegates: const [...material_ui.GlobalMaterialLocalizations.delegates],
+      localizationsDelegates: const [
+        ...material_ui.GlobalMaterialLocalizations.delegates,
+      ],
       theme: theme,
       darkTheme: darkTheme,
       themeMode: themeMode,
@@ -380,26 +406,28 @@ class _AppRootState extends ConsumerState<_AppRoot> {
     );
   }
 
-  AppThemeStyle? _lastOverlayStyle;
+  (AppThemeStyle, Brightness, Color)? _lastOverlayStyle;
 
-  /// 状态栏/导航栏图标亮度跟随主题明暗（启动时 main() 里先按系统明暗设一次）。
-  void _syncSystemOverlayStyle(AppThemeStyle style) {
-    if (_lastOverlayStyle == style) return;
-    _lastOverlayStyle = style;
+  /// 状态栏/导航栏图标亮度跟随主题明暗，底色跟随当前配色。
+  void _syncSystemOverlayStyle(
+    AppThemeStyle style,
+    ThemeData theme,
+    ThemeData darkTheme,
+  ) {
+    final platformBrightness = MediaQuery.platformBrightnessOf(context);
+    final isDark = switch (style.themeMode) {
+      ThemeMode.dark => true,
+      ThemeMode.light => false,
+      ThemeMode.system => platformBrightness == Brightness.dark,
+    };
+    final navColor = style.isMaterial
+        ? (isDark ? darkTheme : theme).colorScheme.surface
+        : (isDark ? NeuColors.dark.base : NeuColors.light.base);
+    final overlayStyle = (style, platformBrightness, navColor);
+    if (_lastOverlayStyle == overlayStyle) return;
+    _lastOverlayStyle = overlayStyle;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final platformDark =
-          MediaQuery.platformBrightnessOf(context) == Brightness.dark;
-      final isDark = switch (style) {
-        AppThemeStyle.neuDark => true,
-        AppThemeStyle.neuLight => false,
-        AppThemeStyle.neuSystem => platformDark,
-      };
-      final navColor = switch (style) {
-        AppThemeStyle.neuLight => NeuColors.light.base,
-        AppThemeStyle.neuDark => NeuColors.dark.base,
-        AppThemeStyle.neuSystem =>
-          platformDark ? NeuColors.dark.base : NeuColors.light.base,
-      };
+      if (!mounted) return;
       SystemChrome.setSystemUIOverlayStyle(
         SystemUiOverlayStyle(
           statusBarColor: Colors.transparent,

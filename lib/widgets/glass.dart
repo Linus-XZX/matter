@@ -39,6 +39,19 @@ class GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      return Material(
+        color: colors.glassFill.withValues(
+          alpha: (colors.glassFill.a * opacity).clamp(0, 1),
+        ),
+        borderRadius: BorderRadius.circular(radius),
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
+        ),
+      );
+    }
     final settings = ChatVisualSettingsScope.maybeOf(context);
     final blurEnabled = settings?.chatBlurEnabled ?? true;
     final shape =
@@ -96,6 +109,7 @@ class GlassPanel extends StatelessWidget {
 
 /// 顶部渐变模糊层:滚入屏幕上缘的内容先被底色盖住、再随渐变柔和消失,
 /// 避免在视口边缘被硬裁切。用于聊天列表头部与聊天室浮动顶栏的后方。
+/// Material 使用与底部导航相同的半透明填充,保持整个工具栏的可读性。
 class TopFadeBlur extends StatelessWidget {
   const TopFadeBlur({super.key, this.blur = 20, this.useShader = false});
 
@@ -108,6 +122,9 @@ class TopFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) {
+      return ColoredBox(color: colors.glassFill);
+    }
     final settings = ChatVisualSettingsScope.maybeOf(context);
     if (!(settings?.chatBlurEnabled ?? true)) {
       return DecoratedBox(
@@ -167,6 +184,7 @@ class BottomFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
+    if (context.isMaterial) return const SizedBox.shrink();
     return LayoutBuilder(
       builder: (context, constraints) {
         final height = constraints.maxHeight;

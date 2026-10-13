@@ -9,6 +9,7 @@ import '../../providers/chat_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
@@ -364,55 +365,61 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
       backgroundColor: colors.base,
+      extendBodyBehindAppBar: context.isMaterial,
+      appBar: context.isMaterial
+          ? buildFloatingAppBar(title: const Text('置顶消息'))
+          : null,
       body: Stack(
         children: [
           Positioned.fill(child: _buildBody(ignoredUserIdsAsync)),
           // 渐变模糊层:柔和过渡从标题栏下方滚过的内容。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: viewPaddingTop + kToolbarHeight,
-            child: const TopFadeBlur(useShader: true),
-          ),
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: viewPaddingTop + kToolbarHeight,
+              child: const TopFadeBlur(useShader: true),
+            ),
           // 标题栏移到上方浮层,滚动内容从它下方穿过。
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    NeuSpacing.sm,
-                    NeuSpacing.sm,
-                    NeuSpacing.lg,
-                    NeuSpacing.xs,
-                  ),
-                  child: Row(
-                    children: [
-                      NeuIconButton(
-                        icon: Icons.arrow_back_ios_new_rounded,
-                        size: 40,
-                        tooltip: '返回',
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                      const SizedBox(width: NeuSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          '置顶消息',
-                          style: Theme.of(context).textTheme.titleLarge,
-                          overflow: TextOverflow.ellipsis,
+          if (!context.isMaterial)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      NeuSpacing.sm,
+                      NeuSpacing.sm,
+                      NeuSpacing.lg,
+                      NeuSpacing.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        NeuIconButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          size: 40,
+                          tooltip: '返回',
+                          onPressed: () => Navigator.of(context).maybePop(),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: NeuSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            '置顶消息',
+                            style: Theme.of(context).textTheme.titleLarge,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -505,9 +512,9 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.fromLTRB(
-          NeuSpacing.lg,
-          topInset + NeuSpacing.md,
-          NeuSpacing.lg,
+          context.isMaterial ? 0 : NeuSpacing.lg,
+          topInset + (context.isMaterial ? 0 : NeuSpacing.md),
+          context.isMaterial ? 0 : NeuSpacing.lg,
           NeuSpacing.xl,
         ),
         itemCount: messages.length + (_loadError == null ? 0 : 1),
@@ -526,16 +533,18 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
               _inflightUnpinIds.contains(message.id);
           return Padding(
             key: ValueKey('pinned-message:${message.id}'),
-            padding: const EdgeInsets.only(bottom: NeuSpacing.md),
+            padding: EdgeInsets.only(
+              bottom: context.isMaterial ? 1 : NeuSpacing.md,
+            ),
             child: NeuAction(
-              radius: NeuRadius.content,
+              radius: context.isMaterial ? 0 : NeuRadius.content,
               onTap: ignoredSender
                   ? null
                   : () => Navigator.of(context).pop(message.id),
               child: NeuSurface(
-                color: colors.card,
-                radius: NeuRadius.content,
-                padding: const EdgeInsets.all(14),
+                color: context.isMaterial ? colors.glassFill : colors.card,
+                radius: context.isMaterial ? 0 : NeuRadius.content,
+                padding: EdgeInsets.all(context.isMaterial ? 16 : 14),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -579,9 +588,8 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
                       content,
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyMedium?.copyWith(height: 1.35),
+                      style: Theme.of(context).textTheme.bodyMedium
+                          ?.copyWith(height: 1.35),
                     ),
                   ],
                 ),
@@ -695,7 +703,7 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
       padding: const EdgeInsets.only(bottom: NeuSpacing.md),
       child: NeuSurface(
         color: colors.surfaceStrong,
-        radius: NeuRadius.content,
+        radius: context.isMaterial ? 0 : NeuRadius.content,
         padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
         child: Row(
           children: [
@@ -707,9 +715,8 @@ class _PinnedMessagesPageState extends ConsumerState<PinnedMessagesPage> {
                 children: [
                   Text(
                     '刷新失败，当前显示上次结果',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: colors.text),
+                    style: Theme.of(context).textTheme.bodyMedium
+                        ?.copyWith(color: colors.text),
                   ),
                   Text(
                     '$_loadError',

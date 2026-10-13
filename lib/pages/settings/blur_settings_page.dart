@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../theme/neu_colors.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 
@@ -15,12 +16,15 @@ class BlurSettingsPage extends ConsumerWidget {
     final notifier = ref.read(chatVisualSettingsProvider.notifier);
     return Scaffold(
       backgroundColor: context.neu.base,
-      appBar: AppBar(
-        title: const Text('模糊效果设置'),
-        backgroundColor: Colors.transparent,
-      ),
+      extendBodyBehindAppBar: true,
+      appBar: buildFloatingAppBar(title: const Text('模糊效果设置')),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        padding: EdgeInsets.fromLTRB(
+          16,
+          MediaQuery.viewPaddingOf(context).top + kToolbarHeight + 8,
+          16,
+          24,
+        ),
         children: [
           _BlurSection(
             title: '总体效果',
@@ -86,9 +90,8 @@ class BlurSettingsPage extends ConsumerWidget {
             padding: const EdgeInsets.all(16),
             child: Text(
               '普通玻璃面板仍使用 Flutter 原生 ImageFilter.blur。渐进式模糊的固定采样核和降采样由 inspire_blur 0.4.1 内部管理，当前版本没有公开配置接口。',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: context.neu.textSecondary),
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: context.neu.textSecondary),
             ),
           ),
         ],
@@ -112,10 +115,8 @@ class _BlurSection extends StatelessWidget {
           padding: const EdgeInsets.only(left: 4, bottom: 8),
           child: Text(
             title,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.1,
-            ),
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 1.1),
           ),
         ),
         NeuSurface(
@@ -167,16 +168,14 @@ class _BlurSwitch extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
+                  style: Theme.of(context).textTheme.bodyLarge
+                      ?.copyWith(fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: context.neu.textSecondary,
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: context.neu.textSecondary),
                 ),
               ],
             ),
