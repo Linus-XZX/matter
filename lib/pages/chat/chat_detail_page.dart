@@ -22,6 +22,7 @@ import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
+import 'attachment_caption_composer.dart' show attachmentCaptionClearance;
 import 'chat_timestamp.dart';
 import 'composer_picker_panel.dart';
 import 'date_separator.dart';
@@ -1595,7 +1596,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         ..write('#')
         ..write(message.caption ?? '')
         ..write('#')
-        ..write(message.captionFormattedBody ?? '');
+        ..write(message.captionFormattedBody ?? '')
+        ..write('#')
+        ..write(message.sharedCaption ?? '');
       final localSortTimestamp = _remoteToLocalSortTimestamp[message.id];
       if (localSortTimestamp != null) {
         buffer
@@ -1617,6 +1620,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         ..write(message.caption ?? '')
         ..write('#')
         ..write(message.captionFormattedBody ?? '')
+        ..write('#')
+        ..write(message.sharedCaption ?? '')
         ..write('#')
         ..write(message.isEdited ? 1 : 0)
         ..write('#')
@@ -1982,7 +1987,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           8,
     );
     final pickerHeight = keepsStablePicker
-        ? math.max(0.0, pickerFullHeight - keyboardHeight)
+        ? math.max(
+            _inputPanelMode == InputPanelMode.attachment && keyboardVisible
+                ? attachmentCaptionClearance
+                : 0.0,
+            pickerFullHeight - keyboardHeight,
+          )
         : 0.0;
     final bottomOffset =
         (_inputPanelMode == InputPanelMode.keyboard || keepsStablePicker)

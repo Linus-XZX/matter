@@ -331,6 +331,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
               fileSize: widget.fileSize,
               mimeType: widget.mimeType,
               filename: widget.filename,
+              caption: widget.caption,
             ),
             messages: widget.galleryMessages,
             roomId: widget.roomId,

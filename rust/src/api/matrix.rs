@@ -44,6 +44,7 @@ use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+mod image_caption;
 pub mod notifications;
 pub mod push;
 mod sdk_timeline;
@@ -4171,6 +4172,8 @@ pub struct ChatMessage {
     pub caption: Option<String>,
     /// Sanitized Matrix HTML for media captions.
     pub caption_formatted_body: Option<String>,
+    /// Matter's common description, shown when viewing any image in a batch.
+    pub shared_caption: Option<String>,
     /// Intentional mentions carried by `m.mentions`.
     pub mentioned_user_ids: Vec<String>,
     pub mentions_room: bool,
@@ -8327,6 +8330,7 @@ fn unable_to_decrypt_message(
         formatted_body: None,
         caption: None,
         caption_formatted_body: None,
+        shared_caption: None,
         mentioned_user_ids: Vec::new(),
         mentions_room: false,
         timestamp,
@@ -8553,8 +8557,32 @@ pub async fn forward_message(
             } else {
                 content.relates_to = None;
             }
+            let shared_caption = if matches!(
+                &content.msgtype,
+                matrix_sdk::ruma::events::room::message::MessageType::Image(_)
+            ) {
+                timeline_event
+                    .raw()
+                    .deserialize_as::<serde_json::Value>()
+                    .ok()
+                    .and_then(|event| image_caption::shared_caption(&event))
+            } else {
+                None
+            };
+            if let matrix_sdk::ruma::events::room::message::MessageType::Image(image) =
+                &mut content.msgtype
+            {
+                if image.caption().is_none() {
+                    if let Some(caption) = &shared_caption {
+                        image.filename = Some(image.body.clone());
+                        image.body = caption.clone();
+                        image.formatted = None;
+                    }
+                }
+            }
+            let content = image_caption::with_captions(content, None, shared_caption.as_deref())?;
             target_room
-                .send(content)
+                .send_raw("m.room.message", content)
                 .await
                 .map_err(|e| api_err("rooms", format!("Forward failed: {e}")))?
                 .response
@@ -8781,6 +8809,7 @@ fn video_message_content(
 /// `image_data` is the raw bytes of the image file.
 /// `filename` is the original file name (e.g. "photo.jpg").
 #[frb]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_image_message(
     account_user_id: String,
     room_id: String,
@@ -8789,6 +8818,8 @@ pub async fn send_image_message(
     mime_type: Option<String>,
     width: Option<i32>,
     height: Option<i32>,
+    caption: Option<String>,
+    shared_caption: Option<String>,
 ) -> Result<(), String> {
     let client = get_client()
         .await
@@ -8847,15 +8878,20 @@ pub async fn send_image_message(
         image_height,
         source,
     );
-    tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
-        .await
-        .map_err(|_| {
-            api_err(
-                "media",
-                "Image uploaded, but sending the message timed out.".to_string(),
-            )
-        })?
-        .map_err(|e| api_err("media", format!("Send image message failed: {e}")))?;
+    let content =
+        image_caption::with_captions(content, caption.as_deref(), shared_caption.as_deref())?;
+    tokio::time::timeout(
+        MEDIA_EVENT_SEND_TIMEOUT,
+        room.send_raw("m.room.message", content),
+    )
+    .await
+    .map_err(|_| {
+        api_err(
+            "media",
+            "Image uploaded, but sending the message timed out.".to_string(),
+        )
+    })?
+    .map_err(|e| api_err("media", format!("Send image message failed: {e}")))?;
 
     app_log(
         "info",
@@ -10165,6 +10201,8 @@ mod account_bound_attachment_tests {
                 room.clone(),
                 vec![1],
                 "image.png".into(),
+                None,
+                None,
                 None,
                 None,
                 None,

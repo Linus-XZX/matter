@@ -22,6 +22,7 @@ class ImageViewerSource {
   final int? fileSize;
   final String? mimeType;
   final String? filename;
+  final String? caption;
 
   const ImageViewerSource({
     required this.heroTag,
@@ -35,6 +36,7 @@ class ImageViewerSource {
     this.fileSize,
     this.mimeType,
     this.filename,
+    this.caption,
   });
 
   factory ImageViewerSource.fromMessage(rust.ChatMessage message) =>
@@ -51,6 +53,8 @@ class ImageViewerSource {
       );
 
   String get id => message?.id ?? heroTag.toString();
+  String? get description =>
+      message?.caption ?? message?.sharedCaption ?? caption;
   double get aspectRatio =>
       width != null && height != null && width! > 0 && height! > 0
       ? width! / height!

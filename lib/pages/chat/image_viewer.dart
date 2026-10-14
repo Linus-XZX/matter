@@ -455,47 +455,76 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
               left: 0,
               right: 0,
               bottom: MediaQuery.paddingOf(context).bottom + 12,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  IconButton(
-                    tooltip: _index == 0 && _hasMore ? '加载更早图片' : '上一张',
-                    onPressed:
-                        !_zoomed && !_loadingOlder && (_index > 0 || _hasMore)
-                        ? _previous
-                        : null,
-                    icon: _loadingOlder
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(
-                            CupertinoIcons.chevron_left,
+                  if (media.source.description?.trim().isNotEmpty == true)
+                    Container(
+                      key: const ValueKey('image-viewer-caption'),
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.sizeOf(context).height * .25,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: .75),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          media.source.description!,
+                          style: const TextStyle(
                             color: Colors.white,
-                            size: 22,
+                            fontSize: 15,
                           ),
-                  ),
-                  Text(
-                    '${_index + 1} / ${_sources.length}',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                  IconButton(
-                    tooltip: '下一张',
-                    onPressed: !_zoomed && _index < _sources.length - 1
-                        ? () => _pages.nextPage(
-                            duration: const Duration(milliseconds: 220),
-                            curve: Curves.easeOut,
-                          )
-                        : null,
-                    icon: const Icon(
-                      CupertinoIcons.chevron_right,
-                      color: Colors.white,
-                      size: 22,
+                        ),
+                      ),
                     ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: _index == 0 && _hasMore ? '加载更早图片' : '上一张',
+                        onPressed:
+                            !_zoomed &&
+                                !_loadingOlder &&
+                                (_index > 0 || _hasMore)
+                            ? _previous
+                            : null,
+                        icon: _loadingOlder
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(
+                                CupertinoIcons.chevron_left,
+                                color: Colors.white,
+                                size: 22,
+                              ),
+                      ),
+
+                      IconButton(
+                        tooltip: '下一张',
+                        onPressed: !_zoomed && _index < _sources.length - 1
+                            ? () => _pages.nextPage(
+                                duration: const Duration(milliseconds: 220),
+                                curve: Curves.easeOut,
+                              )
+                            : null,
+                        icon: const Icon(
+                          CupertinoIcons.chevron_right,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

@@ -494,6 +494,8 @@ Future<void> sendImageMessage({
   String? mimeType,
   int? width,
   int? height,
+  String? caption,
+  String? sharedCaption,
 }) => RustLib.instance.api.crateApiMatrixSendImageMessage(
   accountUserId: accountUserId,
   roomId: roomId,
@@ -502,6 +504,8 @@ Future<void> sendImageMessage({
   mimeType: mimeType,
   width: width,
   height: height,
+  caption: caption,
+  sharedCaption: sharedCaption,
 );
 
 /// Send an arbitrary file (document) attachment to a room.
@@ -1261,6 +1265,9 @@ class ChatMessage {
   /// Sanitized Matrix HTML for media captions.
   final String? captionFormattedBody;
 
+  /// Matter's common description, shown when viewing any image in a batch.
+  final String? sharedCaption;
+
   /// Intentional mentions carried by `m.mentions`.
   final List<String> mentionedUserIds;
   final bool mentionsRoom;
@@ -1316,6 +1323,7 @@ class ChatMessage {
     this.formattedBody,
     this.caption,
     this.captionFormattedBody,
+    this.sharedCaption,
     required this.mentionedUserIds,
     required this.mentionsRoom,
     required this.timestamp,
@@ -1347,6 +1355,7 @@ class ChatMessage {
       formattedBody.hashCode ^
       caption.hashCode ^
       captionFormattedBody.hashCode ^
+      sharedCaption.hashCode ^
       mentionedUserIds.hashCode ^
       mentionsRoom.hashCode ^
       timestamp.hashCode ^
@@ -1380,6 +1389,7 @@ class ChatMessage {
           formattedBody == other.formattedBody &&
           caption == other.caption &&
           captionFormattedBody == other.captionFormattedBody &&
+          sharedCaption == other.sharedCaption &&
           mentionedUserIds == other.mentionedUserIds &&
           mentionsRoom == other.mentionsRoom &&
           timestamp == other.timestamp &&

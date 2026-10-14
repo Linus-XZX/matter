@@ -1310,6 +1310,7 @@ bool chatMessageContentEquals(rust.ChatMessage a, rust.ChatMessage b) {
           a.formattedBody == b.formattedBody &&
           a.caption == b.caption &&
           a.captionFormattedBody == b.captionFormattedBody &&
+          a.sharedCaption == b.sharedCaption &&
           listEquals(a.mentionedUserIds, b.mentionedUserIds) &&
           a.mentionsRoom == b.mentionsRoom &&
           a.timestamp == b.timestamp &&
@@ -1686,6 +1687,7 @@ Future<void> retryFailedLocalMessage(
       formattedBody: message.formattedBody,
       caption: message.caption,
       captionFormattedBody: message.captionFormattedBody,
+      sharedCaption: message.sharedCaption,
       mentionedUserIds: message.mentionedUserIds,
       mentionsRoom: message.mentionsRoom,
       timestamp: retryTimestamp.toString(),
@@ -1873,6 +1875,7 @@ String markLocalOutgoingMessageSentInState(
       formattedBody: message.formattedBody,
       caption: message.caption,
       captionFormattedBody: message.captionFormattedBody,
+      sharedCaption: message.sharedCaption,
       mentionedUserIds: message.mentionedUserIds,
       mentionsRoom: message.mentionsRoom,
       timestamp: message.timestamp,

@@ -74,6 +74,7 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'formattedBody': message.formattedBody,
     'caption': message.caption,
     'captionFormattedBody': message.captionFormattedBody,
+    'sharedCaption': message.sharedCaption,
     'mentionedUserIds': message.mentionedUserIds,
     'mentionsRoom': message.mentionsRoom,
     'timestamp': message.timestamp,
@@ -203,6 +204,7 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     formattedBody: map['formattedBody'] as String?,
     caption: map['caption'] as String?,
     captionFormattedBody: map['captionFormattedBody'] as String?,
+    sharedCaption: map['sharedCaption'] as String?,
     mentionedUserIds: ((map['mentionedUserIds'] as List?) ?? const [])
         .map((item) => '$item')
         .toList(),

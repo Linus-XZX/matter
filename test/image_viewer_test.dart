@@ -96,12 +96,16 @@ rust.ChatMessage imageMessage(
   int? size,
   String? filename,
   String? mimeType,
+  String? caption,
+  String? sharedCaption,
   bool encrypted = false,
 }) => rust.ChatMessage(
   id: id,
   senderId: '@alice:example.org',
   senderName: 'Alice',
   content: filename ?? '$id.png',
+  caption: caption,
+  sharedCaption: sharedCaption,
   timestamp: id == 'older' ? '100' : '200',
   isMe: false,
   msgType: rust.MessageType.image,
@@ -260,6 +264,61 @@ void main() {
     expect(restored.mimeType, 'image/gif');
     expect(restored.filename, 'animation');
   });
+
+  test(
+    'shared image caption survives caching and changes snapshot equality',
+    () {
+      final message = imageMessage('shared', sharedCaption: '整组的描述');
+      final restored = chatMessageFromMap(chatMessageToMap(message));
+      expect(restored.sharedCaption, '整组的描述');
+      expect(restored.caption, isNull);
+      expect(chatMessageContentEquals(message, restored), isTrue);
+      expect(
+        chatMessageContentEquals(message, imageMessage('shared')),
+        isFalse,
+      );
+      expect(ImageViewerSource.fromMessage(restored).description, '整组的描述');
+    },
+  );
+
+  for (final encrypted in [false, true]) {
+    testWidgets(
+      'gallery shows the shared caption on every image (encrypted=$encrypted)',
+      (tester) async {
+        await pumpImages(tester, [
+          imageMessage('one', sharedCaption: '共同描述', encrypted: encrypted),
+          imageMessage(
+            'two',
+            caption: '最后一张的描述',
+            sharedCaption: '共同描述',
+            encrypted: encrypted,
+          ),
+        ]);
+        await openImage(tester, 'two');
+        final caption = find.byKey(const ValueKey('image-viewer-caption'));
+        expect(
+          find.descendant(of: caption, matching: find.text('最后一张的描述')),
+          findsOneWidget,
+        );
+        final bounds = tester.getRect(caption);
+        await tester.drag(find.byType(PageView), const Offset(650, 0));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.descendant(of: caption, matching: find.text('共同描述')),
+          findsOneWidget,
+        );
+        final gesture = await tester.startGesture(const Offset(400, 200));
+        await gesture.moveBy(const Offset(0, 20));
+        await tester.pump();
+        await gesture.moveBy(const Offset(0, 40));
+        await tester.pump();
+        expect(tester.getRect(caption).bottom, bounds.bottom);
+        await gesture.cancel();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   testWidgets(
     'original preference survives remount, eviction and is isolated by account',
@@ -549,7 +608,16 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
-    expect(find.text('1 / 2'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byWidgetPredicate(
+              (widget) => widget is IconButton && widget.tooltip == '上一张',
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
     expect(find.byTooltip('查看原图'), findsNothing);
     await tester.tap(find.text('转到消息'));
     await tester.pump();
@@ -558,19 +626,19 @@ void main() {
     expect(find.byType(ChatImageViewer), findsNothing);
   });
 
-  testWidgets('toolbar and counter stay fixed while dragging images', (
+  testWidgets('toolbar and paging controls stay fixed while dragging images', (
     tester,
   ) async {
     await pumpImages(tester, [imageMessage('older'), imageMessage('latest')]);
     await openImage(tester, 'latest');
     final toolbar = find.byKey(const ValueKey('image-viewer-toolbar'));
-    final counter = find.text('2 / 2');
+    final nextButton = find.byTooltip('下一张');
     final image = find.descendant(
       of: find.byKey(const ValueKey('latest')),
       matching: find.byType(InteractiveViewer),
     );
     final toolbarRect = tester.getRect(toolbar);
-    final counterRect = tester.getRect(counter);
+    final nextButtonRect = tester.getRect(nextButton);
     final imageRect = tester.getRect(image);
     final vertical = await tester.startGesture(imageRect.center);
     await vertical.moveBy(const Offset(0, 20));
@@ -578,7 +646,7 @@ void main() {
     await vertical.moveBy(const Offset(0, 40));
     await tester.pump(const Duration(milliseconds: 16));
     expect(tester.getRect(image), isNot(imageRect));
-    expect(tester.getRect(counter), counterRect);
+    expect(tester.getRect(nextButton), nextButtonRect);
     expect(tester.getRect(toolbar), toolbarRect);
     await vertical.cancel();
     await tester.pump();
@@ -590,7 +658,7 @@ void main() {
     await horizontal.moveBy(const Offset(80, 0));
     await tester.pump(const Duration(milliseconds: 16));
     expect(tester.getRect(image).left, greaterThan(imageRect.left));
-    expect(tester.getRect(counter), counterRect);
+    expect(tester.getRect(nextButton), nextButtonRect);
     expect(tester.getRect(toolbar), toolbarRect);
     await horizontal.cancel();
     await tester.pump();
