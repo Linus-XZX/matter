@@ -7,16 +7,22 @@ import 'package:pro_image_editor/pro_image_editor.dart';
 
 import '../../theme/neu_colors.dart';
 
-/// Full image editor shown before a gallery image is sent to a chat room.
-class ChatImageEditorPage extends StatelessWidget {
+enum ChatImageEditorTool { crop, paint }
+
+/// Explicit image editing; completing it returns bytes to the media preview.
+class ChatImageEditorPage extends StatefulWidget {
   const ChatImageEditorPage({
     super.key,
     required this.imagePath,
     this.mimeType,
+    this.imageBytes,
+    this.initialTool,
   });
 
   final String imagePath;
   final String? mimeType;
+  final Uint8List? imageBytes;
+  final ChatImageEditorTool? initialTool;
 
   @visibleForTesting
   ImageGenerationConfigs get imageGenerationConfigs => ImageGenerationConfigs(
@@ -26,6 +32,38 @@ class ChatImageEditorPage extends StatelessWidget {
     maxOutputSize: Size.infinite,
     outputFormat: _editorOutputFormat(mimeType),
   );
+
+  @override
+  State<ChatImageEditorPage> createState() => _ChatImageEditorPageState();
+}
+
+class _ChatImageEditorPageState extends State<ChatImageEditorPage> {
+  final _editor = GlobalKey<ProImageEditorState>();
+  bool _openedTool = false;
+
+  void _openInitialTool() {
+    if (_openedTool || widget.initialTool == null) return;
+    _openedTool = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      switch (widget.initialTool!) {
+        case ChatImageEditorTool.crop:
+          _editor.currentState?.openCropRotateEditor();
+        case ChatImageEditorTool.paint:
+          _editor.currentState?.openPaintEditor();
+      }
+    });
+  }
+
+  void _finishTool() {
+    if (widget.initialTool == null || !mounted) return;
+    final editor = _editor.currentState;
+    if (editor?.stateManager.canUndo == true) {
+      editor!.doneEditing();
+    } else {
+      Navigator.of(context).pop();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -50,107 +88,121 @@ class ChatImageEditorPage extends StatelessWidget {
       ),
     );
 
-    return ProImageEditor.file(
-      imagePath,
-      callbacks: ProImageEditorCallbacks(
-        onImageEditingComplete: (bytes) async {
-          if (context.mounted) Navigator.of(context).pop(bytes);
-        },
-      ),
-      configs: ProImageEditorConfigs(
-        theme: editorTheme,
-        i18n: _imageEditorI18n,
-        mainEditor: MainEditorConfigs(
-          tools: const [
-            SubEditorMode.cropRotate,
-            SubEditorMode.paint,
-            SubEditorMode.text,
-            SubEditorMode.tune,
-            SubEditorMode.filter,
-            SubEditorMode.blur,
-            SubEditorMode.emoji,
-          ],
-          style: MainEditorStyle(
-            background: colors.base,
-            appBarBackground: colors.base,
-            appBarColor: colors.text,
-            bottomBarBackground: colors.surface,
-            bottomBarColor: colors.text,
-            uiOverlayStyle: SystemUiOverlayStyle(
-              statusBarColor: Colors.transparent,
-              statusBarIconBrightness: overlayIconBrightness,
-              systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: overlayIconBrightness,
-            ),
-          ),
-        ),
-        paintEditor: PaintEditorConfigs(
-          tools: const [
-            PaintMode.moveAndZoom,
-            PaintMode.freeStyle,
-            PaintMode.arrow,
-            PaintMode.line,
-            PaintMode.rect,
-            PaintMode.circle,
-            PaintMode.pixelate,
-            PaintMode.blur,
-            PaintMode.eraser,
-          ],
-          style: PaintEditorStyle(
-            appBarBackground: colors.base,
-            appBarColor: colors.text,
-            background: colors.base,
-            bottomBarBackground: colors.surface,
-            bottomBarActiveItemColor: colors.accent,
-            bottomBarInactiveItemColor: colors.textSecondary,
-            initialColor: colors.accent,
-            uiOverlayStyle: SystemUiOverlayStyle(
-              statusBarColor: Colors.transparent,
-              statusBarIconBrightness: overlayIconBrightness,
-              systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: overlayIconBrightness,
-            ),
-          ),
-        ),
-        cropRotateEditor: CropRotateEditorConfigs(
-          maxScale: 8,
-          style: CropRotateEditorStyle(
-            appBarBackground: colors.base,
-            appBarColor: colors.text,
-            background: colors.base,
-            bottomBarBackground: colors.surface,
-            bottomBarColor: colors.text,
-            cropCornerColor: colors.accent,
-            helperLineColor: Colors.white54,
-            uiOverlayStyle: SystemUiOverlayStyle(
-              statusBarColor: Colors.transparent,
-              statusBarIconBrightness: overlayIconBrightness,
-              systemNavigationBarColor: colors.surface,
-              systemNavigationBarIconBrightness: overlayIconBrightness,
-            ),
-          ),
-        ),
-        tuneEditor: TuneEditorConfigs(
-          style: TuneEditorStyle(
-            appBarBackground: colors.base,
-            appBarColor: colors.text,
-            background: colors.base,
-            bottomBarBackground: colors.surface,
-            bottomBarActiveItemColor: colors.accent,
-            bottomBarInactiveItemColor: colors.textSecondary,
-          ),
-        ),
-        filterEditor: FilterEditorConfigs(
-          style: FilterEditorStyle(
-            appBarBackground: colors.base,
-            appBarColor: colors.text,
-            background: colors.base,
-            previewSelectedTextColor: colors.accent,
-          ),
-        ),
-        imageGeneration: imageGenerationConfigs,
+    final callbacks = ProImageEditorCallbacks(
+      onImageEditingComplete: (bytes) async {
+        if (context.mounted) Navigator.of(context).pop(bytes);
+      },
+      mainEditorCallbacks: MainEditorCallbacks(
+        onImageDecoded: _openInitialTool,
+        onEndCloseSubEditor: (_) => _finishTool(),
       ),
     );
+    final configs = ProImageEditorConfigs(
+      theme: editorTheme,
+      i18n: _imageEditorI18n,
+      mainEditor: MainEditorConfigs(
+        tools: const [
+          SubEditorMode.cropRotate,
+          SubEditorMode.paint,
+          SubEditorMode.text,
+          SubEditorMode.tune,
+          SubEditorMode.filter,
+          SubEditorMode.blur,
+          SubEditorMode.emoji,
+        ],
+        style: MainEditorStyle(
+          background: colors.base,
+          appBarBackground: colors.base,
+          appBarColor: colors.text,
+          bottomBarBackground: colors.surface,
+          bottomBarColor: colors.text,
+          uiOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: overlayIconBrightness,
+            systemNavigationBarColor: colors.surface,
+            systemNavigationBarIconBrightness: overlayIconBrightness,
+          ),
+        ),
+      ),
+      paintEditor: PaintEditorConfigs(
+        tools: const [
+          PaintMode.moveAndZoom,
+          PaintMode.freeStyle,
+          PaintMode.arrow,
+          PaintMode.line,
+          PaintMode.rect,
+          PaintMode.circle,
+          PaintMode.pixelate,
+          PaintMode.blur,
+          PaintMode.eraser,
+        ],
+        style: PaintEditorStyle(
+          appBarBackground: colors.base,
+          appBarColor: colors.text,
+          background: colors.base,
+          bottomBarBackground: colors.surface,
+          bottomBarActiveItemColor: colors.accent,
+          bottomBarInactiveItemColor: colors.textSecondary,
+          initialColor: colors.accent,
+          uiOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: overlayIconBrightness,
+            systemNavigationBarColor: colors.surface,
+            systemNavigationBarIconBrightness: overlayIconBrightness,
+          ),
+        ),
+      ),
+      cropRotateEditor: CropRotateEditorConfigs(
+        maxScale: 8,
+        style: CropRotateEditorStyle(
+          appBarBackground: colors.base,
+          appBarColor: colors.text,
+          background: colors.base,
+          bottomBarBackground: colors.surface,
+          bottomBarColor: colors.text,
+          cropCornerColor: colors.accent,
+          helperLineColor: Colors.white54,
+          uiOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: overlayIconBrightness,
+            systemNavigationBarColor: colors.surface,
+            systemNavigationBarIconBrightness: overlayIconBrightness,
+          ),
+        ),
+      ),
+      tuneEditor: TuneEditorConfigs(
+        style: TuneEditorStyle(
+          appBarBackground: colors.base,
+          appBarColor: colors.text,
+          background: colors.base,
+          bottomBarBackground: colors.surface,
+          bottomBarActiveItemColor: colors.accent,
+          bottomBarInactiveItemColor: colors.textSecondary,
+        ),
+      ),
+      filterEditor: FilterEditorConfigs(
+        style: FilterEditorStyle(
+          appBarBackground: colors.base,
+          appBarColor: colors.text,
+          background: colors.base,
+          previewSelectedTextColor: colors.accent,
+        ),
+      ),
+      imageGeneration: widget.imageGenerationConfigs,
+    );
+    return widget.imageBytes != null
+        ? ProImageEditor.memory(
+            widget.imageBytes!,
+            key: _editor,
+            callbacks: callbacks,
+            configs: configs,
+          )
+        : ProImageEditor.file(
+            widget.imagePath,
+            key: _editor,
+            callbacks: callbacks,
+            configs: configs,
+          );
   }
 }
 

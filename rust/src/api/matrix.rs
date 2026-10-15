@@ -44,6 +44,7 @@ use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+mod image_caption;
 pub mod notifications;
 pub mod push;
 mod sdk_timeline;
@@ -4160,6 +4161,15 @@ pub struct FormattedMessageInput {
 }
 
 #[frb]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageMessageMetadata {
+    pub album_root: Option<String>,
+    pub blurhash: Option<String>,
+    pub spoiler: bool,
+    pub spoiler_reason: Option<String>,
+}
+
+#[frb]
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub id: String,
@@ -4171,6 +4181,9 @@ pub struct ChatMessage {
     pub caption: Option<String>,
     /// Sanitized Matrix HTML for media captions.
     pub caption_formatted_body: Option<String>,
+    /// Matter's common description, shown when viewing any image in a batch.
+    pub shared_caption: Option<String>,
+    pub image_metadata: Option<ImageMessageMetadata>,
     /// Intentional mentions carried by `m.mentions`.
     pub mentioned_user_ids: Vec<String>,
     pub mentions_room: bool,
@@ -4182,10 +4195,12 @@ pub struct ChatMessage {
     pub media_source_json: Option<String>,
     pub image_width: Option<i32>,
     pub image_height: Option<i32>,
-    /// Original filename for file/audio attachments.
+    /// Original filename for media attachments.
     pub filename: Option<String>,
-    /// Declared file size in bytes for file/audio attachments.
+    /// Declared file size in bytes for media attachments.
     pub file_size: Option<i32>,
+    /// MIME type declared by the media event.
+    pub mime_type: Option<String>,
     /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
     pub geo_uri: Option<String>,
     /// Poll data when `msg_type == Poll`.
@@ -8325,6 +8340,8 @@ fn unable_to_decrypt_message(
         formatted_body: None,
         caption: None,
         caption_formatted_body: None,
+        shared_caption: None,
+        image_metadata: None,
         mentioned_user_ids: Vec::new(),
         mentions_room: false,
         timestamp,
@@ -8336,6 +8353,7 @@ fn unable_to_decrypt_message(
         image_height: None,
         filename: None,
         file_size: None,
+        mime_type: None,
         geo_uri: None,
         poll: None,
         in_reply_to: None,
@@ -8542,6 +8560,7 @@ pub async fn forward_message(
                 return Err(api_err("rooms", "无法转发已撤回的消息".to_string()));
             };
             let mut content = original.content.clone();
+            let media_caption = text.body.clone();
             if matches!(
                 &content.msgtype,
                 matrix_sdk::ruma::events::room::message::MessageType::Text(_)
@@ -8550,8 +8569,59 @@ pub async fn forward_message(
             } else {
                 content.relates_to = None;
             }
+            let mut shared_caption = if matches!(
+                &content.msgtype,
+                matrix_sdk::ruma::events::room::message::MessageType::Image(_)
+            ) {
+                timeline_event
+                    .raw()
+                    .deserialize_as::<serde_json::Value>()
+                    .ok()
+                    .and_then(|event| image_caption::shared_caption(&event))
+            } else {
+                None
+            };
+            let mut metadata = timeline_event
+                .raw()
+                .deserialize_as::<serde_json::Value>()
+                .ok()
+                .and_then(|event| image_caption::metadata(&event));
+            if let matrix_sdk::ruma::events::room::message::MessageType::Image(image) =
+                &mut content.msgtype
+            {
+                if image.caption().is_none() {
+                    if shared_caption.is_none()
+                        && !media_caption.trim().is_empty()
+                        && media_caption != image.filename()
+                    {
+                        shared_caption = Some(media_caption.clone());
+                    }
+                    if shared_caption.is_none() {
+                        if let Some(root) = metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.album_root.as_deref())
+                        {
+                            let root = matrix_sdk::ruma::EventId::parse(root)
+                                .map_err(|error| api_err("media", error.to_string()))?;
+                            shared_caption = image_caption::album_caption(&source_room, &root)
+                                .await
+                                .map_err(|error| api_err("media", error))?;
+                        }
+                    }
+                    if let Some(caption) = &shared_caption {
+                        image.filename = Some(image.body.clone());
+                        image.body = caption.clone();
+                        image.formatted = None;
+                    }
+                }
+            }
+            if let Some(metadata) = &mut metadata {
+                metadata.album_root = None;
+            }
+            let content = image_caption::with_captions(content, None, None)?;
+            let content = image_caption::with_metadata(content, metadata.as_ref())?;
             target_room
-                .send(content)
+                .send_raw("m.room.message", content)
                 .await
                 .map_err(|e| api_err("rooms", format!("Forward failed: {e}")))?
                 .response
@@ -8774,10 +8844,34 @@ fn video_message_content(
     ))
 }
 
+/// Read the caption belonging to an image album without downloading its media.
+#[frb]
+pub async fn get_image_album_caption(
+    account_user_id: String,
+    room_id: String,
+    root_event_id: String,
+) -> Result<Option<String>, String> {
+    let client = get_client()
+        .await
+        .ok_or_else(|| api_err("media", "No client created.".to_owned()))?;
+    ensure_account_matches(&client, &account_user_id)?;
+    let room = get_room_by_id(&client, &room_id)?;
+    let root = matrix_sdk::ruma::EventId::parse(root_event_id)
+        .map_err(|error| api_err("media", format!("Invalid album root: {error}")))?;
+    tokio::time::timeout(
+        MEDIA_EVENT_SEND_TIMEOUT,
+        image_caption::album_caption(&room, &root),
+    )
+    .await
+    .map_err(|_| api_err("media", "Album caption lookup timed out.".to_owned()))?
+    .map_err(|error| api_err("media", error))
+}
+
 /// Send an image message to a room.
 /// `image_data` is the raw bytes of the image file.
 /// `filename` is the original file name (e.g. "photo.jpg").
 #[frb]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_image_message(
     account_user_id: String,
     room_id: String,
@@ -8786,7 +8880,10 @@ pub async fn send_image_message(
     mime_type: Option<String>,
     width: Option<i32>,
     height: Option<i32>,
-) -> Result<(), String> {
+    caption: Option<String>,
+    shared_caption: Option<String>,
+    metadata: Option<ImageMessageMetadata>,
+) -> Result<String, String> {
     let client = get_client()
         .await
         .ok_or_else(|| api_err("media", "No client created.".to_string()))?;
@@ -8844,15 +8941,21 @@ pub async fn send_image_message(
         image_height,
         source,
     );
-    tokio::time::timeout(MEDIA_EVENT_SEND_TIMEOUT, room.send(content))
-        .await
-        .map_err(|_| {
-            api_err(
-                "media",
-                "Image uploaded, but sending the message timed out.".to_string(),
-            )
-        })?
-        .map_err(|e| api_err("media", format!("Send image message failed: {e}")))?;
+    let content =
+        image_caption::with_captions(content, caption.as_deref(), shared_caption.as_deref())?;
+    let content = image_caption::with_metadata(content, metadata.as_ref())?;
+    let response = tokio::time::timeout(
+        MEDIA_EVENT_SEND_TIMEOUT,
+        room.send_raw("m.room.message", content),
+    )
+    .await
+    .map_err(|_| {
+        api_err(
+            "media",
+            "Image uploaded, but sending the message timed out.".to_string(),
+        )
+    })?
+    .map_err(|e| api_err("media", format!("Send image message failed: {e}")))?;
 
     app_log(
         "info",
@@ -8867,7 +8970,7 @@ pub async fn send_image_message(
             room_id: room_id.clone(),
         },
     );
-    Ok(())
+    Ok(response.response.event_id.to_string())
 }
 
 /// Send an arbitrary file (document) attachment to a room.
@@ -10165,8 +10268,12 @@ mod account_bound_attachment_tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
-            .await,
+            .await
+            .map(|_| ()),
             send_file_message(
                 wrong.clone(),
                 room.clone(),

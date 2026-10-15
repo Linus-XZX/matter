@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../features/markdown/markdown_source_store.dart';
 import '../features/push/push_runtime.dart';
 import '../src/rust/api/matrix.dart' as rust;
@@ -1210,10 +1212,9 @@ final messagesProvider = FutureProvider.family<List<rust.ChatMessage>, String>((
 });
 
 Future<bool> _canPersistMessagesForRoom(dynamic read, String roomId) async {
-  final knownRooms =
-      (read(chatRoomsProvider) as AsyncValue<List<rust.ChatRoom>>)
-          .asData
-          ?.value;
+  final knownRooms = (read(
+    chatRoomsProvider,
+  ) as AsyncValue<List<rust.ChatRoom>>).asData?.value;
   if (knownRooms != null) {
     for (final room in knownRooms) {
       if (room.id == roomId) {
@@ -1309,6 +1310,8 @@ bool chatMessageContentEquals(rust.ChatMessage a, rust.ChatMessage b) {
           a.formattedBody == b.formattedBody &&
           a.caption == b.caption &&
           a.captionFormattedBody == b.captionFormattedBody &&
+          a.sharedCaption == b.sharedCaption &&
+          a.imageMetadata == b.imageMetadata &&
           listEquals(a.mentionedUserIds, b.mentionedUserIds) &&
           a.mentionsRoom == b.mentionsRoom &&
           a.timestamp == b.timestamp &&
@@ -1320,6 +1323,7 @@ bool chatMessageContentEquals(rust.ChatMessage a, rust.ChatMessage b) {
           a.imageHeight == b.imageHeight &&
           a.filename == b.filename &&
           a.fileSize == b.fileSize &&
+          a.mimeType == b.mimeType &&
           a.geoUri == b.geoUri &&
           _pollContentEquals(a.poll, b.poll) &&
           a.inReplyTo == b.inReplyTo &&
@@ -1684,6 +1688,8 @@ Future<void> retryFailedLocalMessage(
       formattedBody: message.formattedBody,
       caption: message.caption,
       captionFormattedBody: message.captionFormattedBody,
+      sharedCaption: message.sharedCaption,
+      imageMetadata: message.imageMetadata,
       mentionedUserIds: message.mentionedUserIds,
       mentionsRoom: message.mentionsRoom,
       timestamp: retryTimestamp.toString(),
@@ -1871,6 +1877,8 @@ String markLocalOutgoingMessageSentInState(
       formattedBody: message.formattedBody,
       caption: message.caption,
       captionFormattedBody: message.captionFormattedBody,
+      sharedCaption: message.sharedCaption,
+      imageMetadata: message.imageMetadata,
       mentionedUserIds: message.mentionedUserIds,
       mentionsRoom: message.mentionsRoom,
       timestamp: message.timestamp,
@@ -2011,7 +2019,10 @@ final mxcUrlCacheProvider =
 
 const _kMxcCachePrefix = 'mxc_http_cache_v1';
 const _kMaxPersistedMxcEntriesPerUser = 500;
-final _loadedMxcCacheUsers = <String>{};
+final _loadedMxcCacheUsersProvider =
+    NotifierProvider<MutableState<Set<String>>, Set<String>>(
+      () => MutableState({}),
+    );
 
 String _mxcStorageNamespace(WidgetRef ref) =>
     ref.read(activeUserIdProvider) ?? 'anonymous';
@@ -2023,14 +2034,17 @@ String _scopedMxcCacheKey(String namespace, String cacheKey) =>
 
 Future<void> _ensureMxcCacheLoaded(WidgetRef ref) async {
   final namespace = _mxcStorageNamespace(ref);
-  if (_loadedMxcCacheUsers.contains(namespace)) return;
+  if (ref.read(_loadedMxcCacheUsersProvider).contains(namespace)) return;
 
   final prefs = await SharedPreferences.getInstance();
   // The calling widget may have been unmounted while the disk read was in
   // flight: `ref.read` below throws on a disposed widget.
   if (!ref.context.mounted) return;
-  if (_loadedMxcCacheUsers.contains(namespace)) return;
-  _loadedMxcCacheUsers.add(namespace);
+  if (ref.read(_loadedMxcCacheUsersProvider).contains(namespace)) return;
+  ref.read(_loadedMxcCacheUsersProvider.notifier).value = {
+    ...ref.read(_loadedMxcCacheUsersProvider),
+    namespace,
+  };
   final raw = prefs.getString(_mxcStorageKey(namespace));
   if (raw != null && raw.isNotEmpty) {
     try {
@@ -2038,11 +2052,8 @@ Future<void> _ensureMxcCacheLoaded(WidgetRef ref) async {
       final trimmed = _trimPersistedMxcEntries(
         decoded.map((key, value) => MapEntry(key, '$value')),
       );
-      final loadedEntries = decoded.map(
-        (key, value) => MapEntry(
-          _scopedMxcCacheKey(namespace, key),
-          trimmed[key] ?? '$value',
-        ),
+      final loadedEntries = trimmed.map(
+        (key, value) => MapEntry(_scopedMxcCacheKey(namespace, key), value),
       );
       final cache = ref.read(mxcUrlCacheProvider);
       ref.read(mxcUrlCacheProvider.notifier).value = {
@@ -2083,10 +2094,17 @@ Future<void> _persistMxcCacheEntry(
 }
 
 Map<String, String> _trimPersistedMxcEntries(Map<String, String> entries) {
-  if (entries.length <= _kMaxPersistedMxcEntriesPerUser) return entries;
+  // Original entries also record the user's quality choice. Thumbnail cache
+  // eviction must not reset that choice for previously viewed images.
+  final cacheKeys = entries.keys
+      .where((key) => !key.endsWith('|original'))
+      .toList();
+  if (cacheKeys.length <= _kMaxPersistedMxcEntriesPerUser) return entries;
   final trimmed = Map<String, String>.from(entries);
-  while (trimmed.length > _kMaxPersistedMxcEntriesPerUser) {
-    trimmed.remove(trimmed.keys.first);
+  for (final key in cacheKeys.take(
+    cacheKeys.length - _kMaxPersistedMxcEntriesPerUser,
+  )) {
+    trimmed.remove(key);
   }
   return trimmed;
 }
@@ -2147,12 +2165,10 @@ Future<String?> resolveMxcUrlAvatar(WidgetRef ref, String? mxcUrl) async {
   try {
     final httpUrl = await rust.mxcToHttpAvatar(mxcUrl: mxcUrl);
     if (httpUrl == null || httpUrl.isEmpty) return null;
-    if (!ref.context.mounted) return null;
-    ref.read(mxcUrlCacheProvider.notifier).value = {
-      ...cache,
-      cacheKey: httpUrl,
-    };
-    unawaited(_persistMxcCacheEntry(ref, namespace, rawCacheKey, httpUrl));
+    if (!ref.context.mounted || _mxcStorageNamespace(ref) != namespace) {
+      return null;
+    }
+    rememberResolvedMxcUrl(ref, mxcUrl, httpUrl, width: 96, height: 96);
     return httpUrl;
   } catch (_) {
     return null;
@@ -2164,12 +2180,17 @@ Future<String?> resolveMxcUrl(
   String? mxcUrl, {
   int? width,
   int? height,
+  bool useOriginalIfCached = false,
 }) async {
   if (mxcUrl == null || !mxcUrl.startsWith('mxc://')) return null;
   await _ensureMxcCacheLoaded(ref);
   // The calling widget may have been unmounted while the cache load was in
   // flight: `ref.read` below throws on a disposed widget.
   if (!ref.context.mounted) return null;
+  if (useOriginalIfCached) {
+    final original = cachedOriginalMxcUrl(ref, mxcUrl);
+    if (original != null) return original;
+  }
   final namespace = _mxcStorageNamespace(ref);
   final rawCacheKey = _mxcCacheKey(mxcUrl, width: width, height: height);
   final cacheKey = _scopedMxcCacheKey(namespace, rawCacheKey);
@@ -2187,24 +2208,35 @@ Future<String?> resolveMxcUrl(
           )
         : await rust.mxcToHttp(mxcUrl: mxcUrl);
     if (httpUrl == null || httpUrl.isEmpty) return null;
-    if (!ref.context.mounted) return null;
-    ref.read(mxcUrlCacheProvider.notifier).value = {
-      ...cache,
-      cacheKey: httpUrl,
-    };
-    unawaited(_persistMxcCacheEntry(ref, namespace, rawCacheKey, httpUrl));
+    if (!ref.context.mounted || _mxcStorageNamespace(ref) != namespace) {
+      return null;
+    }
+    rememberResolvedMxcUrl(ref, mxcUrl, httpUrl, width: width, height: height);
     return httpUrl;
   } catch (_) {
     return null;
   }
 }
 
-/// Convert mxc:// URI to full-quality download HTTP URL.
-/// Used for "原图" (original quality) in image preview.
+String? cachedOriginalMxcUrl(WidgetRef ref, String? mxcUrl) =>
+    cachedResolvedMxcUrl(ref, mxcUrl == null ? null : '$mxcUrl|original');
+
+/// Convert mxc:// URI to full-quality download HTTP URL and retain that choice
+/// in the account's persisted media cache.
 Future<String?> resolveMxcUrlFull(WidgetRef ref, String? mxcUrl) async {
   if (mxcUrl == null || !mxcUrl.startsWith('mxc://')) return null;
+  await _ensureMxcCacheLoaded(ref);
+  if (!ref.context.mounted) return null;
+  final cached = cachedOriginalMxcUrl(ref, mxcUrl);
+  if (cached != null) return cached;
+  final namespace = _mxcStorageNamespace(ref);
   try {
-    return await rust.mxcToHttpFull(mxcUrl: mxcUrl);
+    final url = await rust.mxcToHttpFull(mxcUrl: mxcUrl);
+    if (!ref.context.mounted || _mxcStorageNamespace(ref) != namespace) {
+      return null;
+    }
+    rememberResolvedMxcUrl(ref, '$mxcUrl|original', url);
+    return url;
   } catch (_) {
     return null;
   }

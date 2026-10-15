@@ -1,6 +1,8 @@
 import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../src/rust/api/matrix.dart' as rust;
 import 'message_ordering.dart';
 
@@ -72,6 +74,15 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'formattedBody': message.formattedBody,
     'caption': message.caption,
     'captionFormattedBody': message.captionFormattedBody,
+    'sharedCaption': message.sharedCaption,
+    'imageMetadata': message.imageMetadata == null
+        ? null
+        : {
+            'albumRoot': message.imageMetadata!.albumRoot,
+            'blurhash': message.imageMetadata!.blurhash,
+            'spoiler': message.imageMetadata!.spoiler,
+            'spoilerReason': message.imageMetadata!.spoilerReason,
+          },
     'mentionedUserIds': message.mentionedUserIds,
     'mentionsRoom': message.mentionsRoom,
     'timestamp': message.timestamp,
@@ -83,6 +94,7 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'imageHeight': message.imageHeight,
     'filename': message.filename,
     'fileSize': message.fileSize,
+    'mimeType': message.mimeType,
     'geoUri': message.geoUri,
     'poll': message.poll == null
         ? null
@@ -200,6 +212,15 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     formattedBody: map['formattedBody'] as String?,
     caption: map['caption'] as String?,
     captionFormattedBody: map['captionFormattedBody'] as String?,
+    sharedCaption: map['sharedCaption'] as String?,
+    imageMetadata: map['imageMetadata'] is Map
+        ? rust.ImageMessageMetadata(
+            albumRoot: map['imageMetadata']['albumRoot'] as String?,
+            blurhash: map['imageMetadata']['blurhash'] as String?,
+            spoiler: map['imageMetadata']['spoiler'] == true,
+            spoilerReason: map['imageMetadata']['spoilerReason'] as String?,
+          )
+        : null,
     mentionedUserIds: ((map['mentionedUserIds'] as List?) ?? const [])
         .map((item) => '$item')
         .toList(),
@@ -213,6 +234,7 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     imageHeight: (map['imageHeight'] as num?)?.toInt(),
     filename: map['filename'] as String?,
     fileSize: (map['fileSize'] as num?)?.toInt(),
+    mimeType: map['mimeType'] as String?,
     geoUri: map['geoUri'] as String?,
     poll: poll,
     inReplyTo: map['inReplyTo'] as String?,

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
@@ -20,8 +19,22 @@ import '../../theme/neu_colors.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_surface.dart';
-import '../chat/chat_image_editor_page.dart';
 import '../chat/latest_message_control.dart';
+import 'attachment_caption_composer.dart';
+import 'blurhash_codec.dart';
+import 'attachment_image_preview_page.dart';
+import 'attachment_media_draft.dart';
+import 'attachment_media_gallery.dart';
+import 'attachment_media_utils.dart';
+
+export 'attachment_media_utils.dart'
+    show
+        AttachmentMediaKind,
+        resolveAttachmentMime,
+        classifyAttachmentMime,
+        detectImageMime;
+
+export 'attachment_media_gallery.dart' show attachmentMediaOrder;
 
 /// The four attachment modes offered by the floating frosted-glass bar.
 enum AttachmentTab { media, file, poll, location }
@@ -39,11 +52,6 @@ const _pollOptionAnimationDuration = Duration(milliseconds: 180);
 /// [file_selector] fallback to avoid MissingPluginException.
 bool get photoManagerSupported =>
     !kIsWeb && (Platform.isAndroid || Platform.isIOS || Platform.isMacOS);
-
-@visibleForTesting
-const attachmentMediaOrder = <OrderOption>[
-  OrderOption(type: OrderOptionType.createDate, asc: false),
-];
 
 /// An inline attachment panel that starts at the keyboard height and expands
 /// as the active content is dragged upward.
@@ -87,10 +95,12 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
   late final String _accountUserId;
   bool _isSending = false;
   bool _isPickingFiles = false;
+  final _mediaDraft = AttachmentMediaDraft();
+  bool _previewOpen = false;
 
   /// Every Dart/FRB upload buffer is capped to avoid multiplying a very large
   /// allocation while it crosses the bridge into Rust.
-  static const int _maxBufferedBytes = 64 * 1024 * 1024;
+  static const int _maxBufferedBytes = attachmentMaxBufferedBytes;
   static const int _maxImageEdge = 4096;
   static const int _maxImageQuality = 92;
 
@@ -106,59 +116,111 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
   void dispose() {
     _sheetController.dispose();
     _sheetExtent.dispose();
+    if (!_previewOpen) _mediaDraft.dispose();
     super.dispose();
   }
 
-  Future<void> _sendMediaAssets(List<AssetEntity> assets) => _runBatch(
-    assets
-        .map(
-          (a) =>
-              () => _sendSingleAsset(a),
-        )
-        .toList(),
-    assets,
-  );
-
-  Future<void> _sendSingleAsset(AssetEntity asset) async {
-    final file = await asset.originFile;
-    if (file == null) throw '无法读取文件';
-    final title = (await asset.titleAsync).trim();
-    final filename = title.isEmpty ? 'asset_${asset.id}' : title;
-    String? declaredMime;
+  Future<void> _openPreview(
+    AttachmentMediaItem item,
+    List<AttachmentMediaItem> images,
+  ) async {
+    if (_isSending || _previewOpen) return;
+    _previewOpen = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+    final route = MaterialPageRoute<bool>(
+      fullscreenDialog: true,
+      builder: (_) => AttachmentImagePreviewPage(
+        draft: _mediaDraft,
+        images: images,
+        initialImage: item,
+        onCaptionFocus: _expandForCaption,
+        onSend: () => _sendSelectedMedia(closePicker: false),
+      ),
+    );
     try {
-      declaredMime = await asset.mimeTypeAsync;
-    } catch (_) {
-      // The filename fallback below is enough when a platform has no MIME API.
+      final sent = await Navigator.of(context, rootNavigator: true).push(route);
+      await route.completed;
+      if (mounted && sent == true) widget.onClose();
+    } finally {
+      _previewOpen = false;
+      if (!mounted) _mediaDraft.dispose();
     }
-    final mime = resolveAttachmentMime(filename, declaredMime);
+  }
 
-    if (asset.type == AssetType.video) {
-      final bytes = await _readFileBytes(file, '视频');
-      final size = asset.size;
-      _ensureCanSend();
-      await rust.sendVideoMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        videoData: bytes,
-        filename: filename,
-        width: size.width.round(),
-        height: size.height.round(),
-        durationMs: asset.videoDuration.inMilliseconds,
-        size: bytes.length,
-        mimeType: mime?.startsWith('video/') == true ? mime : null,
+  void _expandForCaption() {
+    if (!mounted) return;
+    widget.onHeightChanged(widget.maxHeight);
+    if (_sheetController.isAttached) {
+      unawaited(
+        _sheetController.animateTo(
+          1,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        ),
       );
-      return;
     }
+  }
 
-    if (asset.type == AssetType.image) {
-      final prepared = await _prepareAssetImage(
-        asset: asset,
-        file: file,
-        filename: filename,
-        mimeType: mime,
-      );
+  Future<bool> _sendSelectedMedia({bool closePicker = true}) async {
+    _ensureCanSend();
+    final items = List<AttachmentMediaItem>.of(_mediaDraft.selected);
+    if (_isSending || items.isEmpty) return false;
+    final description = _mediaDraft.description.text.trim();
+    final caption = description.isEmpty ? null : description;
+    final lastImage = items.lastIndexWhere((item) => item.isImage);
+    var albumRoot = _mediaDraft.albumRootEventId;
+    final album =
+        albumRoot != null || items.where((item) => item.isImage).length > 1;
+    await _runBatch(
+      [
+        for (var index = 0; index < items.length; index++)
+          () async {
+            final eventId = await _sendSingleMedia(
+              items[index],
+              caption: index == lastImage ? caption : null,
+              albumRoot: albumRoot,
+            );
+            if (album && albumRoot == null && eventId != null) {
+              albumRoot = eventId;
+              _mediaDraft.albumRootEventId = eventId;
+            }
+          },
+      ],
+      _mediaDraft.selected,
+      closePicker: closePicker,
+    );
+    return mounted && _mediaDraft.selected.isEmpty;
+  }
+
+  Future<String?> _sendSingleMedia(
+    AttachmentMediaItem item, {
+    String? caption,
+    String? albumRoot,
+  }) async {
+    final original = await item.original;
+    final file = original.file;
+    final filename = item.editedFilename ?? original.filename;
+    final mime =
+        item.editedMimeType ??
+        resolveAttachmentMime(original.filename, file.mimeType);
+    if (item.isImage) {
+      final prepared = item.editedBytes == null && item.asset != null
+          ? await _prepareAssetImage(
+              asset: item.asset!,
+              file: File(file.path),
+              filename: filename,
+              mimeType: mime,
+              compress: item.compress,
+            )
+          : await _prepareBufferedImage(
+              item.editedBytes ?? await _readXFileBytes(file),
+              filename: filename,
+              mimeType: mime!,
+              compress: item.compress,
+            );
+      final blurhash = await encodeImageBlurhash(prepared.bytes);
       _ensureCanSend();
-      await rust.sendImageMessage(
+      return await rust.sendImageMessage(
         accountUserId: _accountUserId,
         roomId: widget.roomId,
         imageData: prepared.bytes,
@@ -166,30 +228,43 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         mimeType: prepared.mimeType,
         width: prepared.width,
         height: prepared.height,
+        caption: caption,
+        metadata: rust.ImageMessageMetadata(
+          albumRoot: albumRoot,
+          blurhash: blurhash,
+          spoiler: item.spoiler,
+        ),
       );
     } else {
-      final bytes = await _readFileBytes(file, '文件');
+      final bytes = await _readXFileBytes(file);
       _ensureCanSend();
-      await rust.sendFileMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        fileData: bytes,
-        filename: filename,
-        mimeType: mime,
-        size: bytes.length,
-      );
+      if (item.asset?.type == AssetType.video ||
+          classifyAttachmentMime(mime) == AttachmentMediaKind.video) {
+        final size = item.asset?.size;
+        await rust.sendVideoMessage(
+          accountUserId: _accountUserId,
+          roomId: widget.roomId,
+          videoData: bytes,
+          filename: filename,
+          mimeType: mime?.startsWith('video/') == true ? mime : null,
+          size: bytes.length,
+          width: size?.width.round(),
+          height: size?.height.round(),
+          durationMs: item.asset?.videoDuration.inMilliseconds,
+        );
+      } else {
+        await rust.sendFileMessage(
+          accountUserId: _accountUserId,
+          roomId: widget.roomId,
+          fileData: bytes,
+          filename: filename,
+          mimeType: mime,
+          size: bytes.length,
+        );
+      }
     }
+    return null;
   }
-
-  Future<void> _sendMediaXFiles(List<XFile> files) => _runBatch(
-    files
-        .map(
-          (file) =>
-              () => _sendSingleMediaXFile(file),
-        )
-        .toList(),
-    files,
-  );
 
   Future<void> _sendFiles(List<XFile> files) => _runBatch(
     files
@@ -210,56 +285,11 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
       await _sendFiles(files);
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('选择文件失败: $error')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('选择文件失败: $error')));
       }
     } finally {
       if (mounted) setState(() => _isPickingFiles = false);
-    }
-  }
-
-  Future<void> _sendSingleMediaXFile(XFile file) async {
-    final mime = resolveAttachmentMime(file.name, file.mimeType);
-    final kind = classifyAttachmentMime(mime);
-    final original = await _readXFileBytes(file);
-
-    if (kind == AttachmentMediaKind.image) {
-      final prepared = await _prepareBufferedImage(
-        original,
-        filename: file.name,
-        mimeType: mime!,
-      );
-      _ensureCanSend();
-      await rust.sendImageMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        imageData: prepared.bytes,
-        filename: prepared.filename,
-        mimeType: prepared.mimeType,
-        width: prepared.width,
-        height: prepared.height,
-      );
-    } else if (kind == AttachmentMediaKind.video) {
-      _ensureCanSend();
-      await rust.sendVideoMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        videoData: original,
-        filename: file.name,
-        mimeType: mime,
-        size: original.length,
-      );
-    } else {
-      _ensureCanSend();
-      await rust.sendFileMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        fileData: original,
-        filename: file.name,
-        mimeType: mime,
-        size: original.length,
-      );
     }
   }
 
@@ -288,11 +318,12 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     required File file,
     required String filename,
     required String? mimeType,
+    bool compress = true,
   }) async {
     final sourceSize = asset.size;
     if (sourceSize.width <= 0 || sourceSize.height <= 0) {
       final original = await _readFileBytes(file, '图片');
-      final detectedMime = mimeType ?? _guessMime(filename);
+      final detectedMime = mimeType ?? resolveAttachmentMime(filename, null);
       if (detectedMime?.startsWith('image/') != true) {
         throw '无法识别图片格式';
       }
@@ -300,9 +331,20 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         original,
         filename: filename,
         mimeType: detectedMime!,
+        compress: compress,
       );
     }
 
+    if (!compress || mimeType == 'image/gif' || mimeType == 'image/webp') {
+      if (mimeType?.startsWith('image/') != true) throw '无法识别图片格式';
+      return _PreparedImage(
+        bytes: await _readFileBytes(file, '图片'),
+        filename: filename,
+        mimeType: mimeType!,
+        width: sourceSize.width.round(),
+        height: sourceSize.height.round(),
+      );
+    }
     final target = _boundedImageSize(sourceSize);
     final shouldConvert =
         !_canSendOriginalImageMime(mimeType) ||
@@ -349,8 +391,18 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     Uint8List original, {
     required String filename,
     required String mimeType,
+    bool compress = true,
   }) async {
-    final sourceSize = await _decodeImageSize(original);
+    final sourceSize = await decodeAttachmentImageSize(original);
+    if (!compress || mimeType == 'image/gif' || mimeType == 'image/webp') {
+      return _PreparedImage(
+        bytes: original,
+        filename: filename,
+        mimeType: mimeType,
+        width: sourceSize?.width.round(),
+        height: sourceSize?.height.round(),
+      );
+    }
     if (sourceSize == null) throw '无法读取图片尺寸';
     final target = _boundedImageSize(sourceSize);
     final shouldConvert =
@@ -404,7 +456,7 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     required ({int width, int height}) expectedSize,
   }) async {
     _ensureBufferedSize(bytes.length, '图片');
-    final actual = await _decodeImageSize(bytes);
+    final actual = await decodeAttachmentImageSize(bytes);
     final width = actual?.width.round() ?? expectedSize.width;
     final height = actual?.height.round() ?? expectedSize.height;
     if (width > _maxImageEdge || height > _maxImageEdge) {
@@ -412,7 +464,7 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     }
     return _PreparedImage(
       bytes: bytes,
-      filename: _withExtension(filename, 'jpg'),
+      filename: attachmentFilenameWithExtension(filename, 'jpg'),
       mimeType: 'image/jpeg',
       width: width,
       height: height,
@@ -431,37 +483,6 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
       throw '$label超过 ${_maxBufferedBytes ~/ 1024 ~/ 1024}MB 限制';
     }
   }
-
-  Future<void> _sendEditedImage(
-    Uint8List bytes, {
-    required String originalFilename,
-    required String? originalMimeType,
-  }) => _runBatch([
-    () async {
-      _ensureBufferedSize(bytes.length, '图片');
-      final mimeType =
-          detectImageMime(bytes) ??
-          resolveAttachmentMime(originalFilename, originalMimeType);
-      if (mimeType?.startsWith('image/') != true) {
-        throw '无法识别编辑后的图片格式';
-      }
-      final filename = _withExtension(
-        originalFilename,
-        _imageExtensionForMime(mimeType!),
-      );
-      final imageSize = await _decodeImageSize(bytes);
-      _ensureCanSend();
-      await rust.sendImageMessage(
-        accountUserId: _accountUserId,
-        roomId: widget.roomId,
-        imageData: bytes,
-        filename: filename,
-        mimeType: mimeType,
-        width: imageSize?.width.round(),
-        height: imageSize?.height.round(),
-      );
-    },
-  ], null);
 
   Future<void> _sendPoll(
     String question,
@@ -500,10 +521,12 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
   /// pruned from the UI; pass `null` for non-batch sends (poll/location/edit).
   Future<void> _runBatch(
     List<Future<void> Function()> ops,
-    List<dynamic>? items,
-  ) async {
+    List<dynamic>? items, {
+    bool closePicker = true,
+  }) async {
     if (_isSending || ops.isEmpty) return;
     setState(() => _isSending = true);
+    _mediaDraft.setSending(true);
     final presentation = widget.resolveSendPresentation();
     var sent = 0;
     try {
@@ -512,12 +535,14 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         try {
           await ops[i]();
           sent++;
+          if (!mounted && !_previewOpen) return;
           // Prune the head: ops and items advance in lockstep, so after a
           // success the list tail == remaining unsent items. On full success
           // the list is empty; on partial failure the user keeps the unsent
           // remainder, so a retry never re-sends delivered items.
           if (items != null && items.isNotEmpty) {
             items.removeAt(0);
+            _mediaDraft.selectionChanged();
           }
           if (mounted) setState(() {});
         } catch (e) {
@@ -535,9 +560,10 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
           return;
         }
       }
-      await _finishBatch(presentation, closePicker: true);
+      await _finishBatch(presentation, closePicker: closePicker);
     } finally {
       if (mounted && _isSending) setState(() => _isSending = false);
+      if (mounted || _previewOpen) _mediaDraft.setSending(false);
     }
   }
 
@@ -563,7 +589,12 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _mediaDraft,
+    builder: (context, _) => _buildPanel(context),
+  );
+
+  Widget _buildPanel(BuildContext context) {
     final maxHeight = math.max(widget.height, widget.maxHeight);
     final minSize = (widget.height / maxHeight).clamp(0.01, 1.0);
     if (_sheetExtent.value == 0) _sheetExtent.value = minSize;
@@ -629,9 +660,8 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
       child: Container(
         decoration: NeuDecoration(
           colors: colors,
-          superellipseEnabled: ChatVisualSettingsScope.of(
-            context,
-          ).superellipseBorderEnabled,
+          superellipseEnabled: ChatVisualSettingsScope.of(context)
+              .superellipseBorderEnabled,
           radius: NeuRadius.surface,
           intensity: .6,
         ),
@@ -639,9 +669,8 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
           type: MaterialType.transparency,
           clipBehavior: Clip.antiAlias,
           shape:
-              (ChatVisualSettingsScope.maybeOf(
-                    context,
-                  )?.superellipseBorderEnabled ??
+              (ChatVisualSettingsScope.maybeOf(context)
+                      ?.superellipseBorderEnabled ??
                   true)
               ? RoundedSuperellipseBorder(
                   borderRadius: BorderRadius.circular(NeuRadius.surface),
@@ -699,13 +728,29 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
                       left: 0,
                       right: 0,
                       bottom: 0,
-                      child: _FrostedTabBar(
-                        tab: _tab,
-                        isFileBusy: _isPickingFiles,
-                        onTabChanged: _isSending || _isPickingFiles
-                            ? null
-                            : _selectTab,
-                      ),
+                      child:
+                          _tab == AttachmentTab.media &&
+                              _mediaDraft.selected.isNotEmpty
+                          ? AttachmentCaptionComposer(
+                              draft: _mediaDraft,
+                              allowDescription: _mediaDraft.hasImages,
+                              onFocus: _expandForCaption,
+                              onClear: () {
+                                _mediaDraft.selected.clear();
+                                _mediaDraft.selectionChanged();
+                                FocusManager.instance.primaryFocus?.unfocus();
+                              },
+                              onSend: () {
+                                unawaited(_sendSelectedMedia());
+                              },
+                            )
+                          : _FrostedTabBar(
+                              tab: _tab,
+                              isFileBusy: _isPickingFiles,
+                              onTabChanged: _isSending || _isPickingFiles
+                                  ? null
+                                  : _selectTab,
+                            ),
                     ),
                   ],
                 ),
@@ -726,33 +771,15 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     return switch (tab) {
       AttachmentTab.media =>
         photoManagerSupported
-            ? _MediaTabBody(
-                isSending: _isSending,
+            ? AttachmentGalleryTab(
+                draft: _mediaDraft,
                 scrollController: scrollController,
-                onSendAssets: _sendMediaAssets,
-                onOpenEditor: (source) async {
-                  final edited = await Navigator.of(context).push<Uint8List>(
-                    MaterialPageRoute(
-                      fullscreenDialog: true,
-                      builder: (_) => ChatImageEditorPage(
-                        imagePath: source.path,
-                        mimeType: source.mimeType,
-                      ),
-                    ),
-                  );
-                  if (edited != null && mounted) {
-                    await _sendEditedImage(
-                      edited,
-                      originalFilename: source.filename,
-                      originalMimeType: source.mimeType,
-                    );
-                  }
-                },
+                onPreview: _openPreview,
               )
-            : _MediaFallback(
-                isSending: _isSending,
+            : AttachmentMediaFallback(
+                draft: _mediaDraft,
                 scrollController: scrollController,
-                onSendFiles: _sendMediaXFiles,
+                onPreview: _openPreview,
               ),
       AttachmentTab.poll => _PollTabBody(
         isSending: _isSending,
@@ -902,9 +929,8 @@ class _TabButton extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               item.label,
-              style: Theme.of(
-                context,
-              ).textTheme.labelSmall?.copyWith(color: color),
+              style: Theme.of(context).textTheme.labelSmall
+                  ?.copyWith(color: color),
             ),
           ],
         ),
@@ -914,391 +940,6 @@ class _TabButton extends StatelessWidget {
 }
 
 // ── Media tab: gallery grid + multi-select ───────────────────────────
-
-typedef _ImageEditorSource = ({String path, String filename, String? mimeType});
-
-class _MediaTabBody extends StatefulWidget {
-  final bool isSending;
-  final ScrollController? scrollController;
-  final Future<void> Function(List<AssetEntity> assets) onSendAssets;
-  final Future<void> Function(_ImageEditorSource source) onOpenEditor;
-
-  const _MediaTabBody({
-    required this.isSending,
-    required this.scrollController,
-    required this.onSendAssets,
-    required this.onOpenEditor,
-  });
-
-  @override
-  State<_MediaTabBody> createState() => _MediaTabBodyState();
-}
-
-class _MediaTabBodyState extends State<_MediaTabBody> {
-  AssetPathEntity? _album;
-  final List<AssetEntity> _assets = [];
-  final List<AssetEntity> _selected = [];
-  bool _loading = true;
-  String? _error;
-  bool _fetchingMore = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _init();
-  }
-
-  Future<void> _init() async {
-    try {
-      final perm = await PhotoManager.requestPermissionExtend();
-      if (!mounted) return;
-      if (!perm.hasAccess) {
-        setState(() {
-          _loading = false;
-          _error = '没有相册访问权限';
-        });
-        return;
-      }
-      final albums = await PhotoManager.getAssetPathList(
-        type: RequestType.common,
-        hasAll: true,
-        filterOption: FilterOptionGroup(orders: attachmentMediaOrder),
-      );
-      if (!mounted) return;
-      if (albums.isEmpty) {
-        setState(() => _loading = false);
-        return;
-      }
-      final album = albums.firstWhere(
-        (a) => a.isAll,
-        orElse: () => albums.first,
-      );
-      final assets = await album.getAssetListPaged(page: 0, size: 100);
-      if (!mounted) return;
-      setState(() {
-        _album = album;
-        _assets.addAll(assets);
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = '$e';
-      });
-    }
-  }
-
-  Future<void> _fetchMore() async {
-    final album = _album;
-    if (_fetchingMore || album == null || !mounted) return;
-    setState(() => _fetchingMore = true);
-    try {
-      final total = await album.assetCountAsync;
-      if (!mounted || _assets.length >= total) return;
-      final next = await album.getAssetListPaged(
-        page: _assets.length ~/ 100,
-        size: 100,
-      );
-      if (!mounted) return;
-      setState(() => _assets.addAll(next));
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('加载更多媒体失败: $e'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _fetchingMore = false);
-    }
-  }
-
-  bool _onScroll(ScrollNotification n) {
-    if (n is ScrollEndNotification &&
-        n.metrics.pixels >= n.metrics.maxScrollExtent - 240 &&
-        _assets.isNotEmpty &&
-        !_fetchingMore) {
-      _fetchMore();
-    }
-    return false;
-  }
-
-  void _toggleSelect(AssetEntity asset) {
-    if (widget.isSending) return;
-    setState(() {
-      if (_selected.contains(asset)) {
-        _selected.remove(asset);
-      } else {
-        _selected.add(asset);
-      }
-    });
-  }
-
-  int _selectionIndex(AssetEntity asset) =>
-      _selected.indexOf(asset) + 1; // 0 means not selected
-
-  Future<void> _openEditor(AssetEntity asset) async {
-    if (widget.isSending || asset.type != AssetType.image) return;
-    try {
-      final file = await asset.originFile;
-      if (file == null) throw '无法读取原图';
-      final title = (await asset.titleAsync).trim();
-      final filename = title.isEmpty ? 'asset_${asset.id}' : title;
-      String? declaredMime;
-      try {
-        declaredMime = await asset.mimeTypeAsync;
-      } catch (_) {
-        // The filename fallback is enough when MIME metadata is unavailable.
-      }
-      if (!mounted || widget.isSending) return;
-      await widget.onOpenEditor((
-        path: file.path,
-        filename: filename,
-        mimeType: resolveAttachmentMime(filename, declaredMime),
-      ));
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('打开图片失败: $e'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.neu;
-    if (_loading) {
-      return Center(child: CircularProgressIndicator(color: colors.accent));
-    }
-    if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(_error!, style: Theme.of(context).textTheme.bodyMedium),
-        ),
-      );
-    }
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: NotificationListener<ScrollNotification>(
-            onNotification: _onScroll,
-            child: _assets.isEmpty
-                ? Center(
-                    child: Text(
-                      '没有可用的图片或视频',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  )
-                : GridView.builder(
-                    controller: widget.scrollController,
-                    padding: EdgeInsets.fromLTRB(
-                      2,
-                      2,
-                      2,
-                      _selected.isEmpty
-                          ? _attachmentDockClearance
-                          : _attachmentSendBarClearance,
-                    ),
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 4,
-                          mainAxisSpacing: 2,
-                          crossAxisSpacing: 2,
-                        ),
-                    itemCount: _assets.length + (_fetchingMore ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index >= _assets.length) {
-                        return Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: SizedBox.square(
-                              dimension: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: colors.textTertiary,
-                              ),
-                            ),
-                          ),
-                        );
-                      }
-                      final asset = _assets[index];
-                      final order = _selectionIndex(asset);
-                      final selected = order > 0;
-                      final isVideo = asset.type == AssetType.video;
-                      return GestureDetector(
-                        key: ValueKey(asset.id),
-                        // Tapping a video must not open the image editor: it would
-                        // feed video bytes to the image decoder. Videos toggle
-                        // selection instead; only images open the editor.
-                        onTap: widget.isSending
-                            ? null
-                            : isVideo
-                            ? () => _toggleSelect(asset)
-                            : () => _openEditor(asset),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            AnimatedContainer(
-                              duration: const Duration(milliseconds: 150),
-                              color: selected
-                                  ? colors.base
-                                  : Colors.transparent,
-                              padding: selected
-                                  ? const EdgeInsets.all(6)
-                                  : EdgeInsets.zero,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(
-                                  selected ? NeuRadius.tag - 2 : 0,
-                                ),
-                                child: _AssetThumbnail(
-                                  key: ValueKey('thumbnail_${asset.id}'),
-                                  asset: asset,
-                                ),
-                              ),
-                            ),
-                            Positioned(
-                              top: 4,
-                              right: 4,
-                              child: GestureDetector(
-                                onTap: widget.isSending
-                                    ? null
-                                    : () => _toggleSelect(asset),
-                                child: _SelectionBadge(
-                                  selected: selected,
-                                  order: order,
-                                ),
-                              ),
-                            ),
-                            if (isVideo)
-                              const Positioned(
-                                bottom: 4,
-                                left: 4,
-                                child: Icon(
-                                  Icons.play_circle_fill,
-                                  color: Colors.white70,
-                                  size: 18,
-                                ),
-                              ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-          ),
-        ),
-        if (_selected.isNotEmpty)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: _SendBar(
-              label: '发送 ${_selected.length} 项',
-              isSending: widget.isSending,
-              // Pass by reference so partial-success items are pruned by the
-              // send loop and a retry never re-sends delivered items.
-              onSend: () => widget.onSendAssets(_selected),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _AssetThumbnail extends StatefulWidget {
-  final AssetEntity asset;
-  const _AssetThumbnail({super.key, required this.asset});
-
-  @override
-  State<_AssetThumbnail> createState() => _AssetThumbnailState();
-}
-
-class _AssetThumbnailState extends State<_AssetThumbnail> {
-  late Future<Uint8List?> _thumbnail;
-
-  @override
-  void initState() {
-    super.initState();
-    _thumbnail = _loadThumbnail();
-  }
-
-  @override
-  void didUpdateWidget(covariant _AssetThumbnail oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.asset.id != widget.asset.id) {
-      _thumbnail = _loadThumbnail();
-    }
-  }
-
-  Future<Uint8List?> _loadThumbnail() =>
-      widget.asset.thumbnailDataWithSize(const ThumbnailSize.square(256));
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.neu;
-    return FutureBuilder<Uint8List?>(
-      future: _thumbnail,
-      builder: (context, snap) {
-        if (snap.connectionState != ConnectionState.done) {
-          return Container(color: colors.card);
-        }
-        final bytes = snap.data;
-        if (bytes == null) {
-          return Container(
-            color: colors.card,
-            child: Icon(
-              Icons.broken_image,
-              color: colors.textTertiary,
-              size: 22,
-            ),
-          );
-        }
-        return Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true);
-      },
-    );
-  }
-}
-
-class _SelectionBadge extends StatelessWidget {
-  final bool selected;
-  final int order;
-  const _SelectionBadge({required this.selected, required this.order});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.neu;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 120),
-      width: 22,
-      height: 22,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: selected ? colors.accent : Colors.black.withValues(alpha: 0.35),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: selected ? 0 : 0.7),
-          width: 1.5,
-        ),
-      ),
-      alignment: Alignment.center,
-      child: selected
-          ? Text(
-              '$order',
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: colors.onAccent,
-                fontWeight: FontWeight.w600,
-              ),
-            )
-          : const SizedBox.shrink(),
-    );
-  }
-}
 
 class _SendBar extends StatelessWidget {
   final String label;
@@ -1345,145 +986,6 @@ class _SendBar extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-// ── Media fallback (Web/Linux/Windows: no photo_manager) ─────────────
-
-class _MediaFallback extends StatefulWidget {
-  final bool isSending;
-  final ScrollController? scrollController;
-  final Future<void> Function(List<XFile> files) onSendFiles;
-
-  const _MediaFallback({
-    required this.isSending,
-    required this.scrollController,
-    required this.onSendFiles,
-  });
-
-  @override
-  State<_MediaFallback> createState() => _MediaFallbackState();
-}
-
-class _MediaFallbackState extends State<_MediaFallback> {
-  final List<XFile> _picked = [];
-
-  static const _groups = <XTypeGroup>[
-    XTypeGroup(
-      label: '图片 / 视频',
-      extensions: [
-        'jpg',
-        'jpeg',
-        'png',
-        'gif',
-        'webp',
-        'heic',
-        'heif',
-        'avif',
-        'tiff',
-        'tif',
-        'bmp',
-        'mp4',
-        'mov',
-        'm4v',
-        'webm',
-        'mkv',
-        '3gp',
-      ],
-    ),
-  ];
-
-  Future<void> _pick() async {
-    if (widget.isSending) return;
-    try {
-      final files = await openFiles(acceptedTypeGroups: _groups);
-      if (!mounted || widget.isSending || files.isEmpty) return;
-      setState(() => _picked.addAll(files));
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('选择媒体失败: $e')));
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.neu;
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: ListView(
-            controller: widget.scrollController,
-            padding: EdgeInsets.fromLTRB(
-              24,
-              32,
-              24,
-              _picked.isEmpty
-                  ? _attachmentDockClearance
-                  : _attachmentSendBarClearance,
-            ),
-            children: [
-              Icon(
-                Icons.photo_library_outlined,
-                size: 48,
-                color: colors.textTertiary,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                '此平台的相册网格不可用，请选择图片或视频',
-                style: Theme.of(context).textTheme.bodyMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              Center(
-                child: NeuButton(
-                  onPressed: widget.isSending ? null : _pick,
-                  child: const Text('选择图片 / 视频'),
-                ),
-              ),
-              const SizedBox(height: 12),
-              for (var index = 0; index < _picked.length; index++)
-                ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    Icons.insert_drive_file_rounded,
-                    color: colors.textTertiary,
-                  ),
-                  title: Text(
-                    _picked[index].name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: colors.text),
-                  ),
-                  trailing: IconButton(
-                    tooltip: '移除',
-                    onPressed: widget.isSending
-                        ? null
-                        : () => setState(() => _picked.removeAt(index)),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        if (_picked.isNotEmpty)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: _SendBar(
-              label: '发送 ${_picked.length} 项',
-              isSending: widget.isSending,
-              onSend: () => widget.onSendFiles(_picked),
-            ),
-          ),
-      ],
     );
   }
 }
@@ -1983,14 +1485,12 @@ class _LocationTabBodyState extends State<_LocationTabBody> {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-enum AttachmentMediaKind { image, video, file }
-
 class _PreparedImage {
   final Uint8List bytes;
   final String filename;
   final String mimeType;
-  final int width;
-  final int height;
+  final int? width;
+  final int? height;
 
   const _PreparedImage({
     required this.bytes,
@@ -1999,28 +1499,6 @@ class _PreparedImage {
     required this.width,
     required this.height,
   });
-}
-
-@visibleForTesting
-String? resolveAttachmentMime(String filename, String? declaredMime) {
-  final declared = declaredMime?.split(';').first.trim().toLowerCase();
-  if (declared != null &&
-      declared.isNotEmpty &&
-      declared != 'application/octet-stream') {
-    return declared;
-  }
-  return _guessMime(filename) ?? (declared?.isEmpty == false ? declared : null);
-}
-
-@visibleForTesting
-AttachmentMediaKind classifyAttachmentMime(String? mimeType) {
-  if (mimeType?.startsWith('image/') == true) {
-    return AttachmentMediaKind.image;
-  }
-  if (mimeType?.startsWith('video/') == true) {
-    return AttachmentMediaKind.video;
-  }
-  return AttachmentMediaKind.file;
 }
 
 bool _canSendOriginalImageMime(String? mimeType) => const {
@@ -2107,120 +1585,4 @@ class _AttachmentLocationException implements Exception {
 
   @override
   String toString() => message;
-}
-
-String? _guessMime(String filename) {
-  final lower = filename.toLowerCase();
-  final dot = lower.lastIndexOf('.');
-  if (dot < 0) return null;
-  final ext = lower.substring(dot + 1);
-  return const {
-    // Images
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'png': 'image/png',
-    'gif': 'image/gif',
-    'webp': 'image/webp',
-    'heic': 'image/heic',
-    'heif': 'image/heif',
-    'avif': 'image/avif',
-    'tiff': 'image/tiff',
-    'tif': 'image/tiff',
-    'bmp': 'image/bmp',
-    // Video (case-insensitive: .MOV is common on iOS)
-    'mp4': 'video/mp4',
-    'm4v': 'video/mp4',
-    'mov': 'video/quicktime',
-    'webm': 'video/webm',
-    'mkv': 'video/x-matroska',
-    '3gp': 'video/3gpp',
-    // Audio
-    'mp3': 'audio/mpeg',
-    'm4a': 'audio/mp4',
-    'aac': 'audio/aac',
-    'ogg': 'audio/ogg',
-    'opus': 'audio/ogg',
-    'wav': 'audio/wav',
-    'flac': 'audio/flac',
-    // Common documents
-    'pdf': 'application/pdf',
-    'txt': 'text/plain',
-    'zip': 'application/zip',
-  }[ext];
-}
-
-@visibleForTesting
-String? detectImageMime(Uint8List bytes) {
-  bool matches(int offset, List<int> signature) {
-    if (bytes.length < offset + signature.length) return false;
-    for (var index = 0; index < signature.length; index++) {
-      if (bytes[offset + index] != signature[index]) return false;
-    }
-    return true;
-  }
-
-  if (matches(0, const [0xff, 0xd8, 0xff])) return 'image/jpeg';
-  if (matches(0, const [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
-    return 'image/png';
-  }
-  if (matches(0, 'GIF87a'.codeUnits) || matches(0, 'GIF89a'.codeUnits)) {
-    return 'image/gif';
-  }
-  if (matches(0, 'RIFF'.codeUnits) && matches(8, 'WEBP'.codeUnits)) {
-    return 'image/webp';
-  }
-  if (matches(0, 'BM'.codeUnits)) return 'image/bmp';
-  if (matches(0, const [0x49, 0x49, 0x2a, 0x00]) ||
-      matches(0, const [0x4d, 0x4d, 0x00, 0x2a])) {
-    return 'image/tiff';
-  }
-  if (matches(4, 'ftyp'.codeUnits) && bytes.length >= 12) {
-    final brand = String.fromCharCodes(bytes.sublist(8, 12)).toLowerCase();
-    if (brand == 'avif' || brand == 'avis') return 'image/avif';
-    if ({'heic', 'heix', 'hevc', 'hevx'}.contains(brand)) {
-      return 'image/heic';
-    }
-    if (brand == 'heif' || brand == 'mif1' || brand == 'msf1') {
-      return 'image/heif';
-    }
-  }
-  return null;
-}
-
-String _imageExtensionForMime(String mimeType) {
-  return const {
-        'image/jpeg': 'jpg',
-        'image/jpg': 'jpg',
-        'image/png': 'png',
-        'image/gif': 'gif',
-        'image/webp': 'webp',
-        'image/heic': 'heic',
-        'image/heif': 'heif',
-        'image/avif': 'avif',
-        'image/tiff': 'tiff',
-        'image/bmp': 'bmp',
-      }[mimeType.toLowerCase()] ??
-      'jpg';
-}
-
-/// Replace the extension of [name] with [ext]. Used when re-encoding a picked
-/// image to JPEG so the filename matches the bytes we actually send.
-String _withExtension(String name, String ext) {
-  final dot = name.lastIndexOf('.');
-  return dot > 0 ? '${name.substring(0, dot)}.$ext' : '$name.$ext';
-}
-
-Future<Size?> _decodeImageSize(Uint8List bytes) async {
-  ui.ImmutableBuffer? buffer;
-  ui.ImageDescriptor? descriptor;
-  try {
-    buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-    descriptor = await ui.ImageDescriptor.encoded(buffer);
-    return Size(descriptor.width.toDouble(), descriptor.height.toDouble());
-  } catch (_) {
-    return null;
-  } finally {
-    descriptor?.dispose();
-    buffer?.dispose();
-  }
 }

@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Matter · 图片叠放调样台</title>
+<style>
+:root{color-scheme:light;--bg:#f4f3ef;--panel:#fff;--ink:#222824;--muted:#747971;--line:#e2e4dc;--accent:#487458;--soft:#eaf1e9;--chat:#eef0ea;--bubble:#fff;--sent:#dbe9d6;--shadow:0 8px 28px #233b2910}
+body[data-theme="dark"]{color-scheme:dark;--bg:#181d1a;--panel:#242b26;--ink:#e7ece6;--muted:#a1afa2;--line:#3a443c;--accent:#a6c99a;--soft:#303f31;--chat:#1d2520;--bubble:#303a32;--sent:#3d553c;--shadow:0 8px 28px #0002}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button,select{cursor:pointer}button{color:inherit}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,img[role="button"]:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button:disabled{opacity:.5;cursor:default}svg{width:17px;height:17px;vertical-align:middle;flex:none}h1,h2,h3,p{margin:0}h1{font-size:27px;letter-spacing:-.8px}h2{font-size:17px}header{max-width:1320px;margin:auto;padding:32px 28px 22px;display:flex;align-items:center;justify-content:space-between;gap:20px}.eyebrow{font-size:11px;letter-spacing:2px;color:var(--accent);font-weight:750;margin-bottom:6px}.subtitle{color:var(--muted);margin-top:7px}.actions{display:flex;gap:8px;flex-wrap:wrap}.button{border:1px solid var(--line);background:var(--panel);padding:8px 13px;border-radius:10px;white-space:nowrap}.button:hover{border-color:var(--accent)}.primary{background:var(--accent);color:var(--panel);border-color:var(--accent);font-weight:650}main{max-width:1320px;margin:0 auto;padding:0 28px 40px;display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}.section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}.section-head small{color:var(--muted)}.gallery-panel{padding:20px}.gallery{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.candidate{border:1px solid var(--line);background:var(--bg);border-radius:12px;padding:0;overflow:hidden;text-align:left;position:relative;min-width:0}.candidate:hover{border-color:var(--accent)}.candidate[aria-pressed="true"]{border:2px solid var(--accent);background:var(--soft)}.candidate-label{display:block;padding:10px 11px 11px;font-size:12px;font-weight:650}.candidate-label small{float:right;color:var(--muted);font-weight:400}.mini-scene{height:127px;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:10px}.stack{display:block;position:relative;flex:none}.photo-card{display:block;position:absolute;overflow:hidden;background:#c7d5c9;transform-origin:center;isolation:isolate}.photo-card>img{display:block;width:100%;height:100%;object-fit:cover}.photo-surface{display:block;position:relative;overflow:hidden}.photo-surface>img{display:block;width:100%;height:100%;object-fit:cover}.photo-card .caption{display:block;width:100%;border-radius:0}.photo-card.front img[role="button"]{cursor:zoom-in}.photo-card .stamp{position:absolute;right:8px;bottom:9px;border-radius:6px;padding:2px 6px;background:#0007;color:#fff;font-size:10px;pointer-events:none}.counter{position:absolute;display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid #ffffff32;background:#18241cba;color:#fff;border-radius:18px;line-height:1;padding:7px 9px;font-size:12px;font-weight:700;backdrop-filter:blur(8px);z-index:3}.counter svg{width:15px;height:15px}.counter button{all:unset}.counter[data-position="bl"]{left:9px;bottom:8px}.counter[data-position="br"]{right:9px;bottom:8px}.counter[data-position="tl"]{left:9px;top:8px}.counter[data-position="tr"]{right:9px;top:8px}.mini-scene .counter{font-size:10px;padding:5px 7px;gap:3px}.mini-scene .counter svg{width:12px;height:12px}.preview-panel{margin-top:20px;overflow:hidden}.preview-heading{padding:18px 20px 14px;border-bottom:1px solid var(--line)}.preview-heading p{font-size:12px;color:var(--muted);margin-top:4px}.preview-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:13px 20px;border-bottom:1px solid var(--line)}.preview-toolbar label{display:flex;align-items:center;gap:6px;font-size:12px}.preview-toolbar select,.preview-toolbar input[type="number"]{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 7px;max-width:112px}.preview-toolbar input[type="number"]{width:58px}.check{margin-left:auto}.check input{accent-color:var(--accent)}.chat-preview{background:var(--chat);padding:20px;min-height:390px;background-image:radial-gradient(var(--line) .8px,transparent .8px);background-size:13px 13px}.chat-profile{display:flex;gap:9px;align-items:center;color:var(--muted);font-size:12px;margin-bottom:18px}.avatar{height:30px;width:30px;background:var(--soft);color:var(--accent);border:1px solid var(--line);border-radius:11px;display:grid;place-items:center;font-weight:700}.chat-profile strong{display:block;font-size:12px;color:var(--ink)}.chat-stream{display:flex;flex-direction:column;gap:13px;align-items:flex-start}.chat-preview[data-side="outgoing"] .chat-stream{align-items:flex-end}.message-note{background:var(--bubble);border-radius:12px;padding:8px 12px;max-width:85%;font-size:12px;color:var(--muted)}.chat-preview[data-side="outgoing"] .message-note{background:var(--sent)}.image-message{display:flex;flex-direction:column;align-items:center;max-width:100%}.caption{background:var(--bubble);padding:8px 12px;font-size:12px;border-radius:0 0 12px 12px;align-self:center;color:var(--ink)}.chat-preview[data-side="outgoing"] .caption{background:var(--sent)}.independent{border-radius:14px;overflow:hidden;box-shadow:0 2px 8px #0001}.independent .image-frame{position:relative;overflow:hidden}.independent img{width:100%;height:100%;display:block;object-fit:cover;cursor:zoom-in}.independent .caption{border-radius:0;width:100%}.independent .stamp{position:absolute;right:8px;bottom:8px;padding:2px 6px;border-radius:5px;color:#fff;background:#0007;font-size:10px}.fold-button{border:1px solid var(--line);border-radius:20px;background:var(--bubble);color:var(--ink);padding:7px 11px;display:flex;gap:6px;align-items:center;font-size:12px}.hint{font-size:12px;color:var(--muted);padding:13px 20px}.control-panel{padding:20px;position:sticky;top:18px;align-self:start}.control-panel .section-head{margin-bottom:4px}.control-panel>p{font-size:12px;color:var(--muted);margin-bottom:17px}.control{margin:0 0 15px}.control-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px}.control label{font-size:12px;font-weight:550}.value-field{display:flex;gap:4px;align-items:center;color:var(--muted);font-size:11px}.value-field input{width:61px;padding:3px 5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);text-align:right}input[type="range"]{width:100%;height:16px;margin:0;accent-color:var(--accent);cursor:pointer}.select-control{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:12px}.select-control select{border:1px solid var(--line);border-radius:7px;padding:5px 7px;background:var(--bg);color:var(--ink)}.separator{height:1px;background:var(--line);margin:18px 0}.control-actions{display:flex;gap:7px;flex-wrap:wrap}.control-actions .button{font-size:12px;padding:7px 10px}.local-note{color:var(--muted);font-size:11px;margin-top:12px}.export{margin-top:20px;padding:16px 20px}.export summary{cursor:pointer;font-size:13px;font-weight:600}.export p{font-size:12px;color:var(--muted);margin:10px 0}.export textarea{width:100%;height:210px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:12px;font:12px/1.6 ui-monospace,monospace;resize:vertical}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--panel);padding:10px 16px;border-radius:12px;z-index:10;max-width:90%;box-shadow:var(--shadow);font-size:13px}.toast[hidden]{display:none}dialog{border:1px solid var(--line);padding:12px;border-radius:16px;background:var(--panel);color:var(--ink);max-width:90vw;max-height:90vh}dialog::backdrop{background:#101a15c9}dialog img{display:block;max-height:75vh;max-width:80vw;object-fit:contain}dialog .actions{justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--muted)}.footer{max-width:1320px;margin:0 auto;padding:0 28px 26px;color:var(--muted);font-size:12px}
+@media(max-width:1100px){.gallery{grid-template-columns:repeat(2,minmax(0,1fr))}.mini-scene{height:145px}}@media(max-width:760px){header{padding:22px 16px 17px;align-items:flex-start;flex-direction:column}h1{font-size:24px}main{padding:0 16px 25px;grid-template-columns:1fr;gap:18px}.control-panel{position:static}.gallery-panel{padding:16px}.mini-scene{height:125px}.chat-preview{padding:16px}.check{margin-left:0}.footer{padding:0 16px 22px}.preview-toolbar{padding:12px 16px}.preview-heading{padding:16px}.actions .button{font-size:12px}.image-message{max-width:100%}}@media(prefers-reduced-motion:no-preference){.candidate,.button{transition:background .15s,border-color .15s}}
+</style>
+</head>
+<body data-theme="light">
+<header>
+  <div><div class="eyebrow">MATTER / IMAGE STUDY</div><h1>图片叠放调样台</h1><p class="subtitle">先选个方向，再把细节调到满意。所有变化都会实时显示。</p></div>
+  <div class="actions"><button class="button" id="theme-button">切换深色</button><button class="button" id="import-button">导入方案</button><button class="button primary" id="copy-button">复制我的方案</button></div>
+</header>
+<main>
+  <div>
+    <section class="panel gallery-panel" aria-labelledby="gallery-title"><div class="section-head"><h2 id="gallery-title">八个方向，放在一起比较</h2><small>点击选择 · 各自保留参数</small></div><div class="gallery" id="gallery"></div></section>
+    <section class="panel preview-panel" aria-labelledby="preview-title">
+      <div class="preview-heading"><h2 id="preview-title"></h2><p id="preview-description"></p></div>
+      <div class="preview-toolbar">
+        <label>图片数量 <input id="image-count" type="number" min="2" max="20" value="5"></label>
+        <label>比例 <select id="aspect"><option value="1.5">横图 3:2</option><option value="1.333333">横图 4:3</option><option value="1">方图 1:1</option><option value="0.666667">竖图 2:3</option><option value="original">图片原比例</option></select></label>
+        <label>方向 <select id="side"><option value="incoming">对方发来</option><option value="outgoing">自己发送</option></select></label>
+        <label class="check"><input id="show-caption" type="checkbox" checked>显示描述</label>
+        <button class="button" id="next-photo" style="font-size:12px;padding:5px 9px">换一张顶图</button>
+      </div>
+      <div class="chat-preview" id="chat-preview"><div class="chat-profile"><div class="avatar">林</div><div><strong>林间小路</strong><span>图片消息预览</span></div></div><div class="chat-stream" id="chat-stream"></div></div>
+      <p class="hint">点图片查看大图；点张数展开为独立图片消息，再点上方按钮收起。</p>
+    </section>
+    <details class="panel export" id="export-details"><summary>方案配置 · 可以复制发给我</summary><p>包含选中的样式和全部参数。也可下载文件，之后导入继续调整。</p><textarea id="export-json" aria-label="方案配置" readonly spellcheck="false"></textarea><div class="actions" style="margin-top:10px"><button class="button" id="download-button">下载方案 JSON</button></div></details>
+  </div>
+  <aside class="panel control-panel" aria-labelledby="controls-title"><div class="section-head"><h2 id="controls-title">调整当前方案</h2><small id="current-name"></small></div><p>滑动或直接输入数值。负的垂直距离表示向上露出。</p><div id="controls"></div>
+    <label class="select-control">张数角标位置 <select id="badge-position"><option value="bl">左下角</option><option value="br">右下角</option><option value="tl">左上角</option><option value="tr">右上角</option></select></label>
+    <div class="separator"></div><div class="control-actions"><button class="button" id="reset-button">重置当前样式</button><button class="button" id="upload-button">换成自己的图片</button><button class="button" id="samples-button">恢复示例图片</button></div><p class="local-note">参数自动保存在当前浏览器。你的图片仅在本机预览，刷新后恢复示例图。</p>
+  </aside>
+</main>
+<p class="footer">调好后点击「复制我的方案」，把配置发给我，就按这一版实现到 Flutter。</p>
+<div class="toast" id="toast" role="status" hidden></div>
+<input type="file" id="image-files" accept="image/*" multiple hidden><input type="file" id="config-file" accept=".json,application/json" hidden>
+<dialog id="viewer"><img id="viewer-image" alt="图片大图"><div class="actions"><span id="viewer-label"></span><button class="button" id="close-viewer">关闭</button></div></dialog>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+function icon(down=false) {
+  const ns='http://www.w3.org/2000/svg';
+  const svg=document.createElementNS(ns,'svg');
+  for(const [key,value] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'1.7','aria-hidden':'true'})) svg.setAttribute(key,value);
+  if(!down) {
+    const rect=document.createElementNS(ns,'rect');
+    for(const [key,value] of Object.entries({x:5,y:8,width:14,height:12,rx:3})) rect.setAttribute(key,value);
+    svg.append(rect);
+  }
+  const path=document.createElementNS(ns,'path');
+  path.setAttribute('d',down ? 'm6 9 6 6 6-6' : 'M7 5h10M9 2h6');
+  path.setAttribute('stroke-linecap','round');path.setAttribute('stroke-linejoin','round');svg.append(path);
+  return svg;
+}
+const fields = [
+  {key:'width',label:'顶图宽度',min:160,max:360,step:1,unit:'px'},
+  {key:'layers',label:'最多露出几层',min:1,max:3,step:1,unit:'层'},
+  {key:'dx',label:'每层水平错位',min:-40,max:40,step:1,unit:'px'},
+  {key:'dy',label:'每层垂直错位',min:-40,max:40,step:1,unit:'px'},
+  {key:'angle',label:'每层旋转角度',min:-12,max:12,step:.5,unit:'°'},
+  {key:'scale',label:'每层尺寸',min:82,max:100,step:1,unit:'%'},
+  {key:'opacity',label:'每层不透明度',min:60,max:100,step:1,unit:'%'},
+  {key:'radius',label:'图片圆角',min:0,max:32,step:1,unit:'px'},
+  {key:'shadow',label:'阴影大小',min:0,max:30,step:1,unit:'px'}
+];
+const base = {width:270,layers:3,dx:0,dy:-14,angle:0,scale:94,opacity:96,radius:16,shadow:12,badge:'bl'};
+const presets = [
+  {id:'centered',name:'整齐上叠',hint:'居中对齐，后两层向上露出。',values:{}},
+  {id:'corner',name:'右上错位',hint:'保持水平，用斜向错位露出更多图片。',values:{dx:16,dy:-12,scale:98}},
+  {id:'fan',name:'轻扇形',hint:'以同一个方向轻轻展开，避免左右交叉。',values:{dx:10,dy:-8,angle:4,scale:98,opacity:97}},
+  {id:'alternating',name:'交错照片',hint:'后两张分别向左右转，像随手放下的照片。',values:{dx:13,dy:-10,angle:5,scale:98,opacity:97}},
+  {id:'bottom',name:'底部露出',hint:'后两层从底边露出，先看较宽的图片条带。',values:{dy:24,scale:97,opacity:98}},
+  {id:'side',name:'侧边卡包',hint:'从侧边露出，保持整组高度紧凑。',values:{dx:26,dy:0,scale:97,opacity:97}},
+  {id:'lower-fan',name:'向下扇面',hint:'小角度向右下方铺开，两层背景保留更多颜色。',values:{dx:12,dy:16,angle:3,scale:97,opacity:97}},
+  {id:'single',name:'单图角标',hint:'只露一张，靠总张数表达这一组有多大。',values:{layers:1,dx:0,dy:0,scale:100,opacity:100,shadow:8}}
+];
+const storageKey = 'matter.image-stack.playground.v1';
+let configs = Object.fromEntries(presets.map(p => [p.id,{...base,...p.values}]));
+let state = {selected:'centered',theme:'light',count:5,aspect:'1.5',side:'incoming',caption:true,photoIndex:0};
+let expanded = false;
+let previewHeightAnimation;
+let previewRevealAnimations = [];
+let toastTimer;
+const clamp = (value,min,max) => Math.min(max,Math.max(min,value));
+function normalize(values,fallback) {
+  const result = {...fallback};
+  for (const field of fields) {
+    if (typeof values?.[field.key] !== 'number' || !Number.isFinite(values[field.key])) continue;
+    result[field.key] = clamp(Math.round(values[field.key]/field.step)*field.step,field.min,field.max);
+  }
+  if (['bl','br','tl','tr'].includes(values?.badge)) result.badge = values.badge;
+  return result;
+}
+try {
+  const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+  if (saved) {
+    for (const p of presets) configs[p.id] = normalize(saved.configs?.[p.id],configs[p.id]);
+    const ui = saved.state || {};
+    if (presets.some(p => p.id === ui.selected)) state.selected = ui.selected;
+    if (['light','dark'].includes(ui.theme)) state.theme = ui.theme;
+    if (Number.isFinite(ui.count)) state.count = clamp(Math.round(ui.count),2,20);
+    if (['1.5','1.333333','1','0.666667','original'].includes(ui.aspect)) state.aspect = ui.aspect;
+    if (['incoming','outgoing'].includes(ui.side)) state.side = ui.side;
+    if (typeof ui.caption === 'boolean') state.caption = ui.caption;
+  }
+} catch (_) {}
+function save() { try {localStorage.setItem(storageKey,JSON.stringify({configs,state}));} catch (_) {} }
+function notify(text) { clearTimeout(toastTimer);$('toast').textContent = text;$('toast').hidden = false;toastTimer = setTimeout(() => $('toast').hidden = true,3200); }
+function el(tag,className,text) {const node = document.createElement(tag);if(className) node.className = className;if(text !== undefined) node.textContent = text;return node;}
+// Inline illustrations make the page work offline. Local photos can replace them.
+function landscape(name,sky,water,hill,sun,variant) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640"><defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="${sky}"/><stop offset="1" stop-color="${water}"/></linearGradient><linearGradient id="water" x2="0" y2="1"><stop stop-color="${water}"/><stop offset="1" stop-color="${hill}"/></linearGradient></defs><rect width="960" height="640" fill="url(#sky)"/><circle cx="${variant ? 250 : 700}" cy="145" r="70" fill="${sun}" opacity=".85"/><path d="M0 360 140 250 255 325 445 150 640 350 800 230 960 350V640H0Z" fill="${hill}" opacity=".6"/><path d="m355 244 90-94 82 110-77-28-24 24-37-25Z" fill="#fff" opacity=".7"/><path d="M0 418Q210 330 380 405T960 385V640H0Z" fill="${hill}"/><path d="M0 475Q225 415 450 465T960 430V640H0Z" fill="url(#water)"/><path d="M0 555Q170 505 320 578T590 565T960 550V640H0Z" fill="${hill}" opacity=".65"/><path d="m${variant ? 600 : 260} 520 70-15 24 7-14 12Z" fill="${sun}"/><path d="M40 500h170m500-20h100M300 560h130" stroke="#fff" stroke-width="3" opacity=".3"/></svg>`;
+  return {name,src:'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg),width:960,height:640};
+}
+const samples = [
+  landscape('山间湖面','#9bb8c5','#82a5a4','#344f4d','#f0dec0',false),
+  landscape('傍晚的山谷','#e6bca5','#cc9d86','#694d56','#fff0cd',true),
+  landscape('雨后的绿色','#bad0b9','#8fae91','#3b5b47','#eef0ce',false),
+  landscape('蓝色的远山','#8eafd0','#749abd','#344d72','#dbe7f1',true),
+  landscape('金色的秋天','#e4d2aa','#b9a47f','#655b42','#fff0ce',false)
+];
+let photos = [...samples];
+let photoUrls = [];
+function photoAt(index) {return photos[((index % photos.length)+photos.length)%photos.length];}
+function aspectRatio() {return state.aspect === 'original' ? photoAt(state.photoIndex).width/photoAt(state.photoIndex).height : Number(state.aspect);}
+function geometry(config,id,factor=1) {
+  const width = config.width*factor, height = width/aspectRatio();
+  const count = Math.min(config.layers,state.count);
+  const cards = [];
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(let depth=0;depth<count;depth++) {
+    const alternate = id === 'alternating' ? (depth%2 ? 1 : -1) : 1;
+    const scale = Math.pow(config.scale/100,depth);
+    const cardWidth = width*scale, cardHeight = height*scale;
+    const angle = config.angle*depth*alternate;
+    const centerX = width/2+config.dx*depth*alternate*factor;
+    const centerY = height/2+config.dy*depth*factor;
+    const radians = angle*Math.PI/180;
+    const halfWidth = Math.abs(Math.cos(radians))*cardWidth/2+Math.abs(Math.sin(radians))*cardHeight/2;
+    const halfHeight = Math.abs(Math.sin(radians))*cardWidth/2+Math.abs(Math.cos(radians))*cardHeight/2;
+    minX=Math.min(minX,centerX-halfWidth);maxX=Math.max(maxX,centerX+halfWidth);
+    minY=Math.min(minY,centerY-halfHeight);maxY=Math.max(maxY,centerY+halfHeight);
+    cards.push({depth,width:cardWidth,height:cardHeight,centerX,centerY,angle,opacity:Math.pow(config.opacity/100,depth)});
+  }
+  return {cards,minX,minY,width:maxX-minX,height:maxY-minY};
+}
+function counter(config,interactive) {
+  const badge = el(interactive ? 'button' : 'span','counter');
+  if(interactive) badge.type = 'button';
+  badge.dataset.position = config.badge;
+  badge.append(icon());
+  badge.append(el('span','',String(state.count)));
+  if(interactive) {
+    badge.title = `展开全部${state.count}张图片`;
+    badge.setAttribute('aria-label',badge.title);
+    badge.addEventListener('click',() => {expanded=true;renderPreview(true);});
+  }
+  return badge;
+}
+function showViewer(photo) { $('viewer-image').src = photo.src;$('viewer-label').textContent = photo.name;$('viewer').showModal(); }
+function renderStack(config,id,factor,interactive) {
+  const layout = geometry(config,id,factor);
+  const stack = el('span','stack');
+  stack.style.width = layout.width+'px';stack.style.height = layout.height+'px';
+  for(const card of [...layout.cards].reverse()) {
+    const layer = el('span','photo-card'+(card.depth === 0 ? ' front' : ''));
+    Object.assign(layer.style,{left:(card.centerX-card.width/2-layout.minX)+'px',top:(card.centerY-card.height/2-layout.minY)+'px',width:card.width+'px',height:card.height+'px',transform:`rotate(${card.angle}deg)`,opacity:card.opacity,borderRadius:config.radius*factor+'px',zIndex:10-card.depth,boxShadow:config.shadow ? `0 ${config.shadow*.25*factor}px ${config.shadow*factor}px rgba(12,28,20,.22)` : 'none'});
+    const photo = photoAt(state.photoIndex-card.depth);
+    const image = el('img');image.src = photo.src;image.alt = photo.name;image.draggable = false;
+    let surface = layer;
+    if(card.depth === 0 && interactive && state.caption) {
+      stack.style.height = 'auto';stack.style.minHeight = layout.height+'px';
+      stack.style.paddingTop = (card.centerY-card.height/2-layout.minY)+'px';
+      Object.assign(layer.style,{position:'relative',top:'0',height:'auto'});
+      surface = el('span','photo-surface');surface.style.height = card.height+'px';
+      layer.append(surface,el('span','caption',photo.name+'，留一份今天的颜色。'));
+    }
+    surface.append(image);
+    if(card.depth === 0) {
+      surface.append(counter(config,interactive));
+      if(interactive) {
+        image.tabIndex = 0;image.setAttribute('role','button');image.setAttribute('aria-label',`查看${photo.name}`);
+        image.addEventListener('click',() => showViewer(photo));
+        image.addEventListener('keydown',event => {if(['Enter',' '].includes(event.key)){event.preventDefault();showViewer(photo);}});
+        if(config.badge !== 'br') surface.append(el('span','stamp','14:32'));
+      }
+    } else {layer.setAttribute('aria-hidden','true');}
+    stack.append(layer);
+  }
+  return stack;
+}
+function renderGallery() {
+  $('gallery').replaceChildren();
+  for(const preset of presets) {
+    const button = el('button','candidate');button.type = 'button';button.dataset.style = preset.id;
+    button.setAttribute('aria-pressed',String(state.selected === preset.id));
+    button.setAttribute('aria-label',`选择${preset.name}`);
+    const mini = el('span','mini-scene');mini.setAttribute('aria-hidden','true');
+    const config = configs[preset.id];
+    const label = el('span','candidate-label',preset.name);
+    if(state.selected === preset.id) label.append(el('small','','当前'));
+    button.append(mini,label);$('gallery').append(button);
+    // Fit the transformed footprint, including portrait images and large offsets.
+    const bounds = geometry(config,preset.id);
+    const factor = Math.min(118/config.width,Math.max(60,mini.clientWidth-24)/bounds.width,96/bounds.height);
+    mini.append(renderStack(config,preset.id,factor,false));
+    button.addEventListener('click',() => {state.selected=preset.id;expanded=false;renderAll();});
+  }
+}
+function renderPreview(animate=false) {
+  const preset = presets.find(p => p.id === state.selected);
+  const config = configs[state.selected];
+  $('preview-title').textContent = preset.name+' · 聊天中预览';
+  $('preview-description').textContent = preset.hint;
+  $('chat-preview').dataset.side = state.side;
+  const stream = $('chat-stream');
+  const previousHeight = stream.getBoundingClientRect().height;
+  previewHeightAnimation?.cancel();previewRevealAnimations.forEach(animation => animation.cancel());
+  previewHeightAnimation = null;previewRevealAnimations = [];stream.style.overflowY = '';
+  stream.replaceChildren(el('div','message-note','刚拍的几张，放在一起看看。'));
+  const available = Math.max(120,$('chat-preview').clientWidth-48);
+  if(expanded) {
+    const fold = el('button','fold-button');fold.type='button';fold.append(icon(true));
+    fold.append(el('span','',`收起 · ${state.count} 张`));
+    fold.addEventListener('click',() => {expanded=false;renderPreview(true);});stream.append(fold);
+    for(let index=0;index<state.count;index++) {
+      const photo = photoAt(state.photoIndex-state.count+1+index);
+      const width = Math.min(config.width,available), height = Math.min(width/(state.aspect === 'original' ? photo.width/photo.height : aspectRatio()),280);
+      const message = el('div','image-message independent');message.style.width=width+'px';
+      const frame = el('div','image-frame');frame.style.width=width+'px';frame.style.height=height+'px';
+      const image = el('img');image.src=photo.src;image.alt=photo.name;image.tabIndex=0;image.setAttribute('role','button');
+      image.addEventListener('click',() => showViewer(photo));
+      image.addEventListener('keydown',event => {if(['Enter',' '].includes(event.key)){event.preventDefault();showViewer(photo);}});
+      frame.append(image,el('span','stamp',`14:${String(28+index).padStart(2,'0')}`));message.append(frame);
+      if(state.caption) message.append(el('div','caption',`${photo.name} · 第${index+1}张`));stream.append(message);
+    }
+  } else {
+    const bounds = geometry(config,state.selected);
+    const factor = Math.min(1,available/bounds.width);
+    const message = el('div','image-message');message.append(renderStack(config,state.selected,factor,true));
+    stream.append(message);
+  }
+  if(animate && previousHeight>0 && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const nextHeight = stream.getBoundingClientRect().height;
+    stream.style.overflowY = 'clip';
+    const transition = stream.animate([{height:previousHeight+'px'},{height:nextHeight+'px'}],{duration:300,easing:'cubic-bezier(.4,0,.2,1)'});
+    previewHeightAnimation = transition;
+    const finished = () => {if(previewHeightAnimation === transition){stream.style.overflowY='';previewHeightAnimation=null;}};
+    transition.onfinish = finished;transition.oncancel = finished;
+    previewRevealAnimations = [...stream.children].slice(1).map(child => child.animate(
+      [{opacity:.65,transform:'translateY(6px)'},{opacity:1,transform:'translateY(0)'}],
+      {duration:180,easing:'cubic-bezier(0,0,.2,1)'}
+    ));
+  }
+}
+function buildControls() {
+  for(const field of fields) {
+    const control = el('div','control'), head = el('div','control-head');
+    const label = el('label','',field.label);label.htmlFor='range-'+field.key;
+    const value = el('span','value-field'), number = el('input');number.type='number';number.id='number-'+field.key;
+    const range = el('input');range.type='range';range.id='range-'+field.key;
+    for(const input of [number,range]) {
+      input.min=field.min;input.max=field.max;input.step=field.step;input.dataset.key=field.key;
+      input.setAttribute('aria-label',field.label+(input === number ? '数值' : ''));
+      input.addEventListener('input',() => {
+        if(input.value === '' || !Number.isFinite(input.valueAsNumber)) return;
+        configs[state.selected][field.key] = normalize({[field.key]:input.valueAsNumber},configs[state.selected])[field.key];
+        syncControls();renderGallery();renderPreview();updateExport();save();
+      });
+      input.addEventListener('blur',syncControls);
+    }
+    value.append(number,el('span','',field.unit));head.append(label,value);control.append(head,range);$('controls').append(control);
+  }
+}
+function syncControls() {
+  const config=configs[state.selected];
+  for(const field of fields) for(const kind of ['range','number']) {
+    const input=$(kind+'-'+field.key);
+    if(input !== document.activeElement || input.type === 'range') input.value=config[field.key];
+  }
+  $('badge-position').value=config.badge;
+  $('current-name').textContent=presets.find(p => p.id === state.selected).name;
+}
+function exported() {
+  const preset=presets.find(p => p.id === state.selected);
+  const config=configs[state.selected];
+  return {prototype:'matter-image-stack',version:1,styleId:preset.id,styleName:preset.name,parameters:{...config},preview:{count:state.count,aspect:state.aspect,theme:state.theme,side:state.side,caption:state.caption},layers:geometry(config,preset.id).cards.map(card => ({depth:card.depth,offsetX:card.centerX-config.width/2,offsetY:card.centerY-config.width/aspectRatio()/2,width:card.width,height:card.height,rotationDegrees:card.angle,opacity:card.opacity}))};
+}
+function updateExport() { $('export-json').value=JSON.stringify(exported(),null,2); }
+function renderAll() {
+  document.body.dataset.theme=state.theme;
+  $('theme-button').textContent=state.theme === 'light' ? '切换深色' : '切换浅色';
+  $('image-count').value=state.count;$('aspect').value=state.aspect;$('side').value=state.side;$('show-caption').checked=state.caption;
+  syncControls();renderGallery();renderPreview();updateExport();save();
+}
+$('theme-button').addEventListener('click',() => {state.theme=state.theme === 'light' ? 'dark' : 'light';renderAll();});
+$('image-count').addEventListener('change',event => {state.count=clamp(Math.round(Number(event.target.value)||5),2,20);renderAll();});
+$('aspect').addEventListener('change',event => {state.aspect=event.target.value;renderAll();});
+$('side').addEventListener('change',event => {state.side=event.target.value;renderAll();});
+$('show-caption').addEventListener('change',event => {state.caption=event.target.checked;renderAll();});
+$('badge-position').addEventListener('change',event => {configs[state.selected].badge=event.target.value;renderAll();});
+$('next-photo').addEventListener('click',() => {state.photoIndex=(state.photoIndex+1)%photos.length;renderAll();});
+$('reset-button').addEventListener('click',() => {const preset=presets.find(p => p.id === state.selected);configs[preset.id]={...base,...preset.values};expanded=false;renderAll();notify('已恢复当前样式的默认参数');});
+$('close-viewer').addEventListener('click',() => $('viewer').close());
+$('viewer').addEventListener('click',event => {if(event.target === $('viewer')) {const rect=$('viewer').getBoundingClientRect();if(event.clientX<rect.left || event.clientX>rect.right || event.clientY<rect.top || event.clientY>rect.bottom) $('viewer').close();}});
+$('upload-button').addEventListener('click',() => $('image-files').click());
+$('image-files').addEventListener('change',async event => {
+  const files=Array.from(event.target.files);
+  const loaded=await Promise.all(files.map(async file => {
+    const src=URL.createObjectURL(file), image=new Image();image.src=src;
+    try {await image.decode();return {name:file.name,src,width:image.naturalWidth,height:image.naturalHeight};}
+    catch (_) {URL.revokeObjectURL(src);return null;}
+  }));
+  const valid=loaded.filter(Boolean);
+  if(valid.length) {photoUrls.forEach(url => URL.revokeObjectURL(url));photoUrls=valid.map(photo => photo.src);photos=valid;state.photoIndex=0;expanded=false;renderAll();notify(`已载入${valid.length}张本地图片`);}
+  else if(files.length) notify('没有读到可用的图片，请换一个文件');
+  event.target.value='';
+});
+$('samples-button').addEventListener('click',() => {photoUrls.forEach(url => URL.revokeObjectURL(url));photoUrls=[];photos=[...samples];state.photoIndex=0;renderAll();});
+$('copy-button').addEventListener('click',async () => {
+  updateExport();
+  try {await navigator.clipboard.writeText($('export-json').value);notify('方案已复制，直接粘贴发给我即可');}
+  catch (_) {$('export-details').open=true;$('export-json').focus();$('export-json').select();notify('配置已选中，按 Ctrl+C 或 ⌘C 复制');}
+});
+$('download-button').addEventListener('click',() => {
+  const url=URL.createObjectURL(new Blob([JSON.stringify(exported(),null,2)],{type:'application/json'}));
+  const link=el('a');link.href=url;link.download='matter-image-stack-'+state.selected+'.json';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
+});
+$('import-button').addEventListener('click',() => $('config-file').click());
+$('config-file').addEventListener('change',async event => {
+  const file=event.target.files[0];if(!file) return;
+  try {
+    const value=JSON.parse(await file.text());
+    if(value.prototype !== 'matter-image-stack' || value.version !== 1 || !presets.some(p => p.id === value.styleId) || !value.parameters || typeof value.parameters !== 'object') throw new Error('format');
+    state.selected=value.styleId;configs[value.styleId]=normalize(value.parameters,{...base,...presets.find(p => p.id === value.styleId).values});
+    const ui=value.preview || {};
+    if(['1.5','1.333333','1','0.666667','original'].includes(ui.aspect)) state.aspect=ui.aspect;
+    if(Number.isFinite(ui.count)) state.count=clamp(Math.round(ui.count),2,20);
+    if(['incoming','outgoing'].includes(ui.side)) state.side=ui.side;
+    if(['light','dark'].includes(ui.theme)) state.theme=ui.theme;
+    if(typeof ui.caption === 'boolean') state.caption=ui.caption;
+    expanded=false;renderAll();notify('方案已导入，可以继续调整');
+  } catch (_) {notify('无法导入，请选择从这个页面导出的方案 JSON');}
+  event.target.value='';
+});
+let resizeTimer;window.addEventListener('resize',() => {clearTimeout(resizeTimer);resizeTimer=setTimeout(() => {renderGallery();renderPreview();},80);});
+buildControls();renderAll();
+</script>
+</body>
+</html>

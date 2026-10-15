@@ -13,6 +13,7 @@ import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
+import '../../providers/image_view_history.dart';
 import 'action_failure_message.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
 import '../../theme/neu_colors.dart';
@@ -27,6 +28,9 @@ import 'message_input.dart'
 import 'file_message_bubble.dart';
 import 'forward_message_sheet.dart';
 import 'image_message_bubble.dart';
+import 'image_message_collection.dart';
+import 'image_message_runs.dart';
+import 'image_viewer.dart' show ImageHistoryLoader;
 import 'link_preview.dart';
 import 'location_message_bubble.dart';
 import 'message_insert_animation.dart';
@@ -128,6 +132,7 @@ class MessageGroup {
   final List<ChatMessage> messages;
   final bool startsCluster;
   bool endsCluster;
+  final List<ChatImageRun>? imageRuns;
 
   MessageGroup({
     required this.senderId,
@@ -136,6 +141,7 @@ class MessageGroup {
     required this.messages,
     this.startsCluster = true,
     this.endsCluster = true,
+    this.imageRuns,
   });
 }
 
@@ -159,6 +165,7 @@ class MessageGroupWidget extends ConsumerWidget {
   final ValueChanged<String>? onMentionRequested;
   final ValueChanged<String>? onMessageJumpRequested;
   final ValueChanged<ChatRoom>? onMessageForwarded;
+  final ImageHistoryLoader? loadOlderImages;
 
   const MessageGroupWidget({
     super.key,
@@ -181,6 +188,7 @@ class MessageGroupWidget extends ConsumerWidget {
     this.onMentionRequested,
     this.onMessageJumpRequested,
     this.onMessageForwarded,
+    this.loadOlderImages,
   });
 
   static const double _avatarSize = 36.0;
@@ -204,8 +212,12 @@ class MessageGroupWidget extends ConsumerWidget {
     return 'message-row:${message.id}';
   }
 
-  Widget _anchoredMessage(ChatMessage message, Widget child) {
-    final anchorKey = messageAnchorKeys[message.id];
+  Widget _anchoredMessage(
+    ChatMessage message,
+    Widget child, {
+    bool collection = false,
+  }) {
+    final anchorKey = collection ? null : messageAnchorKeys[message.id];
     return KeyedSubtree(
       key: ValueKey(_messageRowKey(message)),
       child: anchorKey == null
@@ -266,51 +278,14 @@ class MessageGroupWidget extends ConsumerWidget {
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
-          children: group.messages
-              .asMap()
-              .entries
-              .map(
-                (e) => _anchoredMessage(
-                  e.value,
-                  _buildMessage(
-                    context,
-                    ref,
-                    e.value,
-                    true,
-                    membersById: membersById,
-                    mentionDisplayNames: mentionDisplayNames,
-                    isFirst: e.key == 0 && group.startsCluster,
-                    isLast:
-                        e.key == group.messages.length - 1 && group.endsCluster,
-                  ),
-                ),
-              )
-              .toList(),
+          children: _buildMessageRows(context, ref, true, mentionDisplayNames),
         ),
       );
     }
 
     final messagesColumn = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: group.messages
-          .asMap()
-          .entries
-          .map(
-            (e) => _anchoredMessage(
-              e.value,
-              _buildMessage(
-                context,
-                ref,
-                e.value,
-                false,
-                membersById: membersById,
-                mentionDisplayNames: mentionDisplayNames,
-                isFirst: e.key == 0 && group.startsCluster,
-                isLast: e.key == group.messages.length - 1 && group.endsCluster,
-              ),
-            ),
-          )
-          .toList(),
+      children: _buildMessageRows(context, ref, false, mentionDisplayNames),
     );
 
     if (compact) {
@@ -344,32 +319,70 @@ class MessageGroupWidget extends ConsumerWidget {
             : () => onMentionRequested!(group.senderId),
         messagesBuilder: (avatarSwipeOffset) => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: group.messages
-              .asMap()
-              .entries
-              .map(
-                (e) => _anchoredMessage(
-                  e.value,
-                  _buildMessage(
-                    context,
-                    ref,
-                    e.value,
-                    false,
-                    membersById: membersById,
-                    mentionDisplayNames: mentionDisplayNames,
-                    isFirst: e.key == 0 && group.startsCluster,
-                    isLast:
-                        e.key == group.messages.length - 1 && group.endsCluster,
-                    linkedAvatarOffset: e.key == group.messages.length - 1
-                        ? avatarSwipeOffset
-                        : null,
-                  ),
-                ),
-              )
-              .toList(),
+          children: _buildMessageRows(
+            context,
+            ref,
+            false,
+            mentionDisplayNames,
+            linkedAvatarOffset: avatarSwipeOffset,
+          ),
         ),
       ),
     );
+  }
+
+  List<Widget> _buildMessageRows(
+    BuildContext context,
+    WidgetRef ref,
+    bool isMe,
+    Map<String, String> mentionDisplayNames, {
+    ValueNotifier<double>? linkedAvatarOffset,
+  }) {
+    final runs = group.imageRuns ?? chatImageRuns(group.messages);
+    final viewed = runs.any((run) => run.collection)
+        ? ref.watch(
+            imageViewHistoryProvider((
+              account: ref.watch(activeUserIdProvider) ?? 'anonymous',
+              room: roomId,
+            )),
+          )
+        : const <String>[];
+    final rows = <Widget>[];
+    for (var index = 0; index < runs.length; index++) {
+      final run = runs[index];
+      var selected = run.messages.last;
+      if (run.collection && !run.album) {
+        final imagesById = {for (final image in run.messages) image.id: image};
+        for (final id in viewed.reversed) {
+          final image = imagesById[id];
+          if (image != null) {
+            selected = image;
+            break;
+          }
+        }
+      }
+      rows.add(
+        _anchoredMessage(
+          run.messages.first,
+          _buildMessage(
+            context,
+            ref,
+            selected,
+            isMe,
+            membersById: membersById,
+            mentionDisplayNames: mentionDisplayNames,
+            isFirst: index == 0 && group.startsCluster,
+            isLast: index == runs.length - 1 && group.endsCluster,
+            linkedAvatarOffset: index == runs.length - 1
+                ? linkedAvatarOffset
+                : null,
+            imageRun: run.collection ? run : null,
+          ),
+          collection: run.collection,
+        ),
+      );
+    }
+    return rows;
   }
 
   Widget _buildMessage(
@@ -382,6 +395,8 @@ class MessageGroupWidget extends ConsumerWidget {
     bool isFirst = false,
     bool isLast = false,
     ValueNotifier<double>? linkedAvatarOffset,
+    ChatImageRun? imageRun,
+    Widget? collectionBubble,
   }) {
     if (message.msgType == MessageType.event) {
       BuildContext? eventContext;
@@ -403,8 +418,9 @@ class MessageGroupWidget extends ConsumerWidget {
       );
     }
 
-    final flightId = _messageFlightId(message);
-    final visualMessageId = flightId ?? message.id;
+    final flightId = imageRun == null ? _messageFlightId(message) : null;
+    final visualMessageId =
+        imageRun?.messages.first.id ?? flightId ?? message.id;
     final isLocalOutgoing = isLocalOutgoingMessage(message.id);
     final isLocalFailed = isLocalOutgoingFailedMessage(message.id);
     final isLocalSent = isLocalOutgoingSentMessage(message.id);
@@ -432,82 +448,189 @@ class MessageGroupWidget extends ConsumerWidget {
             mentionDisplayNames: mentionDisplayNames,
           )
         : null;
+    if (imageRun != null && collectionBubble == null) {
+      return ImageMessageCollection(
+        key: ValueKey('image-collection:${imageRun.messages.first.id}'),
+        messages: imageRun.messages,
+        selected: message,
+        album: imageRun.album,
+        isMe: isMe,
+        borderRadius: messageBorderRadius,
+        shadows: enabledNeuBubbleShadows(context, context.neu),
+        anchors: messageAnchorKeys,
+        metadata: metadata,
+        collapsedBuilder: (bubble) => _buildMessage(
+          context,
+          ref,
+          message,
+          isMe,
+          membersById: membersById,
+          mentionDisplayNames: mentionDisplayNames,
+          isFirst: isFirst,
+          isLast: isLast,
+          linkedAvatarOffset: linkedAvatarOffset,
+          imageRun: imageRun,
+          collectionBubble: bubble,
+        ),
+        expandedBuilder: (collapseButton) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: isMe
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            collapseButton,
+            for (var index = 0; index < imageRun.messages.length; index++)
+              _anchoredMessage(
+                imageRun.messages[index],
+                _buildMessage(
+                  context,
+                  ref,
+                  imageRun.messages[index],
+                  isMe,
+                  membersById: membersById,
+                  mentionDisplayNames: mentionDisplayNames,
+                  isFirst: index == 0 && isFirst,
+                  isLast: index == imageRun.messages.length - 1 && isLast,
+                  linkedAvatarOffset: index == imageRun.messages.length - 1
+                      ? linkedAvatarOffset
+                      : null,
+                ),
+              ),
+          ],
+        ),
+        captionBuilder: (image) {
+          final text = image.caption ?? image.sharedCaption;
+          return text == null || text.trim().isEmpty
+              ? null
+              : ImageMessageCaption(
+                  text: text,
+                  formattedBody: image.captionFormattedBody,
+                  isMe: isMe,
+                  mentionDisplayNames: mentionDisplayNames,
+                  mentionedUserIds: image.mentionedUserIds,
+                  onMentionTap: onMentionTap,
+                );
+        },
+        tileBuilder: (image, size, radius) => Builder(
+          builder: (tileContext) => GestureDetector(
+            onLongPress: () => _showContextMenu(tileContext, ref, image),
+            child: ImageMessageBubble(
+              key: ValueKey('image-bubble:${image.id}'),
+              imageUrl: image.imageUrl,
+              mediaSourceJson: image.mediaSourceJson,
+              imageWidth: image.imageWidth,
+              imageHeight: image.imageHeight,
+              fileSize: image.fileSize,
+              mimeType: image.mimeType,
+              filename: image.filename ?? image.content,
+              message: image,
+              roomId: roomId,
+              galleryMessages: messageIndex.values,
+              loadOlderImages: loadOlderImages,
+              onMessageJumpRequested: onMessageJumpRequested,
+              onMessageReplyRequested: (reply) =>
+                  _startReply(context, ref, reply),
+              onMessageForwarded: onMessageForwarded,
+              isMe: isMe,
+              heroTag: 'image-preview:${image.id}',
+              metadata: const SizedBox.shrink(),
+              borderRadius: radius,
+              displaySize: size,
+              showCaption: false,
+              onLoaded: onImageLoaded,
+            ),
+          ),
+        ),
+      );
+    }
     final coreBubble =
-        message.msgType == MessageType.video &&
-            (message.imageUrl != null || message.mediaSourceJson != null)
-        ? VideoMessageBubble(
-            key: ValueKey('video-bubble:$visualMessageId'),
-            videoUrl: message.imageUrl,
-            mediaSourceJson: message.mediaSourceJson,
-            filename: message.content,
-            videoWidth: message.imageWidth,
-            videoHeight: message.imageHeight,
-            isMe: isMe,
-            heroTag: 'video-preview:$visualMessageId',
-            metadata: metadata,
-            onLoaded: onImageLoaded,
-          )
-        : (message.msgType == MessageType.image ||
-                  message.msgType == MessageType.sticker) &&
-              (message.imageUrl != null || message.mediaSourceJson != null)
-        ? ImageMessageBubble(
-            key: ValueKey('image-bubble:$visualMessageId'),
-            imageUrl: message.imageUrl,
-            mediaSourceJson: message.mediaSourceJson,
-            imageWidth: message.imageWidth,
-            imageHeight: message.imageHeight,
-            caption: message.caption,
-            captionFormattedBody: message.captionFormattedBody,
-            mentionDisplayNames: mentionDisplayNames,
-            mentionedUserIds: message.mentionedUserIds,
-            onMentionTap: onMentionTap,
-            isMe: isMe,
-            heroTag: 'image-preview:$visualMessageId',
-            isSticker: message.msgType == MessageType.sticker,
-            metadata: metadata,
-            borderRadius: messageBorderRadius,
-            onLoaded: onImageLoaded,
-          )
-        : message.msgType == MessageType.poll && message.poll != null
-        ? PollMessageBubble(
-            key: ValueKey('poll-bubble:${message.id}'),
-            roomId: roomId,
-            pollStartEventId: message.id,
-            poll: message.poll!,
-            isMe: isMe,
-            metadata: metadata,
-          )
-        : message.msgType == MessageType.location && message.geoUri != null
-        ? LocationMessageBubble(
-            key: ValueKey('location-bubble:${message.id}'),
-            body: message.content,
-            geoUri: message.geoUri!,
-            isMe: isMe,
-            metadata: metadata,
-          )
-        : message.msgType == MessageType.file &&
-              (message.mediaSourceJson != null || message.imageUrl != null)
-        ? FileMessageBubble(
-            key: ValueKey('file-bubble:${message.id}'),
-            filename: message.filename ?? message.content,
-            caption: message.caption,
-            fileSize: message.fileSize,
-            mediaSourceJson: message.mediaSourceJson,
-            imageUrl: message.imageUrl,
-            isMe: isMe,
-            metadata: metadata,
-          )
-        : _buildTextBubble(
-            context,
-            ref,
-            message,
-            isMe,
-            isFirst: isFirst,
-            isLast: isLast,
-            formattedBody: readerHtml,
-            mentionDisplayNames: mentionDisplayNames,
-            onMentionTap: onMentionTap,
-          );
+        collectionBubble ??
+        (message.msgType == MessageType.video &&
+                (message.imageUrl != null || message.mediaSourceJson != null)
+            ? VideoMessageBubble(
+                key: ValueKey('video-bubble:$visualMessageId'),
+                videoUrl: message.imageUrl,
+                mediaSourceJson: message.mediaSourceJson,
+                filename: message.content,
+                videoWidth: message.imageWidth,
+                videoHeight: message.imageHeight,
+                isMe: isMe,
+                heroTag: 'video-preview:$visualMessageId',
+                metadata: metadata,
+                onLoaded: onImageLoaded,
+              )
+            : (message.msgType == MessageType.image ||
+                      message.msgType == MessageType.sticker) &&
+                  (message.imageUrl != null || message.mediaSourceJson != null)
+            ? ImageMessageBubble(
+                key: ValueKey('image-bubble:$visualMessageId'),
+                imageUrl: message.imageUrl,
+                mediaSourceJson: message.mediaSourceJson,
+                imageWidth: message.imageWidth,
+                imageHeight: message.imageHeight,
+                fileSize: message.fileSize,
+                mimeType: message.mimeType,
+                filename: message.filename ?? message.content,
+                message: message,
+                roomId: roomId,
+                galleryMessages: messageIndex.values,
+                loadOlderImages: loadOlderImages,
+                onMessageJumpRequested: onMessageJumpRequested,
+                onMessageReplyRequested: (replyMessage) =>
+                    _startReply(context, ref, replyMessage),
+                onMessageForwarded: onMessageForwarded,
+                caption: message.caption,
+                captionFormattedBody: message.captionFormattedBody,
+                mentionDisplayNames: mentionDisplayNames,
+                mentionedUserIds: message.mentionedUserIds,
+                onMentionTap: onMentionTap,
+                isMe: isMe,
+                heroTag: 'image-preview:$visualMessageId',
+                isSticker: message.msgType == MessageType.sticker,
+                metadata: metadata,
+                borderRadius: messageBorderRadius,
+                onLoaded: onImageLoaded,
+              )
+            : message.msgType == MessageType.poll && message.poll != null
+            ? PollMessageBubble(
+                key: ValueKey('poll-bubble:${message.id}'),
+                roomId: roomId,
+                pollStartEventId: message.id,
+                poll: message.poll!,
+                isMe: isMe,
+                metadata: metadata,
+              )
+            : message.msgType == MessageType.location && message.geoUri != null
+            ? LocationMessageBubble(
+                key: ValueKey('location-bubble:${message.id}'),
+                body: message.content,
+                geoUri: message.geoUri!,
+                isMe: isMe,
+                metadata: metadata,
+              )
+            : message.msgType == MessageType.file &&
+                  (message.mediaSourceJson != null || message.imageUrl != null)
+            ? FileMessageBubble(
+                key: ValueKey('file-bubble:${message.id}'),
+                filename: message.filename ?? message.content,
+                caption: message.caption,
+                fileSize: message.fileSize,
+                mediaSourceJson: message.mediaSourceJson,
+                imageUrl: message.imageUrl,
+                isMe: isMe,
+                metadata: metadata,
+              )
+            : _buildTextBubble(
+                context,
+                ref,
+                message,
+                isMe,
+                isFirst: isFirst,
+                isLast: isLast,
+                formattedBody: readerHtml,
+                mentionDisplayNames: mentionDisplayNames,
+                onMentionTap: onMentionTap,
+              ));
     final bubble = coreBubble;
     // Capture the bubble's own build context so the floating menu can anchor
     // to the bubble rect rather than the whole message-group rect. The outer
@@ -587,8 +710,9 @@ class MessageGroupWidget extends ConsumerWidget {
                 ],
               ],
             ),
-            if (message.reactions.isNotEmpty)
-              _buildReactionsRow(context, ref, message, isMe),
+            for (final reactionMessage in imageRun?.messages ?? [message])
+              if (reactionMessage.reactions.isNotEmpty)
+                _buildReactionsRow(context, ref, reactionMessage, isMe),
           ],
         ),
       ),

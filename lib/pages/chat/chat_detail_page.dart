@@ -14,6 +14,7 @@ import '../../providers/connection_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../providers/message_cache_persistence.dart';
 import '../../providers/message_ordering.dart';
+import '../../providers/image_view_history.dart';
 import '../../providers/mutable_state.dart';
 import '../../src/rust/api/matrix.dart';
 import '../../theme/neu_colors.dart';
@@ -22,6 +23,7 @@ import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
+import 'attachment_caption_composer.dart' show attachmentCaptionClearance;
 import 'chat_timestamp.dart';
 import 'composer_picker_panel.dart';
 import 'date_separator.dart';
@@ -30,6 +32,7 @@ import 'forward_message_sheet.dart';
 import 'latest_message_control.dart';
 import 'local_outgoing_matcher.dart';
 import 'message_group.dart';
+import 'image_message_runs.dart';
 import 'message_input.dart';
 import 'pinned_messages_page.dart';
 import 'pinned_messages_stack.dart';
@@ -980,6 +983,16 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           }
         }
       }
+      if (_messageIndex[messageId]?.msgType == MessageType.image) {
+        ref
+            .read(
+              imageViewHistoryProvider((
+                account: ref.read(activeUserIdProvider) ?? 'anonymous',
+                room: widget.roomId,
+              )).notifier,
+            )
+            .viewed(messageId);
+      }
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted || generation != _messageJumpGeneration) return;
       final targetIndex = _timelineEntryIndexForMessage(messageId);
@@ -1391,6 +1404,16 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     }
   }
 
+  Future<({List<ChatMessage> messages, bool hasMore})>
+  _loadImageHistory() async {
+    await _loadOlderMessages();
+    if (!mounted) return (messages: <ChatMessage>[], hasMore: false);
+    if (_olderLoadBlockedByError) throw StateError('历史消息加载失败，请重试');
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return (messages: <ChatMessage>[], hasMore: false);
+    return (messages: _messageIndex.values.toList(), hasMore: _hasMoreMessages);
+  }
+
   void _retryOlderMessages() {
     setState(() {
       _olderLoadBlockedByError = false;
@@ -1526,7 +1549,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
 
   List<MessageGroup> _groupMessages(List<ChatMessage> messages) {
     final groups = <MessageGroup>[];
-    for (final message in messages) {
+    for (final run in chatImageRuns(messages)) {
+      final message = run.messages.first;
       final startsNewCluster =
           groups.isEmpty ||
           groups.last.senderId != message.senderId ||
@@ -1544,12 +1568,14 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
             senderId: message.senderId,
             senderName: message.senderName,
             isMe: message.isMe,
-            messages: [message],
+            messages: List.of(run.messages),
+            imageRuns: [run],
             startsCluster: startsNewCluster,
           ),
         );
       } else {
-        groups.last.messages.add(message);
+        groups.last.messages.addAll(run.messages);
+        groups.last.imageRuns!.add(run);
       }
     }
     return groups;
@@ -1585,7 +1611,21 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         ..write('#')
         ..write(message.caption ?? '')
         ..write('#')
-        ..write(message.captionFormattedBody ?? '');
+        ..write(message.captionFormattedBody ?? '')
+        ..write('#')
+        ..write(message.sharedCaption ?? '')
+        ..write(
+          jsonEncode(
+            message.imageMetadata == null
+                ? null
+                : [
+                    message.imageMetadata!.albumRoot,
+                    message.imageMetadata!.blurhash,
+                    message.imageMetadata!.spoiler,
+                    message.imageMetadata!.spoilerReason,
+                  ],
+          ),
+        );
       final localSortTimestamp = _remoteToLocalSortTimestamp[message.id];
       if (localSortTimestamp != null) {
         buffer
@@ -1607,6 +1647,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         ..write(message.caption ?? '')
         ..write('#')
         ..write(message.captionFormattedBody ?? '')
+        ..write('#')
+        ..write(message.sharedCaption ?? '')
+        ..write(
+          jsonEncode(
+            message.imageMetadata == null
+                ? null
+                : [
+                    message.imageMetadata!.albumRoot,
+                    message.imageMetadata!.blurhash,
+                    message.imageMetadata!.spoiler,
+                    message.imageMetadata!.spoilerReason,
+                  ],
+          ),
+        )
         ..write('#')
         ..write(message.isEdited ? 1 : 0)
         ..write('#')
@@ -1822,6 +1876,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           onMessageJumpRequested: (messageId) =>
               unawaited(_jumpToMessage(messageId)),
           onMessageForwarded: _showForwardNotice,
+          loadOlderImages: _loadImageHistory,
         );
       case _TimelineEntryType.date:
         return DateSeparator(
@@ -1971,7 +2026,12 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           8,
     );
     final pickerHeight = keepsStablePicker
-        ? math.max(0.0, pickerFullHeight - keyboardHeight)
+        ? math.max(
+            _inputPanelMode == InputPanelMode.attachment && keyboardVisible
+                ? attachmentCaptionClearance
+                : 0.0,
+            pickerFullHeight - keyboardHeight,
+          )
         : 0.0;
     final bottomOffset =
         (_inputPanelMode == InputPanelMode.keyboard || keepsStablePicker)

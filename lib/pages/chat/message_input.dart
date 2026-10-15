@@ -377,6 +377,7 @@ rust.ChatMessage _acceptedEditedMessage(
   formattedBody: accepted.formattedBody,
   caption: original.caption,
   captionFormattedBody: original.captionFormattedBody,
+  sharedCaption: original.sharedCaption,
   mentionedUserIds: accepted.mentionedUserIds,
   mentionsRoom: accepted.mentionsRoom,
   timestamp: original.timestamp,
@@ -388,6 +389,7 @@ rust.ChatMessage _acceptedEditedMessage(
   imageHeight: original.imageHeight,
   filename: original.filename,
   fileSize: original.fileSize,
+  mimeType: original.mimeType,
   geoUri: original.geoUri,
   poll: original.poll,
   inReplyTo: original.inReplyTo,
@@ -1692,6 +1694,13 @@ class MessageInputState extends ConsumerState<MessageInput> {
         ? widget.panelMode
         : _lastPickerPanelMode;
 
+    final attachmentKeyboard =
+        visiblePickerMode == InputPanelMode.attachment &&
+        MediaQuery.viewInsetsOf(context).bottom > 0;
+    final panelContentHeight = attachmentKeyboard
+        ? widget.pickerHeight
+        : widget.pickerFullHeight;
+
     final input = SafeArea(
       top: false,
       child: ColoredBox(
@@ -1885,12 +1894,14 @@ class MessageInputState extends ConsumerState<MessageInput> {
               child: ClipRect(
                 child: OverflowBox(
                   alignment: Alignment.topCenter,
-                  minHeight: widget.pickerFullHeight,
-                  maxHeight: widget.pickerFullHeight,
+                  minHeight: panelContentHeight,
+                  maxHeight: panelContentHeight,
                   child: SizedBox(
                     width: double.infinity,
-                    height: widget.pickerFullHeight,
-                    child: widget.pickerHeight <= 0
+                    height: panelContentHeight,
+                    child:
+                        widget.pickerHeight <= 0 &&
+                            widget.panelMode != InputPanelMode.attachment
                         ? const SizedBox.shrink()
                         : switch (visiblePickerMode) {
                             InputPanelMode.emoji => ComposerPickerPanel(
@@ -1920,9 +1931,17 @@ class MessageInputState extends ConsumerState<MessageInput> {
                               resolveSendPresentation:
                                   widget.resolveSendPresentation,
                               onMessageSent: widget.onMessageSent,
-                              height: widget.pickerBaseHeight,
-                              maxHeight: widget.pickerMaxHeight,
-                              onHeightChanged: widget.onPickerHeightChanged,
+                              height: attachmentKeyboard
+                                  ? widget.pickerHeight
+                                  : widget.pickerBaseHeight,
+                              maxHeight: attachmentKeyboard
+                                  ? widget.pickerHeight
+                                  : widget.pickerMaxHeight,
+                              onHeightChanged: (height) {
+                                if (!attachmentKeyboard) {
+                                  widget.onPickerHeightChanged(height);
+                                }
+                              },
                               onClose: () => widget.onPanelModeChanged(
                                 InputPanelMode.none,
                               ),

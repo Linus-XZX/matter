@@ -1133,6 +1133,8 @@ fn timeline_item_to_message(
                         formatted_body: None,
                         caption: None,
                         caption_formatted_body: None,
+                        shared_caption: None,
+                        image_metadata: None,
                         mentioned_user_ids: Vec::new(),
                         mentions_room: false,
                         timestamp,
@@ -1144,6 +1146,7 @@ fn timeline_item_to_message(
                         image_height,
                         filename: None,
                         file_size: None,
+                        mime_type: content.info.mimetype.clone(),
                         geo_uri: None,
                         poll: None,
                         in_reply_to,
@@ -1178,6 +1181,8 @@ fn timeline_item_to_message(
             formatted_body: None,
             caption: None,
             caption_formatted_body: None,
+            shared_caption: None,
+            image_metadata: None,
             mentioned_user_ids: Vec::new(),
             mentions_room: false,
             timestamp,
@@ -1189,6 +1194,7 @@ fn timeline_item_to_message(
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1206,6 +1212,8 @@ fn timeline_item_to_message(
             formatted_body: None,
             caption: None,
             caption_formatted_body: None,
+            shared_caption: None,
+            image_metadata: None,
             mentioned_user_ids: Vec::new(),
             mentions_room: false,
             timestamp,
@@ -1217,6 +1225,7 @@ fn timeline_item_to_message(
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1336,6 +1345,29 @@ fn message_to_chat_message(
             result.media_source_json = serde_json::to_string(&image.source).ok();
             result.image_width = image_width;
             result.image_height = image_height;
+            result.filename = Some(image.filename().to_string());
+            result.file_size = image
+                .info
+                .as_deref()
+                .and_then(|info| uint_to_i32(info.size));
+            result.mime_type = image.info.as_deref().and_then(|info| info.mimetype.clone());
+            let original_event = item
+                .original_json()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.json().get()).ok());
+            result.image_metadata = original_event
+                .as_ref()
+                .and_then(super::image_caption::metadata);
+            if !message.is_edited() {
+                result.shared_caption = original_event
+                    .as_ref()
+                    .and_then(super::image_caption::shared_caption);
+                if result.caption.is_none()
+                    && image.filename.is_some()
+                    && result.shared_caption.as_deref() == Some(image.body.as_str())
+                {
+                    result.caption = result.shared_caption.clone();
+                }
+            }
             result
         }
         RumaMessageType::Video(video) => {
@@ -1492,6 +1524,8 @@ fn base_message(
         formatted_body,
         caption: None,
         caption_formatted_body: None,
+        shared_caption: None,
+        image_metadata: None,
         mentioned_user_ids,
         mentions_room,
         timestamp: timestamp.to_owned(),
@@ -1503,6 +1537,7 @@ fn base_message(
         image_height: None,
         filename: None,
         file_size: None,
+        mime_type: None,
         geo_uri: None,
         poll: None,
         in_reply_to,
@@ -1792,6 +1827,8 @@ mod tests {
             formatted_body: None,
             caption: None,
             caption_formatted_body: None,
+            shared_caption: None,
+            image_metadata: None,
             mentioned_user_ids: Vec::new(),
             mentions_room: false,
             timestamp: "0".to_owned(),
@@ -1803,6 +1840,7 @@ mod tests {
             image_height: None,
             filename: None,
             file_size: None,
+            mime_type: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,

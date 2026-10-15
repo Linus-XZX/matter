@@ -7,7 +7,6 @@ import 'file_download_saver.dart';
 import 'message_group.dart' show enabledNeuBubbleShadows, neuBubbleShape;
 
 /// Converts an untrusted attachment name into a portable suggested filename.
-@visibleForTesting
 String sanitizeAttachmentFilename(String filename) {
   var name = filename.replaceAll('\\', '/').split('/').last.trim();
   name = name.replaceAll(RegExp(r'[\x00-\x1f<>:"|?*]'), '_');
@@ -219,9 +218,8 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
                           const SizedBox(height: 8),
                           Text(
                             caption,
-                            style: Theme.of(
-                              context,
-                            ).textTheme.bodyMedium?.copyWith(color: foreground),
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: foreground),
                           ),
                         ],
                       ],
