@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/message_ordering.dart';
+import '../../providers/image_view_history.dart';
+import '../../providers/message_cache_persistence.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import 'file_download_saver.dart';
@@ -14,6 +16,7 @@ import 'file_message_bubble.dart' show sanitizeAttachmentFilename;
 import 'forward_message_sheet.dart';
 import 'image_loading_policy.dart';
 import 'image_media.dart';
+import 'image_placeholders.dart';
 import 'image_viewer_media.dart';
 import 'image_zoom_frame.dart';
 
@@ -57,6 +60,9 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
   final _downloading = <String>{};
   final _forwarding = <String>{};
   ImageViewerMedia? _menuMedia;
+  final _albumCaptions = <String, String?>{};
+  final _captionLoading = <String>{};
+  final _captionErrors = <String>{};
 
   ImageViewerMedia _mediaFor(ImageViewerSource source) =>
       _mediaById.putIfAbsent(source.id, () => ImageViewerMedia(source, ref));
@@ -82,7 +88,7 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
         .map(
           (message) => message.id == widget.initialSource.id
               ? widget.initialSource
-              : ImageViewerSource.fromMessage(message),
+              : ImageViewerSource.fromMessage(message, roomId: widget.roomId),
         )
         .toList();
   }
@@ -100,6 +106,7 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
     );
     _pages = PageController(initialPage: _index);
     _hasMore = widget.loadOlderImages != null;
+    _rememberViewed();
   }
 
   @override
@@ -110,6 +117,74 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
     }
     _mediaById.clear();
     super.dispose();
+  }
+
+  void _rememberViewed() {
+    final source = _sources[_index];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          ref.read(activeUserIdProvider) != _account ||
+          widget.roomId == null) {
+        return;
+      }
+      final hidden =
+          _mediaById[source.id]?.spoilerHidden ??
+          (source.message?.imageMetadata?.spoiler == true &&
+              !source.spoilerRevealed);
+      if (hidden) return;
+      ref
+          .read(
+            imageViewHistoryProvider((
+              account: _account ?? 'anonymous',
+              room: widget.roomId!,
+            )).notifier,
+          )
+          .viewed(source.id);
+    });
+  }
+
+  String _albumRoot(ImageViewerSource source) =>
+      source.message?.imageMetadata?.albumRoot ?? source.id;
+
+  String? _description(ImageViewerSource source) {
+    if (source.description?.trim().isNotEmpty == true) {
+      return source.description;
+    }
+    final root = _albumRoot(source);
+    for (final candidate in _sources.reversed) {
+      if (_albumRoot(candidate) == root &&
+          candidate.description?.trim().isNotEmpty == true) {
+        return candidate.description;
+      }
+    }
+    return _albumCaptions[root];
+  }
+
+  Future<void> _loadCaption(ImageViewerSource source) async {
+    final root = _albumRoot(source);
+    if (widget.roomId == null ||
+        _account == null ||
+        !root.startsWith('\$') ||
+        _captionLoading.contains(root) ||
+        _albumCaptions.containsKey(root)) {
+      return;
+    }
+    _captionLoading.add(root);
+    _captionErrors.remove(root);
+    try {
+      final caption = await rust.getImageAlbumCaption(
+        accountUserId: _account,
+        roomId: widget.roomId!,
+        rootEventId: root,
+      );
+      if (mounted && ref.read(activeUserIdProvider) == _account) {
+        setState(() => _albumCaptions[root] = caption);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _captionErrors.add(root));
+    } finally {
+      _captionLoading.remove(root);
+    }
   }
 
   Future<void> _previous() async {
@@ -199,7 +274,12 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
       final room = await showForwardMessageSheet(
         context: context,
         sourceRoomId: widget.roomId!,
-        message: source.message!,
+        message: _description(source) == null
+            ? source.message!
+            : chatMessageFromMap({
+                ...chatMessageToMap(source.message!),
+                'caption': _description(source),
+              }),
       );
       if (mounted && room != null) {
         _notify('已转发到 ${room.name}');
@@ -284,7 +364,10 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
                       : colors.text,
                   disabledForegroundColor: colors.textSecondary,
                 ),
-                onPressed: busy || media.original == OriginalImageState.loaded
+                onPressed:
+                    media.spoilerHidden ||
+                        busy ||
+                        media.original == OriginalImageState.loaded
                     ? null
                     : media.loadOriginal,
                 child: busy
@@ -382,6 +465,13 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
       if (next != _account) Navigator.of(context).pop();
     });
     final media = _mediaFor(_sources[_index]);
+    final description = _description(media.source);
+    final captionRoot = _albumRoot(media.source);
+    if (description == null && !_captionErrors.contains(captionRoot)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_loadCaption(media.source));
+      });
+    }
     final toolbarHeight = MediaQuery.paddingOf(context).top + kToolbarHeight;
     return AnimatedBuilder(
       animation: widget.animation,
@@ -418,10 +508,13 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
                       );
                       return index < 0 ? null : index;
                     },
-                    onPageChanged: (index) => setState(() {
-                      _index = index;
-                      _zoomed = false;
-                    }),
+                    onPageChanged: (index) {
+                      setState(() {
+                        _index = index;
+                        _zoomed = false;
+                      });
+                      _rememberViewed();
+                    },
                     itemBuilder: (context, index) {
                       final pageMedia = _mediaFor(_sources[index]);
                       return _ImageViewerPage(
@@ -458,7 +551,7 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (media.source.description?.trim().isNotEmpty == true)
+                  if (description?.trim().isNotEmpty == true)
                     Container(
                       key: const ValueKey('image-viewer-caption'),
                       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -475,13 +568,21 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
                       ),
                       child: SingleChildScrollView(
                         child: SelectableText(
-                          media.source.description!,
+                          description!,
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 15,
                           ),
                         ),
                       ),
+                    ),
+                  if (_captionErrors.contains(captionRoot) &&
+                      media.source.message?.imageMetadata?.albumRoot != null)
+                    IconButton(
+                      tooltip: '重试描述',
+                      color: Colors.white,
+                      onPressed: () => _loadCaption(media.source),
+                      icon: const Icon(CupertinoIcons.arrow_clockwise),
                     ),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -570,6 +671,16 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
       final media = widget.media;
       final source = media.source;
       final displayedUrl = media.url;
+      if (media.spoilerHidden) {
+        return SizedBox.expand(
+          child: SpoilerImageCover(
+            hash: source.message?.imageMetadata?.blurhash,
+            reason: source.message?.imageMetadata?.spoilerReason,
+            color: Colors.black,
+            onReveal: media.revealSpoiler,
+          ),
+        );
+      }
       return Stack(
         children: [
           Positioned.fill(
@@ -592,6 +703,7 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
                           child: ChatMediaImage(
                             imageUrl: displayedUrl,
                             imageBytes: media.bytes,
+                            blurhash: source.message?.imageMetadata?.blurhash,
                             fit: BoxFit.contain,
                             onLoaded: () => media.markLoaded(displayedUrl),
                             onError: () => media.markFailed(displayedUrl),
@@ -620,6 +732,13 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
                         label: const Text(
                           '重新加载图片',
                           style: TextStyle(color: Colors.white),
+                        ),
+                      )
+                    : source.message?.imageMetadata?.blurhash != null
+                    ? SizedBox.expand(
+                        child: BlurhashPlaceholder(
+                          hash: source.message!.imageMetadata!.blurhash,
+                          color: Colors.black,
                         ),
                       )
                     : const CircularProgressIndicator(

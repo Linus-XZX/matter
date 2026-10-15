@@ -170,6 +170,7 @@ class _AuthenticatedImage extends StatelessWidget {
   final int? cacheWidth;
   final int? cacheHeight;
   final bool useOldImageOnUrlChange;
+  final Widget? loadingPlaceholder;
 
   const _AuthenticatedImage({
     super.key,
@@ -186,6 +187,7 @@ class _AuthenticatedImage extends StatelessWidget {
     this.cacheWidth,
     this.cacheHeight,
     this.useOldImageOnUrlChange = false,
+    this.loadingPlaceholder,
   });
 
   @override
@@ -227,12 +229,14 @@ class _AuthenticatedImage extends StatelessWidget {
           height: height,
         );
       },
-      placeholder: (context, _) => Center(
-        child: CircularProgressIndicator(
-          color: context.neu.accent,
-          strokeWidth: 1.5,
-        ),
-      ),
+      placeholder: (context, _) =>
+          loadingPlaceholder ??
+          Center(
+            child: CircularProgressIndicator(
+              color: context.neu.accent,
+              strokeWidth: 1.5,
+            ),
+          ),
       errorWidget: (context, url, error) {
         WidgetsBinding.instance.addPostFrameCallback((_) => onError?.call());
         return fallback;
@@ -244,6 +248,7 @@ class _AuthenticatedImage extends StatelessWidget {
 /// Authenticated image widget for message bubbles (larger images).
 class AuthenticatedImageMessage extends ConsumerWidget {
   final String imageUrl;
+  final Widget? loadingPlaceholder;
   final VoidCallback? onTap;
   final BoxFit? fit;
   final VoidCallback? onLoaded;
@@ -254,6 +259,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
   const AuthenticatedImageMessage({
     super.key,
     required this.imageUrl,
+    this.loadingPlaceholder,
     this.onTap,
     this.fit,
     this.onLoaded,
@@ -301,6 +307,7 @@ class AuthenticatedImageMessage extends ConsumerWidget {
       cacheWidth: cacheWidth,
       cacheHeight: cacheHeight,
       useOldImageOnUrlChange: true,
+      loadingPlaceholder: loadingPlaceholder,
     );
 
     if (onTap != null) {

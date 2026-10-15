@@ -275,6 +275,20 @@ class _AttachmentImagePreviewPageState
                             ),
                           ),
                           IconButton(
+                            key: const ValueKey('attachment-spoiler-toggle'),
+                            tooltip: _current.spoiler ? '取消隐藏图片' : '隐藏图片',
+                            onPressed: busy
+                                ? null
+                                : () => widget.draft.toggleSpoiler(_current),
+                            color: _current.spoiler ? colors.accent : null,
+                            icon: Icon(
+                              _current.spoiler
+                                  ? CupertinoIcons.eye_slash
+                                  : CupertinoIcons.eye,
+                              size: 24,
+                            ),
+                          ),
+                          IconButton(
                             tooltip: '更多调整',
                             onPressed: busy ? null : () => _edit(null),
                             icon: const Icon(

@@ -15,6 +15,7 @@ class AttachmentMediaItem {
   String? editedMimeType;
   String? _originalMimeType;
   bool _compress = true;
+  bool spoiler = false;
 
   String? get mimeType =>
       editedMimeType ??
@@ -82,6 +83,7 @@ class AttachmentMediaDraft extends ChangeNotifier {
   final selected = <AttachmentMediaItem>[];
   final _items = <String, AttachmentMediaItem>{};
   bool isSending = false;
+  String? albumRootEventId;
 
   AttachmentMediaItem forAsset(AssetEntity asset) {
     final id = 'asset:${asset.id}';
@@ -99,6 +101,7 @@ class AttachmentMediaDraft extends ChangeNotifier {
   void toggle(AttachmentMediaItem item) {
     if (isSending) return;
     if (!selected.remove(item)) selected.add(item);
+    if (selected.isEmpty) albumRootEventId = null;
     notifyListeners();
   }
 
@@ -107,7 +110,16 @@ class AttachmentMediaDraft extends ChangeNotifier {
     notifyListeners();
   }
 
-  void selectionChanged() => notifyListeners();
+  void selectionChanged() {
+    if (selected.isEmpty) albumRootEventId = null;
+    notifyListeners();
+  }
+
+  void toggleSpoiler(AttachmentMediaItem item) {
+    if (isSending) return;
+    item.spoiler = !item.spoiler;
+    notifyListeners();
+  }
 
   void toggleCompression(AttachmentMediaItem item) {
     if (isSending || !item.canCompress) return;

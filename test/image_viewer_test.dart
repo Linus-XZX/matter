@@ -32,6 +32,19 @@ class ImageApi implements RustLibApi {
   final originals = <String>[];
   final downloads = <String>[];
   final forwards = <String>[];
+  final albumCaptions = <String, String?>{};
+  final captionRequests = <String>[];
+
+  @override
+  Future<String?> crateApiMatrixGetImageAlbumCaption({
+    required String accountUserId,
+    required String roomId,
+    required String rootEventId,
+  }) async {
+    captionRequests.add(rootEventId);
+    return albumCaptions[rootEventId];
+  }
+
   Completer<String?>? originalPending;
   Completer<String?>? thumbnailPending;
 
@@ -98,6 +111,7 @@ rust.ChatMessage imageMessage(
   String? mimeType,
   String? caption,
   String? sharedCaption,
+  rust.ImageMessageMetadata? metadata,
   bool encrypted = false,
 }) => rust.ChatMessage(
   id: id,
@@ -106,6 +120,7 @@ rust.ChatMessage imageMessage(
   content: filename ?? '$id.png',
   caption: caption,
   sharedCaption: sharedCaption,
+  imageMetadata: metadata,
   timestamp: id == 'older' ? '100' : '200',
   isMe: false,
   msgType: rust.MessageType.image,
@@ -319,6 +334,93 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'an album caption is shared without repeating it in every image event',
+    (tester) async {
+      await pumpImages(tester, [
+        imageMessage('older'),
+        imageMessage(
+          'two',
+          caption: '整组描述',
+          metadata: const rust.ImageMessageMetadata(
+            albumRoot: 'older',
+            spoiler: false,
+          ),
+        ),
+      ]);
+      await openImage(tester, 'two');
+      await tester.drag(find.byType(PageView), const Offset(650, 0));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('image-viewer-caption')),
+          matching: find.text('整组描述'),
+        ),
+        findsOneWidget,
+      );
+      expect(api.captionRequests, isEmpty);
+    },
+  );
+
+  testWidgets('a partial album loads its caption through the root relation', (
+    tester,
+  ) async {
+    const root = '\$root:example.org';
+    const child = '\$child:example.org';
+    api.albumCaptions[root] = '尚未加载到聊天列表里的描述';
+    await pumpImages(tester, [
+      imageMessage(
+        child,
+        metadata: const rust.ImageMessageMetadata(
+          albumRoot: root,
+          spoiler: false,
+        ),
+      ),
+    ]);
+    await openImage(tester, child);
+    await tester.pump();
+    expect(find.text('尚未加载到聊天列表里的描述'), findsOneWidget);
+    expect(api.captionRequests, [root]);
+  });
+
+  testWidgets(
+    'paging to a spoiler keeps encrypted media unfetched until reveal',
+    (tester) async {
+      final hidden = imageMessage(
+        'older',
+        encrypted: true,
+        metadata: const rust.ImageMessageMetadata(spoiler: true),
+      );
+      await pumpImages(tester, [hidden, imageMessage('two')]);
+      await openImage(tester, 'two');
+      expect(api.downloads, isEmpty);
+      await tester.drag(find.byType(PageView), const Offset(650, 0));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final pages = tester.widget<PageView>(find.byType(PageView)).controller!;
+      for (
+        var frame = 0;
+        frame < 30 && pages.position.isScrollingNotifier.value;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(pages.position.isScrollingNotifier.value, isFalse);
+      final cover = find.byKey(const ValueKey('spoiler-image-cover'));
+      expect(cover, findsOneWidget);
+      expect(api.downloads, isEmpty);
+      await tester.tap(cover);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(api.downloads, [hidden.mediaSourceJson]);
+      expect(
+        find.byKey(const ValueKey('spoiler-image-cover')).hitTestable(),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets(
     'original preference survives remount, eviction and is isolated by account',

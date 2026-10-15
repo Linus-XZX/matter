@@ -9,10 +9,12 @@ import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
+import '../../providers/image_view_history.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import 'image_loading_policy.dart';
 import 'image_media.dart';
+import 'image_placeholders.dart';
 import 'image_viewer.dart';
 import 'message_group.dart' show enabledNeuBubbleShadows;
 import 'message_text.dart';
@@ -46,6 +48,8 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
   final Widget metadata;
   final BorderRadius? borderRadius;
   final VoidCallback? onLoaded;
+  final Size? displaySize;
+  final bool showCaption;
 
   const ImageMessageBubble({
     super.key,
@@ -74,6 +78,8 @@ class ImageMessageBubble extends ConsumerStatefulWidget {
     required this.metadata,
     this.borderRadius,
     this.onLoaded,
+    this.displaySize,
+    this.showCaption = true,
   });
 
   @override
@@ -85,9 +91,31 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   Uint8List? _decryptedBytes;
   bool _isLoadingEncrypted = false;
   bool _encryptedLoadFailed = false;
+  bool _resolveFailed = false;
   int? _thumbnailWidth;
   int? _thumbnailHeight;
   int _resolveGeneration = 0;
+  bool _spoilerRevealed = false;
+
+  bool get _spoilerHidden =>
+      widget.message?.imageMetadata?.spoiler == true && !_spoilerRevealed;
+
+  void _revealSpoiler() {
+    setState(() => _spoilerRevealed = true);
+    final room = widget.roomId;
+    final id = widget.message?.id;
+    if (room != null && id != null) {
+      ref
+          .read(
+            imageViewHistoryProvider((
+              account: ref.read(activeUserIdProvider) ?? 'anonymous',
+              room: room,
+            )).notifier,
+          )
+          .viewed(id);
+    }
+    _resolveUrl();
+  }
 
   void _handleMediaLoaded() {
     if (!mounted) return;
@@ -125,15 +153,18 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     if (widget.imageUrl != oldWidget.imageUrl ||
         widget.mediaSourceJson != oldWidget.mediaSourceJson) {
       _resolveGeneration++;
+      _spoilerRevealed = false;
       _resolvedUrl = null;
       _decryptedBytes = null;
       _isLoadingEncrypted = false;
       _encryptedLoadFailed = false;
+      _resolveFailed = false;
     }
     if (widget.imageUrl != oldWidget.imageUrl ||
         widget.imageWidth != oldWidget.imageWidth ||
         widget.imageHeight != oldWidget.imageHeight ||
         widget.mediaSourceJson != oldWidget.mediaSourceJson ||
+        widget.displaySize != oldWidget.displaySize ||
         widget.fileSize != oldWidget.fileSize ||
         widget.mimeType != oldWidget.mimeType ||
         widget.filename != oldWidget.filename ||
@@ -143,8 +174,10 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   }
 
   Future<void> _resolveUrl() async {
+    if (_spoilerHidden) return;
     if (widget.imageUrl == null && _isLoadingEncrypted) return;
     final generation = ++_resolveGeneration;
+    _resolveFailed = false;
     final account = ref.read(activeUserIdProvider);
     bool isCurrent() =>
         mounted &&
@@ -180,9 +213,12 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
               height: _thumbnailHeight,
               useOriginalIfCached: !widget.isSticker,
             );
-      if (isCurrent() && url != null) {
-        setState(() => _resolvedUrl = url);
-        widget.onLoaded?.call();
+      if (isCurrent()) {
+        setState(() {
+          _resolvedUrl = url;
+          _resolveFailed = url == null;
+        });
+        if (url != null) widget.onLoaded?.call();
       }
     } else {
       _resolvedUrl = imageUrl;
@@ -193,6 +229,17 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   @override
   Widget build(BuildContext context) {
     final account = ref.watch(activeUserIdProvider) ?? 'anonymous';
+    if (widget.roomId != null && widget.message != null) {
+      final viewed = ref.watch(
+        imageViewHistoryProvider((account: account, room: widget.roomId!)),
+      );
+      if (_spoilerHidden && viewed.contains(widget.message!.id)) {
+        _spoilerRevealed = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _resolveUrl();
+        });
+      }
+    }
     final originalUrl = ref.watch(
       mxcUrlCacheProvider.select(
         (cache) => widget.isSticker
@@ -206,7 +253,10 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     final bubbleSize = _bubbleSize(context);
     final caption = widget.caption?.trim();
     final hasCaption =
-        !widget.isSticker && caption != null && caption.isNotEmpty;
+        widget.showCaption &&
+        !widget.isSticker &&
+        caption != null &&
+        caption.isNotEmpty;
     final mediaBorderRadius = hasCaption
         ? BorderRadius.zero
         : _bubbleBorderRadius;
@@ -215,8 +265,38 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
     final cacheWidth = originalUrl == null ? _thumbnailWidth : null;
     final cacheHeight = originalUrl == null ? _thumbnailHeight : null;
 
+    if (_spoilerHidden) {
+      return _withCaption(
+        Container(
+          width: bubbleSize.width,
+          height: bubbleSize.height,
+          decoration: BoxDecoration(borderRadius: mediaBorderRadius),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: SpoilerImageCover(
+                  hash: widget.message?.imageMetadata?.blurhash,
+                  reason: widget.message?.imageMetadata?.spoilerReason,
+                  color: colors.card,
+                  onReveal: _revealSpoiler,
+                ),
+              ),
+              widget.metadata,
+            ],
+          ),
+        ),
+        caption,
+        hasCaption,
+      );
+    }
+
     if (url == null && bytes == null) {
-      final placeholder = _isLoadingEncrypted && !_encryptedLoadFailed
+      final placeholder =
+          (!_resolveFailed &&
+                  !_encryptedLoadFailed &&
+                  widget.message?.imageMetadata?.blurhash != null) ||
+              (_isLoadingEncrypted && !_encryptedLoadFailed)
           ? _buildLoading(context, bubbleSize)
           : _buildBroken(context, bubbleSize);
       return _withCaption(
@@ -230,10 +310,12 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       key: ValueKey('msg-image:${widget.heroTag}'),
       imageUrl: url,
       imageBytes: bytes,
+      blurhash: widget.message?.imageMetadata?.blurhash,
       fit:
           widget.isSticker ||
               needsShortImageBackdrop ||
-              (context.isMaterial &&
+              (widget.displaySize == null &&
+                  context.isMaterial &&
                   _fittedBubbleSize(context).height < _minimumImageBubbleHeight)
           ? BoxFit.contain
           : BoxFit.cover,
@@ -252,7 +334,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
             ? colors.accent.withValues(alpha: 0.3)
             : colors.card,
         borderRadius: mediaBorderRadius,
-        boxShadow: widget.isSticker || hasCaption
+        boxShadow: widget.displaySize != null || widget.isSticker || hasCaption
             ? null
             : enabledNeuBubbleShadows(context, colors),
       ),
@@ -332,6 +414,8 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
               mimeType: widget.mimeType,
               filename: widget.filename,
               caption: widget.caption,
+              roomId: widget.roomId,
+              spoilerRevealed: _spoilerRevealed,
             ),
             messages: widget.galleryMessages,
             roomId: widget.roomId,
@@ -363,7 +447,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
         mainAxisSize: MainAxisSize.min,
         children: [
           bubble,
-          _ImageCaption(
+          ImageMessageCaption(
             text: caption,
             formattedBody: widget.captionFormattedBody,
             isMe: widget.isMe,
@@ -409,6 +493,7 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
           cachedOriginalMxcUrl(ref, widget.imageUrl) != null);
 
   Size _bubbleSize(BuildContext context) {
+    if (widget.displaySize != null) return widget.displaySize!;
     final fittedSize = _fittedBubbleSize(context);
     if (widget.isSticker || fittedSize.height >= _minimumImageBubbleHeight) {
       return fittedSize;
@@ -417,11 +502,13 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
   }
 
   bool _needsShortImageBackdrop(BuildContext context) =>
+      widget.displaySize == null &&
       !widget.isSticker &&
       ChatVisualSettingsScope.of(context).shortImageBlurredBackdropEnabled &&
       _fittedBubbleSize(context).height < _minimumImageBubbleHeight;
 
   Size _fittedBubbleSize(BuildContext context) {
+    if (widget.displaySize != null) return widget.displaySize!;
     final maxHeight = widget.isSticker ? 160.0 : 280.0;
     final maxWidth = widget.isSticker
         ? 160.0
@@ -447,7 +534,9 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
       decoration: BoxDecoration(
         color: isMe ? colors.accent.withValues(alpha: 0.3) : colors.card,
         borderRadius: _bubbleBorderRadius,
-        boxShadow: enabledNeuBubbleShadows(context, colors),
+        boxShadow: widget.displaySize == null
+            ? enabledNeuBubbleShadows(context, colors)
+            : null,
       ),
       child: Center(
         child: Icon(
@@ -467,12 +556,22 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
         color: context.neu.card,
         borderRadius: _bubbleBorderRadius,
       ),
-      child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          BlurhashPlaceholder(
+            hash: widget.message?.imageMetadata?.blurhash,
+            color: context.neu.card,
+          ),
+          if (widget.message?.imageMetadata?.blurhash == null)
+            const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        ],
+      ),
     );
   }
 }
 
-class _ImageCaption extends StatelessWidget {
+class ImageMessageCaption extends StatelessWidget {
   final String text;
   final String? formattedBody;
   final bool isMe;
@@ -480,7 +579,8 @@ class _ImageCaption extends StatelessWidget {
   final List<String> mentionedUserIds;
   final MessageMentionTapHandler? onMentionTap;
 
-  const _ImageCaption({
+  const ImageMessageCaption({
+    super.key,
     required this.text,
     required this.formattedBody,
     required this.isMe,

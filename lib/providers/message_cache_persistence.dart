@@ -75,6 +75,14 @@ Map<String, dynamic> chatMessageToMap(rust.ChatMessage message) {
     'caption': message.caption,
     'captionFormattedBody': message.captionFormattedBody,
     'sharedCaption': message.sharedCaption,
+    'imageMetadata': message.imageMetadata == null
+        ? null
+        : {
+            'albumRoot': message.imageMetadata!.albumRoot,
+            'blurhash': message.imageMetadata!.blurhash,
+            'spoiler': message.imageMetadata!.spoiler,
+            'spoilerReason': message.imageMetadata!.spoilerReason,
+          },
     'mentionedUserIds': message.mentionedUserIds,
     'mentionsRoom': message.mentionsRoom,
     'timestamp': message.timestamp,
@@ -205,6 +213,14 @@ rust.ChatMessage chatMessageFromMap(Map<String, dynamic> map) {
     caption: map['caption'] as String?,
     captionFormattedBody: map['captionFormattedBody'] as String?,
     sharedCaption: map['sharedCaption'] as String?,
+    imageMetadata: map['imageMetadata'] is Map
+        ? rust.ImageMessageMetadata(
+            albumRoot: map['imageMetadata']['albumRoot'] as String?,
+            blurhash: map['imageMetadata']['blurhash'] as String?,
+            spoiler: map['imageMetadata']['spoiler'] == true,
+            spoilerReason: map['imageMetadata']['spoilerReason'] as String?,
+          )
+        : null,
     mentionedUserIds: ((map['mentionedUserIds'] as List?) ?? const [])
         .map((item) => '$item')
         .toList(),

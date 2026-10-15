@@ -21,6 +21,7 @@ import '../../widgets/neu_decoration.dart';
 import '../../widgets/neu_surface.dart';
 import '../chat/latest_message_control.dart';
 import 'attachment_caption_composer.dart';
+import 'blurhash_codec.dart';
 import 'attachment_image_preview_page.dart';
 import 'attachment_media_draft.dart';
 import 'attachment_media_gallery.dart';
@@ -167,14 +168,23 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     final description = _mediaDraft.description.text.trim();
     final caption = description.isEmpty ? null : description;
     final lastImage = items.lastIndexWhere((item) => item.isImage);
+    var albumRoot = _mediaDraft.albumRootEventId;
+    final album =
+        albumRoot != null || items.where((item) => item.isImage).length > 1;
     await _runBatch(
       [
         for (var index = 0; index < items.length; index++)
-          () => _sendSingleMedia(
-            items[index],
-            caption: index == lastImage ? caption : null,
-            sharedCaption: caption,
-          ),
+          () async {
+            final eventId = await _sendSingleMedia(
+              items[index],
+              caption: index == lastImage ? caption : null,
+              albumRoot: albumRoot,
+            );
+            if (album && albumRoot == null && eventId != null) {
+              albumRoot = eventId;
+              _mediaDraft.albumRootEventId = eventId;
+            }
+          },
       ],
       _mediaDraft.selected,
       closePicker: closePicker,
@@ -182,10 +192,10 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
     return mounted && _mediaDraft.selected.isEmpty;
   }
 
-  Future<void> _sendSingleMedia(
+  Future<String?> _sendSingleMedia(
     AttachmentMediaItem item, {
     String? caption,
-    String? sharedCaption,
+    String? albumRoot,
   }) async {
     final original = await item.original;
     final file = original.file;
@@ -208,8 +218,9 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
               mimeType: mime!,
               compress: item.compress,
             );
+      final blurhash = await encodeImageBlurhash(prepared.bytes);
       _ensureCanSend();
-      await rust.sendImageMessage(
+      return await rust.sendImageMessage(
         accountUserId: _accountUserId,
         roomId: widget.roomId,
         imageData: prepared.bytes,
@@ -218,7 +229,11 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         width: prepared.width,
         height: prepared.height,
         caption: caption,
-        sharedCaption: sharedCaption,
+        metadata: rust.ImageMessageMetadata(
+          albumRoot: albumRoot,
+          blurhash: blurhash,
+          spoiler: item.spoiler,
+        ),
       );
     } else {
       final bytes = await _readXFileBytes(file);
@@ -248,6 +263,7 @@ class _AttachmentPickerState extends State<AttachmentPicker> {
         );
       }
     }
+    return null;
   }
 
   Future<void> _sendFiles(List<XFile> files) => _runBatch(

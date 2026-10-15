@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
+import 'image_placeholders.dart';
 
 class ChatMediaImage extends StatelessWidget {
   final String? imageUrl;
@@ -13,6 +14,7 @@ class ChatMediaImage extends StatelessWidget {
   final VoidCallback? onError;
   final int? cacheWidth;
   final int? cacheHeight;
+  final String? blurhash;
 
   const ChatMediaImage({
     super.key,
@@ -23,6 +25,7 @@ class ChatMediaImage extends StatelessWidget {
     this.onError,
     this.cacheWidth,
     this.cacheHeight,
+    this.blurhash,
   });
 
   @override
@@ -43,6 +46,9 @@ class ChatMediaImage extends StatelessWidget {
             WidgetsBinding.instance.addPostFrameCallback(
               (_) => onLoaded?.call(),
             );
+          }
+          if (frame == null && !wasSynchronouslyLoaded && blurhash != null) {
+            return BlurhashPlaceholder(hash: blurhash, color: context.neu.card);
           }
           return child;
         },
@@ -68,6 +74,9 @@ class ChatMediaImage extends StatelessWidget {
       onError: onError,
       cacheWidth: cacheWidth,
       cacheHeight: cacheHeight,
+      loadingPlaceholder: blurhash == null
+          ? null
+          : BlurhashPlaceholder(hash: blurhash, color: context.neu.card),
     );
   }
 }

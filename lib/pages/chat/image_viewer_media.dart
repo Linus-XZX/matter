@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/chat_provider.dart';
+import '../../providers/auth_provider.dart';
+import '../../providers/image_view_history.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import 'image_loading_policy.dart';
 
@@ -23,6 +25,8 @@ class ImageViewerSource {
   final String? mimeType;
   final String? filename;
   final String? caption;
+  final String? roomId;
+  final bool spoilerRevealed;
 
   const ImageViewerSource({
     required this.heroTag,
@@ -37,20 +41,25 @@ class ImageViewerSource {
     this.mimeType,
     this.filename,
     this.caption,
+    this.roomId,
+    this.spoilerRevealed = false,
   });
 
-  factory ImageViewerSource.fromMessage(rust.ChatMessage message) =>
-      ImageViewerSource(
-        heroTag: 'image-preview:${message.id}',
-        message: message,
-        imageUrl: message.imageUrl,
-        mediaSourceJson: message.mediaSourceJson,
-        width: message.imageWidth,
-        height: message.imageHeight,
-        fileSize: message.fileSize,
-        mimeType: message.mimeType,
-        filename: message.filename ?? message.content,
-      );
+  factory ImageViewerSource.fromMessage(
+    rust.ChatMessage message, {
+    String? roomId,
+  }) => ImageViewerSource(
+    heroTag: 'image-preview:${message.id}',
+    message: message,
+    roomId: roomId,
+    imageUrl: message.imageUrl,
+    mediaSourceJson: message.mediaSourceJson,
+    width: message.imageWidth,
+    height: message.imageHeight,
+    fileSize: message.fileSize,
+    mimeType: message.mimeType,
+    filename: message.filename ?? message.content,
+  );
 
   String get id => message?.id ?? heroTag.toString();
   String? get description =>
@@ -72,10 +81,39 @@ class ImageViewerMedia extends ChangeNotifier {
   OriginalImageState _original = OriginalImageState.thumbnail;
   bool _resolveFailed = false;
   bool _disposed = false;
+  bool _revealed = false;
 
   ImageViewerMedia(this.source, this._ref) {
+    _revealed =
+        source.spoilerRevealed ||
+        (source.roomId != null &&
+            _ref
+                .read(
+                  imageViewHistoryProvider((
+                    account: _ref.read(activeUserIdProvider) ?? 'anonymous',
+                    room: source.roomId!,
+                  )),
+                )
+                .contains(source.id));
     _url = source.previewUrl;
     _bytes = source.imageBytes;
+    if (!spoilerHidden) unawaited(resolveImage());
+  }
+
+  bool get spoilerHidden =>
+      source.message?.imageMetadata?.spoiler == true && !_revealed;
+  void revealSpoiler() {
+    _update(() => _revealed = true);
+    if (source.roomId != null) {
+      _ref
+          .read(
+            imageViewHistoryProvider((
+              account: _ref.read(activeUserIdProvider) ?? 'anonymous',
+              room: source.roomId!,
+            )).notifier,
+          )
+          .viewed(source.id);
+    }
     unawaited(resolveImage());
   }
 
@@ -98,6 +136,7 @@ class ImageViewerMedia extends ChangeNotifier {
   }
 
   Future<void> resolveImage() async {
+    if (spoilerHidden) return;
     _resolveFailed = false;
     if (_bytes != null) {
       _original = OriginalImageState.loaded;

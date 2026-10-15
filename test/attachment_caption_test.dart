@@ -19,6 +19,7 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:pro_image_editor/pro_image_editor.dart';
 import 'package:material_ui/material_ui.dart' as material_ui;
 import 'package:matter/src/rust/frb_generated.dart';
+import 'package:matter/src/rust/api/matrix.dart' show ImageMessageMetadata;
 
 import 'helpers/neu_test_theme.dart';
 
@@ -51,6 +52,7 @@ class _ImageApi implements RustLibApi {
           String account,
           String? caption,
           String? sharedCaption,
+          ImageMessageMetadata? metadata,
           List<int> bytes,
         })
       >[];
@@ -58,7 +60,7 @@ class _ImageApi implements RustLibApi {
   Completer<void>? pendingUpload;
 
   @override
-  Future<void> crateApiMatrixSendImageMessage({
+  Future<String> crateApiMatrixSendImageMessage({
     required String accountUserId,
     required String roomId,
     required List<int> imageData,
@@ -68,16 +70,19 @@ class _ImageApi implements RustLibApi {
     int? height,
     String? caption,
     String? sharedCaption,
+    ImageMessageMetadata? metadata,
   }) async {
     calls.add((
       filename: filename,
       account: accountUserId,
       caption: caption,
       sharedCaption: sharedCaption,
+      metadata: metadata,
       bytes: List.of(imageData),
     ));
     await pendingUpload?.future;
     if (filename == failFilename) throw StateError('upload failed');
+    return '\$image-${calls.length}:example.org';
   }
 
   @override
@@ -230,7 +235,12 @@ void main() {
     );
     expect(raw, findsOneWidget);
     expect(tester.widget<IconButton>(raw).onPressed, isNull);
+    await tester.tap(find.byKey(const ValueKey('attachment-spoiler-toggle')));
+    await tester.pump();
+    expect(preview.initialImage.spoiler, isTrue);
     await send(tester, 1);
+    expect(api.calls.single.metadata?.spoiler, isTrue);
+    expect(api.calls.single.metadata?.blurhash, isNotEmpty);
     expect(api.calls.single.bytes, gif);
     expect(api.calls.single.filename, 'animation.gif');
   });
@@ -249,10 +259,15 @@ void main() {
       await send(tester, 2);
       expect(api.calls.map((call) => call.filename), ['one.png', 'two.png']);
       expect(api.calls.map((call) => call.caption), [null, '旅途中的两张照片']);
-      expect(api.calls.map((call) => call.sharedCaption), [
-        '旅途中的两张照片',
-        '旅途中的两张照片',
+      expect(api.calls.map((call) => call.sharedCaption), [null, null]);
+      expect(api.calls.map((call) => call.metadata?.albumRoot), [
+        null,
+        '\$image-1:example.org',
       ]);
+      expect(
+        api.calls.every((call) => call.metadata?.blurhash?.isNotEmpty == true),
+        isTrue,
+      );
       expect(
         api.calls.every((call) => call.account == '@alice:example.org'),
         isTrue,
@@ -290,7 +305,8 @@ void main() {
       await send(tester, 1);
       expect(api.calls.single.filename, 'one.png');
       expect(api.calls.single.caption, '当前这一张');
-      expect(api.calls.single.sharedCaption, '当前这一张');
+      expect(api.calls.single.sharedCaption, isNull);
+      expect(api.calls.single.metadata?.albumRoot, isNull);
       expect(find.byType(AttachmentImagePreviewPage), findsNothing);
       expect(find.text('closed'), findsOneWidget);
     },
@@ -358,7 +374,11 @@ void main() {
       await send(tester, 2);
       expect(api.calls.map((call) => call.filename), ['one.png', 'two.png']);
       expect(api.calls.map((call) => call.caption), [null, '整组发送']);
-      expect(api.calls.map((call) => call.sharedCaption), ['整组发送', '整组发送']);
+      expect(api.calls.map((call) => call.sharedCaption), [null, null]);
+      expect(api.calls.map((call) => call.metadata?.albumRoot), [
+        null,
+        '\$image-1:example.org',
+      ]);
       expect(find.text('closed'), findsOneWidget);
     },
   );

@@ -7,12 +7,11 @@ import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
 import '../../widgets/neu_field.dart';
 
-typedef ForwardMessageSender =
-    Future<void> Function({
-      required String sourceRoomId,
-      required String targetRoomId,
-      required rust.ChatMessage message,
-    });
+typedef ForwardMessageSender = Future<void> Function({
+  required String sourceRoomId,
+  required String targetRoomId,
+  required rust.ChatMessage message,
+});
 
 List<rust.ChatRoom> forwardableRooms(List<rust.ChatRoom> rooms, String query) {
   final normalizedQuery = query.trim().toLowerCase();
@@ -38,7 +37,9 @@ Future<void> _sendForward({
     targetRoomId: targetRoomId,
     eventId: message.id,
     text: rust.FormattedMessageInput(
-      body: message.content,
+      body: message.msgType == rust.MessageType.image
+          ? message.caption ?? message.sharedCaption ?? message.content
+          : message.content,
       formattedBody: message.formattedBody,
       mentionedUserIds: const [],
       mentionsRoom: false,
@@ -200,9 +201,8 @@ class _ForwardMessageSheetState extends ConsumerState<ForwardMessageSheet> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _sendingRoomId = null);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('转发失败: $error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('转发失败: $error')));
     }
   }
 
