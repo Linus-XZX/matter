@@ -6596,6 +6596,7 @@ fn start_sync_internal(
                             // startup); upgrading back to Sliding Sync restores
                             // receipt push and the room subscription extension.
                             let mut successful_syncs: u32 = 0;
+                            let mut consecutive_errors: u32 = 0;
                             loop {
                                 if matches!(
                                     get_connection_status(),
@@ -6607,10 +6608,19 @@ fn start_sync_internal(
                                 if !sync_generation_is_active(generation, &loop_user_id).await {
                                     break;
                                 }
-                                set_connection_status_for_generation(
-                                    generation,
-                                    ConnectionStatus::Updating,
-                                );
+                                // `Updating` marks an actual catch-up (the
+                                // loop's first sync, or the first one after an
+                                // error). A steady-state long-poll wait is a
+                                // healthy connection, not "syncing": setting it
+                                // every iteration kept the UI on 同步中… for
+                                // the whole 30s poll window while messages
+                                // kept arriving.
+                                if successful_syncs == 0 {
+                                    set_connection_status_for_generation(
+                                        generation,
+                                        ConnectionStatus::Updating,
+                                    );
+                                }
                                 match loop_client
                                     .sync_once(matrix_sdk::config::SyncSettings::default())
                                     .await
@@ -6635,6 +6645,7 @@ fn start_sync_internal(
                                             SyncEvent::SyncCompleted,
                                         );
                                         successful_syncs += 1;
+                                        consecutive_errors = 0;
                                         // Only upgrade back to Sliding Sync when
                                         // this session never degraded away from it
                                         // (the probe was flaky at startup). After
@@ -6684,15 +6695,16 @@ fn start_sync_internal(
                                             clear_published_sync(generation).await;
                                             break;
                                         }
+                                        consecutive_errors += 1;
+                                        successful_syncs = 0;
                                         set_connection_status_for_generation(
                                             generation,
-                                            ConnectionStatus::Disconnected,
+                                            sync_retry_status(consecutive_errors),
                                         );
-                                        successful_syncs = 0;
                                         interruptible_retry_sleep(
                                             generation,
                                             &loop_user_id,
-                                            std::time::Duration::from_secs(5),
+                                            sync_retry_delay(consecutive_errors),
                                         )
                                         .await;
                                     }
@@ -6824,11 +6836,11 @@ async fn try_start_sliding_sync(
                                 break;
                             }
                             app_log("error", "sync", format!("Sliding Sync rebuild failed: {e}"));
+                            consecutive_failures += 1;
                             set_connection_status_for_generation(
                                 generation,
-                                ConnectionStatus::Disconnected,
+                                sync_retry_status(consecutive_failures),
                             );
-                            consecutive_failures += 1;
                             if consecutive_failures >= DEGRADE_AFTER_FAILURES {
                                 degrade_to_traditional_sync(generation, &user_id).await;
                                 break;
@@ -6836,7 +6848,7 @@ async fn try_start_sliding_sync(
                             interruptible_retry_sleep(
                                 generation,
                                 &user_id,
-                                std::time::Duration::from_secs(5),
+                                sync_retry_delay(consecutive_failures),
                             )
                             .await;
                             continue;
@@ -6903,15 +6915,15 @@ async fn try_start_sliding_sync(
                                     clear_published_sync(generation).await;
                                     break 'rebuild;
                                 }
+                                consecutive_failures += 1;
                                 set_connection_status_for_generation(
                                     generation,
-                                    ConnectionStatus::Disconnected,
+                                    sync_retry_status(consecutive_failures),
                                 );
                                 // The instance has failed; drop the published handle
                                 // so subscribe/unsubscribe calls during the retry
                                 // delay don't mutate a stale, soon-discarded instance.
                                 clear_published_sync(generation).await;
-                                consecutive_failures += 1;
                                 if consecutive_failures >= DEGRADE_AFTER_FAILURES {
                                     degrade_to_traditional_sync(generation, &user_id).await;
                                     break 'rebuild;
@@ -6919,7 +6931,7 @@ async fn try_start_sliding_sync(
                                 interruptible_retry_sleep(
                                     generation,
                                     &user_id,
-                                    std::time::Duration::from_secs(5),
+                                    sync_retry_delay(consecutive_failures),
                                 )
                                 .await;
                                 continue 'rebuild;
@@ -6935,16 +6947,16 @@ async fn try_start_sliding_sync(
                         "sync",
                         "Sliding Sync stream ended; restarting".to_string(),
                     );
-                    set_connection_status_for_generation(
-                        generation,
-                        ConnectionStatus::Disconnected,
-                    );
                     // The stream ended (e.g. server closed the connection); the
                     // instance is no longer live, so clear the handle before the
                     // retry delay to avoid routing room subscriptions to it.
                     clear_published_sync(generation).await;
                     consecutive_failures =
                         failures_after_stream_end(consecutive_failures, received_update);
+                    set_connection_status_for_generation(
+                        generation,
+                        sync_retry_status(consecutive_failures),
+                    );
                     if consecutive_failures >= DEGRADE_AFTER_FAILURES {
                         degrade_to_traditional_sync(generation, &user_id).await;
                         break;
@@ -6952,7 +6964,7 @@ async fn try_start_sliding_sync(
                     interruptible_retry_sleep(
                         generation,
                         &user_id,
-                        std::time::Duration::from_secs(1),
+                        sync_retry_delay(consecutive_failures),
                     )
                     .await;
                 }
@@ -7029,11 +7041,40 @@ fn lagged_sync_event() -> SyncEvent {
     SyncEvent::FullRefreshRequired
 }
 
+/// Consecutive sync failures above this threshold report `Disconnected`:
+/// one dropped long-poll is routine on healthy networks (flaky networks,
+/// proxy idle timeouts), so a single failure must not claim the connection
+/// is down while everything else works.
+const SYNC_OFFLINE_AFTER_FAILURES: u32 = 2;
+
+/// The connection status to report while the sync loop is between retries.
+///
+/// The first consecutive failure reports [`ConnectionStatus::Connecting`]
+/// — the UI label reads it as "reconnecting" — and only repeated failures
+/// mean the connection is actually down.
+fn sync_retry_status(consecutive_failures: u32) -> ConnectionStatus {
+    if consecutive_failures >= SYNC_OFFLINE_AFTER_FAILURES {
+        ConnectionStatus::Disconnected
+    } else {
+        ConnectionStatus::Connecting
+    }
+}
+
+/// Back-off before the next retry: near-immediate on the first failure so a
+/// transient drop recovers without a visible outage window, slower after.
+fn sync_retry_delay(consecutive_failures: u32) -> std::time::Duration {
+    if consecutive_failures <= 1 {
+        std::time::Duration::from_secs(1)
+    } else {
+        std::time::Duration::from_secs(5)
+    }
+}
+
 #[cfg(test)]
 mod sync_event_tests {
     use super::{
-        failures_after_stream_end, lagged_sync_event, SyncEvent, DEGRADE_AFTER_FAILURES,
-        SYNC_EVENT_GENERATION,
+        failures_after_stream_end, lagged_sync_event, sync_retry_delay, sync_retry_status,
+        ConnectionStatus, SyncEvent, DEGRADE_AFTER_FAILURES, SYNC_EVENT_GENERATION,
     };
 
     #[test]
@@ -7077,6 +7118,29 @@ mod sync_event_tests {
 
         assert_eq!(generation, 42);
         assert!(SYNC_EVENT_GENERATION.try_with(|_| ()).is_err());
+    }
+
+    #[test]
+    fn single_sync_failure_reports_reconnecting_not_offline() {
+        // A fresh counter or the first failure is "reconnecting"…
+        assert!(matches!(sync_retry_status(0), ConnectionStatus::Connecting));
+        assert!(matches!(sync_retry_status(1), ConnectionStatus::Connecting));
+        // …only repeated consecutive failures mean the connection is down.
+        assert!(matches!(
+            sync_retry_status(2),
+            ConnectionStatus::Disconnected
+        ));
+        assert!(matches!(
+            sync_retry_status(DEGRADE_AFTER_FAILURES),
+            ConnectionStatus::Disconnected
+        ));
+    }
+
+    #[test]
+    fn first_retry_is_quick_then_backs_off() {
+        assert_eq!(sync_retry_delay(0), std::time::Duration::from_secs(1));
+        assert_eq!(sync_retry_delay(1), std::time::Duration::from_secs(1));
+        assert_eq!(sync_retry_delay(2), std::time::Duration::from_secs(5));
     }
 }
 
