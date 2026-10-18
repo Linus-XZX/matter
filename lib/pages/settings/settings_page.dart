@@ -23,6 +23,7 @@ import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
+import '../../widgets/grouped_rows.dart';
 import '../../widgets/sheets.dart';
 import '../login/login_page.dart';
 import 'encryption_page.dart';
@@ -594,7 +595,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       NeuSpacing.lg,
                   NeuSpacing.lg,
                   context.isMaterial
-                      ? NeuSpacing.xl + MediaQuery.paddingOf(context).bottom
+                      ? NeuSpacing.floatingDockClearance +
+                            MediaQuery.paddingOf(context).bottom
                       : NeuSpacing.navClearance,
                 ),
                 sliver: SliverList.list(
@@ -627,10 +629,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 children: [
                                   Text(
                                     currentUser?.displayName ?? '未登录',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium
-                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                    style: context.isMaterial
+                                        ? Theme.of(context).textTheme.titleLarge
+                                        : Theme.of(context)
+                                              .textTheme
+                                              .titleMedium
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w700,
+                                              ),
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
@@ -644,6 +650,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 ],
                               ),
                             ),
+                            if (context.isMaterial) ...[
+                              const SizedBox(width: NeuSpacing.sm),
+                              Icon(
+                                Icons.chevron_right_rounded,
+                                color: colors.textSecondary,
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -739,6 +752,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           subtitle: _themeStyleLabel(
                             ref.watch(appThemeStyleProvider),
                           ),
+                          // 弹出选择器,不跳页。
+                          selects: true,
                           onTap: _showThemeStylePicker,
                         ),
                         if (context.isMaterial)
@@ -1151,23 +1166,33 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           padding: const EdgeInsets.fromLTRB(4, 0, 4, NeuSpacing.sm),
           child: Text(
             title,
-            style: Theme.of(context).textTheme.bodySmall
-                ?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 1.2),
+            style: context.isMaterial
+                ? Theme.of(context).textTheme.titleSmall
+                : Theme.of(context).textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.2,
+                  ),
           ),
         ),
-        NeuSurface(
-          color: context.neu.card,
-          radius: NeuRadius.surface,
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Column(
-            children: [
-              for (var index = 0; index < items.length; index++) ...[
-                if (index > 0) const _Hairline(),
-                items[index],
+        // 分组是一张卡:每行自带卡片填充,首行只圆上角、末行只圆下角,
+        // 行与行零间距,于是连续的几行看上去是一整块。行间细线是卡内部的
+        // 分割,不是两道边界。新拟物的行本身就是凸起块,走同组件的另一分支。
+        if (context.isMaterial)
+          GroupedRows(children: items)
+        else
+          NeuSurface(
+            color: context.neu.card,
+            radius: NeuRadius.surface,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(
+              children: [
+                for (var index = 0; index < items.length; index++) ...[
+                  if (index > 0) const _Hairline(),
+                  items[index],
+                ],
               ],
-            ],
+            ),
           ),
-        ),
       ],
     );
   }
@@ -1196,8 +1221,8 @@ class _Hairline extends StatelessWidget {
   Widget build(BuildContext context) {
     return Divider(
       height: 1,
-      indent: 16,
-      endIndent: 16,
+      indent: NeuSpacing.rowTitleInset,
+      endIndent: NeuSpacing.lg,
       color: context.neu.hairline,
     );
   }
@@ -1211,6 +1236,11 @@ class _SettingItem extends StatelessWidget {
   final VoidCallback? onTap;
   final Widget? trailing;
 
+  /// 这一行是「在此处选择一个值」(弹出选择),而不是「进入下一层」。
+  /// 两者的箭头不同:选择用上下双箭头,进入用右箭头 —— 否则用户在点之前
+  /// 不知道会跳转页面还是弹出一个选择器。
+  final bool selects;
+
   const _SettingItem({
     required this.icon,
     required this.title,
@@ -1218,6 +1248,7 @@ class _SettingItem extends StatelessWidget {
     this.iconColor,
     this.onTap,
     this.trailing,
+    this.selects = false,
   });
 
   @override
@@ -1228,7 +1259,18 @@ class _SettingItem extends StatelessWidget {
         leading: Icon(icon, color: iconColor),
         title: Text(title),
         subtitle: subtitle.isEmpty ? null : Text(subtitle),
-        trailing: trailing,
+        // 右箭头和行首分隔线缩进沿用新拟物分支的行规则:没有 trailing 时
+        // 可点进下一层的行必须画出箭头,否则 Material 模式下这些行看不出能点。
+        // 选择类行用上下双箭头,与进入下一层区分开。
+        trailing: trailing != null || onTap == null
+            ? trailing
+            : Icon(
+                selects
+                    ? Icons.unfold_more_rounded
+                    : Icons.chevron_right_rounded,
+                size: 20,
+                color: colors.textSecondary,
+              ),
         onTap: onTap,
       );
     }
@@ -1265,7 +1307,7 @@ class _SettingItem extends StatelessWidget {
           ?trailing,
           if (trailing == null && onTap != null)
             Icon(
-              Icons.chevron_right_rounded,
+              selects ? Icons.unfold_more_rounded : Icons.chevron_right_rounded,
               size: 20,
               color: colors.textSecondary,
             ),
