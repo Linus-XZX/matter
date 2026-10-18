@@ -75,6 +75,7 @@ Bug fixes must preserve intended behavior. Do not remove, bypass, disable, or si
 - Keep formatting consistent.
 - Format Dart code with `dart format .` and follow the lint rules in `analysis_options.yaml`.
 - Format Rust code with `cargo fmt` and check it with `cargo clippy`.
+- Theme and layout decisions are recorded in [docs/ui-conventions.md](docs/ui-conventions.md). Read it before changing type, shape, colour, list structure or navigation.
 
 # Environment Guide
 
