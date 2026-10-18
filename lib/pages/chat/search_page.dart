@@ -191,10 +191,12 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
               Tab(text: '消息'),
               Tab(text: '聊天'),
             ],
-            labelColor: colors.accent,
-            unselectedLabelColor: colors.textTertiary,
-            indicatorColor: colors.accent,
-            dividerColor: colors.hairline,
+            labelColor: context.isMaterial ? null : colors.accent,
+            unselectedLabelColor: context.isMaterial
+                ? null
+                : colors.textTertiary,
+            indicatorColor: context.isMaterial ? null : colors.accent,
+            dividerColor: context.isMaterial ? null : colors.hairline,
           );
     // 浮动标题栏的高度(搜索框行 + 标签栏),同时用作结果列表的顶部内边距
     // 和渐变模糊层的高度,结果滚动时从标题栏下方穿过。
@@ -235,7 +237,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
           );
 
     final scaffold = Scaffold(
-      backgroundColor: colors.base,
+      backgroundColor: context.isMaterial ? null : colors.base,
       extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
           ? buildFloatingAppBar(

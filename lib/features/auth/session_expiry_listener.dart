@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../providers/auth_provider.dart';
 import '../../providers/connection_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
@@ -73,101 +74,137 @@ class _SessionExpiryListenerState extends ConsumerState<SessionExpiryListener> {
       context: navigator.context,
       barrierDismissible: false,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => PopScope(
-          canPop: !busy,
-          child: Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            insetPadding: const EdgeInsets.symmetric(horizontal: 32),
-            child: GlassPanel(
-              radius: NeuRadius.nav,
-              padding: const EdgeInsets.all(22),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '登录已失效',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '$account\n\n请重新登录以继续收发消息。',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                    if (error != null) ...[
-                      const SizedBox(height: 12),
-                      Text(error!, style: TextStyle(color: context.neu.error)),
-                    ],
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: NeuButton(
-                            onPressed: busy ? null : () => navigator.pop(false),
-                            child: const Center(child: Text('稍后')),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: NeuButton(
-                            onPressed: busy
-                                ? null
-                                : () async {
-                                    setDialogState(() {
-                                      busy = true;
-                                      error = null;
-                                    });
-                                    _reloggingIn = true;
-                                    try {
-                                      canResume = await rust
-                                          .prepareSessionRelogin(
-                                            accountUserId: account,
-                                          );
-                                      if (!mounted ||
-                                          !dialogContext.mounted ||
-                                          ref.read(activeUserIdProvider) !=
-                                              account) {
-                                        return;
-                                      }
-                                      if (route.isCurrent) {
-                                        navigator.pop(true);
-                                      } else {
-                                        navigator.removeRoute(route, true);
-                                      }
-                                    } catch (_) {
-                                      if (dialogContext.mounted) {
-                                        setDialogState(() {
-                                          busy = false;
-                                          error = '无法打开登录页，请重试。';
-                                        });
-                                      }
-                                    } finally {
-                                      _reloggingIn = false;
-                                    }
-                                  },
-                            child: Center(
-                              child: busy
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text('重新登录'),
+        builder: (context, setDialogState) {
+          Future<void> submit() async {
+            setDialogState(() {
+              busy = true;
+              error = null;
+            });
+            _reloggingIn = true;
+            try {
+              canResume = await rust.prepareSessionRelogin(
+                accountUserId: account,
+              );
+              if (!mounted ||
+                  !dialogContext.mounted ||
+                  ref.read(activeUserIdProvider) != account) {
+                return;
+              }
+              if (route.isCurrent) {
+                navigator.pop(true);
+              } else {
+                navigator.removeRoute(route, true);
+              }
+            } catch (_) {
+              if (dialogContext.mounted) {
+                setDialogState(() {
+                  busy = false;
+                  error = '无法打开登录页，请重试。';
+                });
+              }
+            } finally {
+              _reloggingIn = false;
+            }
+          }
+
+          final messageWidget = Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$account\n\n请重新登录以继续收发消息。',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 12),
+                Text(error!, style: TextStyle(color: context.neu.error)),
+              ],
+            ],
+          );
+
+          if (context.isMaterial) {
+            return PopScope(
+              canPop: !busy,
+              child: AlertDialog(
+                title: const Text('登录已失效'),
+                content: SingleChildScrollView(child: messageWidget),
+                actions: [
+                  TextButton(
+                    onPressed: busy ? null : () => navigator.pop(false),
+                    child: const Text('稍后'),
+                  ),
+                  FilledButton(
+                    onPressed: busy ? null : submit,
+                    child: busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('重新登录'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return PopScope(
+            canPop: !busy,
+            child: Dialog(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+              child: GlassPanel(
+                radius: NeuRadius.nav,
+                padding: const EdgeInsets.all(22),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '登录已失效',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      messageWidget,
+                      const SizedBox(height: 20),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: NeuButton(
+                              onPressed: busy
+                                  ? null
+                                  : () => navigator.pop(false),
+                              child: const Center(child: Text('稍后')),
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ],
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: NeuButton(
+                              onPressed: busy ? null : submit,
+                              child: Center(
+                                child: busy
+                                    ? const SizedBox(
+                                        width: 20,
+                                        height: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Text('重新登录'),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
     _dialog = route;

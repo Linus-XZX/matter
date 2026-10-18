@@ -420,9 +420,7 @@ class _AppRootState extends ConsumerState<_AppRoot>
       ThemeMode.light => false,
       ThemeMode.system => platformBrightness == Brightness.dark,
     };
-    final navColor = style.isMaterial
-        ? (isDark ? darkTheme : theme).colorScheme.surface
-        : (isDark ? NeuColors.dark.base : NeuColors.light.base);
+    final navColor = (isDark ? darkTheme : theme).scaffoldBackgroundColor;
     final overlayStyle = (style, platformBrightness, navColor);
     if (_lastOverlayStyle == overlayStyle) return;
     _lastOverlayStyle = overlayStyle;

@@ -231,11 +231,25 @@ ThemeData buildMaterialTheme(
         borderRadius: BorderRadius.circular(NeuRadius.content),
         borderSide: BorderSide(color: scheme.primary, width: 2),
       ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(NeuRadius.content),
+        borderSide: BorderSide(color: scheme.error, width: 1.5),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(NeuRadius.content),
+        borderSide: BorderSide(color: scheme.error, width: 2),
+      ),
+      prefixIconColor: scheme.onSurfaceVariant,
+      suffixIconColor: scheme.onSurfaceVariant,
     ),
     chipTheme: ChipThemeData(
       backgroundColor: scheme.surfaceContainer,
       selectedColor: scheme.primary,
-      labelStyle: text.labelLarge?.copyWith(fontSize: 14),
+      secondarySelectedColor: scheme.primary,
+      labelStyle: text.labelLarge?.copyWith(
+        fontSize: 14,
+        color: scheme.onSurface,
+      ),
       secondaryLabelStyle: text.labelLarge?.copyWith(
         fontSize: 14,
         color: scheme.onPrimary,
@@ -255,6 +269,12 @@ ThemeData buildMaterialTheme(
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
+        shape: buttonShape,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
+      ),
+    ),
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(
         shape: buttonShape,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
       ),
@@ -314,16 +334,39 @@ ThemeData buildMaterialTheme(
       contentTextStyle: text.bodyMedium?.copyWith(fontSize: 15),
     ),
     bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: surfaces.page,
+      backgroundColor: scheme.surfaceContainerLow,
       surfaceTintColor: Colors.transparent,
-      modalBackgroundColor: surfaces.page,
-      elevation: 0,
+      modalBackgroundColor: scheme.surfaceContainerLow,
+      elevation: 1,
       showDragHandle: true,
       dragHandleColor: scheme.onSurfaceVariant.withValues(alpha: .4),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(
           top: Radius.circular(NeuRadius.nav),
         ),
+      ),
+    ),
+    badgeTheme: BadgeThemeData(
+      backgroundColor: scheme.error,
+      textColor: scheme.onError,
+      textStyle: text.labelSmall?.copyWith(fontWeight: FontWeight.w700),
+    ),
+    navigationRailTheme: NavigationRailThemeData(
+      backgroundColor: surfaces.page,
+      elevation: 0,
+      indicatorColor: scheme.secondaryContainer,
+      selectedIconTheme: IconThemeData(size: 24, color: scheme.primary),
+      unselectedIconTheme: IconThemeData(
+        size: 24,
+        color: scheme.onSurfaceVariant,
+      ),
+      selectedLabelTextStyle: text.labelMedium?.copyWith(
+        fontWeight: FontWeight.w600,
+        color: scheme.primary,
+      ),
+      unselectedLabelTextStyle: text.labelMedium?.copyWith(
+        fontWeight: FontWeight.w500,
+        color: scheme.onSurfaceVariant,
       ),
     ),
     popupMenuTheme: PopupMenuThemeData(

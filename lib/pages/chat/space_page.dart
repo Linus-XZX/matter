@@ -273,176 +273,162 @@ class SpacePage extends ConsumerWidget {
       context: context,
       builder: (ctx) => Consumer(
         builder: (_, ref, _) => StatefulBuilder(
-          builder: (ctx, setDialogState) => Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            insetPadding: const EdgeInsets.symmetric(horizontal: 32),
-            child: GlassPanel(
-              radius: NeuRadius.nav,
-              padding: const EdgeInsets.all(22),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('创建空间', style: Theme.of(ctx).textTheme.titleMedium),
-                    const SizedBox(height: 16),
-                    NeuTextField(
-                      hint: '空间名称',
-                      onChanged: (value) => spaceName = value,
-                    ),
-                    const SizedBox(height: 12),
-                    NeuTextField(
-                      hint: '空间说明（可选）',
-                      onChanged: (value) => spaceTopic = value,
-                    ),
-                    if (createError != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: Text(
-                          createError!,
-                          style: Theme.of(ctx).textTheme.bodySmall
-                              ?.copyWith(color: ctx.neu.error),
-                        ),
+          builder: (ctx, setDialogState) {
+            Future<void> submit() async {
+              if (creating) return;
+              final name = spaceName.trim();
+              final topic = spaceTopic.trim();
+              if (name.isEmpty) {
+                setDialogState(() => createError = '空间名称不能为空');
+                return;
+              }
+              setDialogState(() {
+                creating = true;
+                createError = null;
+              });
+              try {
+                await createSpace(
+                  accountUserId: dialogAccountUserId,
+                  name: name,
+                  topic: topic.isEmpty ? null : topic,
+                );
+                if (container.read(activeUserIdProvider) !=
+                    dialogAccountUserId) {
+                  if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                    Navigator.of(ctx).pop();
+                  }
+                  return;
+                }
+                container.invalidate(spacesProvider);
+                container.invalidate(allChatRoomsProvider);
+                if (!context.mounted) return;
+                if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                  Navigator.of(ctx).pop();
+                }
+                neuToast(context, '空间已创建');
+              } catch (e) {
+                if (!context.mounted) return;
+                if (container.read(activeUserIdProvider) !=
+                    dialogAccountUserId) {
+                  if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                    Navigator.of(ctx).pop();
+                  }
+                  return;
+                }
+                if (ctx.mounted) {
+                  setDialogState(() {
+                    creating = false;
+                    createError = _actionFailureMessage(e);
+                  });
+                } else {
+                  neuToast(context, _actionFailureMessage(e));
+                }
+              }
+            }
+
+            final formFields = [
+              NeuTextField(
+                hint: '空间名称',
+                onChanged: (value) => spaceName = value,
+              ),
+              const SizedBox(height: 12),
+              NeuTextField(
+                hint: '空间说明（可选）',
+                onChanged: (value) => spaceTopic = value,
+              ),
+              if (createError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    createError!,
+                    style: Theme.of(ctx).textTheme.bodySmall
+                        ?.copyWith(color: ctx.neu.error),
+                  ),
+                ),
+            ];
+
+            if (ctx.isMaterial) {
+              return AlertDialog(
+                title: const Text('创建空间'),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: formFields,
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: creating ? null : () => Navigator.of(ctx).pop(),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton(
+                    onPressed: creating ? null : submit,
+                    child: creating
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('创建'),
+                  ),
+                ],
+              );
+            }
+
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+              child: GlassPanel(
+                radius: NeuRadius.nav,
+                padding: const EdgeInsets.all(22),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('创建空间', style: Theme.of(ctx).textTheme.titleMedium),
+                      const SizedBox(height: 16),
+                      ...formFields,
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: NeuButton(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              onPressed: creating
+                                  ? null
+                                  : () => Navigator.of(ctx).pop(),
+                              child: const Center(child: Text('取消')),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: NeuButton(
+                              accent: true,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              onPressed: creating ? null : submit,
+                              child: creating
+                                  ? SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        color: ctx.neu.onAccent,
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Center(child: Text('创建')),
+                            ),
+                          ),
+                        ],
                       ),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: NeuButton(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            onPressed: creating
-                                ? null
-                                : () => Navigator.of(ctx).pop(),
-                            child: const Center(child: Text('取消')),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: NeuButton(
-                            accent: true,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            onPressed: creating
-                                ? null
-                                : () async {
-                                    // Entry guard (not only the disabled
-                                    // button): the rebuild lags a frame, so a
-                                    // second tap on the old widget could
-                                    // otherwise create two spaces.
-                                    if (creating) return;
-                                    final name = spaceName.trim();
-                                    final topic = spaceTopic.trim();
-                                    if (name.isEmpty) {
-                                      // Feedback instead of a silent no-op
-                                      // (same as the room management save
-                                      // path).
-                                      setDialogState(
-                                        () => createError = '空间名称不能为空',
-                                      );
-                                      return;
-                                    }
-                                    setDialogState(() {
-                                      creating = true;
-                                      createError = null;
-                                    });
-                                    try {
-                                      await createSpace(
-                                        // Account snapshot captured when the
-                                        // dialog OPENED (see above), not read
-                                        // at tap time.
-                                        accountUserId: dialogAccountUserId,
-                                        name: name,
-                                        topic: topic.isEmpty ? null : topic,
-                                      );
-                                      // The account may have switched while
-                                      // the request was in flight: skip ALL
-                                      // local feedback (same discipline as
-                                      // the other pages) and close the
-                                      // dialog — it would otherwise stay
-                                      // stuck in its in-flight state above
-                                      // the new account's page.
-                                      if (container.read(
-                                            activeUserIdProvider,
-                                          ) !=
-                                          dialogAccountUserId) {
-                                        if (ctx.mounted &&
-                                            ModalRoute.of(ctx)?.isCurrent ==
-                                                true) {
-                                          Navigator.of(ctx).pop();
-                                        }
-                                        return;
-                                      }
-                                      container.invalidate(spacesProvider);
-                                      container.invalidate(
-                                        allChatRoomsProvider,
-                                      );
-                                      if (!context.mounted) return;
-                                      // `isCurrent` guards against popping
-                                      // the page when the dialog was
-                                      // dismissed during its exit transition
-                                      // (mounted stays true through it).
-                                      if (ctx.mounted &&
-                                          ModalRoute.of(ctx)?.isCurrent ==
-                                              true) {
-                                        Navigator.of(ctx).pop();
-                                      }
-                                      // The dialog may have been dismissed
-                                      // while the request was in flight:
-                                      // still report success.
-                                      neuToast(context, '空间已创建');
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致），
-                                      // 并关闭卡在 in-flight 态的对话框。
-                                      if (container.read(
-                                            activeUserIdProvider,
-                                          ) !=
-                                          dialogAccountUserId) {
-                                        if (ctx.mounted &&
-                                            ModalRoute.of(ctx)?.isCurrent ==
-                                                true) {
-                                          Navigator.of(ctx).pop();
-                                        }
-                                        return;
-                                      }
-                                      if (ctx.mounted) {
-                                        setDialogState(() {
-                                          creating = false;
-                                          // Render the failure inside the
-                                          // dialog: a page-level toast would
-                                          // sit beneath the modal barrier
-                                          // while the dialog stays open.
-                                          createError = _actionFailureMessage(
-                                            e,
-                                          );
-                                        });
-                                      } else {
-                                        neuToast(
-                                          context,
-                                          _actionFailureMessage(e),
-                                        );
-                                      }
-                                    }
-                                  },
-                            child: creating
-                                ? SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      color: ctx.neu.onAccent,
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Center(child: Text('创建')),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
@@ -464,174 +450,156 @@ class SpacePage extends ConsumerWidget {
         // use the PAGE context (method parameter) so feedback still lands
         // after the dialog was dismissed mid-request.
         builder: (_, ref, _) => StatefulBuilder(
-          builder: (ctx, setDialogState) => Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            insetPadding: const EdgeInsets.symmetric(horizontal: 32),
-            child: GlassPanel(
-              radius: NeuRadius.nav,
-              padding: const EdgeInsets.all(22),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('加入空间', style: Theme.of(ctx).textTheme.titleMedium),
-                    const SizedBox(height: 16),
-                    NeuTextField(
-                      hint: '!space_id:server 或 #alias:server',
-                      onChanged: (value) => spaceIdentifier = value,
-                    ),
-                    if (joinError != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: Text(
-                          joinError!,
-                          style: Theme.of(ctx).textTheme.bodySmall
-                              ?.copyWith(color: ctx.neu.error),
-                        ),
+          builder: (ctx, setDialogState) {
+            Future<void> submit() async {
+              if (joining) return;
+              final value = spaceIdentifier.trim();
+              if (value.isEmpty) {
+                setDialogState(() => joinError = '请输入空间 ID 或别名');
+                return;
+              }
+              setDialogState(() {
+                joining = true;
+                joinError = null;
+              });
+              try {
+                await joinRoom(
+                  accountUserId: dialogAccountUserId,
+                  identifier: value,
+                );
+                if (container.read(activeUserIdProvider) !=
+                    dialogAccountUserId) {
+                  if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                    Navigator.of(ctx).pop();
+                  }
+                  return;
+                }
+                container.invalidate(spacesProvider);
+                container.invalidate(allChatRoomsProvider);
+                container.invalidate(allUngroupedRoomsProvider);
+                if (!context.mounted) return;
+                if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                  Navigator.of(ctx).pop();
+                }
+                neuToast(context, '已加入空间');
+              } catch (e) {
+                if (!context.mounted) return;
+                if (container.read(activeUserIdProvider) !=
+                    dialogAccountUserId) {
+                  if (ctx.mounted && ModalRoute.of(ctx)?.isCurrent == true) {
+                    Navigator.of(ctx).pop();
+                  }
+                  return;
+                }
+                if (ctx.mounted) {
+                  setDialogState(() {
+                    joining = false;
+                    joinError = _actionFailureMessage(e);
+                  });
+                } else {
+                  neuToast(context, _actionFailureMessage(e));
+                }
+              }
+            }
+
+            final formFields = [
+              NeuTextField(
+                hint: '!space_id:server 或 #alias:server',
+                onChanged: (value) => spaceIdentifier = value,
+              ),
+              if (joinError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    joinError!,
+                    style: Theme.of(ctx).textTheme.bodySmall
+                        ?.copyWith(color: ctx.neu.error),
+                  ),
+                ),
+            ];
+
+            if (ctx.isMaterial) {
+              return AlertDialog(
+                title: const Text('加入空间'),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: formFields,
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: joining ? null : () => Navigator.of(ctx).pop(),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton(
+                    onPressed: joining ? null : submit,
+                    child: joining
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('加入'),
+                  ),
+                ],
+              );
+            }
+
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+              child: GlassPanel(
+                radius: NeuRadius.nav,
+                padding: const EdgeInsets.all(22),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('加入空间', style: Theme.of(ctx).textTheme.titleMedium),
+                      const SizedBox(height: 16),
+                      ...formFields,
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: NeuButton(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              onPressed: joining
+                                  ? null
+                                  : () => Navigator.of(ctx).pop(),
+                              child: const Center(child: Text('取消')),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: NeuButton(
+                              accent: true,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              onPressed: joining ? null : submit,
+                              child: joining
+                                  ? SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        color: ctx.neu.onAccent,
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Center(child: Text('加入')),
+                            ),
+                          ),
+                        ],
                       ),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: NeuButton(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            onPressed: joining
-                                ? null
-                                : () => Navigator.of(ctx).pop(),
-                            child: const Center(child: Text('取消')),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: NeuButton(
-                            accent: true,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            onPressed: joining
-                                ? null
-                                : () async {
-                                    // Entry guard (not only the disabled
-                                    // button): the rebuild lags a frame, so a
-                                    // second tap on the old widget could
-                                    // otherwise issue a duplicate join.
-                                    if (joining) return;
-                                    final value = spaceIdentifier.trim();
-                                    if (value.isEmpty) {
-                                      // Feedback instead of a silent no-op
-                                      // (same discipline as the create-space
-                                      // dialog).
-                                      setDialogState(
-                                        () => joinError = '请输入空间 ID 或别名',
-                                      );
-                                      return;
-                                    }
-                                    setDialogState(() {
-                                      joining = true;
-                                      joinError = null;
-                                    });
-                                    try {
-                                      await joinRoom(
-                                        // Account snapshot captured when the
-                                        // dialog OPENED (see above), not read
-                                        // at tap time.
-                                        accountUserId: dialogAccountUserId,
-                                        identifier: value,
-                                      );
-                                      // The account may have switched while
-                                      // the request was in flight: skip ALL
-                                      // local feedback (same discipline as
-                                      // the other pages) and close the
-                                      // dialog — it would otherwise stay
-                                      // stuck in its in-flight state above
-                                      // the new account's page.
-                                      if (container.read(
-                                            activeUserIdProvider,
-                                          ) !=
-                                          dialogAccountUserId) {
-                                        if (ctx.mounted &&
-                                            ModalRoute.of(ctx)?.isCurrent ==
-                                                true) {
-                                          Navigator.of(ctx).pop();
-                                        }
-                                        return;
-                                      }
-                                      // Page-scoped container: the
-                                      // dialog-scoped ref is disposed (and
-                                      // would throw) once the dialog was
-                                      // dismissed mid-request.
-                                      container.invalidate(spacesProvider);
-                                      container.invalidate(
-                                        allChatRoomsProvider,
-                                      );
-                                      container.invalidate(
-                                        allUngroupedRoomsProvider,
-                                      );
-                                      if (!context.mounted) return;
-                                      // `isCurrent` guards against popping
-                                      // the page when the dialog was
-                                      // dismissed during its exit transition
-                                      // (mounted stays true through it).
-                                      if (ctx.mounted &&
-                                          ModalRoute.of(ctx)?.isCurrent ==
-                                              true) {
-                                        Navigator.of(ctx).pop();
-                                      }
-                                      // The dialog may have been dismissed
-                                      // while the request was in flight:
-                                      // still report success.
-                                      neuToast(context, '已加入空间');
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-                                      // 账号可能在请求期间切换：跳过失败反馈（与成功路径一致），
-                                      // 并关闭卡在 in-flight 态的对话框。
-                                      if (container.read(
-                                            activeUserIdProvider,
-                                          ) !=
-                                          dialogAccountUserId) {
-                                        if (ctx.mounted &&
-                                            ModalRoute.of(ctx)?.isCurrent ==
-                                                true) {
-                                          Navigator.of(ctx).pop();
-                                        }
-                                        return;
-                                      }
-                                      if (ctx.mounted) {
-                                        setDialogState(() {
-                                          joining = false;
-                                          // Render the failure inside the
-                                          // dialog: a page-level toast would
-                                          // sit beneath the modal barrier
-                                          // while the dialog stays open.
-                                          joinError = _actionFailureMessage(e);
-                                        });
-                                      } else {
-                                        neuToast(
-                                          context,
-                                          _actionFailureMessage(e),
-                                        );
-                                      }
-                                    }
-                                  },
-                            child: joining
-                                ? SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      color: ctx.neu.onAccent,
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Center(child: Text('加入')),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
