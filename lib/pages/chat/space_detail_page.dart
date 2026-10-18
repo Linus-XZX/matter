@@ -113,7 +113,7 @@ class _SpaceDetailPageState extends ConsumerState<SpaceDetailPage> {
             icon: Icon(Icons.arrow_back_rounded, color: context.neu.text),
             onPressed: () => Navigator.of(context).pop(),
           ),
-          title: Text('空间', style: Theme.of(context).textTheme.titleLarge),
+          title: Text('空间', style: Theme.of(context).textTheme.headlineSmall),
         ),
         body: Center(
           child: Text('账号已切换', style: Theme.of(context).textTheme.bodyMedium),

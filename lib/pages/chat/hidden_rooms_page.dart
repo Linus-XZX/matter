@@ -43,7 +43,7 @@ class _HiddenRoomsPageState extends ConsumerState<HiddenRoomsPage> {
       backgroundColor: context.neu.base,
       extendBodyBehindAppBar: true,
       appBar: buildFloatingAppBar(
-        title: Text('隐藏的聊天', style: Theme.of(context).textTheme.titleLarge),
+        title: Text('隐藏的聊天', style: Theme.of(context).textTheme.headlineSmall),
         actions: [
           if (_selectionMode)
             IconButton(

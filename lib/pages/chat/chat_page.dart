@@ -8,6 +8,7 @@ import '../../src/rust/api/matrix.dart';
 import '../../providers/connection_provider.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/cascade_title.dart';
+import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_field.dart';
@@ -149,22 +150,35 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         backgroundColor: widget.embedded ? null : Colors.transparent,
         title: CascadeTitle(
           text: titleText,
-          style: Theme.of(context).textTheme.titleLarge!,
+          style: Theme.of(context).textTheme.headlineSmall!,
         ),
         actions: [
-          _buildHeaderSearchEntry(),
-          if (hasHiddenRooms)
-            IconButton(
-              icon: const Icon(Icons.visibility_off_outlined),
-              tooltip: '隐藏的聊天',
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const HiddenRoomsPage()),
+          MaterialToolbar(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: 6,
+                children: [
+                  _buildHeaderSearchEntry(),
+                  if (hasHiddenRooms)
+                    NeuIconButton(
+                      icon: Icons.visibility_off_outlined,
+                      tooltip: '隐藏的聊天',
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const HiddenRoomsPage(),
+                        ),
+                      ),
+                    ),
+                  NeuIconButton(
+                    icon: Icons.edit_outlined,
+                    tooltip: '新聊天',
+                    onPressed: _openCreateChat,
+                  ),
+                ],
               ),
             ),
-          IconButton(
-            icon: const Icon(Icons.edit_outlined),
-            tooltip: '新聊天',
-            onPressed: _openCreateChat,
           ),
         ],
       );
@@ -178,7 +192,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             Expanded(
               child: CascadeTitle(
                 text: titleText,
-                style: Theme.of(context).textTheme.titleLarge!,
+                style: Theme.of(context).textTheme.headlineSmall!,
               ),
             ),
             _buildHeaderSearchEntry(),
@@ -326,7 +340,8 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               topInset + headerHeight,
               NeuSpacing.lg,
               context.isMaterial
-                  ? 80 + MediaQuery.paddingOf(context).bottom
+                  ? NeuSpacing.floatingDockClearance +
+                        MediaQuery.paddingOf(context).bottom
                   : NeuSpacing.navClearance,
             ),
             itemCount: rooms.length + 1,

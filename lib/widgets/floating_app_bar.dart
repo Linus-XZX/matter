@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../theme/material_theme.dart';
+import '../theme/neu_colors.dart';
 import 'glass.dart';
 
-/// A standard toolbar over the page's fading surface. Its Scaffold must extend
-/// the body behind the toolbar and reserve its height inside scrolling content.
+/// A toolbar over the page's fading surface. Reserve its height in the scroll
+/// content and extend the Scaffold body behind it.
 AppBar buildFloatingAppBar({
   required Widget title,
   Widget? leading,
@@ -14,8 +16,23 @@ AppBar buildFloatingAppBar({
   bool automaticallyImplyLeading = true,
 }) => AppBar(
   title: title,
-  leading: leading,
-  actions: actions,
+  leading: leading == null
+      ? null
+      : Center(child: MaterialToolbar(child: leading)),
+  actions: actions == null
+      ? null
+      : [
+          MaterialToolbar(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: 6,
+                children: actions,
+              ),
+            ),
+          ),
+        ],
   bottom: bottom,
   toolbarHeight: toolbarHeight,
   titleSpacing: titleSpacing,
@@ -28,3 +45,21 @@ AppBar buildFloatingAppBar({
     child: SizedBox.expand(child: TopFadeBlur(useShader: true)),
   ),
 );
+
+/// A neutral filled control sits above the fading header. Keep this local to
+/// toolbars so composer actions and inline list buttons retain their own skin.
+class MaterialToolbar extends StatelessWidget {
+  const MaterialToolbar({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!context.isMaterial) return child;
+    final theme = Theme.of(context);
+    return IconButtonTheme(
+      data: IconButtonThemeData(style: materialToolbarButtonStyle(theme)),
+      child: child,
+    );
+  }
+}

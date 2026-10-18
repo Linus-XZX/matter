@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../providers/chat_visual_settings_provider.dart';
 import '../theme/neu_colors.dart';
+import 'material_press.dart';
 
 /// 为自绘控件提供统一的键盘操作、焦点轮廓和读屏状态。
 class NeuAction extends StatefulWidget {
@@ -44,17 +45,21 @@ class _NeuActionState extends State<NeuAction> {
         label: widget.label,
         selected: widget.selected,
         toggled: widget.toggled,
-        child: Material(
-          type: MaterialType.transparency,
-          child: InkWell(
-            onTap: widget.onTap,
-            onLongPress: enabled ? widget.onLongPress : null,
-            onSecondaryTap: enabled ? widget.onSecondaryTap : null,
-            onHighlightChanged: widget.onPressedChanged,
-            borderRadius: BorderRadius.circular(widget.radius),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-              child: widget.child,
+        child: MaterialPress(
+          maxGrowth: 4,
+          builder: (states) => Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              statesController: states,
+              onTap: widget.onTap,
+              onLongPress: enabled ? widget.onLongPress : null,
+              onSecondaryTap: enabled ? widget.onSecondaryTap : null,
+              onHighlightChanged: widget.onPressedChanged,
+              borderRadius: BorderRadius.circular(widget.radius),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                child: widget.child,
+              ),
             ),
           ),
         ),

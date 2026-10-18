@@ -46,7 +46,7 @@ class SpacePage extends ConsumerWidget {
           ? buildFloatingAppBar(
               title: CascadeTitle(
                 text: titleText,
-                style: Theme.of(context).textTheme.titleLarge!,
+                style: Theme.of(context).textTheme.headlineSmall!,
               ),
             )
           : null,
@@ -153,7 +153,8 @@ class SpacePage extends ConsumerWidget {
                     SliverPadding(
                       padding: EdgeInsets.only(
                         bottom: context.isMaterial
-                            ? 80 + MediaQuery.paddingOf(context).bottom
+                            ? NeuSpacing.floatingDockClearance +
+                                  MediaQuery.paddingOf(context).bottom
                             : 96,
                       ),
                     ),
@@ -187,7 +188,7 @@ class SpacePage extends ConsumerWidget {
                             ),
                             child: CascadeTitle(
                               text: titleText,
-                              style: Theme.of(context).textTheme.titleLarge!,
+                              style: Theme.of(context).textTheme.headlineSmall!,
                             ),
                           ),
                         ),

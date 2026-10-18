@@ -186,14 +186,25 @@ void main() {
     final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     expect(scaffold.appBar == null || scaffold.extendBodyBehindAppBar, isTrue);
     expect(find.byType(TopFadeBlur), findsOneWidget);
-    final fade = tester.widget<ColoredBox>(
+    final fade = tester.widget<DecoratedBox>(
       find.descendant(
         of: find.byType(TopFadeBlur),
-        matching: find.byType(ColoredBox),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is DecoratedBox &&
+              widget.decoration is BoxDecoration &&
+              (widget.decoration as BoxDecoration).gradient is LinearGradient,
+        ),
       ),
     );
-    expect(fade.color, tester.element(appBar).neu.glassFill);
-    expect(fade.color.a, greaterThan(0));
-    expect(fade.color.a, lessThan(1));
+    final gradient =
+        (fade.decoration as BoxDecoration).gradient! as LinearGradient;
+    expect(
+      gradient.colors.first.withValues(alpha: 1),
+      tester.element(appBar).neu.base,
+    );
+    expect(gradient.colors.first.a, greaterThan(0));
+    expect(gradient.colors.first.a, lessThan(1));
+    expect(gradient.colors.last.a, 0);
   });
 }

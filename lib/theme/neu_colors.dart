@@ -179,8 +179,34 @@ class NeuColors extends ThemeExtension<NeuColors> {
   }
 
   @override
-  NeuColors lerp(ThemeExtension<NeuColors>? other, double t) =>
-      t < 0.5 ? this : (other as NeuColors? ?? this);
+  NeuColors lerp(ThemeExtension<NeuColors>? other, double t) {
+    if (other is! NeuColors) return this;
+    Color blend(Color from, Color to) => Color.lerp(from, to, t)!;
+    return NeuColors(
+      isMaterial: t < .5 ? isMaterial : other.isMaterial,
+      base: blend(base, other.base),
+      surface: blend(surface, other.surface),
+      surfaceStrong: blend(surfaceStrong, other.surfaceStrong),
+      card: blend(card, other.card),
+      shadowLight: blend(shadowLight, other.shadowLight),
+      shadowDark: blend(shadowDark, other.shadowDark),
+      text: blend(text, other.text),
+      textSecondary: blend(textSecondary, other.textSecondary),
+      textTertiary: blend(textTertiary, other.textTertiary),
+      accent: blend(accent, other.accent),
+      accentPressed: blend(accentPressed, other.accentPressed),
+      onAccent: blend(onAccent, other.onAccent),
+      accentSoft: blend(accentSoft, other.accentSoft),
+      success: blend(success, other.success),
+      warning: blend(warning, other.warning),
+      error: blend(error, other.error),
+      glassFill: blend(glassFill, other.glassFill),
+      glassBorder: blend(glassBorder, other.glassBorder),
+      hairline: blend(hairline, other.hairline),
+      highlightAlpha:
+          highlightAlpha + (other.highlightAlpha - highlightAlpha) * t,
+    );
+  }
 }
 
 /// 圆角档位(超椭圆应用这些半径,沿用 matter 的角标体系)。
@@ -205,6 +231,15 @@ class NeuSpacing {
 
   /// 窄屏列表底部为玻璃导航预留的高度。
   static const double navClearance = 104;
+
+  /// Material 悬浮 dock 占掉的垂直高度:安全区上边距 8 + 导航条 62 +
+  /// 下边距 10。滚动内容底部要留这么多,否则最后一行会压在 dock 下面。
+  /// 系统底部安全区要另外加上。
+  static const double floatingDockClearance = 80;
+
+  /// 分组卡片里行标题的起始缩进。行首图标(20/24)加图标与文字的间距
+  /// 都落到这个线上,行间分隔线也从这里起,不然文字会顶到线上。
+  static const double rowTitleInset = 48;
 }
 
 extension NeuColorsX on BuildContext {
