@@ -38,6 +38,10 @@ class MatterApp extends ConsumerStatefulWidget {
 
 class _MatterAppState extends ConsumerState<MatterApp> {
   final _tabPosition = ValueNotifier(0.0);
+
+  /// 0 at rest, 1 while a dock destination is pressed. Owned here because the
+  /// platter that has to scale sits above the bar, in `DockSurface`.
+  final _dockLift = ValueNotifier<double>(0);
   Timer? _verificationTimer;
   bool _checkingVerification = false;
   bool _verificationDialogOpen = false;
@@ -87,6 +91,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
   void dispose() {
     _verificationTimer?.cancel();
     _tabPosition.dispose();
+    _dockLift.dispose();
     super.dispose();
   }
 
@@ -438,6 +443,47 @@ class _MatterAppState extends ConsumerState<MatterApp> {
     _selectedRoom = _reconcileSelectedRoomDetails(selectedRoom, refreshedRoom);
   }
 
+  /// Material 模式的底部导航:悬浮胶囊,不贴底满宽。
+  ///
+  /// 选中项的内容盘由 `MaterialTabNavigationBar` 自绘(随页面滑动插值),
+  /// 外边距和模糊底只在这里加一层,所以两者位置天然对齐。
+  Widget _buildMaterialDock(int navigationIndex) {
+    final dock = MaterialTabNavigationBar(
+      key: const ValueKey('material-dock'),
+      position: _tabPosition,
+      lift: _dockLift,
+      selectedIndex: navigationIndex,
+      onDestinationSelected: _onItemTapped,
+      destinations: const [
+        NavigationDestination(
+          icon: Icon(Icons.chat_bubble_outline),
+          selectedIcon: Icon(Icons.chat_bubble),
+          label: '聊天',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.account_tree_outlined),
+          selectedIcon: Icon(Icons.account_tree),
+          label: '空间',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.people_outline),
+          selectedIcon: Icon(Icons.people),
+          label: '通讯录',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.settings_outlined),
+          selectedIcon: Icon(Icons.settings),
+          label: '设置',
+        ),
+      ],
+    );
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+      child: DockSurface(radius: NeuRadius.nav, lift: _dockLift, child: dock),
+    );
+  }
+
   Widget _buildMobileLayout() {
     final navigationIndex = ref.watch(navigationIndexProvider);
     if (context.isMaterial) {
@@ -465,34 +511,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
                 label: const Text('添加空间'),
               )
             : null,
-        bottomNavigationBar: MaterialTabNavigationBar(
-          key: const ValueKey('material-dock'),
-          position: _tabPosition,
-          selectedIndex: navigationIndex,
-          onDestinationSelected: _onItemTapped,
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.chat_bubble_outline),
-              selectedIcon: Icon(Icons.chat_bubble),
-              label: '聊天',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.account_tree_outlined),
-              selectedIcon: Icon(Icons.account_tree),
-              label: '空间',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.people_outline),
-              selectedIcon: Icon(Icons.people),
-              label: '通讯录',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: '设置',
-            ),
-          ],
-        ),
+        bottomNavigationBar: _buildMaterialDock(navigationIndex),
       );
     }
     return Scaffold(

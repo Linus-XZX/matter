@@ -13,9 +13,11 @@ import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/connection_provider.dart';
 import 'package:matter/providers/hidden_rooms_provider.dart';
 import 'package:matter/providers/mutable_state.dart';
+import 'package:matter/providers/navigation_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:matter/theme/material_theme.dart';
+import 'package:matter/widgets/material_tab_navigation_bar.dart';
 import 'package:matter/widgets/mobile_tab_view.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -72,33 +74,78 @@ Future<ProviderContainer> _pumpApp(
   return container;
 }
 
-Finder _destination(int index) => find.byType(NavigationDestination).at(index);
+// The dock draws its own destinations now, so address them by label: that is
+// also what a user aims at, and it keeps the finder honest about which row of
+// the bar is being touched.
+const _destinationLabels = ['聊天', '空间', '通讯录', '设置'];
 
-Finder _destinationIcon(int index) =>
-    find.descendant(of: _destination(index), matching: find.byType(Icon)).first;
+final _bar = find.byKey(const ValueKey('material-dock'));
 
+Finder _destination(int index) => find.descendant(
+  of: find.byKey(const ValueKey('material-dock')),
+  matching: find.text(_destinationLabels[index]),
+);
+
+/// The lens tracks the page position. Assert what the reader can see — the
+/// lens sits over the destination the pages are nearest to — instead of
+/// restating the dock's geometry: width, padding and height all follow the
+/// bar's measured size, so a formula copied into the test only agrees by
+/// coincidence.
 void _expectHighlight(WidgetTester tester, double page) {
-  final bar = find.byKey(const ValueKey('material-dock'));
-  expect(bar, findsOneWidget);
-  final paint = find
-      .descendant(of: bar, matching: find.byType(CustomPaint))
+  expect(_bar, findsOneWidget);
+  final lens = find
+      .descendant(of: _bar, matching: find.byType(CustomPaint))
       .first;
-  final origin = tester.getTopLeft(paint);
-  final first = tester.getCenter(_destinationIcon(0)) - origin;
-  final last = tester.getCenter(_destinationIcon(3)) - origin;
-  final center = Offset.lerp(first, last, page / 3)!;
+  final painted = _paintedLens(tester, lens);
+  final scheme = Theme.of(tester.element(find.byType(MaterialTabNavigationBar)))
+      .colorScheme;
+  // Compare the encoded value: Color equality also weighs the float channels,
+  // which differ in the last bits between a stored colour and a derived one.
   expect(
-    paint,
-    paints..rrect(
-      color: Theme.of(tester.element(find.byType(NavigationBar)))
-          .colorScheme
-          .secondaryContainer,
-      rrect: RRect.fromRectAndRadius(
-        Rect.fromCenter(center: center, width: 64, height: 32),
-        const Radius.circular(16),
-      ),
-    ),
+    painted.paint.color.toARGB32(),
+    scheme.primary.withValues(alpha: .14).toARGB32(),
   );
+
+  // The painter draws in the bar's own coordinates, so the expected centre is
+  // the pitch the destinations are laid out on, with no origin correction.
+  final count = _destinationLabels.length;
+  final pitch = (tester.getSize(_bar).width - 8) / count;
+  double centerOf(double index) {
+    final direction = Directionality.of(tester.element(_bar));
+    final visual = direction == TextDirection.ltr ? index : count - 1 - index;
+    return 4 + (visual + .5) * pitch;
+  }
+
+  // The lens is a spring, so mid-flight it sits between two destinations
+  // rather than on one. What must hold at every moment is that it is inside
+  // the span its target implies -- never stuck at the previous destination.
+  final x = painted.rrect.center.dx;
+  final target = centerOf(page);
+  expect(
+    x,
+    closeTo(target, pitch / 2),
+    reason: 'lens should be heading for destination $page, not stuck',
+  );
+}
+
+/// Reads back the single rounded rectangle the dock's painter draws.
+({RRect rrect, Paint paint}) _paintedLens(WidgetTester tester, Finder lens) {
+  final painter = tester.widget<CustomPaint>(lens).painter!;
+  final canvas = _LensRecorder();
+  painter.paint(canvas, tester.getSize(lens));
+  expect(canvas.rrects, hasLength(1));
+  return canvas.rrects.single;
+}
+
+class _LensRecorder implements Canvas {
+  final rrects = <({RRect rrect, Paint paint})>[];
+
+  @override
+  void drawRRect(RRect rrect, Paint paint) =>
+      rrects.add((rrect: rrect, paint: paint));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 void main() {
@@ -349,6 +396,48 @@ void main() {
   });
 
   for (final direction in TextDirection.values) {
+    testWidgets(
+      'dock hold and slide switches visible pages before release in $direction',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(400, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final container = await _pumpApp(tester, direction: direction);
+        final position = tester
+            .widget<MobileTabView>(find.byType(MobileTabView))
+            .position;
+        final gesture = await tester.startGesture(
+          tester.getCenter(_destination(0)),
+        );
+        await tester.pump(const Duration(milliseconds: 600));
+        await gesture.moveTo(tester.getCenter(_destination(1)));
+        await tester.pumpAndSettle();
+        expect(container.read(navigationIndexProvider), 1);
+        expect(position.value, 1);
+        // The page, not just its selection state, must have changed.
+        expect(find.text('还没有加入空间'), findsOneWidget);
+        await gesture.moveTo(tester.getCenter(_destination(3)));
+        await tester.pumpAndSettle();
+        expect(container.read(navigationIndexProvider), 3);
+        expect(position.value, 3);
+        expect(find.text('Material 配色'), findsOneWidget);
+        final lens = find
+            .descendant(of: _bar, matching: find.byType(CustomPaint))
+            .first;
+        final previewX = _paintedLens(tester, lens).rrect.center.dx;
+        await gesture.up();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 64));
+        expect(
+          _paintedLens(tester, lens).rrect.center.dx,
+          closeTo(previewX, .5),
+        );
+        await tester.pumpAndSettle();
+        expect(container.read(navigationIndexProvider), 3);
+        expect(position.value, 3);
+        _expectHighlight(tester, 3);
+      },
+    );
+
     testWidgets(
       'Material highlight follows taps, reversals and swipes in $direction',
       (tester) async {

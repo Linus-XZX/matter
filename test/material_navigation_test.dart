@@ -9,6 +9,7 @@ import 'package:matter/providers/theme_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:matter/theme/material_theme.dart';
+import 'package:matter/widgets/material_tab_navigation_bar.dart';
 import 'package:matter/theme/neu_colors.dart';
 import 'package:matter/theme/neu_theme.dart';
 import 'package:matter/widgets/glass.dart';
@@ -81,7 +82,7 @@ void main() {
         }
         final desktop = width >= 960;
         expect(
-          find.byType(desktop ? NavigationRail : NavigationBar),
+          find.byType(desktop ? NavigationRail : MaterialTabNavigationBar),
           findsOneWidget,
         );
         for (final destination in [
@@ -90,7 +91,7 @@ void main() {
           (label: '设置', icon: Icons.settings_outlined),
         ]) {
           final navigation = find.byType(
-            desktop ? NavigationRail : NavigationBar,
+            desktop ? NavigationRail : MaterialTabNavigationBar,
           );
           await tester.tap(
             find.descendant(
@@ -135,7 +136,7 @@ void main() {
         await tester.tap(find.text('新拟物 · 跟随系统'));
         await tester.pumpAndSettle();
         expect(container.read(appThemeStyleProvider), AppThemeStyle.neuSystem);
-        expect(find.byType(NavigationBar), findsNothing);
+        expect(find.byType(MaterialTabNavigationBar), findsNothing);
         expect(find.text('Material 配色'), findsNothing);
         await tester.tap(find.text('主题'));
         await tester.pumpAndSettle();
@@ -146,7 +147,7 @@ void main() {
           AppThemeStyle.materialDark,
         );
         expect(
-          find.byType(desktop ? NavigationRail : NavigationBar),
+          find.byType(desktop ? NavigationRail : MaterialTabNavigationBar),
           findsOneWidget,
         );
         expect(tester.takeException(), isNull);
