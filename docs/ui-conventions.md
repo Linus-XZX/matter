@@ -77,11 +77,13 @@ items categorise; a chat list is a stream even though it is also made of rows.
 
 ### Categorised rows
 
-`GroupedRows` owns one filled `Material` with a continuous superellipse outline
-around the category. Hairlines paint on top of that same fill. The individual
+`GroupedRows` owns one filled `Material` with the theme's card outline around
+the category. Hairlines paint on top of that same fill. The individual
 `ListTile` shapes are square so their pressed ink reaches the row edges; only
-the group's outside boundary clips it. Cards and `NeuSurface` in Material use
-the same superellipse silhouette, while action buttons use a full pill.
+the group's outside boundary clips it. Material cards and grouped settings use
+28 dp circular corners from `material_theme.dart`, independent of the
+new-skeuomorphic radius scale. Action buttons use a full pill; Material FABs use
+56 × 56 dp icon-only controls with 16 dp circular corners.
 
 Neither of the other two shapes works here. A card wrapped around the run draws
 two boundaries, the card edge plus the hairline. Spaced-out cards turn the group
@@ -100,14 +102,23 @@ handles both branches so call sites do not have to.
 `ChatListDivider` draws the hairline. It is the single switch, so no call site
 needs a branch.
 
-The hairline is indented to `NeuSpacing.rowTitleInset` (48 dp) so it starts where
-the row title starts and the text never sits on the line. Material rows are 56 dp
-minimum (`listTileTheme.minTileHeight`).
+`ChatListDivider` draws the hairline, aligned with the stream's text. Material
+chat and contact rows use a 44 dp avatar, 12 dp of horizontal row padding and a
+12 dp content gap, so their divider starts at 68 dp; compact chat rows use a
+40 dp avatar and a 64 dp inset. Vertical padding is 10 dp, or 8 dp for compact
+chat rows. New-skeuomorphic rows keep their original dimensions.
 
-That indent is a contract, not a preference. `ListTile`'s title lands at
-`contentPadding.left + minLeadingWidth + horizontalTitleGap`, so the theme sets
-them to 16 + 24 + 8 to reach 48. Changing any one of the three without
-re-checking `rowTitleInset` puts the hairline back inside the text.
+Material conversation titles use 16 dp type with a medium weight, rising to
+semibold for unread rooms. Previews stay on one line to preserve list density;
+time and unread markers share a separate trailing column. Membership actions
+sit below the complete row, so accepting or rejecting an invitation retains
+enough width with enlarged text. Contact message actions use unfilled icon
+buttons, leaving accent fills to primary and selected actions.
+
+Settings `ListTile` titles follow a separate alignment contract:
+`contentPadding.left + minLeadingWidth + horizontalTitleGap` is 16 + 24 + 8,
+matching `NeuSpacing.rowTitleInset` (48 dp). Changing any of those three requires
+checking the group's divider inset too.
 
 ### Tones
 
@@ -126,6 +137,26 @@ tone plus hairlines, and that is correct for it.
 
 Drawing one arrow for both left the user unable to tell a page push from a
 picker until after the tap.
+
+## Search and primary actions
+
+`AppSearchField` uses the native M3 `SearchBar` in Material and `NeuTextField` in
+new-skeuomorphic pages. The search bar is a flat pill on the card surface; its
+fill, shape and type come from `searchBarTheme`. Chat search remains a read-only
+entry that opens the search route, while contacts filter in place.
+
+On mobile, new chat and add space are icon-only FABs owned by the app's outer
+Scaffold, so both clear the floating dock and snack bars. Standalone chat and
+space pages own their own FAB; embedded desktop lists keep the toolbar action.
+Material FABs omit visible labels and keep tooltips for discovery and screen
+readers, including the selected-chat count when restoring hidden chats.
+
+The settings profile card shares the neutral card fill with ordinary settings
+groups. Its 52 dp avatar and 18 dp title keep the profile recognisable without
+turning it into a coloured banner. Section headings use `onSurfaceVariant`;
+primary colour marks selected values and primary actions. The Material theme
+picker groups appearance families and uses light, dark and paired thumbnails
+for the Material options.
 
 ## Dividers
 
