@@ -13,14 +13,16 @@ import '../../providers/auth_provider.dart';
 import '../../providers/authenticated_media_cache.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
+import '../../providers/material_color_provider.dart';
 import '../../providers/session_credential_store.dart';
 import '../../providers/theme_provider.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 
+import '../../theme/material_theme.dart';
 import '../../theme/neu_colors.dart';
-import '../../widgets/app_avatar.dart';
 import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
+import '../../widgets/material_press.dart';
 import '../../widgets/neu_action.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/grouped_rows.dart';
@@ -31,6 +33,8 @@ import 'blur_settings_page.dart';
 import 'log_viewer_page.dart';
 import 'material_color_settings_page.dart';
 import 'notification_settings_page.dart';
+import 'material_theme_style_picker.dart';
+import 'settings_profile_card.dart';
 import 'profile_edit_page.dart';
 
 final accountSwitchControllerProvider = Provider(AccountSwitchController.new);
@@ -601,9 +605,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
                 sliver: SliverList.list(
                   children: [
-                    // Profile card
-                    NeuAction(
-                      radius: NeuRadius.surface,
+                    SettingsProfileCard(
+                      user: currentUser,
                       onTap: () {
                         Navigator.of(context).push(
                           MaterialPageRoute(
@@ -611,55 +614,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           ),
                         );
                       },
-                      child: NeuSurface(
-                        color: colors.card,
-                        radius: NeuRadius.surface,
-                        padding: const EdgeInsets.all(NeuSpacing.lg),
-                        child: Row(
-                          children: [
-                            AppAvatar(
-                              fallback: currentUser?.displayName ?? '我',
-                              size: 60,
-                              url: currentUser?.avatarUrl,
-                            ),
-                            const SizedBox(width: NeuSpacing.lg),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    currentUser?.displayName ?? '未登录',
-                                    style: context.isMaterial
-                                        ? Theme.of(context).textTheme.titleLarge
-                                        : Theme.of(context)
-                                              .textTheme
-                                              .titleMedium
-                                              ?.copyWith(
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    currentUser != null
-                                        ? currentUser.id
-                                        : '点击登录你的 Matrix 账号',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            if (context.isMaterial) ...[
-                              const SizedBox(width: NeuSpacing.sm),
-                              Icon(
-                                Icons.chevron_right_rounded,
-                                color: colors.textSecondary,
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
                     ),
 
                     // ── Account switcher ────────────────────────────────
@@ -1137,6 +1091,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Future<void> _showThemeStylePicker() async {
     final current = ref.read(appThemeStyleProvider);
+    if (context.isMaterial) {
+      final schemes = ref.read(materialColorSchemesProvider);
+      await showMaterialThemeStylePicker(
+        context,
+        current: current,
+        light: schemes.light,
+        dark: schemes.dark,
+        onChanged: (style) =>
+            ref.read(appThemeStyleProvider.notifier).setStyle(style),
+      );
+      return;
+    }
     await showNeuSheet<void>(
       context: context,
       child: Column(
@@ -1167,7 +1133,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           child: Text(
             title,
             style: context.isMaterial
-                ? Theme.of(context).textTheme.titleSmall
+                ? materialSettingsSectionStyle(Theme.of(context))
                 : Theme.of(context).textTheme.bodySmall?.copyWith(
                     fontWeight: FontWeight.w600,
                     letterSpacing: 1.2,
@@ -1255,23 +1221,26 @@ class _SettingItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.neu;
     if (context.isMaterial) {
-      return ListTile(
-        leading: Icon(icon, color: iconColor),
-        title: Text(title),
-        subtitle: subtitle.isEmpty ? null : Text(subtitle),
-        // 右箭头和行首分隔线缩进沿用新拟物分支的行规则:没有 trailing 时
-        // 可点进下一层的行必须画出箭头,否则 Material 模式下这些行看不出能点。
-        // 选择类行用上下双箭头,与进入下一层区分开。
-        trailing: trailing != null || onTap == null
-            ? trailing
-            : Icon(
-                selects
-                    ? Icons.unfold_more_rounded
-                    : Icons.chevron_right_rounded,
-                size: 20,
-                color: colors.textSecondary,
-              ),
-        onTap: onTap,
+      return MaterialPress(
+        builder: (states) => ListTile(
+          statesController: states,
+          leading: Icon(icon, color: iconColor),
+          title: Text(title),
+          subtitle: subtitle.isEmpty ? null : Text(subtitle),
+          // 右箭头和行首分隔线缩进沿用新拟物分支的行规则:没有 trailing 时
+          // 可点进下一层的行必须画出箭头,否则 Material 模式下这些行看不出能点。
+          // 选择类行用上下双箭头,与进入下一层区分开。
+          trailing: trailing != null || onTap == null
+              ? trailing
+              : Icon(
+                  selects
+                      ? Icons.unfold_more_rounded
+                      : Icons.chevron_right_rounded,
+                  size: 20,
+                  color: colors.textSecondary,
+                ),
+          onTap: onTap,
+        ),
       );
     }
     final textTheme = Theme.of(context).textTheme;
