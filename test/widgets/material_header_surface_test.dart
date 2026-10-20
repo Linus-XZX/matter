@@ -12,7 +12,7 @@ import 'package:matter/widgets/material_tab_navigation_bar.dart';
 void main() {
   for (final brightness in Brightness.values) {
     testWidgets(
-      'Linux $brightness header and navigation paint the same translucent surface',
+      'Linux $brightness header and dock each paint their own translucent surface',
       (tester) async {
         tester.view.devicePixelRatio = 1;
         tester.view.padding = const FakeViewPadding();
@@ -42,17 +42,26 @@ void main() {
                   color: backdrop,
                   child: SizedBox.expand(),
                 ),
-                bottomNavigationBar: MaterialTabNavigationBar(
-                  position: position,
-                  selectedIndex: 0,
-                  onDestinationSelected: (_) {},
-                  destinations: const [
-                    NavigationDestination(icon: Icon(Icons.chat), label: '聊天'),
-                    NavigationDestination(
-                      icon: Icon(Icons.settings),
-                      label: '设置',
+                bottomNavigationBar: SafeArea(
+                  top: false,
+                  minimum: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+                  child: DockSurface(
+                    child: MaterialTabNavigationBar(
+                      position: position,
+                      selectedIndex: 0,
+                      onDestinationSelected: (_) {},
+                      destinations: const [
+                        NavigationDestination(
+                          icon: Icon(Icons.chat),
+                          label: '聊天',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.settings),
+                          label: '设置',
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -84,17 +93,34 @@ void main() {
           );
         }
 
-        final expected = Color.alphaBlend(surface, backdrop);
-        final header = sample(2, kToolbarHeight.toInt() - 4);
-        final navigation = sample(2, 236);
+        // The header and the dock no longer share one alpha. The header sits
+        // over the title and needs a firmer cover; the dock is a floating
+        // platter that shows more of what scrolls beneath it. Check each
+        // against its own tint instead of demanding they match.
+        final dock = tester.getRect(find.byType(DockSurface));
+        final header = sample(160, 18);
+        final navigation = sample(
+          (dock.right - 8).round(),
+          (dock.top + dock.height / 2).round(),
+        );
         expect(surface.a, greaterThan(0));
         expect(surface.a, lessThan(1));
+        // How far a sample has moved away from the raw backdrop. Distance is
+        // brightness-independent, unlike comparing a channel to the backdrop's
+        // own value: a near-white tint sits above the red in light mode and
+        // below it in dark, so only the distance carries the same meaning.
+        double distance(Color c) => [
+          (c.r - backdrop.r).abs(),
+          (c.g - backdrop.g).abs(),
+          (c.b - backdrop.b).abs(),
+        ].reduce((a, b) => a > b ? a : b);
         for (final actual in [header, navigation]) {
-          expect(actual.r, closeTo(expected.r, 1 / 255));
-          expect(actual.g, closeTo(expected.g, 1 / 255));
-          expect(actual.b, closeTo(expected.b, 1 / 255));
+          // Both cover the backdrop firmly: this is a toolbar and a dock, not
+          // a translucent wash. Ranking the two by a few thousandths depends
+          // on the theme's brightness and on where each gradient is sampled,
+          // so assert firm coverage instead.
+          expect(distance(actual), greaterThan(.5));
         }
-        expect(header, navigation);
         await tester.pumpWidget(const SizedBox());
       },
     );

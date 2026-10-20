@@ -1792,8 +1792,26 @@ class MessageInputState extends ConsumerState<MessageInput> {
                               vertical: 11,
                             ),
                             border: context.isMaterial
-                                ? OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(28),
+                                ? const OutlineInputBorder(
+                                    borderRadius: BorderRadius.all(
+                                      Radius.circular(28),
+                                    ),
+                                    borderSide: BorderSide.none,
+                                  )
+                                : InputBorder.none,
+                            enabledBorder: context.isMaterial
+                                ? const OutlineInputBorder(
+                                    borderRadius: BorderRadius.all(
+                                      Radius.circular(28),
+                                    ),
+                                    borderSide: BorderSide.none,
+                                  )
+                                : InputBorder.none,
+                            focusedBorder: context.isMaterial
+                                ? const OutlineInputBorder(
+                                    borderRadius: BorderRadius.all(
+                                      Radius.circular(28),
+                                    ),
                                     borderSide: BorderSide.none,
                                   )
                                 : InputBorder.none,

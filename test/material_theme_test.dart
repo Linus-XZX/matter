@@ -23,9 +23,26 @@ void main() {
       final colors = theme.extension<NeuColors>()!;
       expect(theme.useMaterial3, isTrue);
       expect(colors.isMaterial, isTrue);
-      expect(colors.base, theme.colorScheme.surface);
+      // The page is one step off M3's surface so cards can sit on it: in light
+      // mode surface and surfaceBright are both tone 98, so a page on surface
+      // left the card indistinguishable from it.
+      expect(colors.base, theme.scaffoldBackgroundColor);
+      expect(
+        colors.base,
+        brightness == Brightness.dark
+            ? theme.colorScheme.surface
+            : theme.colorScheme.surfaceContainer,
+      );
       expect(colors.text, theme.colorScheme.onSurface);
       expect(colors.accent, theme.colorScheme.primary);
+      expect(
+        theme.appBarTheme.titleTextStyle?.color,
+        theme.colorScheme.onSurface,
+      );
+      expect(
+        theme.dialogTheme.titleTextStyle?.color,
+        theme.colorScheme.onSurface,
+      );
       expect(theme.splashFactory, isNot(NoSplash.splashFactory));
       final luminances = [
         colors.accent.computeLuminance(),
@@ -37,6 +54,23 @@ void main() {
       );
     });
   }
+
+  test(
+    'shared colors interpolate with the Material theme instead of jumping',
+    () {
+      final light = buildMaterialTheme(Brightness.light);
+      final dark = buildMaterialTheme(Brightness.dark);
+      final start = light.extension<NeuColors>()!;
+      final end = dark.extension<NeuColors>()!;
+      final middle = ThemeData.lerp(light, dark, .25).extension<NeuColors>()!;
+      expect(middle.base, Color.lerp(start.base, end.base, .25));
+      expect(middle.card, Color.lerp(start.card, end.card, .25));
+      expect(middle.text, Color.lerp(start.text, end.text, .25));
+      expect(middle.accent, Color.lerp(start.accent, end.accent, .25));
+      expect(middle.glassFill, Color.lerp(start.glassFill, end.glassFill, .25));
+      expect(middle.isMaterial, isTrue);
+    },
+  );
 
   for (final style in AppThemeStyle.values) {
     test('restores persisted ${style.name}', () async {

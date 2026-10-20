@@ -43,7 +43,7 @@ class _HiddenRoomsPageState extends ConsumerState<HiddenRoomsPage> {
       backgroundColor: context.neu.base,
       extendBodyBehindAppBar: true,
       appBar: buildFloatingAppBar(
-        title: Text('隐藏的聊天', style: Theme.of(context).textTheme.titleLarge),
+        title: Text('隐藏的聊天', style: Theme.of(context).textTheme.headlineSmall),
         actions: [
           if (_selectionMode)
             IconButton(
@@ -136,11 +136,17 @@ class _HiddenRoomsPageState extends ConsumerState<HiddenRoomsPage> {
         },
       ),
       floatingActionButton: _selectionMode
-          ? FloatingActionButton.extended(
-              onPressed: _unhideSelected,
-              icon: const Icon(Icons.visibility_outlined),
-              label: Text('显示 ${_selectedRoomIds.length} 个聊天'),
-            )
+          ? context.isMaterial
+                ? FloatingActionButton(
+                    tooltip: '显示 ${_selectedRoomIds.length} 个聊天',
+                    onPressed: _unhideSelected,
+                    child: const Icon(Icons.visibility_outlined),
+                  )
+                : FloatingActionButton.extended(
+                    onPressed: _unhideSelected,
+                    icon: const Icon(Icons.visibility_outlined),
+                    label: Text('显示 ${_selectedRoomIds.length} 个聊天'),
+                  )
           : null,
     );
   }

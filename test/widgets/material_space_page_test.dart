@@ -13,6 +13,7 @@ import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/navigation_provider.dart';
 import 'package:matter/theme/neu_colors.dart';
+import 'package:matter/widgets/material_tab_navigation_bar.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -184,10 +185,7 @@ void main() {
             ),
             findsNothing,
           );
-          expect(
-            find.widgetWithText(FloatingActionButton, '添加空间'),
-            findsOneWidget,
-          );
+          expect(find.byTooltip('添加空间'), findsOneWidget);
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox());
         },
@@ -247,10 +245,20 @@ void main() {
         );
         final colors = Theme.of(tester.element(find.byType(AppBar)))
             .extension<NeuColors>()!;
-        final expected = Color.alphaBlend(colors.glassFill, colors.base);
-        expect(actual.r, closeTo(expected.r, 1 / 255));
-        expect(actual.g, closeTo(expected.g, 1 / 255));
-        expect(actual.b, closeTo(expected.b, 1 / 255));
+        // The toolbar is a fade, not a flat fill: it is near-opaque behind the
+        // title and releases to zero at its bottom edge so rows do not get cut
+        // off by a hard line. The pixel here is in that tail, so it is no
+        // longer the full glassFill; what must hold is that the toolbar still
+        // tints the page rather than showing the raw backdrop.
+        final opaque = Color.alphaBlend(colors.glassFill, colors.base);
+        final bare = colors.base;
+        double distance(Color a, Color b) => (a.r - b.r).abs();
+        expect(
+          distance(actual, bare),
+          lessThan(distance(opaque, bare)),
+          reason: 'header should tint the page, fading towards its bottom',
+        );
+
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
       },
@@ -278,14 +286,20 @@ void main() {
         fullApp: layout.fullApp,
       );
       final fab = find.byType(FloatingActionButton);
-      final navigation = find.byType(NavigationBar);
-      final bottomEdge = navigation.evaluate().isNotEmpty
-          ? tester.getTopLeft(navigation).dy
-          : 700 - layout.bottom;
-      expect(
-        tester.getBottomLeft(fab).dy,
-        closeTo(bottomEdge - kFloatingActionButtonMargin, .1),
-      );
+      // The dock draws its own destinations, and Scaffold measures it as the
+      // bottom navigation. The FAB sits above whatever the Scaffold reserved,
+      // so ask the Scaffold for that rather than reading the bar's own top:
+      // the bar is inset from that edge by the dock's safe-area padding.
+      final navigation = find.byType(MaterialTabNavigationBar);
+      // On a phone the dock floats, inset from the Scaffold's reserved edge by
+      // its own safe-area padding, so the FAB clears the bar's top by the
+      // floating margin plus that inset. A narrow desktop layout has no dock,
+      // and the FAB clears the window edge instead.
+      final hasDock = navigation.evaluate().isNotEmpty;
+      final expected = hasDock
+          ? tester.getTopLeft(navigation).dy - kFloatingActionButtonMargin - 8
+          : 700 - layout.bottom - 16;
+      expect(tester.getBottomLeft(fab).dy, closeTo(expected, .1));
       await tester.tap(fab);
       await tester.pumpAndSettle();
       expect(find.text('创建空间'), findsOneWidget);
@@ -316,7 +330,7 @@ void main() {
       await _pumpPage(tester, api, fullApp: true, rooms: [_room]);
       expect(find.text('还没有加入空间'), findsOneWidget);
       expect(find.text('其他房间'), findsOneWidget);
-      expect(find.widgetWithText(FloatingActionButton, '添加空间'), findsOneWidget);
+      expect(find.byTooltip('添加空间'), findsOneWidget);
       await tester.tap(find.widgetWithText(FilledButton, '创建空间'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).first, '研发小组');

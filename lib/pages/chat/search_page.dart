@@ -11,7 +11,7 @@ import '../../widgets/app_avatar.dart';
 import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
-import '../../widgets/neu_field.dart';
+import '../../widgets/app_search_field.dart';
 import '../../widgets/neu_surface.dart';
 import 'chat_detail_page.dart';
 import 'chat_list_item.dart';
@@ -137,15 +137,15 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
-    final searchField = NeuTextField(
+    final searchFieldRowHeight = context.isMaterial
+        ? 68.0
+        : _searchFieldRowHeight;
+    final searchField = AppSearchField(
       key: const ValueKey('chat-search-field'),
       controller: _controller,
       focusNode: _focusNode,
       hint: _isRoomSearch ? '搜索此聊天的消息' : '搜索消息或聊天',
-      radius: context.isMaterial ? 28 : NeuRadius.content,
-      leading: const Icon(Icons.search_rounded),
       textInputAction: TextInputAction.search,
-      autofocus: false,
       trailing: _query.isEmpty
           ? null
           : context.isMaterial
@@ -191,16 +191,18 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
               Tab(text: '消息'),
               Tab(text: '聊天'),
             ],
-            labelColor: colors.accent,
-            unselectedLabelColor: colors.textTertiary,
-            indicatorColor: colors.accent,
-            dividerColor: colors.hairline,
+            labelColor: context.isMaterial ? null : colors.accent,
+            unselectedLabelColor: context.isMaterial
+                ? null
+                : colors.textTertiary,
+            indicatorColor: context.isMaterial ? null : colors.accent,
+            dividerColor: context.isMaterial ? null : colors.hairline,
           );
     // 浮动标题栏的高度(搜索框行 + 标签栏),同时用作结果列表的顶部内边距
     // 和渐变模糊层的高度,结果滚动时从标题栏下方穿过。
     final viewPaddingTop = MediaQuery.viewPaddingOf(context).top;
     final headerHeight =
-        _searchFieldRowHeight + (tabBar?.preferredSize.height ?? 0);
+        searchFieldRowHeight + (tabBar?.preferredSize.height ?? 0);
     final topInset = viewPaddingTop + headerHeight;
 
     final messageSearchKey = ValueKey(
@@ -235,7 +237,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
           );
 
     final scaffold = Scaffold(
-      backgroundColor: colors.base,
+      backgroundColor: context.isMaterial ? null : colors.base,
       extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
           ? buildFloatingAppBar(
@@ -244,7 +246,7 @@ class _ChatSearchPageState extends ConsumerState<ChatSearchPage>
                 tooltip: '返回',
                 onPressed: () => Navigator.of(context).maybePop(),
               ),
-              toolbarHeight: _searchFieldRowHeight,
+              toolbarHeight: searchFieldRowHeight,
               title: searchField,
               bottom: tabBar,
             )

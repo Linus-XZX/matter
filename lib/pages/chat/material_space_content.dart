@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../src/rust/api/matrix.dart';
 import '../../widgets/app_avatar.dart';
+import '../../widgets/material_press.dart';
 import 'chat_list_item.dart';
 import 'space_detail_page.dart';
 
@@ -130,37 +131,36 @@ class _SpaceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Card.filled(
-      margin: EdgeInsets.zero,
-      color: theme.colorScheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => SpaceDetailPage(space: space),
+    return MaterialPress(
+      builder: (states) => Card(
+        child: InkWell(
+          statesController: states,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SpaceDetailPage(space: space),
+            ),
           ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              AppAvatar(fallback: space.name, size: 48, url: space.avatarUrl),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Text(
-                  space.name,
-                  style: theme.textTheme.titleMedium,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                AppAvatar(fallback: space.name, size: 48, url: space.avatarUrl),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text(
+                    space.name,
+                    style: theme.textTheme.titleMedium,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                Icons.chevron_right_rounded,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ],
+                const SizedBox(width: 8),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ],
+            ),
           ),
         ),
       ),

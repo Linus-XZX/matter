@@ -158,42 +158,69 @@ void main() {
     );
   }
 
-  testWidgets('Material keeps new chat in the translucent top header', (
-    tester,
-  ) async {
-    final container = ProviderContainer(
-      overrides: [
-        inboxRoomsProvider.overrideWith((ref) => const AsyncData([])),
-      ],
-    );
-    addTearDown(container.dispose);
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: MaterialApp(
-          theme: neuTestTheme(material: true),
-          home: const ChatPage(),
+  testWidgets(
+    'Material keeps an icon-only new chat FAB below the fading header',
+    (tester) async {
+      final container = ProviderContainer(
+        overrides: [
+          inboxRoomsProvider.overrideWith((ref) => const AsyncData([])),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: neuTestTheme(material: true),
+            home: const ChatPage(),
+          ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    final appBar = find.byType(AppBar);
-    expect(
-      find.descendant(of: appBar, matching: find.byTooltip('新聊天')),
-      findsOneWidget,
-    );
-    expect(find.byTooltip('搜索'), findsNothing);
-    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-    expect(scaffold.appBar == null || scaffold.extendBodyBehindAppBar, isTrue);
-    expect(find.byType(TopFadeBlur), findsOneWidget);
-    final fade = tester.widget<ColoredBox>(
-      find.descendant(
-        of: find.byType(TopFadeBlur),
-        matching: find.byType(ColoredBox),
-      ),
-    );
-    expect(fade.color, tester.element(appBar).neu.glassFill);
-    expect(fade.color.a, greaterThan(0));
-    expect(fade.color.a, lessThan(1));
-  });
+      );
+      await tester.pumpAndSettle();
+      final appBar = find.byType(AppBar);
+      final fab = find.byType(FloatingActionButton);
+      expect(fab, findsOneWidget);
+      expect(
+        find.descendant(of: fab, matching: find.byTooltip('新聊天')),
+        findsOneWidget,
+      );
+      final fabSize = tester.getSize(fab);
+      expect(fabSize.width, fabSize.height);
+      expect(
+        find.descendant(of: fab, matching: find.byType(Text)),
+        findsNothing,
+      );
+      expect(
+        tester.getTopLeft(fab).dy,
+        greaterThan(tester.getBottomLeft(appBar).dy),
+      );
+      expect(find.byTooltip('搜索'), findsNothing);
+      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+      expect(
+        scaffold.appBar == null || scaffold.extendBodyBehindAppBar,
+        isTrue,
+      );
+      expect(find.byType(TopFadeBlur), findsOneWidget);
+      final fade = tester.widget<DecoratedBox>(
+        find.descendant(
+          of: find.byType(TopFadeBlur),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is DecoratedBox &&
+                widget.decoration is BoxDecoration &&
+                (widget.decoration as BoxDecoration).gradient is LinearGradient,
+          ),
+        ),
+      );
+      final gradient =
+          (fade.decoration as BoxDecoration).gradient! as LinearGradient;
+      expect(
+        gradient.colors.first.withValues(alpha: 1),
+        tester.element(appBar).neu.base,
+      );
+      expect(gradient.colors.first.a, greaterThan(0));
+      expect(gradient.colors.first.a, lessThan(1));
+      expect(gradient.colors.last.a, 0);
+    },
+  );
 }

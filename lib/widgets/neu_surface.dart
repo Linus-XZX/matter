@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../providers/chat_visual_settings_provider.dart';
 import '../theme/neu_colors.dart';
+import 'material_press.dart';
 import 'neu_action.dart';
 import 'neu_decoration.dart';
 
@@ -37,7 +38,7 @@ class NeuSurface extends StatelessWidget {
     if (context.isMaterial) {
       return Material(
         color: accent ? context.neu.accent : (color ?? context.neu.surface),
-        shape: RoundedRectangleBorder(
+        shape: RoundedSuperellipseBorder(
           borderRadius: BorderRadius.circular(radius),
           side: borderColor == null
               ? BorderSide.none
@@ -109,7 +110,7 @@ class _NeuButtonState extends State<NeuButton> {
   Widget build(BuildContext context) {
     final colors = context.neu;
     if (context.isMaterial) {
-      final style = ButtonStyle(
+      final style = MaterialPress.feedbackStyle.copyWith(
         padding: WidgetStatePropertyAll(widget.padding),
       );
       final content = widget.icon == null
@@ -122,17 +123,21 @@ class _NeuButtonState extends State<NeuButton> {
                 Flexible(child: widget.child),
               ],
             );
-      return widget.accent
-          ? FilledButton(
-              onPressed: widget.onPressed,
-              style: style,
-              child: content,
-            )
-          : FilledButton.tonal(
-              onPressed: widget.onPressed,
-              style: style,
-              child: content,
-            );
+      return MaterialPress(
+        builder: (states) => widget.accent
+            ? FilledButton(
+                statesController: states,
+                onPressed: widget.onPressed,
+                style: style,
+                child: content,
+              )
+            : FilledButton.tonal(
+                statesController: states,
+                onPressed: widget.onPressed,
+                style: style,
+                child: content,
+              ),
+      );
     }
     final enabled = widget.onPressed != null;
     var child = DefaultTextStyle.merge(
@@ -229,32 +234,39 @@ class _NeuIconButtonState extends State<NeuIconButton> {
         maximumSize: Size.square(widget.size),
         padding: EdgeInsets.zero,
         iconSize: widget.size * .44,
-      );
+      ).merge(MaterialPress.feedbackStyle);
       final icon = widget.badge
           ? Badge(child: Icon(widget.icon))
           : Icon(widget.icon);
-      if (widget.accent) {
-        return IconButton.filled(
-          style: style,
-          onPressed: widget.onPressed,
-          tooltip: widget.tooltip,
-          icon: icon,
-        );
-      }
-      if (widget.selected) {
-        return IconButton.filledTonal(
-          style: style,
-          isSelected: true,
-          onPressed: widget.onPressed,
-          tooltip: widget.tooltip,
-          icon: icon,
-        );
-      }
-      return IconButton(
-        style: style,
-        onPressed: widget.onPressed,
-        tooltip: widget.tooltip,
-        icon: icon,
+      return MaterialPress(
+        builder: (states) {
+          if (widget.accent) {
+            return IconButton.filled(
+              statesController: states,
+              style: style,
+              onPressed: widget.onPressed,
+              tooltip: widget.tooltip,
+              icon: icon,
+            );
+          }
+          if (widget.selected) {
+            return IconButton.filledTonal(
+              statesController: states,
+              style: style,
+              isSelected: true,
+              onPressed: widget.onPressed,
+              tooltip: widget.tooltip,
+              icon: icon,
+            );
+          }
+          return IconButton(
+            statesController: states,
+            style: style,
+            onPressed: widget.onPressed,
+            tooltip: widget.tooltip,
+            icon: icon,
+          );
+        },
       );
     }
     final enabled = widget.onPressed != null;

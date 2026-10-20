@@ -122,11 +122,11 @@ class TopFadeBlur extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.neu;
-    if (context.isMaterial) {
-      return ColoredBox(color: colors.glassFill);
-    }
     final settings = ChatVisualSettingsScope.maybeOf(context);
-    if (!(settings?.chatBlurEnabled ?? true)) {
+    // 新拟物把「模糊」当成用户可关的装饰,Material 里它是工具栏的结构:
+    // 内容从下面滚过去就应当被磨砂挡住,而不是从一块纯色板下露出来。
+    // 因此 Material 分支只关掉条带兜底(shader 可用时),不整体退化成纯色。
+    if (!(settings?.chatBlurEnabled ?? true) && !context.isMaterial) {
       return DecoratedBox(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -150,14 +150,29 @@ class TopFadeBlur extends StatelessWidget {
       useShader: useShader,
       // 覆盖率按平方曲线渐出:靠近内容侧几乎透明,
       // 配合模糊条带实现"从无到有"的柔和过渡。
-      colors: [
-        colors.base.withValues(alpha: .96),
-        colors.base.withValues(alpha: .54),
-        colors.base.withValues(alpha: .24),
-        colors.base.withValues(alpha: .06),
-        colors.base.withValues(alpha: 0),
-      ],
-      stops: const [0, .25, .5, .75, 1],
+      //
+      // Material 的工具栏里坐着一个标题和几个图标按钮,它们占掉大半高度,
+      // 所以着色不能像新拟物那样在 50% 处就退到 .24:否则标题压在近乎透明
+      // 的一层上,滚过去的内容会直接从字缝里透出来。这里把不透明段拉到
+      // 74%,只留最后一小段做渐隐。
+      colors: context.isMaterial
+          ? [
+              colors.base.withValues(alpha: .98),
+              colors.base.withValues(alpha: .96),
+              colors.base.withValues(alpha: .72),
+              colors.base.withValues(alpha: .3),
+              colors.base.withValues(alpha: 0),
+            ]
+          : [
+              colors.base.withValues(alpha: .96),
+              colors.base.withValues(alpha: .54),
+              colors.base.withValues(alpha: .24),
+              colors.base.withValues(alpha: .06),
+              colors.base.withValues(alpha: 0),
+            ],
+      stops: context.isMaterial
+          ? const [0, .55, .74, .88, 1]
+          : const [0, .25, .5, .75, 1],
     );
   }
 }
