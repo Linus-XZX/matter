@@ -435,6 +435,8 @@ class _AppRootState extends ConsumerState<_AppRoot>
               ? Brightness.light
               : Brightness.dark,
           systemNavigationBarDividerColor: Colors.transparent,
+          systemNavigationBarContrastEnforced: false,
+          systemStatusBarContrastEnforced: false,
         ),
       );
     });

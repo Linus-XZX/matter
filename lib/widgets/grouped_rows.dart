@@ -17,13 +17,13 @@ class GroupedRows extends StatelessWidget {
   const GroupedRows({
     super.key,
     required this.children,
-    this.radius = NeuRadius.surface,
+    this.radius,
     this.dividerIndent = NeuSpacing.rowTitleInset,
     this.dividerEndIndent = NeuSpacing.lg,
   });
 
   final List<Widget> children;
-  final double radius;
+  final double? radius;
 
   /// 分隔线左缩进,默认对齐行标题。
   final double dividerIndent;
@@ -34,9 +34,11 @@ class GroupedRows extends StatelessWidget {
     final colors = context.neu;
     return Material(
       color: colors.card,
-      shape: RoundedSuperellipseBorder(
-        borderRadius: BorderRadius.circular(radius),
-      ),
+      shape: radius == null
+          ? Theme.of(context).cardTheme.shape
+          : RoundedSuperellipseBorder(
+              borderRadius: BorderRadius.circular(radius!),
+            ),
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

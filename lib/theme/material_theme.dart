@@ -5,6 +5,54 @@ import 'neu_colors.dart';
 
 const defaultMaterialSeedColor = Color(0xFF5B8DEF);
 
+const double materialListAvatarSize = 44;
+const double materialDenseListAvatarSize = 40;
+const double materialListContentGap = 12;
+const double materialSurfaceRadius = 28;
+const materialListItemShape = RoundedRectangleBorder(
+  borderRadius: BorderRadius.all(Radius.circular(materialSurfaceRadius)),
+);
+
+TextStyle? materialListTitleStyle(ThemeData theme, {bool unread = false}) =>
+    theme.textTheme.titleMedium?.copyWith(
+      fontSize: 16,
+      fontWeight: unread ? FontWeight.w600 : FontWeight.w500,
+    );
+
+TextTheme materialConversationTextTheme(
+  ThemeData theme, {
+  required bool unread,
+  required bool muted,
+}) => theme.textTheme.copyWith(
+  titleMedium: materialListTitleStyle(theme, unread: unread),
+  bodyMedium: theme.textTheme.bodyMedium?.copyWith(
+    color: unread
+        ? theme.colorScheme.onSurface
+        : theme.colorScheme.onSurfaceVariant,
+  ),
+  labelSmall: theme.textTheme.labelSmall?.copyWith(
+    color: unread && !muted
+        ? theme.colorScheme.primary
+        : theme.colorScheme.onSurfaceVariant,
+  ),
+);
+
+({Color fill, Color foreground, TextStyle? title, TextStyle? subtitle})
+materialProfileCardStyle(ThemeData theme) => (
+  fill: theme.cardTheme.color ?? theme.colorScheme.surfaceContainerLow,
+  foreground: theme.colorScheme.onSurfaceVariant,
+  title: theme.textTheme.titleMedium?.copyWith(
+    fontSize: 18,
+    color: theme.colorScheme.onSurface,
+  ),
+  subtitle: theme.textTheme.bodyMedium,
+);
+
+TextStyle? materialSettingsSectionStyle(ThemeData theme) => theme
+    .textTheme
+    .titleSmall
+    ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+
 const materialPreviewBubbleShape = RoundedSuperellipseBorder(
   borderRadius: BorderRadius.all(Radius.circular(12)),
 );
@@ -126,8 +174,8 @@ ThemeData buildMaterialTheme(
   // 分隔线取正文色的 14%,不用 outlineVariant:后者在深色页上比对浅色页重一倍,
   // 还会带种子的色偏。
   final hairline = scheme.onSurface.withValues(alpha: .14);
-  const surfaceShape = RoundedSuperellipseBorder(
-    borderRadius: BorderRadius.all(Radius.circular(NeuRadius.surface)),
+  const surfaceShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.all(Radius.circular(materialSurfaceRadius)),
   );
   const buttonShape = StadiumBorder();
   const overlayShape = RoundedSuperellipseBorder(
@@ -249,6 +297,20 @@ ThemeData buildMaterialTheme(
       prefixIconColor: scheme.onSurfaceVariant,
       suffixIconColor: scheme.onSurfaceVariant,
     ),
+    searchBarTheme: SearchBarThemeData(
+      elevation: const WidgetStatePropertyAll(0),
+      backgroundColor: WidgetStatePropertyAll(surfaces.card),
+      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      shape: const WidgetStatePropertyAll(buttonShape),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 16),
+      ),
+      constraints: const BoxConstraints(minHeight: 56),
+      textStyle: WidgetStatePropertyAll(text.bodyLarge),
+      hintStyle: WidgetStatePropertyAll(
+        text.bodyLarge?.copyWith(color: scheme.onSurfaceVariant),
+      ),
+    ),
     chipTheme: ChipThemeData(
       backgroundColor: scheme.surfaceContainer,
       selectedColor: scheme.primary,
@@ -301,7 +363,7 @@ ThemeData buildMaterialTheme(
       hoverElevation: 2,
       highlightElevation: 4,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(NeuRadius.content)),
+        borderRadius: BorderRadius.all(Radius.circular(16)),
       ),
     ),
     switchTheme: SwitchThemeData(
