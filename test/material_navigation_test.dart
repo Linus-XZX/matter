@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/app.dart';
+import 'package:matter/pages/chat/create_chat_page.dart';
 import 'package:matter/pages/settings/material_color_settings_page.dart';
 import 'package:matter/providers/material_color_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
@@ -85,6 +86,21 @@ void main() {
           find.byType(desktop ? NavigationRail : MaterialTabNavigationBar),
           findsOneWidget,
         );
+        if (!desktop) {
+          final compose = find.byKey(const ValueKey('new-chat-action'));
+          expect(compose, findsOneWidget);
+          expect(
+            tester.getBottomLeft(compose).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('material-dock'))).dy,
+            ),
+          );
+          await tester.tap(compose);
+          await tester.pumpAndSettle();
+          expect(find.byType(CreateChatPage), findsOneWidget);
+          await tester.tap(find.byType(BackButton));
+          await tester.pumpAndSettle();
+        }
         for (final destination in [
           (label: '空间', icon: Icons.workspaces_outline),
           (label: '通讯录', icon: Icons.people_outline),

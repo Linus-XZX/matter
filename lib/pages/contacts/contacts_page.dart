@@ -6,12 +6,13 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../src/rust/api/matrix.dart' hide redactMessage;
+import '../../theme/material_theme.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
 import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
-import '../../widgets/neu_field.dart';
+import '../../widgets/app_search_field.dart';
 import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
 import '../chat/action_failure_message.dart';
@@ -143,13 +144,11 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                         NeuSpacing.lg,
                         NeuSpacing.sm,
                       ),
-                      child: NeuTextField(
+                      child: AppSearchField(
                         key: const ValueKey('contacts-search-entry'),
                         controller: _searchController,
                         focusNode: _searchFocusNode,
                         hint: '搜索联系人',
-                        radius: context.isMaterial ? 28 : NeuRadius.content,
-                        leading: const Icon(Icons.search_rounded),
                         onChanged: (value) {
                           setState(() => _searchQuery = value.toLowerCase());
                         },
@@ -188,9 +187,13 @@ class _ContactsPageState extends ConsumerState<ContactsPage> {
                       ),
                       sliver: SliverList.separated(
                         itemCount: filtered.length,
-                        // 与条目内边距对齐:水平 8 + 头像 48 + 间隔 14。
-                        separatorBuilder: (context, index) =>
-                            const ChatListDivider(indent: 8 + 48 + 14),
+                        separatorBuilder: (context, index) => ChatListDivider(
+                          indent: context.isMaterial
+                              ? 12 +
+                                    materialListAvatarSize +
+                                    materialListContentGap
+                              : 8 + 48 + 14,
+                        ),
                         itemBuilder: (context, index) {
                           final contact = filtered[index];
                           return _ContactTile(
@@ -450,18 +453,22 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
   Widget build(BuildContext context) {
     final contact = widget.contact;
     return NeuAction(
-      radius: NeuRadius.content,
+      radius: context.isMaterial ? materialSurfaceRadius : NeuRadius.content,
       onTap: _showProfile,
       onPressedChanged: (value) => setState(() => _pressed = value),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 110),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        padding: EdgeInsets.symmetric(
+          horizontal: context.isMaterial ? 12 : 8,
+          vertical: 10,
+        ),
         decoration: ShapeDecoration(
           color: _pressed ? context.neu.accentSoft : null,
-          shape:
-              (ChatVisualSettingsScope.maybeOf(context)
-                      ?.superellipseBorderEnabled ??
-                  true)
+          shape: context.isMaterial
+              ? materialListItemShape
+              : (ChatVisualSettingsScope.maybeOf(context)
+                        ?.superellipseBorderEnabled ??
+                    true)
               ? RoundedSuperellipseBorder(
                   borderRadius: BorderRadius.circular(NeuRadius.content),
                 )
@@ -473,36 +480,49 @@ class _ContactTileState extends ConsumerState<_ContactTile> {
           children: [
             AppAvatar(
               fallback: contact.name,
-              size: 48,
+              size: context.isMaterial ? materialListAvatarSize : 48,
               radius: NeuRadius.content,
               url: _resolvedAvatarUrl,
             ),
-            const SizedBox(width: 14),
+            SizedBox(width: context.isMaterial ? materialListContentGap : 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     contact.name,
-                    style: Theme.of(context).textTheme.titleMedium,
+                    maxLines: context.isMaterial ? 1 : null,
+                    overflow: context.isMaterial ? TextOverflow.ellipsis : null,
+                    style: context.isMaterial
+                        ? materialListTitleStyle(Theme.of(context))
+                        : Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 2),
                   Text(
                     contact.status,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+                    style: context.isMaterial
+                        ? Theme.of(context).textTheme.bodyMedium
+                        : Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),
             ),
             const SizedBox(width: NeuSpacing.sm),
-            NeuIconButton(
-              icon: Icons.chat_bubble_outline_rounded,
-              size: 36,
-              tooltip: '发消息',
-              onPressed: _creatingDm ? null : _createDm,
-            ),
+            if (context.isMaterial)
+              IconButton(
+                icon: const Icon(Icons.chat_bubble_outline_rounded),
+                tooltip: '发消息',
+                onPressed: _creatingDm ? null : _createDm,
+              )
+            else
+              NeuIconButton(
+                icon: Icons.chat_bubble_outline_rounded,
+                size: 36,
+                tooltip: '发消息',
+                onPressed: _creatingDm ? null : _createDm,
+              ),
           ],
         ),
       ),

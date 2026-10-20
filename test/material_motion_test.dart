@@ -158,9 +158,11 @@ void main() {
     const ChatSearchPage(),
     const ContactsPage(),
   ]) {
-    testWidgets('${page.runtimeType} has a rounded Material search field', (
+    testWidgets('${page.runtimeType} uses an accessible Material search bar', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final container = ProviderContainer(
         overrides: [
           allChatRoomsProvider.overrideWith((ref) async => []),
@@ -178,28 +180,71 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final decorator = tester.widget<InputDecorator>(
-        find.byType(InputDecorator).first,
+      final search = find.byType(SearchBar);
+      expect(search, findsOneWidget);
+      expect(tester.getSize(search).height, greaterThanOrEqualTo(56));
+      final surface = tester.widget<Material>(
+        find.descendant(of: search, matching: find.byType(Material)).first,
       );
-      final border =
-          decorator.decoration.enabledBorder ?? decorator.decoration.border;
-      expect(border, isA<OutlineInputBorder>());
-      expect(
-        (border! as OutlineInputBorder).borderRadius,
-        BorderRadius.circular(28),
-      );
-      await tester.tap(find.byType(TextField).first, warnIfMissed: false);
+      expect(surface.shape, isA<StadiumBorder>());
+      await tester.tap(search);
       await tester.pumpAndSettle();
-      final focused = tester.widget<InputDecorator>(
-        find.byType(InputDecorator).first,
-      );
       expect(
-        (focused.decoration.focusedBorder! as OutlineInputBorder).borderRadius,
-        BorderRadius.circular(28),
+        tester.widget<SearchBar>(find.byType(SearchBar)).focusNode!.hasFocus,
+        isTrue,
       );
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
   }
+
+  testWidgets(
+    'Material contact search filters names and status with enlarged text',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            contactsProvider.overrideWith(
+              (ref) async => const [
+                rust.Contact(
+                  id: '@rain:example.org',
+                  name: 'Rain',
+                  status: 'Coffee time',
+                ),
+                rust.Contact(
+                  id: '@forest:example.org',
+                  name: 'Forest',
+                  status: 'On the road',
+                ),
+              ],
+            ),
+          ],
+          child: MaterialApp(
+            theme: buildMaterialTheme(Brightness.dark),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: const ContactsPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'COFFEE');
+      await tester.pumpAndSettle();
+      expect(find.text('Rain'), findsOneWidget);
+      expect(find.text('Forest'), findsNothing);
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      expect(find.text('Rain'), findsOneWidget);
+      expect(find.text('Forest'), findsOneWidget);
+      expect(find.byTooltip('发消息'), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('room refresh preserves visible rows and scroll position', (
     tester,

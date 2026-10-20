@@ -51,11 +51,10 @@ class SpacePage extends ConsumerWidget {
             )
           : null,
       floatingActionButton: context.isMaterial && showFloatingActionButton
-          ? FloatingActionButton.extended(
+          ? FloatingActionButton(
               tooltip: '添加空间',
               onPressed: () => showSpaceActions(context),
-              icon: const Icon(Icons.add),
-              label: const Text('添加空间'),
+              child: const Icon(Icons.add),
             )
           : null,
       body: context.isMaterial

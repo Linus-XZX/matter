@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'features/push/push_runtime.dart';
 import 'pages/chat/chat_detail_page.dart';
+import 'pages/chat/create_chat_page.dart';
 import 'pages/chat/chat_page.dart';
 import 'pages/chat/desktop_room_details_panel.dart';
 import 'pages/chat/room_metadata_patch.dart';
@@ -495,7 +496,7 @@ class _MatterAppState extends ConsumerState<MatterApp> {
           position: _tabPosition,
           onChanged: _onItemTapped,
           children: [
-            _pages[0],
+            const ChatPage(showFloatingActionButton: false),
             const SpacePage(showFloatingActionButton: false),
             _pages[2],
             _pages[3],
@@ -503,14 +504,22 @@ class _MatterAppState extends ConsumerState<MatterApp> {
         ),
         // Keep the FAB with the navigation bar and snack bars so Scaffold can
         // position it above both, including the system's bottom safe area.
-        floatingActionButton: navigationIndex == 1
-            ? FloatingActionButton.extended(
-                tooltip: '添加空间',
-                onPressed: () => SpacePage.showSpaceActions(context),
-                icon: const Icon(Icons.add),
-                label: const Text('添加空间'),
-              )
-            : null,
+        floatingActionButton: switch (navigationIndex) {
+          0 => FloatingActionButton(
+            key: const ValueKey('new-chat-action'),
+            tooltip: '新聊天',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const CreateChatPage()),
+            ),
+            child: const Icon(Icons.edit_outlined),
+          ),
+          1 => FloatingActionButton(
+            tooltip: '添加空间',
+            onPressed: () => SpacePage.showSpaceActions(context),
+            child: const Icon(Icons.add),
+          ),
+          _ => null,
+        },
         bottomNavigationBar: _buildMaterialDock(navigationIndex),
       );
     }

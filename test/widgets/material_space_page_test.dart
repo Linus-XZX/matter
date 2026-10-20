@@ -185,10 +185,7 @@ void main() {
             ),
             findsNothing,
           );
-          expect(
-            find.widgetWithText(FloatingActionButton, '添加空间'),
-            findsOneWidget,
-          );
+          expect(find.byTooltip('添加空间'), findsOneWidget);
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox());
         },
@@ -333,7 +330,7 @@ void main() {
       await _pumpPage(tester, api, fullApp: true, rooms: [_room]);
       expect(find.text('还没有加入空间'), findsOneWidget);
       expect(find.text('其他房间'), findsOneWidget);
-      expect(find.widgetWithText(FloatingActionButton, '添加空间'), findsOneWidget);
+      expect(find.byTooltip('添加空间'), findsOneWidget);
       await tester.tap(find.widgetWithText(FilledButton, '创建空间'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).first, '研发小组');

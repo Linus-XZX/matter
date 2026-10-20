@@ -11,7 +11,7 @@ import '../../widgets/cascade_title.dart';
 import '../../widgets/floating_app_bar.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/neu_action.dart';
-import '../../widgets/neu_field.dart';
+import '../../widgets/app_search_field.dart';
 import '../../widgets/neu_surface.dart';
 import 'create_chat_page.dart';
 import 'chat_list_item.dart';
@@ -27,6 +27,7 @@ class ChatPage extends ConsumerStatefulWidget {
   final String? spaceId;
   final bool directMessagesOnly;
   final bool ungroupedRoomsOnly;
+  final bool showFloatingActionButton;
 
   const ChatPage({
     super.key,
@@ -38,6 +39,7 @@ class ChatPage extends ConsumerStatefulWidget {
     this.spaceId,
     this.directMessagesOnly = false,
     this.ungroupedRoomsOnly = false,
+    this.showFloatingActionButton = true,
   }) : assert(!directMessagesOnly || !ungroupedRoomsOnly);
 
   @override
@@ -112,13 +114,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       onTap: _openSearch,
       child: ExcludeFocus(
         child: ExcludeSemantics(
-          child: IgnorePointer(
-            child: NeuTextField(
-              hint: '搜索消息或聊天',
-              radius: context.isMaterial ? 28 : NeuRadius.content,
-              leading: const Icon(Icons.search),
-            ),
-          ),
+          child: IgnorePointer(child: const AppSearchField(hint: '搜索消息或聊天')),
         ),
       ),
     );
@@ -171,11 +167,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                         ),
                       ),
                     ),
-                  NeuIconButton(
-                    icon: Icons.edit_outlined,
-                    tooltip: '新聊天',
-                    onPressed: _openCreateChat,
-                  ),
+                  if (widget.embedded)
+                    NeuIconButton(
+                      icon: Icons.edit_outlined,
+                      tooltip: '新聊天',
+                      onPressed: _openCreateChat,
+                    ),
                 ],
               ),
             ),
@@ -479,6 +476,14 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
     final topInset = MediaQuery.viewPaddingOf(context).top;
     return Scaffold(
+      floatingActionButton:
+          context.isMaterial && widget.showFloatingActionButton
+          ? FloatingActionButton(
+              tooltip: '新聊天',
+              onPressed: _openCreateChat,
+              child: const Icon(Icons.edit_outlined),
+            )
+          : null,
       body: Stack(
         children: [
           Positioned.fill(
