@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/settings/material_color_settings_page.dart';
+import 'package:matter/pages/settings/material_scheme_preview.dart';
 import 'package:matter/providers/material_color_provider.dart';
 import 'package:matter/providers/theme_provider.dart';
 import 'package:matter/theme/material_theme.dart';
@@ -53,14 +54,17 @@ class _ColorApp extends ConsumerWidget {
 }
 
 Future<void> _tapChip(WidgetTester tester, String label) async {
-  final chip = find.widgetWithText(ChoiceChip, label);
+  final tooltipFinder = find.byTooltip(label);
+  final target = tooltipFinder.evaluate().isNotEmpty
+      ? tooltipFinder
+      : find.text(label);
   final scrollable = find.byType(Scrollable).first;
   tester.state<ScrollableState>(scrollable).position.jumpTo(0);
   await tester.pumpAndSettle();
-  await tester.scrollUntilVisible(chip, 200, scrollable: scrollable);
-  await Scrollable.ensureVisible(tester.element(chip), alignment: .5);
+  await tester.scrollUntilVisible(target, 200, scrollable: scrollable);
+  await Scrollable.ensureVisible(tester.element(target.first), alignment: .5);
   await tester.pumpAndSettle();
-  await tester.tap(chip);
+  await tester.tap(target.first);
   await tester.pumpAndSettle();
 }
 
@@ -362,6 +366,148 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'system swatch restores the system palette after a manual choice',
+    (tester) async {
+      _mockSystem(accent: Colors.green);
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const _ColorApp(brightness: Brightness.light),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _tapChip(tester, '紫色');
+      await _tapChip(tester, '跟随系统配色');
+      expect(
+        container.read(materialColorSettingsProvider).followSystem,
+        isTrue,
+      );
+      expect(
+        container.read(materialColorSchemesProvider).light.primary,
+        ColorScheme.fromSeed(seedColor: Colors.green).primary,
+      );
+      final style = tester.widget<ListTile>(
+        find.widgetWithText(ListTile, '色彩风格'),
+      );
+      expect(style.onTap, isNull);
+      expect(find.text('由系统配色决定'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('style picker updates both live previews and the app palette', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const _ColorApp(brightness: Brightness.light),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _tapChip(tester, '紫色');
+    await _tapChip(tester, '色彩风格');
+    await tester.tap(find.text('生动'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(materialColorSettingsProvider).colorStyle,
+      DynamicSchemeVariant.vibrant,
+    );
+    final previews = tester
+        .widgetList<MaterialSchemePreview>(find.byType(MaterialSchemePreview))
+        .toList();
+    const brightnesses = [Brightness.light, Brightness.dark];
+    for (var i = 0; i < brightnesses.length; i++) {
+      expect(
+        previews[i].scheme,
+        ColorScheme.fromSeed(
+          seedColor: const Color(0xFF8B5CF6),
+          brightness: brightnesses[i],
+          dynamicSchemeVariant: DynamicSchemeVariant.vibrant,
+        ),
+      );
+    }
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'custom colors validate input, select, and delete without losing the page',
+    (tester) async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const _ColorApp(brightness: Brightness.dark),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _tapChip(tester, '添加自定义颜色');
+      await tester.enterText(find.byType(TextField), '#xyz');
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+      expect(find.text('请输入有效的 6 位颜色代码'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '#123456');
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(
+        container.read(materialColorSettingsProvider).seedColor,
+        const Color(0xFF123456),
+      );
+      await tester.longPress(find.byTooltip('#123456 (长按删除)'));
+      await tester.pumpAndSettle();
+      expect(
+        container.read(materialColorSettingsProvider).customColors,
+        isEmpty,
+      );
+      expect(
+        container.read(materialColorSettingsProvider).seedColor,
+        defaultMaterialSeedColor,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('background thumbnails retain the original tonal palette', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await container
+        .read(materialColorSettingsProvider.notifier)
+        .setBackground(Brightness.light, MaterialBackground.pure);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const _ColorApp(brightness: Brightness.light),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _tapChip(tester, '纯白');
+    final thumbnail = tester.widget<MaterialSchemeThumbnail>(
+      find.descendant(
+        of: find.widgetWithText(ListTile, '随主题色').first,
+        matching: find.byType(MaterialSchemeThumbnail),
+      ),
+    );
+    expect(
+      thumbnail.scheme,
+      ColorScheme.fromSeed(seedColor: defaultMaterialSeedColor),
+    );
+    expect(
+      container.read(materialColorSchemesProvider).light.surface,
+      Colors.white,
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'palette page clears the actual toolbar and supports enlarged text',

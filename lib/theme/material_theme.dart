@@ -5,6 +5,13 @@ import 'neu_colors.dart';
 
 const defaultMaterialSeedColor = Color(0xFF5B8DEF);
 
+const materialPreviewBubbleShape = RoundedSuperellipseBorder(
+  borderRadius: BorderRadius.all(Radius.circular(12)),
+);
+const materialPreviewThumbnailShape = RoundedSuperellipseBorder(
+  borderRadius: BorderRadius.all(Radius.circular(8)),
+);
+
 enum MaterialBackground {
   tonal,
   pure,
