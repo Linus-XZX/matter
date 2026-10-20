@@ -8,6 +8,7 @@ import '../../providers/chat_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../providers/hidden_rooms_provider.dart';
 import '../../src/rust/api/matrix.dart';
+import '../../theme/material_theme.dart';
 import '../../theme/neu_colors.dart';
 import '../../widgets/app_avatar.dart';
 import '../../widgets/avatar.dart' show NeuBadge;
@@ -16,6 +17,7 @@ import '../../widgets/neu_surface.dart';
 import '../../widgets/sheets.dart';
 import 'chat_timestamp.dart';
 import 'chat_detail_page.dart';
+import 'material_chat_list_content.dart';
 import 'message_input.dart';
 import 'space_detail_page.dart';
 
@@ -49,7 +51,17 @@ class ChatListDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: EdgeInsets.only(left: indent ?? 8 + (dense ? 44 : 46) + 12),
+      margin: EdgeInsets.only(
+        left:
+            indent ??
+            (context.isMaterial
+                ? 12 +
+                      (dense
+                          ? materialDenseListAvatarSize
+                          : materialListAvatarSize) +
+                      materialListContentGap
+                : 8 + (dense ? 44 : 46) + 12),
+      ),
       height: 1,
       color: context.neu.hairline,
     );
@@ -126,7 +138,7 @@ class _ChatListItemState extends ConsumerState<ChatListItem> {
         : null;
 
     return NeuAction(
-      radius: NeuRadius.content,
+      radius: context.isMaterial ? materialSurfaceRadius : NeuRadius.content,
       selected: isSelected,
       label: room.name,
       onPressedChanged: (value) => setState(() => _pressed = value),
@@ -173,10 +185,15 @@ class _ChatListItemState extends ConsumerState<ChatListItem> {
           : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 110),
-        padding: EdgeInsets.symmetric(horizontal: 8, vertical: dense ? 8 : 10),
+        padding: EdgeInsets.symmetric(
+          horizontal: context.isMaterial ? 12 : 8,
+          vertical: dense ? 8 : 10,
+        ),
         decoration: ShapeDecoration(
           color: fillColor,
-          shape: ChatVisualSettingsScope.of(context).superellipseBorderEnabled
+          shape: context.isMaterial
+              ? materialListItemShape
+              : ChatVisualSettingsScope.of(context).superellipseBorderEnabled
               ? RoundedSuperellipseBorder(
                   borderRadius: BorderRadius.circular(NeuRadius.content),
                 )
@@ -184,116 +201,135 @@ class _ChatListItemState extends ConsumerState<ChatListItem> {
                   borderRadius: BorderRadius.circular(NeuRadius.content),
                 ),
         ),
-        child: Row(
-          children: [
-            AppAvatar(
-              key: ValueKey('room-avatar:${room.id}:${room.avatarUrl}'),
-              fallback: room.name,
-              size: dense ? 44 : 46,
-              url: room.avatarUrl,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        child: context.isMaterial
+            ? MaterialChatListContent(
+                room: room,
+                preview: preview,
+                hasDraft: hasDraft,
+                hasUnread: hasUnread,
+                dense: dense,
+                showRoomTypeIcon: showRoomTypeIcon,
+                membershipActions: isPendingMembership
+                    ? _PendingRoomActions(room: room)
+                    : null,
+              )
+            : Row(
                 children: [
-                  Row(
-                    children: [
-                      if (showRoomTypeIcon) ...[
-                        _roomTypeIcon(context, room.roomType),
-                        const SizedBox(width: 4),
-                      ],
-                      Expanded(
-                        child: Text(
-                          room.name,
-                          style: Theme.of(context).textTheme.titleMedium,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (room.isMuted) ...[
-                        const SizedBox(width: 6),
-                        Icon(
-                          Icons.notifications_off_outlined,
-                          key: ValueKey('room-muted-icon:${room.id}'),
-                          size: 15,
-                          color: colors.textTertiary,
-                        ),
-                      ],
-                      const SizedBox(width: 8),
-                      Text(
-                        formatChatListTime(room.lastMessageTime),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: hasUnread ? unreadAccent : colors.textTertiary,
-                          fontWeight: hasUnread
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                        ),
-                      ),
-                    ],
+                  AppAvatar(
+                    key: ValueKey('room-avatar:${room.id}:${room.avatarUrl}'),
+                    fallback: room.name,
+                    size: dense ? 44 : 46,
+                    url: room.avatarUrl,
                   ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: hasDraft
-                            ? Text.rich(
-                                TextSpan(
-                                  children: [
-                                    TextSpan(
-                                      text: '草稿：',
-                                      style: TextStyle(
-                                        color: colors.error,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    TextSpan(text: preview),
-                                  ],
-                                ),
-                                style: Theme.of(context).textTheme.bodyMedium,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            if (showRoomTypeIcon) ...[
+                              _roomTypeIcon(context, room.roomType),
+                              const SizedBox(width: 4),
+                            ],
+                            Expanded(
+                              child: Text(
+                                room.name,
+                                style: Theme.of(context).textTheme.titleMedium,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                              )
-                            : Text(
-                                preview,
-                                style: Theme.of(context).textTheme.bodyMedium,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                      ),
-                      if (hasUnread) ...[
-                        const SizedBox(width: 8),
-                        if (room.unreadCount > 0)
-                          NeuBadge(
-                            key: ValueKey('room-unread-badge:${room.id}'),
-                            count: room.unreadCount,
-                            muted: room.isMuted,
-                          )
-                        else
-                          Container(
-                            key: ValueKey('room-unread-dot:${room.id}'),
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: unreadAccent,
-                                width: 2.4,
                               ),
                             ),
-                          ),
+                            if (room.isMuted) ...[
+                              const SizedBox(width: 6),
+                              Icon(
+                                Icons.notifications_off_outlined,
+                                key: ValueKey('room-muted-icon:${room.id}'),
+                                size: 15,
+                                color: colors.textTertiary,
+                              ),
+                            ],
+                            const SizedBox(width: 8),
+                            Text(
+                              formatChatListTime(room.lastMessageTime),
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: hasUnread
+                                        ? unreadAccent
+                                        : colors.textTertiary,
+                                    fontWeight: hasUnread
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                  ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: hasDraft
+                                  ? Text.rich(
+                                      TextSpan(
+                                        children: [
+                                          TextSpan(
+                                            text: '草稿：',
+                                            style: TextStyle(
+                                              color: colors.error,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          TextSpan(text: preview),
+                                        ],
+                                      ),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    )
+                                  : Text(
+                                      preview,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                            ),
+                            if (hasUnread) ...[
+                              const SizedBox(width: 8),
+                              if (room.unreadCount > 0)
+                                NeuBadge(
+                                  key: ValueKey('room-unread-badge:${room.id}'),
+                                  count: room.unreadCount,
+                                  muted: room.isMuted,
+                                )
+                              else
+                                Container(
+                                  key: ValueKey('room-unread-dot:${room.id}'),
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: unreadAccent,
+                                      width: 2.4,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ],
+                        ),
+                        if (isPendingMembership) ...[
+                          const SizedBox(height: 10),
+                          _PendingRoomActions(room: room),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                  if (isPendingMembership) ...[
-                    const SizedBox(height: 10),
-                    _PendingRoomActions(room: room),
-                  ],
                 ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
