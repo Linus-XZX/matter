@@ -95,15 +95,30 @@ void main() {
             matching: find.byType(TopFadeBlur),
           );
           expect(fade, findsOneWidget);
-          final background = tester.widget<ColoredBox>(
-            find.descendant(of: fade, matching: find.byType(ColoredBox)),
+          final background = tester.widget<DecoratedBox>(
+            find.descendant(
+              of: fade,
+              matching: find.byWidgetPredicate(
+                (widget) =>
+                    widget is DecoratedBox &&
+                    widget.decoration is BoxDecoration &&
+                    (widget.decoration as BoxDecoration).gradient
+                        is LinearGradient,
+              ),
+            ),
           );
+          final gradient =
+              (background.decoration as BoxDecoration).gradient!
+                  as LinearGradient;
+          expect(gradient.begin, Alignment.topCenter);
+          expect(gradient.end, Alignment.bottomCenter);
           expect(
-            background.color,
-            Theme.of(tester.element(header)).extension<NeuColors>()!.glassFill,
+            gradient.colors.first.withValues(alpha: 1),
+            Theme.of(tester.element(header)).extension<NeuColors>()!.base,
           );
-          expect(background.color.a, greaterThan(0));
-          expect(background.color.a, lessThan(1));
+          expect(gradient.colors.first.a, greaterThan(0));
+          expect(gradient.colors.first.a, lessThan(1));
+          expect(gradient.colors.last.a, 0);
           expect(tester.getSize(fade), tester.getSize(header));
           expect(
             tester.getRect(header).height,
