@@ -1,6 +1,7 @@
 package moe.aks.matter
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -19,6 +20,15 @@ import java.util.concurrent.atomic.AtomicInteger
 class MainActivity : FlutterActivity() {
     private var pendingInstallResult: MethodChannel.Result? = null
     private var pendingApkPath: String? = null
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine? = DownloadRuntime.engine
+
+    override fun shouldDestroyEngineWithHost(): Boolean = !DownloadRuntime.ownsEngine(flutterEngine)
+
+    override fun onDestroy() {
+        DownloadRuntime.detachHost(this)
+        super.onDestroy()
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -49,6 +59,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        DownloadRuntime.attachHost(this, flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "moe.aks.matter/downloads",
@@ -57,6 +68,7 @@ class MainActivity : FlutterActivity() {
                 result.notImplemented()
                 return@setMethodCallHandler
             }
+            var retainedId: Int? = null
             try {
                 val id = if (call.method == "start") nextDownloadId.incrementAndGet() else call.argument<Int>("id")!!
                 val command =
@@ -71,6 +83,8 @@ class MainActivity : FlutterActivity() {
                         putExtra("installPath", call.argument<String>("installPath"))
                     }
                 if (call.method == "start") {
+                    DownloadRuntime.retain(id, flutterEngine, this)
+                    retainedId = id
                     if (Build.VERSION.SDK_INT >= 33 &&
                         checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                     ) {
@@ -82,6 +96,7 @@ class MainActivity : FlutterActivity() {
                 }
                 result.success(if (call.method == "start") id else null)
             } catch (error: Exception) {
+                retainedId?.let { DownloadRuntime.finish(it) }
                 result.error("download_service_failed", "无法更新下载通知：${error.message}", null)
             }
         }

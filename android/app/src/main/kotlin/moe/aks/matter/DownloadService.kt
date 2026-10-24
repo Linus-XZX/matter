@@ -42,7 +42,7 @@ class DownloadService : Service() {
     ): Int {
         val id = intent?.getIntExtra("id", -1) ?: -1
         if (id == -1) {
-            if (active.isEmpty()) stopSelf()
+            if (active.isEmpty()) stopSelf(startId)
             return START_NOT_STICKY
         }
         when (intent?.action) {
@@ -94,8 +94,9 @@ class DownloadService : Service() {
                             buildNotification(id, transfer.filename, text, installPath = installPath),
                         )
                     }
-                    if (active.isEmpty()) stopSelf()
                 }
+                DownloadRuntime.finish(id)
+                if (active.isEmpty()) stopSelf(startId)
             }
         }
         return START_NOT_STICKY
@@ -151,11 +152,13 @@ class DownloadService : Service() {
             notifications.notify(id, buildNotification(id, transfer.filename, "下载超时，请重试"))
         }
         active.clear()
+        DownloadRuntime.release()
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
 
     override fun onDestroy() {
+        DownloadRuntime.release()
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         super.onDestroy()
