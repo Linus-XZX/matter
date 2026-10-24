@@ -153,6 +153,7 @@ class _DownloadUpdateDialog extends StatefulWidget {
 class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
   final _cancel = Completer<void>();
   bool _installing = false;
+  bool _background = false;
   int _received = 0;
   int _total = 0;
   String _status = '正在连接 GitHub…';
@@ -167,7 +168,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
 
   @override
   void dispose() {
-    _cancelDownload();
+    if (!_background) _cancelDownload();
     super.dispose();
   }
 
@@ -191,7 +192,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
             widget.update,
             cancel: _cancel.future,
             onProgress: (received, total) {
-              if (!mounted || _cancel.isCompleted) return;
+              if (!mounted || _background || _cancel.isCompleted) return;
               setState(() {
                 _received = received;
                 _total = total;
@@ -199,7 +200,12 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
               });
             },
           );
-      if (!mounted || _cancel.isCompleted) return;
+      if (!mounted || _background || _cancel.isCompleted) return;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _background = true;
+        Navigator.pop(context);
+        return;
+      }
       _downloadedPath = path;
       setState(() {
         _installing = true;
@@ -208,7 +214,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
       await widget.service.installUpdate(path);
       if (mounted) Navigator.pop(context);
     } catch (error) {
-      if (!mounted || _cancel.isCompleted) return;
+      if (!mounted || _background || _cancel.isCompleted) return;
       setState(() {
         _error = error is AppUpdateException ? error.message : error.toString();
         _installing = false;
@@ -227,7 +233,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
     return PopScope(
       canPop: !_installing,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) _cancelDownload();
+        if (didPop && !_background) _cancelDownload();
       },
       child: AlertDialog(
         title: Text(_status),
@@ -252,6 +258,14 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
           ),
         ),
         actions: [
+          if (_error == null && !_installing)
+            TextButton(
+              onPressed: () {
+                _background = true;
+                Navigator.pop(context);
+              },
+              child: const Text('后台下载'),
+            ),
           TextButton(
             onPressed: _installing
                 ? null

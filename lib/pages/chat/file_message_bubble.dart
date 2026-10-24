@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../features/downloads/download_notification.dart';
 import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/sheets.dart';
@@ -105,7 +106,9 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
     }
     if (!mounted) return;
     setState(() => _downloading = true);
+    DownloadNotification? notification;
     try {
+      notification = await DownloadNotification.start(_safeFilename);
       final bytes = widget.mediaSourceJson != null
           ? await rust.downloadMediaSourceBytes(
               mediaSourceJson: widget.mediaSourceJson!,
@@ -117,11 +120,14 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
       if (bytes == null || bytes.isEmpty) throw Exception('文件不可用');
 
       if (!await saveDownloadedFile(filename: _safeFilename, bytes: bytes)) {
+        await notification.cancel();
         return;
       }
+      await notification.complete();
       if (!mounted) return;
       _showMessage('文件已保存');
     } catch (error) {
+      await notification?.fail(error);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

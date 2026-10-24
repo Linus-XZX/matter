@@ -82,6 +82,59 @@ void main() {
       },
     );
   }
+  for (final useHome in [false, true]) {
+    testWidgets('update finishes in the background (home=$useHome)', (
+      tester,
+    ) async {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      addTearDown(() => tester.binding.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      ));
+      final service = _PendingDownloadService();
+      final update = ReleaseUpdate(
+        version: '0.2.0',
+        notes: '',
+        releasePage: Uri.parse('https://github.com/slopwerks/matter/releases'),
+        downloadUrl: Uri.parse('https://github.com/slopwerks/matter/matter.apk'),
+        assetSize: 65536,
+        digest: null,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: neuTestTheme(),
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showAvailableUpdateDialog(
+                context,
+                service: service,
+                current: const InstalledAppVersion(version: '0.1.0'),
+                update: update,
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下载并安装'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('后台下载'), findsOneWidget);
+      if (useHome) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      } else {
+        await tester.tap(find.text('后台下载'));
+      }
+      // Finishing during route dismissal must not open the installer either.
+      service.download.complete('/tmp/matter.apk');
+      await tester.pumpAndSettle();
+      expect(service.installs, 0);
+      expect(service.cancelled, isFalse);
+      expect(find.text('open'), findsOneWidget);
+    });
+  }
+
   testWidgets('update prompt shows versions, package size, and confirmation', (
     tester,
   ) async {

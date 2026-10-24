@@ -1,14 +1,19 @@
 package moe.aks.matter
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : FlutterActivity() {
     private var pendingInstallResult: MethodChannel.Result? = null
@@ -16,8 +21,62 @@ class MainActivity : FlutterActivity() {
     private var pendingFileSaveResult: MethodChannel.Result? = null
     private var pendingFileSaveSource: File? = null
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleDownloadIntent(intent)
+    }
+
+    private fun handleDownloadIntent(intent: Intent?) {
+        if (intent?.action != DownloadService.ACTION_INSTALL_UPDATE) return
+        val path = intent.getStringExtra("path") ?: return
+        intent.action = null
+        requestInstall(path, object : MethodChannel.Result {
+            override fun success(result: Any?) {}
+            override fun notImplemented() {}
+            override fun error(code: String, message: String?, details: Any?) {
+                Toast.makeText(this@MainActivity, message ?: "无法安装更新", Toast.LENGTH_LONG).show()
+            }
+        })
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "moe.aks.matter/downloads",
+        ).setMethodCallHandler { call, result ->
+            if (call.method !in listOf("start", "progress", "finish")) {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            try {
+                val id = if (call.method == "start") nextDownloadId.incrementAndGet() else call.argument<Int>("id")!!
+                val command = Intent(this, DownloadService::class.java).apply {
+                    action = call.method
+                    putExtra("id", id)
+                    putExtra("filename", call.argument<String>("filename"))
+                    putExtra("received", call.argument<Number>("received")?.toLong() ?: 0L)
+                    putExtra("total", call.argument<Number>("total")?.toLong() ?: 0L)
+                    putExtra("status", call.argument<String>("status"))
+                    putExtra("error", call.argument<String>("error"))
+                    putExtra("installPath", call.argument<String>("installPath"))
+                }
+                if (call.method == "start") {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4109)
+                    }
+                    ContextCompat.startForegroundService(this, command)
+                } else {
+                    startService(command)
+                }
+                result.success(if (call.method == "start") id else null)
+            } catch (error: Exception) {
+                result.error("download_service_failed", "无法更新下载通知：${error.message}", null)
+            }
+        }
+        handleDownloadIntent(intent)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             UPDATE_CHANNEL,
@@ -172,6 +231,7 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private val nextDownloadId = AtomicInteger((System.currentTimeMillis() % 1_000_000_000).toInt() + 1_000_000_000)
         private const val UPDATE_CHANNEL = "moe.aks.matter/app_update"
         private const val FILE_SAVE_CHANNEL = "moe.aks.matter/file_saver"
         private const val INSTALL_PERMISSION_REQUEST = 4107

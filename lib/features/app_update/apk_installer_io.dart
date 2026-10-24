@@ -6,11 +6,53 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../downloads/download_notification.dart';
 import 'update_exception.dart';
 
 const _installerChannel = MethodChannel('moe.aks.matter/app_update');
+bool _downloadInProgress = false;
 
 Future<String> downloadAndroidApk({
+  required Uri uri,
+  required String fileName,
+  required int expectedSize,
+  required String? digest,
+  required void Function(int received, int total) onProgress,
+  Future<void>? cancel,
+}) async {
+  if (_downloadInProgress) {
+    throw const AppUpdateException('安装包正在下载，请查看下载通知');
+  }
+  _downloadInProgress = true;
+  DownloadNotification? notification;
+  try {
+    notification = await DownloadNotification.start('Matter 更新');
+    final path = await _downloadAndroidApk(
+      uri: uri,
+      fileName: fileName,
+      expectedSize: expectedSize,
+      digest: digest,
+      cancel: cancel,
+      onProgress: (received, total) {
+        notification!.progress(received, total);
+        onProgress(received, total);
+      },
+    );
+    await notification.complete(installPath: path);
+    return path;
+  } catch (error) {
+    if (error is AppUpdateException && error.message == '下载已取消') {
+      await notification?.cancel();
+    } else {
+      await notification?.fail(error);
+    }
+    rethrow;
+  } finally {
+    _downloadInProgress = false;
+  }
+}
+
+Future<String> _downloadAndroidApk({
   required Uri uri,
   required String fileName,
   required int expectedSize,
