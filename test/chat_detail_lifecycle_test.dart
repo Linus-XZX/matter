@@ -315,6 +315,65 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  for (final memberName in ['小明', '  小明  ', '   ', null]) {
+    testWidgets('typing indicator resolves room nickname ($memberName)', (
+      tester,
+    ) async {
+      const roomId = '!typing-name:example.org';
+      const userId = '@me:example.org';
+      const typingUserId = '@alice:example.org';
+      final members = Completer<List<rust.Contact>>();
+      final container = ProviderContainer(
+        overrides: [
+          ignoredUserIdsProvider.overrideWith((ref) async => const <String>{}),
+          roomMembersProvider(roomId).overrideWith((ref) => members.future),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(activeUserIdProvider.notifier).value = userId;
+      container.read(messageCacheOwnerProvider(roomId).notifier).value = userId;
+      container.read(messageCachePrimedProvider(roomId).notifier).value = true;
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: neuTestTheme(),
+            home: const ChatDetailPage(roomId: roomId, roomName: 'Room'),
+          ),
+        ),
+      );
+      await tester.pump();
+      container
+          .read(typingUsersStateProvider('$userId:$roomId').notifier)
+          .value = {
+        userId,
+        typingUserId,
+      };
+      await tester.pump();
+      expect(find.text('alice 正在输入…'), findsOneWidget);
+      members.complete([
+        if (memberName != null)
+          rust.Contact(
+            id: typingUserId,
+            name: memberName,
+            status: typingUserId,
+          ),
+      ]);
+      await tester.pump();
+      await tester.pump();
+      final expectedName = memberName?.trim();
+      expect(
+        find.text(
+          '${expectedName == null || expectedName.isEmpty ? 'alice' : expectedName} 正在输入…',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('me 正在输入'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
+
   for (final focused in [false, true]) {
     for (final entry in ['chip', 'quick', 'picker']) {
       testWidgets(

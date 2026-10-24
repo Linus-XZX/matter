@@ -2672,8 +2672,15 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         .toSet();
     if (typing.isEmpty) return const SizedBox.shrink();
 
-    // Derive display names from user ids (localpart fallback).
+    final memberNames = {
+      for (final member
+          in ref.watch(roomMembersProvider(widget.roomId)).asData?.value ??
+              const <Contact>[])
+        member.id: member.name.trim(),
+    };
     final names = typing.map((id) {
+      final name = memberNames[id];
+      if (name != null && name.isNotEmpty) return name;
       final part = id.split(':').first;
       return part.startsWith('@') ? part.substring(1) : part;
     }).toList();
