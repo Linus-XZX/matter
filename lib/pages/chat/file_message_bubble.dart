@@ -5,6 +5,7 @@ import '../../src/rust/api/matrix.dart' as rust;
 import '../../theme/neu_colors.dart';
 import '../../widgets/sheets.dart';
 import 'file_download_saver.dart';
+import 'markdown_attachment_page.dart';
 import 'message_group.dart' show enabledNeuBubbleShadows, neuBubbleShape;
 
 /// Converts an untrusted attachment name into a portable suggested filename.
@@ -86,13 +87,24 @@ class FileMessageBubble extends StatefulWidget {
 class _FileMessageBubbleState extends State<FileMessageBubble> {
   static const _largeDownloadWarningBytes = 64 * 1024 * 1024;
   static const _maximumManualDownloadBytes = 128 * 1024 * 1024;
+  static const _maximumMarkdownPreviewBytes = 2 * 1024 * 1024;
   bool _downloading = false;
 
   String get _safeFilename => sanitizeAttachmentFilename(widget.filename);
+  bool get _isMarkdown {
+    final name = _safeFilename.toLowerCase();
+    return name.endsWith('.md') || name.endsWith('.markdown');
+  }
 
-  Future<void> _download() async {
+  Future<void> _download({bool preview = false}) async {
     if (_downloading) return;
     final fileSize = widget.fileSize;
+    if (preview &&
+        fileSize != null &&
+        fileSize > _maximumMarkdownPreviewBytes) {
+      _showMessage('文件超过 2 MB，请点击下载按钮保存后用其他应用打开');
+      return;
+    }
     var maxSizeBytes = _largeDownloadWarningBytes;
     if (fileSize != null &&
         fileSize > _largeDownloadWarningBytes &&
@@ -108,22 +120,40 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
     setState(() => _downloading = true);
     DownloadNotification? notification;
     try {
-      notification = await DownloadNotification.start(_safeFilename);
+      if (!preview) {
+        notification = await DownloadNotification.start(_safeFilename);
+      }
       final bytes = widget.mediaSourceJson != null
           ? await rust.downloadMediaSourceBytes(
               mediaSourceJson: widget.mediaSourceJson!,
-              maxSizeBytes: maxSizeBytes,
+              maxSizeBytes: preview
+                  ? _maximumMarkdownPreviewBytes
+                  : maxSizeBytes,
             )
           : widget.imageUrl != null
           ? await rust.downloadMediaBytes(mxcUrl: widget.imageUrl!)
           : null;
       if (bytes == null || bytes.isEmpty) throw Exception('文件不可用');
-
-      if (!await saveDownloadedFile(filename: _safeFilename, bytes: bytes)) {
-        await notification.cancel();
+      if (preview) {
+        if (bytes.length > _maximumMarkdownPreviewBytes) {
+          throw Exception('文件超过 2 MB，请点击下载按钮保存后用其他应用打开');
+        }
+        if (!mounted) return;
+        final page = MarkdownAttachmentPage(
+          filename: _safeFilename,
+          bytes: bytes,
+        );
+        Navigator.of(context, rootNavigator: true).push(
+          MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => page),
+        );
         return;
       }
-      await notification.complete();
+
+      if (!await saveDownloadedFile(filename: _safeFilename, bytes: bytes)) {
+        await notification?.cancel();
+        return;
+      }
+      await notification?.complete();
       if (!mounted) return;
       _showMessage('文件已保存');
     } catch (error) {
@@ -131,7 +161,7 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('下载失败: $error'),
+            content: Text('${preview ? '预览' : '下载'}失败: $error'),
             duration: const Duration(seconds: 2),
           ),
         );
@@ -183,7 +213,9 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
               Material(
                 type: MaterialType.transparency,
                 child: InkWell(
-                  onTap: _downloading ? null : _download,
+                  onTap: _downloading
+                      ? null
+                      : () => _download(preview: _isMarkdown),
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
                     child: Column(
@@ -213,11 +245,22 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            Icon(
-                              Icons.download_rounded,
-                              size: 18,
-                              color: secondary,
-                            ),
+                            if (_isMarkdown)
+                              IconButton(
+                                tooltip: '下载文件',
+                                onPressed: _downloading ? null : _download,
+                                icon: Icon(
+                                  Icons.download_rounded,
+                                  size: 18,
+                                  color: secondary,
+                                ),
+                              )
+                            else
+                              Icon(
+                                Icons.download_rounded,
+                                size: 18,
+                                color: secondary,
+                              ),
                           ],
                         ),
                         if (caption != null && caption.isNotEmpty) ...[

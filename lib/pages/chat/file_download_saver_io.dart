@@ -1,9 +1,44 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const _fileSaveChannel = MethodChannel('moe.aks.matter/file_saver');
+
+Future<bool> openDownloadedFile({
+  required String filename,
+  required Uint8List bytes,
+}) async {
+  final cache = await getTemporaryDirectory();
+  final root = Directory('${cache.path}/matter_open_files');
+  await root.create(recursive: true);
+  final directory = await root.createTemp('open-');
+  try {
+    final file = File('${directory.path}/$filename');
+    await file.writeAsBytes(bytes, flush: true);
+    final bool opened;
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      opened =
+          await _fileSaveChannel.invokeMethod<bool>('openFile', {
+            'path': file.path,
+          }) ??
+          false;
+    } else {
+      opened = await launchUrl(
+        Uri.file(file.path),
+        mode: LaunchMode.externalApplication,
+      );
+    }
+    if (!opened) await directory.delete(recursive: true);
+    return opened;
+  } catch (_) {
+    if (await directory.exists()) await directory.delete(recursive: true);
+    rethrow;
+  }
+}
 
 Future<bool> saveDownloadedFile({
   required String filename,

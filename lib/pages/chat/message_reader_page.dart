@@ -30,12 +30,16 @@ void openMessageReader(
 /// reading width and selectable text.
 class MessageReaderPage extends StatelessWidget {
   final String html;
+  final String title;
+  final List<Widget> actions;
   final Map<String, String> mentionDisplayNames;
   final ValueChanged<String>? onMentionTap;
 
   const MessageReaderPage({
     super.key,
     required this.html,
+    this.title = '阅读',
+    this.actions = const [],
     this.mentionDisplayNames = const {},
     this.onMentionTap,
   });
@@ -49,7 +53,8 @@ class MessageReaderPage extends StatelessWidget {
       extendBodyBehindAppBar: context.isMaterial,
       appBar: context.isMaterial
           ? buildFloatingAppBar(
-              title: const Text('阅读'),
+              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: actions,
               leading: IconButton(
                 icon: const Icon(Icons.close),
                 tooltip: '关闭',
@@ -117,10 +122,15 @@ class MessageReaderPage extends StatelessWidget {
                           onPressed: () => Navigator.of(context).pop(),
                         ),
                         const SizedBox(width: NeuSpacing.sm),
-                        Text(
-                          '阅读',
-                          style: Theme.of(context).textTheme.titleLarge,
+                        Expanded(
+                          child: Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
                         ),
+                        ...actions,
                       ],
                     ),
                   ),

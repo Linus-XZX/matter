@@ -4,6 +4,7 @@ import UIKit
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
   private var pendingFileSaveResult: FlutterResult?
+  private var openFileController: UIDocumentInteractionController?
 
   override func application(
     _ application: UIApplication,
@@ -19,16 +20,42 @@ import UIKit
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
     channel.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "saveFile" else {
-        result(FlutterMethodNotImplemented)
-        return
-      }
       guard let self else {
-        result(FlutterError(code: "unavailable", message: "无法保存文件", details: nil))
+        result(FlutterError(code: "unavailable", message: "无法打开文件", details: nil))
         return
       }
-      self.saveFile(arguments: call.arguments, result: result)
+      switch call.method {
+      case "saveFile": self.saveFile(arguments: call.arguments, result: result)
+      case "openFile": self.openFile(arguments: call.arguments, result: result)
+      default: result(FlutterMethodNotImplemented)
+      }
     }
+  }
+
+  private func openFile(arguments: Any?, result: @escaping FlutterResult) {
+    guard let values = arguments as? [String: Any],
+      let path = values["path"] as? String,
+      let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+      let controller = activeViewController()
+    else {
+      result(FlutterError(code: "invalid_file", message: "找不到待打开的文件", details: nil))
+      return
+    }
+    let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+    let root = cache.appendingPathComponent("matter_open_files").resolvingSymlinksInPath()
+    guard file.deletingLastPathComponent().deletingLastPathComponent().path == root.path,
+      FileManager.default.fileExists(atPath: file.path)
+    else {
+      result(FlutterError(code: "invalid_file", message: "文件路径无效", details: nil))
+      return
+    }
+    let document = UIDocumentInteractionController(url: file)
+    document.uti = "net.daringfireball.markdown"
+    openFileController = document
+    result(document.presentOpenInMenu(
+      from: CGRect(x: controller.view.bounds.midX, y: controller.view.bounds.midY, width: 1, height: 1),
+      in: controller.view, animated: true
+    ))
   }
 
   private func saveFile(arguments: Any?, result: @escaping FlutterResult) {

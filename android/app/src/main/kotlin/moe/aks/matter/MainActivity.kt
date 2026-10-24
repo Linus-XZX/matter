@@ -119,10 +119,36 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                "openFile" -> {
+                    val path = call.argument<String>("path")
+                    if (path.isNullOrBlank()) {
+                        result.error("invalid_path", "文件路径无效", null)
+                    } else {
+                        requestFileOpen(path, result)
+                    }
+                }
+
                 else -> {
                     result.notImplemented()
                 }
             }
+        }
+    }
+
+    private fun requestFileOpen(path: String, result: MethodChannel.Result) {
+        try {
+            val file = File(path).canonicalFile
+            val root = File(cacheDir, "matter_open_files").canonicalFile
+            require(file.isFile && file.parentFile?.parentFile == root) { "找不到待打开的文件" }
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/markdown")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(view, "用其他应用打开"))
+            result.success(true)
+        } catch (error: Exception) {
+            result.error("open_failed", "无法打开文件：${error.message}", null)
         }
     }
 

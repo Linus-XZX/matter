@@ -2,6 +2,11 @@ import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 
+Future<bool> openDownloadedFile({
+  required String filename,
+  required Uint8List bytes,
+}) => saveDownloadedFile(filename: filename, bytes: bytes);
+
 Future<bool> saveDownloadedFile({
   required String filename,
   required Uint8List bytes,
