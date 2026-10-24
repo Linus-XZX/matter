@@ -141,6 +141,16 @@ class DownloadService : Service() {
                 ),
             ).apply {
                 if (ongoing) setProgress(100, percent ?: 0, percent == null)
+                if (installPath != null) {
+                    val files = Intent(open).setAction(ACTION_SHOW_UPDATE_FILE)
+                    addAction(
+                        Notification.Action.Builder(
+                            null,
+                            "在下载中查看",
+                            PendingIntent.getActivity(this@DownloadService, id, files, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE),
+                        ).build(),
+                    )
+                }
             }.build()
     }
 
@@ -167,5 +177,6 @@ class DownloadService : Service() {
     companion object {
         const val CHANNEL = "matter_downloads"
         const val ACTION_INSTALL_UPDATE = "moe.aks.matter.INSTALL_UPDATE"
+        const val ACTION_SHOW_UPDATE_FILE = "moe.aks.matter.SHOW_UPDATE_FILE"
     }
 }

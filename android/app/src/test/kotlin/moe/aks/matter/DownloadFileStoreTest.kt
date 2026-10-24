@@ -96,6 +96,48 @@ class DownloadFileStoreTest {
         return File(staging, "report.pdf").apply { writeBytes(byteArrayOf(1, 2, 3)) }
     }
 
+    private fun update(): File {
+        val context = RuntimeEnvironment.getApplication()
+        val directory = File(context.cacheDir, "updates").apply { mkdirs() }
+        return File(directory, "matter.apk").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+    }
+
+    @Test
+    fun exportsTheCompletedUpdateWithApkMimeType() {
+        val provider = provider()
+        val source = update()
+        val uri = DownloadFileStore.saveUpdate(RuntimeEnvironment.getApplication(), source.path)
+        val row = provider.rows.getValue(uri)
+        assertEquals("matter.apk", row.getAsString(MediaStore.Downloads.DISPLAY_NAME))
+        assertEquals("application/vnd.android.package-archive", row.getAsString(MediaStore.Downloads.MIME_TYPE))
+        assertEquals(Environment.DIRECTORY_DOWNLOADS, row.getAsString(MediaStore.Downloads.RELATIVE_PATH))
+        assertEquals(0, row.getAsInteger(MediaStore.Downloads.IS_PENDING))
+        assertArrayEquals(source.readBytes(), provider.files.getValue(uri).readBytes())
+        assertTrue(source.exists())
+    }
+
+    @Test
+    fun failedUpdateExportsRemoveThePendingFile() {
+        val provider = provider().apply { failWrite = true }
+        assertThrows(IOException::class.java) {
+            DownloadFileStore.saveUpdate(RuntimeEnvironment.getApplication(), update().path)
+        }
+        assertTrue(provider.rows.isEmpty())
+    }
+
+    @Test
+    fun updateExportsRejectPrivateFilesAndUnfinishedDownloads() {
+        val provider = provider()
+        val context = RuntimeEnvironment.getApplication()
+        val source = update()
+        val privateFile = File(context.cacheDir, "private.apk").apply { writeText("private") }
+        val partial = File(source.parentFile, "matter.apk.download").apply { writeText("partial") }
+        for (file in listOf(privateFile, partial)) {
+            assertThrows(IllegalArgumentException::class.java) { DownloadFileStore.saveUpdate(context, file.path) }
+        }
+        assertTrue(provider.rows.isEmpty())
+    }
+
     @Test
     fun savesToPublicDownloadsAndPublishesOnlyAfterWriting() {
         val provider = provider()

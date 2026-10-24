@@ -62,6 +62,11 @@ class DownloadServiceTest {
         val intent = shadowOf(completed.contentIntent).savedIntent
         assertEquals(DownloadService.ACTION_INSTALL_UPDATE, intent.action)
         assertEquals("/cache/updates/matter.apk", intent.getStringExtra("path"))
+        val filesAction = completed.actions.single()
+        assertEquals("在下载中查看", filesAction.title.toString())
+        val filesIntent = shadowOf(filesAction.actionIntent).savedIntent
+        assertEquals(DownloadService.ACTION_SHOW_UPDATE_FILE, filesIntent.action)
+        assertEquals("/cache/updates/matter.apk", filesIntent.getStringExtra("path"))
         controller.destroy()
     }
 

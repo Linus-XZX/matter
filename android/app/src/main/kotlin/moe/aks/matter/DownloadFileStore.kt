@@ -9,6 +9,18 @@ import java.io.File
 import java.net.URLConnection
 
 internal object DownloadFileStore {
+    fun updateApk(context: Context, path: String): File {
+        val source = File(path).canonicalFile
+        val updates = File(context.cacheDir, "updates").canonicalFile
+        require(source.isFile && source.parentFile == updates && source.extension == "apk") {
+            "找不到已下载的安装包"
+        }
+        return source
+    }
+
+    fun saveUpdate(context: Context, path: String): Uri =
+        publish(context, updateApk(context, path), "application/vnd.android.package-archive")
+
     fun save(
         context: Context,
         path: String,
@@ -18,10 +30,14 @@ internal object DownloadFileStore {
         require(source.isFile && source.parentFile?.parentFile == stagingDirectory) {
             "找不到待保存的下载文件"
         }
+        return publish(context, source, URLConnection.guessContentTypeFromName(source.name) ?: "application/octet-stream")
+    }
+
+    private fun publish(context: Context, source: File, mimeType: String): Uri {
         val values =
             ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, source.name)
-                put(MediaStore.Downloads.MIME_TYPE, URLConnection.guessContentTypeFromName(source.name) ?: "application/octet-stream")
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }

@@ -169,6 +169,16 @@ Future<void> installAndroidApk(String path) async {
   }
 }
 
+Future<void> showAndroidApkInFiles(String path) async {
+  try {
+    await _installerChannel.invokeMethod<void>('showInFiles', {'path': path});
+  } on PlatformException catch (error) {
+    throw AppUpdateException(error.message ?? '无法打开下载目录');
+  } on MissingPluginException {
+    throw const AppUpdateException('当前平台暂不支持查看 Android 更新安装包');
+  }
+}
+
 String? _parseSha256Digest(String? digest) {
   if (digest == null || !digest.startsWith('sha256:')) return null;
   final value = digest.substring('sha256:'.length).toLowerCase();

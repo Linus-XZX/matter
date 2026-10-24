@@ -212,7 +212,12 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
         _status = '正在打开系统安装器…';
       });
       await widget.service.installUpdate(path);
-      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        setState(() {
+          _installing = false;
+          _status = '安装包已下载';
+        });
+      }
     } catch (error) {
       if (!mounted || _background || _cancel.isCompleted) return;
       setState(() {
@@ -220,6 +225,31 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
         _installing = false;
         _status = '更新失败';
       });
+    }
+  }
+
+  Future<void> _showInFiles() async {
+    final path = _downloadedPath;
+    if (path == null || _installing) return;
+    setState(() {
+      _installing = true;
+      _error = null;
+      _status = '正在保存安装包…';
+    });
+    try {
+      await widget.service.showDownloadedUpdate(path);
+      if (mounted) setState(() => _status = '安装包已保存到下载目录');
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error is AppUpdateException
+              ? error.message
+              : error.toString();
+          _status = '无法查看安装包';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _installing = false);
     }
   }
 
@@ -243,7 +273,11 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (_error == null) ...[
+              if (_error != null)
+                Text(_error!)
+              else if (_downloadedPath != null)
+                const Text('可继续安装，或在文件管理器的下载目录中打开安装包。')
+              else ...[
                 LinearProgressIndicator(value: progress),
                 const SizedBox(height: 12),
                 Text(
@@ -252,13 +286,17 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
                       : '$percent · ${formatByteSize(_received)} / ${formatByteSize(_total)}',
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
-              ] else
-                Text(_error!),
+              ],
             ],
           ),
         ),
         actions: [
-          if (_error == null && !_installing)
+          if (_downloadedPath != null)
+            TextButton(
+              onPressed: _installing ? null : _showInFiles,
+              child: const Text('在文件管理器中查看'),
+            ),
+          if (_downloadedPath == null && _error == null && !_installing)
             TextButton(
               onPressed: () {
                 _background = true;
@@ -273,10 +311,13 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
                     _cancelDownload();
                     Navigator.pop(context);
                   },
-            child: const Text('取消'),
+            child: Text(_downloadedPath == null ? '取消' : '关闭'),
           ),
-          if (_error != null)
-            FilledButton(onPressed: _start, child: const Text('重试')),
+          if (_error != null || _downloadedPath != null)
+            FilledButton(
+              onPressed: _installing ? null : _start,
+              child: Text(_downloadedPath == null ? '重试' : '安装更新'),
+            ),
         ],
       ),
     );

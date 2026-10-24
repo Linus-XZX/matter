@@ -213,6 +213,13 @@ class AppUpdateService {
     return installAndroidApk(path);
   }
 
+  Future<void> showDownloadedUpdate(String path) {
+    if (!isSupported) {
+      throw const AppUpdateException('当前平台暂不支持应用内更新');
+    }
+    return showAndroidApkInFiles(path);
+  }
+
   Map<String, dynamic>? _findAndroidAsset(Object? assets) {
     if (assets is! List) return null;
     for (final asset in assets) {
