@@ -4,9 +4,11 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../features/diagnostics/media_diagnostics.dart';
 import '../providers/authenticated_media_cache.dart';
 import '../providers/auth_provider.dart';
 import '../providers/chat_provider.dart';
+import '../providers/connection_provider.dart';
 import '../theme/neu_colors.dart';
 
 class AppAvatar extends ConsumerStatefulWidget {
@@ -156,7 +158,7 @@ class _AppAvatarState extends ConsumerState<AppAvatar> {
 }
 
 /// Cross-platform image widget using an Authorization header when required.
-class _AuthenticatedImage extends StatelessWidget {
+class _AuthenticatedImage extends ConsumerStatefulWidget {
   final String url;
   final String? token;
   final String? userId;
@@ -191,46 +193,103 @@ class _AuthenticatedImage extends StatelessWidget {
   });
 
   @override
+  ConsumerState<_AuthenticatedImage> createState() =>
+      _AuthenticatedImageState();
+}
+
+class _AuthenticatedImageState extends ConsumerState<_AuthenticatedImage> {
+  bool _failed = false;
+  int _retry = 0;
+  Stopwatch _loadWatch = Stopwatch()..start();
+  bool _failureLogged = false;
+
+  void _startLoad() {
+    _loadWatch = Stopwatch()..start();
+    _failureLogged = false;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AuthenticatedImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.url != oldWidget.url ||
+        widget.userId != oldWidget.userId ||
+        widget.homeserver != oldWidget.homeserver ||
+        widget.cacheWidth != oldWidget.cacheWidth ||
+        widget.cacheHeight != oldWidget.cacheHeight ||
+        (_failed && widget.token != oldWidget.token)) {
+      _startLoad();
+    }
+    if (widget.userId != oldWidget.userId ||
+        widget.homeserver != oldWidget.homeserver ||
+        (_failed &&
+            (widget.url != oldWidget.url || widget.token != oldWidget.token))) {
+      _failed = false;
+      _retry++;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isMatrixMedia = isCurrentHomeserverMatrixMediaUrl(url, homeserver);
+    ref.listen(connectionProvider, (previous, next) {
+      if (_failed &&
+          previous != AppConnectionState.connected &&
+          next == AppConnectionState.connected) {
+        // Rebuilding an equal image provider retains its failed stream.
+        // Remount it to request the same URL again after sync recovers.
+        setState(() {
+          _startLoad();
+          _failed = false;
+          _retry++;
+        });
+      }
+    });
+    final isMatrixMedia = isCurrentHomeserverMatrixMediaUrl(
+      widget.url,
+      widget.homeserver,
+    );
     final cacheKey = authenticatedMediaCacheKey(
-      url: url,
-      userId: userId,
-      homeserver: homeserver,
+      url: widget.url,
+      userId: widget.userId,
+      homeserver: widget.homeserver,
     );
     final cacheManager = authenticatedMediaCacheManager(
-      url: url,
-      userId: userId,
-      homeserver: homeserver,
+      url: widget.url,
+      userId: widget.userId,
+      homeserver: widget.homeserver,
     );
     return CachedNetworkImage(
-      imageUrl: url,
+      key: ValueKey(_retry),
+      imageUrl: widget.url,
       cacheKey: cacheKey,
       cacheManager: cacheManager,
-      httpHeaders: token == null || !isMatrixMedia
+      httpHeaders: widget.token == null || !isMatrixMedia
           ? null
-          : {'Authorization': 'Bearer $token'},
-      fit: fit ?? BoxFit.cover,
-      width: width,
-      height: height,
-      memCacheWidth: cacheWidth,
-      memCacheHeight: cacheHeight,
-      maxWidthDiskCache: cacheWidth,
-      maxHeightDiskCache: cacheHeight,
-      useOldImageOnUrlChange: useOldImageOnUrlChange,
+          : {'Authorization': 'Bearer ${widget.token}'},
+      fit: widget.fit ?? BoxFit.cover,
+      width: widget.width,
+      height: widget.height,
+      memCacheWidth: widget.cacheWidth,
+      memCacheHeight: widget.cacheHeight,
+      maxWidthDiskCache: widget.cacheWidth,
+      maxHeightDiskCache: widget.cacheHeight,
+      useOldImageOnUrlChange: widget.useOldImageOnUrlChange,
       fadeInDuration: Duration.zero,
       fadeOutDuration: Duration.zero,
       imageBuilder: (context, imageProvider) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => onLoaded?.call());
+        _loadWatch.stop();
+        _failed = false;
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => widget.onLoaded?.call(),
+        );
         return Image(
           image: imageProvider,
-          fit: fit ?? BoxFit.cover,
-          width: width,
-          height: height,
+          fit: widget.fit ?? BoxFit.cover,
+          width: widget.width,
+          height: widget.height,
         );
       },
       placeholder: (context, _) =>
-          loadingPlaceholder ??
+          widget.loadingPlaceholder ??
           Center(
             child: CircularProgressIndicator(
               color: context.neu.accent,
@@ -238,8 +297,23 @@ class _AuthenticatedImage extends StatelessWidget {
             ),
           ),
       errorWidget: (context, url, error) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => onError?.call());
-        return fallback;
+        _failed = true;
+        _loadWatch.stop();
+        if (!_failureLogged) {
+          _failureLogged = true;
+          logMediaLoadFailure(
+            url: url,
+            error: error,
+            elapsedMs: _loadWatch.elapsedMilliseconds,
+            attempt: _retry + 1,
+            connection: ref.read(connectionProvider).name,
+            authenticated: isMatrixMedia && widget.token != null,
+          );
+        }
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => widget.onError?.call(),
+        );
+        return widget.fallback;
       },
     );
   }

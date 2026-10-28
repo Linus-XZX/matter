@@ -8,6 +8,7 @@ import '../../features/matrix_html/matrix_html_renderer.dart';
 import '../../features/matrix_html/matrix_link_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/connection_provider.dart';
 import '../../providers/chat_visual_settings_provider.dart';
 import '../../providers/image_view_history.dart';
 import '../../src/rust/api/matrix.dart' as rust;
@@ -345,6 +346,13 @@ class _ImageMessageBubbleState extends ConsumerState<ImageMessageBubble> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(connectionProvider, (previous, next) {
+      if (previous != AppConnectionState.connected &&
+          next == AppConnectionState.connected &&
+          (_encryptedLoadFailed || _resolveFailed)) {
+        _resolveUrl();
+      }
+    });
     final account = ref.watch(activeUserIdProvider) ?? 'anonymous';
     if (widget.roomId != null && widget.message != null) {
       final viewed = ref.watch(

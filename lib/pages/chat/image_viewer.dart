@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import '../../providers/connection_provider.dart';
 import '../../providers/message_ordering.dart';
 import '../../providers/image_view_history.dart';
 import '../../providers/message_cache_persistence.dart';
@@ -463,6 +464,19 @@ class _ChatImageViewerState extends ConsumerState<ChatImageViewer> {
   Widget build(BuildContext context) {
     ref.listen(activeUserIdProvider, (_, next) {
       if (next != _account) Navigator.of(context).pop();
+    });
+    ref.listen(connectionProvider, (previous, next) {
+      if (previous != AppConnectionState.connected &&
+          next == AppConnectionState.connected &&
+          ref.read(activeUserIdProvider) == _account) {
+        for (final media in _mediaById.values) {
+          if (media.resolveFailed ||
+              (media.original == OriginalImageState.failed &&
+                  media.url == null)) {
+            unawaited(media.resolveImage());
+          }
+        }
+      }
     });
     final media = _mediaFor(_sources[_index]);
     final description = _description(media.source);

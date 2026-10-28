@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/pages/chat/image_viewer.dart';
 import 'package:matter/pages/chat/image_message_bubble.dart';
+import 'package:matter/providers/connection_provider.dart';
 import 'package:matter/providers/chat_provider.dart';
 import 'package:matter/providers/message_cache_persistence.dart';
 import 'package:matter/pages/chat/message_group.dart';
@@ -31,6 +32,7 @@ class ImageApi implements RustLibApi {
   final thumbnails = <String>[];
   final originals = <String>[];
   final downloads = <String>[];
+  bool failDownloads = false;
   final forwards = <String>[];
   final albumCaptions = <String, String?>{};
   final captionRequests = <String>[];
@@ -62,6 +64,7 @@ class ImageApi implements RustLibApi {
     int? maxSizeBytes,
   }) async {
     downloads.add(mediaSourceJson);
+    if (failDownloads) throw StateError('Connection reset');
     return pixel;
   }
 
@@ -266,6 +269,71 @@ void main() {
     RustLib.initMock(api: api);
   });
   tearDown(RustLib.dispose);
+
+  testWidgets('encrypted bubble retries after sync reconnects', (tester) async {
+    api.failDownloads = true;
+    await pumpImages(tester, [imageMessage('offline', encrypted: true)]);
+    expect(api.downloads, hasLength(1));
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ImageMessageBubble)),
+    );
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
+    await tester.pump();
+    api.failDownloads = false;
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.connected;
+    await tester.pump();
+    await tester.pump();
+
+    expect(api.downloads, hasLength(2));
+    expect(find.byType(Image), findsOneWidget);
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
+    await tester.pump();
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.connected;
+    await tester.pump();
+    expect(api.downloads, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('encrypted viewer retries after sync reconnects', (tester) async {
+    api.failDownloads = true;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: neuTestTheme(),
+          home: ChatImageViewer(
+            initialSource: ImageViewerSource.fromMessage(
+              imageMessage('offline', encrypted: true),
+            ),
+            animation: const AlwaysStoppedAnimation(1),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('重新加载图片'), findsOneWidget);
+    final failedRequests = api.downloads.length;
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ChatImageViewer)),
+    );
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.disconnected;
+    await tester.pump();
+    api.failDownloads = false;
+    container.read(connectionProvider.notifier).value =
+        AppConnectionState.connected;
+    await tester.pump();
+    await tester.pump();
+
+    expect(api.downloads.length, greaterThan(failedRequests));
+    expect(find.text('重新加载图片'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   test('image metadata survives the message disk cache round trip', () {
     final message = imageMessage(
