@@ -3,3 +3,4 @@
 pub mod api;
 mod frb_generated;
 mod http_client;
+mod network_diagnostics;

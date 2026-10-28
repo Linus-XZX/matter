@@ -1,4 +1,5 @@
 use crate::http_client::matrix_client_builder;
+use crate::network_diagnostics::RequestDiagnostics;
 use flutter_rust_bridge::frb;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use log::{info, warn};
@@ -6443,6 +6444,8 @@ pub async fn sync_once() -> Result<(), String> {
         ));
     }
 
+    let mut diagnostics = RequestDiagnostics::new(client.homeserver());
+    diagnostics.stage = "initial_sync";
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         SYNC_EVENT_GENERATION.scope(
@@ -6471,7 +6474,14 @@ pub async fn sync_once() -> Result<(), String> {
             Ok(())
         }
         Ok(Err(e)) => {
-            let msg = format!("sync_once: failed for user {}: {e}", user_id);
+            diagnostics.status = e
+                .as_client_api_error()
+                .map(|error| error.status_code.as_u16());
+            let msg = format!(
+                "sync_once: failed for user {}: {}",
+                user_id,
+                diagnostics.failure(&e),
+            );
             app_log("error", "sync", msg.clone());
             report_session_error(&e);
             set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
@@ -6479,8 +6489,9 @@ pub async fn sync_once() -> Result<(), String> {
         }
         Err(_) => {
             let msg = format!(
-                "sync_once: timed out after 10s for user {} (homeserver: {hs})",
-                user_id
+                "sync_once: timed out after 10s for user {} (homeserver: {hs}): {}",
+                user_id,
+                diagnostics.context(),
             );
             app_log("error", "sync", msg.clone());
             set_connection_status_for_generation(generation, ConnectionStatus::Disconnected);
@@ -6621,6 +6632,9 @@ fn start_sync_internal(
                                         ConnectionStatus::Updating,
                                     );
                                 }
+                                let mut diagnostics =
+                                    RequestDiagnostics::new(loop_client.homeserver());
+                                diagnostics.stage = "traditional_sync";
                                 match loop_client
                                     .sync_once(matrix_sdk::config::SyncSettings::default())
                                     .await
@@ -6686,10 +6700,17 @@ fn start_sync_internal(
                                         {
                                             break;
                                         }
+                                        diagnostics.status = e
+                                            .as_client_api_error()
+                                            .map(|error| error.status_code.as_u16());
                                         app_log(
                                             "error",
                                             "sync",
-                                            format!("Traditional sync error: {e}"),
+                                            format!(
+                                                "Traditional sync error: attempt={} {}",
+                                                consecutive_errors + 1,
+                                                diagnostics.failure(&e),
+                                            ),
                                         );
                                         if report_session_error_for_generation(generation, &e) {
                                             clear_published_sync(generation).await;
@@ -6882,6 +6903,8 @@ async fn try_start_sliding_sync(
                     let stream = sliding_sync.sync();
                     futures_util::pin_mut!(stream);
                     let mut received_update = false;
+                    let mut diagnostics = RequestDiagnostics::new(client.homeserver());
+                    diagnostics.stage = "sliding_sync";
                     while let Some(update) = stream.next().await {
                         if matches!(get_connection_status(), ConnectionStatus::SessionExpired) {
                             clear_published_sync(generation).await;
@@ -6908,9 +6931,22 @@ async fn try_start_sliding_sync(
                                     SyncEvent::SyncCompleted,
                                 );
                                 consecutive_failures = 0;
+                                diagnostics = RequestDiagnostics::new(client.homeserver());
+                                diagnostics.stage = "sliding_sync";
                             }
                             Err(e) => {
-                                app_log("error", "sync", format!("Sliding Sync error: {e}"));
+                                diagnostics.status = e
+                                    .as_client_api_error()
+                                    .map(|error| error.status_code.as_u16());
+                                app_log(
+                                    "error",
+                                    "sync",
+                                    format!(
+                                        "Sliding Sync error: attempt={} {}",
+                                        consecutive_failures + 1,
+                                        diagnostics.failure(&e),
+                                    ),
+                                );
                                 if report_session_error_for_generation(generation, &e) {
                                     clear_published_sync(generation).await;
                                     break 'rebuild;
@@ -7627,17 +7663,20 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
     let identity = media_client_identity(&client).await.ok()?;
     let session = client.matrix_auth().session()?;
     let http_client = client.http_client().clone();
+    let mut diagnostics = RequestDiagnostics::new(url.clone());
     drop(client);
 
-    match tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
-        http_client
+    match tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async {
+        let response = http_client
             .get(url)
             .bearer_auth(session.tokens.access_token)
             .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await
+            .await?;
+        diagnostics.status = Some(response.status().as_u16());
+        diagnostics.stage = "http_status";
+        let response = response.error_for_status()?;
+        diagnostics.stage = "response_body";
+        response.bytes().await
     })
     .await
     {
@@ -7658,7 +7697,7 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
             app_log(
                 "error",
                 "media",
-                format!("download_media_bytes failed: {e}"),
+                format!("download_media_bytes failed: {}", diagnostics.failure(&e)),
             );
             None
         }
@@ -7666,7 +7705,11 @@ pub async fn download_media_bytes(mxc_url: String) -> Option<Vec<u8>> {
             app_log(
                 "error",
                 "media",
-                format!("download_media_bytes timed out for {mxc_url}"),
+                format!(
+                    "download_media_bytes timed out: {} timeout_ms={}",
+                    diagnostics.context(),
+                    MEDIA_DOWNLOAD_TOTAL_TIMEOUT.as_millis(),
+                ),
             );
             None
         }
@@ -7813,23 +7856,40 @@ pub async fn download_media_source_bytes(
         .session()
         .ok_or_else(|| api_err("media", "No authenticated session.".to_string()))?;
     let http_client = client.http_client().clone();
+    let mut diagnostics = RequestDiagnostics::new(url.clone());
     drop(client);
-    let content = tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async move {
+    let content = tokio::time::timeout(MEDIA_DOWNLOAD_TOTAL_TIMEOUT, async {
         let response = http_client
             .get(url)
             .bearer_auth(session.tokens.access_token)
             .send()
             .await
-            .map_err(|e| api_err("media", format!("Media download failed: {e}")))?
-            .error_for_status()
-            .map_err(|e| api_err("media", format!("Media download failed: {e}")))?;
+            .map_err(|e| {
+                api_err(
+                    "media",
+                    format!("Media download failed: {}", diagnostics.failure(&e)),
+                )
+            })?;
+        diagnostics.status = Some(response.status().as_u16());
+        diagnostics.stage = "http_status";
+        let response = response.error_for_status().map_err(|e| {
+            api_err(
+                "media",
+                format!("Media download failed: {}", diagnostics.failure(&e)),
+            )
+        })?;
+        diagnostics.stage = "response_body";
         ensure_media_content_length(response.content_length(), limit)?;
 
         let mut encrypted = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| api_err("media", format!("Media download failed: {e}")))?;
+            let chunk = chunk.map_err(|e| {
+                api_err(
+                    "media",
+                    format!("Media download failed: {}", diagnostics.failure(&e)),
+                )
+            })?;
             append_media_chunk(&mut encrypted, &chunk, limit)?;
         }
 
@@ -7844,7 +7904,11 @@ pub async fn download_media_source_bytes(
     .map_err(|_| {
         api_err(
             "media",
-            "Media download timed out. Please retry.".to_string(),
+            format!(
+                "Media download timed out. Please retry. {} timeout_ms={}",
+                diagnostics.context(),
+                MEDIA_DOWNLOAD_TOTAL_TIMEOUT.as_millis(),
+            ),
         )
     })??;
     reacquire_media_client(&identity).await?;
