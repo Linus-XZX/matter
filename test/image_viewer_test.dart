@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -18,8 +19,44 @@ import 'package:matter/providers/auth_provider.dart';
 import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 import 'helpers/neu_test_theme.dart';
+import 'support/temp_path_provider.dart';
+
+class _DownloadPaths extends TempPathProvider {
+  _DownloadPaths(super.root);
+
+  @override
+  Future<String?> getDownloadsPath() async => root.path;
+}
+
+Future<Directory> _installDownloads(WidgetTester tester) async {
+  final directory = (await tester.runAsync(
+    () => Directory.systemTemp.createTemp('matter-image-download-'),
+  ))!;
+  final previous = PathProviderPlatform.instance;
+  PathProviderPlatform.instance = _DownloadPaths(directory);
+  addTearDown(() async {
+    PathProviderPlatform.instance = previous;
+    await directory.delete(recursive: true);
+  });
+  return directory;
+}
+
+Future<void> _downloadImage(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('下载').hitTestable());
+  // File I/O needs real event-loop turns, while the download spinner keeps
+  // scheduling frames until saving finishes.
+  for (var attempt = 0; attempt < 100; attempt++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump();
+    if (find.text('图片已保存').evaluate().isNotEmpty) break;
+  }
+  expect(find.text('图片已保存'), findsWidgets);
+}
 
 final pixel = Uint8List.fromList(
   base64Decode(
@@ -503,19 +540,7 @@ void main() {
   testWidgets('download and forwarding use the image selected after a swipe', (
     tester,
   ) async {
-    String? suggestedName;
-    const selector = MethodChannel('plugins.flutter.io/file_selector');
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(selector, (call) async {
-          if (call.method == 'getSavePath') {
-            suggestedName = (call.arguments as Map)['suggestedName'] as String?;
-          }
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(selector, null),
-    );
+    final downloads = await _installDownloads(tester);
     await pumpImages(tester, [imageMessage('older'), imageMessage('latest')]);
     await openImage(tester, 'latest');
     await tester.drag(find.byType(PageView), const Offset(650, 0));
@@ -541,15 +566,14 @@ void main() {
     }
     await tester.pump();
     expect(scrolling.position.isScrollingNotifier.value, isFalse);
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(const ValueKey('image-viewer-toolbar')),
-        matching: find.byTooltip('下载'),
-      ),
-    );
-    await tester.pump();
+    await _downloadImage(tester);
     expect(api.downloads, ['mxc://example.org/older']);
-    expect(suggestedName, 'older.png');
+    expect(
+      await tester.runAsync(
+        () => File('${downloads.path}/older.png').readAsBytes(),
+      ),
+      pixel,
+    );
     await chooseImageAction(tester, 'older', '转发');
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
@@ -564,29 +588,20 @@ void main() {
   testWidgets(
     'encrypted image downloads decrypted bytes through its MediaSource',
     (tester) async {
-      String? suggestedName;
-      const selector = MethodChannel('plugins.flutter.io/file_selector');
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(selector, (call) async {
-            if (call.method == 'getSavePath') {
-              suggestedName =
-                  (call.arguments as Map)['suggestedName'] as String?;
-            }
-            return null;
-          });
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(selector, null),
-      );
+      final downloads = await _installDownloads(tester);
       await pumpImages(tester, [imageMessage('encrypted', encrypted: true)]);
       await openImage(tester, 'encrypted');
       expect(api.downloads, ['{"url":"mxc://example.org/encrypted","key":{}}']);
       api.downloads.clear();
-      await tester.tap(find.byTooltip('下载').hitTestable());
-      await tester.pump();
+      await _downloadImage(tester);
       // The preview already has the decrypted original, so saving reuses it.
       expect(api.downloads, isEmpty);
-      expect(suggestedName, 'encrypted.png');
+      expect(
+        await tester.runAsync(
+          () => File('${downloads.path}/encrypted.png').readAsBytes(),
+        ),
+        pixel,
+      );
     },
   );
 

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:matter/features/app_update/apk_installer_io.dart';
@@ -11,6 +12,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const pathProviderChannel = MethodChannel('plugins.flutter.io/path_provider');
+  const downloadChannel = MethodChannel('moe.aks.matter/downloads');
+  final notifications = <MethodCall>[];
   final previousHttpOverrides = HttpOverrides.current;
   late Directory temporaryDirectory;
   late HttpServer server;
@@ -19,6 +22,13 @@ void main() {
   var stallBody = false;
 
   setUp(() async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    notifications.clear();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(downloadChannel, (call) async {
+          notifications.add(call);
+          return call.method == 'start' ? 10001 : null;
+        });
     HttpOverrides.global = null;
     requests = 0;
     stallBody = false;
@@ -54,6 +64,9 @@ void main() {
   });
 
   tearDown(() async {
+    debugDefaultTargetPlatformOverride = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(downloadChannel, null);
     HttpOverrides.global = previousHttpOverrides;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProviderChannel, null);
@@ -81,6 +94,12 @@ void main() {
 
     expect(path, cachedApk.path);
     expect(requests, 0);
+    expect(notifications.map((call) => call.method), ['start', 'finish']);
+    expect(notifications.last.arguments, {
+      'id': 10001,
+      'status': 'complete',
+      'installPath': path,
+    });
   });
 
   test('redownloads when the cached APK size does not match', () async {
@@ -158,10 +177,11 @@ void main() {
       );
       await started.future.timeout(const Duration(seconds: 5));
       await expectation;
+      expect(notifications.last.arguments['status'], 'failed');
+      expect(notifications.last.arguments.containsKey('installPath'), isFalse);
       expect(
-        await File(
-          '${temporaryDirectory.path}/updates/matter.apk.download',
-        ).exists(),
+        await File('${temporaryDirectory.path}/updates/matter.apk.download')
+            .exists(),
         isFalse,
       );
       expect(
@@ -202,10 +222,13 @@ void main() {
       await started.future.timeout(const Duration(seconds: 5));
       cancel.complete();
       await expectation;
+      expect(notifications.last.arguments, {
+        'id': 10001,
+        'status': 'cancelled',
+      });
       expect(
-        await File(
-          '${temporaryDirectory.path}/updates/matter.apk.download',
-        ).exists(),
+        await File('${temporaryDirectory.path}/updates/matter.apk.download')
+            .exists(),
         isFalse,
       );
       stallBody = false;
