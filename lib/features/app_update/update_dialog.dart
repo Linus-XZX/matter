@@ -153,6 +153,7 @@ class _DownloadUpdateDialog extends StatefulWidget {
 class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
   final _cancel = Completer<void>();
   bool _installing = false;
+  bool _background = false;
   int _received = 0;
   int _total = 0;
   String _status = '正在连接 GitHub…';
@@ -167,7 +168,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
 
   @override
   void dispose() {
-    _cancelDownload();
+    if (!_background) _cancelDownload();
     super.dispose();
   }
 
@@ -191,7 +192,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
             widget.update,
             cancel: _cancel.future,
             onProgress: (received, total) {
-              if (!mounted || _cancel.isCompleted) return;
+              if (!mounted || _background || _cancel.isCompleted) return;
               setState(() {
                 _received = received;
                 _total = total;
@@ -199,21 +200,56 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
               });
             },
           );
-      if (!mounted || _cancel.isCompleted) return;
+      if (!mounted || _background || _cancel.isCompleted) return;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _background = true;
+        Navigator.pop(context);
+        return;
+      }
       _downloadedPath = path;
       setState(() {
         _installing = true;
         _status = '正在打开系统安装器…';
       });
       await widget.service.installUpdate(path);
-      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        setState(() {
+          _installing = false;
+          _status = '安装包已下载';
+        });
+      }
     } catch (error) {
-      if (!mounted || _cancel.isCompleted) return;
+      if (!mounted || _background || _cancel.isCompleted) return;
       setState(() {
         _error = error is AppUpdateException ? error.message : error.toString();
         _installing = false;
         _status = '更新失败';
       });
+    }
+  }
+
+  Future<void> _showInFiles() async {
+    final path = _downloadedPath;
+    if (path == null || _installing) return;
+    setState(() {
+      _installing = true;
+      _error = null;
+      _status = '正在保存安装包…';
+    });
+    try {
+      await widget.service.showDownloadedUpdate(path);
+      if (mounted) setState(() => _status = '安装包已保存到下载目录');
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error is AppUpdateException
+              ? error.message
+              : error.toString();
+          _status = '无法查看安装包';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _installing = false);
     }
   }
 
@@ -227,7 +263,7 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
     return PopScope(
       canPop: !_installing,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) _cancelDownload();
+        if (didPop && !_background) _cancelDownload();
       },
       child: AlertDialog(
         title: Text(_status),
@@ -237,7 +273,11 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (_error == null) ...[
+              if (_error != null)
+                Text(_error!)
+              else if (_downloadedPath != null)
+                const Text('可继续安装，或在文件管理器的下载目录中打开安装包。')
+              else ...[
                 LinearProgressIndicator(value: progress),
                 const SizedBox(height: 12),
                 Text(
@@ -246,12 +286,24 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
                       : '$percent · ${formatByteSize(_received)} / ${formatByteSize(_total)}',
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
-              ] else
-                Text(_error!),
+              ],
             ],
           ),
         ),
         actions: [
+          if (_downloadedPath != null)
+            TextButton(
+              onPressed: _installing ? null : _showInFiles,
+              child: const Text('在文件管理器中查看'),
+            ),
+          if (_downloadedPath == null && _error == null && !_installing)
+            TextButton(
+              onPressed: () {
+                _background = true;
+                Navigator.pop(context);
+              },
+              child: const Text('后台下载'),
+            ),
           TextButton(
             onPressed: _installing
                 ? null
@@ -259,10 +311,13 @@ class _DownloadUpdateDialogState extends State<_DownloadUpdateDialog> {
                     _cancelDownload();
                     Navigator.pop(context);
                   },
-            child: const Text('取消'),
+            child: Text(_downloadedPath == null ? '取消' : '关闭'),
           ),
-          if (_error != null)
-            FilledButton(onPressed: _start, child: const Text('重试')),
+          if (_error != null || _downloadedPath != null)
+            FilledButton(
+              onPressed: _installing ? null : _start,
+              child: Text(_downloadedPath == null ? '重试' : '安装更新'),
+            ),
         ],
       ),
     );

@@ -11,3 +11,6 @@ Future<String> downloadAndroidApk({
 
 Future<void> installAndroidApk(String path) =>
     throw const AppUpdateException('当前平台暂不支持应用内更新');
+
+Future<void> showAndroidApkInFiles(String path) =>
+    throw const AppUpdateException('当前平台暂不支持应用内更新');

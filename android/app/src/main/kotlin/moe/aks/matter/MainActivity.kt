@@ -1,37 +1,121 @@
 package moe.aks.matter
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
 import android.os.Build
-import android.provider.Settings
+import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : FlutterActivity() {
-    private var pendingInstallResult: MethodChannel.Result? = null
-    private var pendingApkPath: String? = null
-    private var pendingFileSaveResult: MethodChannel.Result? = null
-    private var pendingFileSaveSource: File? = null
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine? = DownloadRuntime.engine
+
+    override fun shouldDestroyEngineWithHost(): Boolean = !DownloadRuntime.ownsEngine(flutterEngine)
+
+    override fun onDestroy() {
+        DownloadRuntime.detachHost(this)
+        super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleDownloadIntent(intent)
+    }
+
+    private fun handleDownloadIntent(intent: Intent?) {
+        val action = intent?.action
+        if (action != DownloadService.ACTION_INSTALL_UPDATE && action != DownloadService.ACTION_SHOW_UPDATE_FILE) return
+        val path = intent?.getStringExtra("path") ?: return
+        intent.action = null
+        val result =
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {}
+
+                override fun notImplemented() {}
+
+                override fun error(
+                    code: String,
+                    message: String?,
+                    details: Any?,
+                ) {
+                    Toast.makeText(this@MainActivity, message ?: "无法处理更新安装包", Toast.LENGTH_LONG).show()
+                }
+            }
+        if (action == DownloadService.ACTION_SHOW_UPDATE_FILE) requestUpdateFiles(path, result) else requestInstall(path, result)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        DownloadRuntime.attachHost(this, flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "moe.aks.matter/downloads",
+        ).setMethodCallHandler { call, result ->
+            if (call.method !in listOf("start", "progress", "finish")) {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            var retainedId: Int? = null
+            try {
+                val id = if (call.method == "start") nextDownloadId.incrementAndGet() else call.argument<Int>("id")!!
+                val command =
+                    Intent(this, DownloadService::class.java).apply {
+                        action = call.method
+                        putExtra("id", id)
+                        putExtra("filename", call.argument<String>("filename"))
+                        putExtra("received", call.argument<Number>("received")?.toLong() ?: 0L)
+                        putExtra("total", call.argument<Number>("total")?.toLong() ?: 0L)
+                        putExtra("status", call.argument<String>("status"))
+                        putExtra("error", call.argument<String>("error"))
+                        putExtra("installPath", call.argument<String>("installPath"))
+                    }
+                if (call.method == "start") {
+                    DownloadRuntime.retain(id, flutterEngine, this)
+                    retainedId = id
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4109)
+                    }
+                    ContextCompat.startForegroundService(this, command)
+                } else {
+                    startService(command)
+                }
+                result.success(if (call.method == "start") id else null)
+            } catch (error: Exception) {
+                retainedId?.let { DownloadRuntime.finish(it) }
+                result.error("download_service_failed", "无法更新下载通知：${error.message}", null)
+            }
+        }
+        handleDownloadIntent(intent)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             UPDATE_CHANNEL,
         ).setMethodCallHandler { call, result ->
             when (call.method) {
-                "installApk" -> {
+                "installApk", "showInFiles" -> {
                     val path = call.argument<String>("path")
                     if (path.isNullOrBlank()) {
                         result.error("invalid_path", "安装包路径无效", null)
+                    } else if (call.method == "showInFiles") {
+                        requestUpdateFiles(path, result)
                     } else {
                         requestInstall(path, result)
                     }
                 }
-                else -> result.notImplemented()
+
+                else -> {
+                    result.notImplemented()
+                }
             }
         }
         MethodChannel(
@@ -47,124 +131,84 @@ class MainActivity : FlutterActivity() {
                         requestFileSave(path, result)
                     }
                 }
-                else -> result.notImplemented()
-            }
-        }
-    }
 
-    private fun requestInstall(path: String, result: MethodChannel.Result) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !packageManager.canRequestPackageInstalls()
-        ) {
-            if (pendingInstallResult != null) {
-                result.error("install_in_progress", "已有安装请求正在处理", null)
-                return
-            }
-            pendingInstallResult = result
-            pendingApkPath = path
-            val intent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:$packageName"),
-            )
-            startActivityForResult(intent, INSTALL_PERMISSION_REQUEST)
-            return
-        }
-
-        launchPackageInstaller(path, result)
-    }
-
-    @Deprecated("Deprecated by Android; retained for the package-install permission flow")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        when (requestCode) {
-            INSTALL_PERMISSION_REQUEST -> {
-                val result = pendingInstallResult
-                val path = pendingApkPath
-                pendingInstallResult = null
-                pendingApkPath = null
-                if (result == null || path == null) return
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                    !packageManager.canRequestPackageInstalls()
-                ) {
-                    result.error("install_permission_denied", "未授予安装未知应用权限", null)
-                    return
+                "openFile" -> {
+                    val path = call.argument<String>("path")
+                    if (path.isNullOrBlank()) {
+                        result.error("invalid_path", "文件路径无效", null)
+                    } else {
+                        requestFileOpen(path, result)
+                    }
                 }
-                launchPackageInstaller(path, result)
+
+                else -> {
+                    result.notImplemented()
+                }
             }
-            FILE_SAVE_REQUEST -> finishFileSave(resultCode, data)
         }
     }
 
-    private fun requestFileSave(path: String, result: MethodChannel.Result) {
-        if (pendingFileSaveResult != null) {
-            result.error("save_in_progress", "已有文件保存请求正在处理", null)
-            return
-        }
+    private fun requestFileOpen(path: String, result: MethodChannel.Result) {
         try {
-            val source = File(path).canonicalFile
-            val downloadDirectory = File(cacheDir, "matter_downloads").canonicalFile
-            if (!source.isFile || source.parentFile?.parentFile != downloadDirectory) {
-                result.error("invalid_file", "找不到待保存的下载文件", null)
-                return
-            }
-            pendingFileSaveResult = result
-            pendingFileSaveSource = source
-            startActivityForResult(
-                Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "application/octet-stream"
-                    putExtra(Intent.EXTRA_TITLE, source.name)
-                },
-                FILE_SAVE_REQUEST,
-            )
-        } catch (error: Exception) {
-            pendingFileSaveResult = null
-            pendingFileSaveSource = null
-            result.error("save_failed", "无法创建保存文件：${error.message}", null)
-        }
-    }
-
-    private fun finishFileSave(resultCode: Int, data: Intent?) {
-        val result = pendingFileSaveResult
-        val source = pendingFileSaveSource
-        pendingFileSaveResult = null
-        pendingFileSaveSource = null
-        if (result == null || source == null) return
-        val destination = data?.data
-        if (resultCode != RESULT_OK || destination == null) {
-            result.success(false)
-            return
-        }
-        try {
-            contentResolver.openOutputStream(destination)?.use { output ->
-                source.inputStream().use { input -> input.copyTo(output) }
-            } ?: throw IllegalStateException("无法打开保存位置")
-            result.success(true)
-        } catch (error: Exception) {
-            result.error("save_failed", "无法保存文件：${error.message}", null)
-        }
-    }
-
-    private fun launchPackageInstaller(path: String, result: MethodChannel.Result) {
-        try {
-            val apkFile = File(path).canonicalFile
-            val updateDirectory = File(cacheDir, "updates").canonicalFile
-            if (!apkFile.isFile || apkFile.parentFile != updateDirectory) {
-                result.error("invalid_apk", "找不到已下载的安装包", null)
-                return
-            }
-
-            val apkUri = FileProvider.getUriForFile(
-                this,
-                "$packageName.fileprovider",
-                apkFile,
-            )
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, "application/vnd.android.package-archive")
+            val file = File(path).canonicalFile
+            val root = File(cacheDir, "matter_open_files").canonicalFile
+            require(file.isFile && file.parentFile?.parentFile == root) { "找不到待打开的文件" }
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/markdown")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(intent)
+            startActivity(Intent.createChooser(view, "用其他应用打开"))
+            result.success(true)
+        } catch (error: Exception) {
+            result.error("open_failed", "无法打开文件：${error.message}", null)
+        }
+    }
+
+    private fun requestUpdateFiles(
+        path: String,
+        result: MethodChannel.Result,
+    ) {
+        fileSaveExecutor.execute {
+            try {
+                DownloadFileStore.saveUpdate(applicationContext, path)
+            } catch (error: Exception) {
+                runOnUiThread { result.error("save_failed", "无法保存安装包：${error.message}", null) }
+                return@execute
+            }
+            runOnUiThread {
+                try {
+                    UpdateInstaller.openDownloads(this)
+                    result.success(null)
+                } catch (error: Exception) {
+                    result.error("open_failed", "安装包已保存到下载目录，但无法打开文件管理器：${error.message}", null)
+                }
+            }
+        }
+    }
+
+    private fun requestFileSave(
+        path: String,
+        result: MethodChannel.Result,
+    ) {
+        fileSaveExecutor.execute {
+            try {
+                DownloadFileStore.save(applicationContext, path)
+                runOnUiThread { result.success(true) }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    result.error("save_failed", "无法保存文件：${error.message}", null)
+                }
+            }
+        }
+    }
+
+    private fun requestInstall(
+        path: String,
+        result: MethodChannel.Result,
+    ) {
+        try {
+            UpdateInstaller.install(this, path)
             result.success(null)
         } catch (error: Exception) {
             result.error("install_failed", "无法打开系统安装器：${error.message}", null)
@@ -172,9 +216,9 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private val fileSaveExecutor = Executors.newSingleThreadExecutor()
+        private val nextDownloadId = AtomicInteger((System.currentTimeMillis() % 1_000_000_000).toInt() + 1_000_000_000)
         private const val UPDATE_CHANNEL = "moe.aks.matter/app_update"
         private const val FILE_SAVE_CHANNEL = "moe.aks.matter/file_saver"
-        private const val INSTALL_PERMISSION_REQUEST = 4107
-        private const val FILE_SAVE_REQUEST = 4108
     }
 }
