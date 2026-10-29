@@ -19,6 +19,7 @@ class MediaPlayback extends ChangeNotifier {
       this.player.stream.duration,
       this.player.stream.buffer,
       this.player.stream.volume,
+      this.player.stream.rate,
       this.player.stream.width,
       this.player.stream.height,
     ]) {
@@ -33,6 +34,9 @@ class MediaPlayback extends ChangeNotifier {
   }
 
   bool get isPlaying => player.state.playing;
+  bool get isCompleted => player.state.completed;
+  bool get isClosed => _closed;
+  double get rate => player.state.rate;
   Duration get position => player.state.position;
   Duration get duration => player.state.duration;
   Duration get buffer => player.state.buffer;
@@ -52,7 +56,17 @@ class MediaPlayback extends ChangeNotifier {
 
   Future<void> pause() => player.pause();
   Future<void> seek(Duration position) => player.seek(position);
-  Future<void> setVolume(double volume) => player.setVolume(volume * 100);
+  Future<void> setVolume(double volume) =>
+      player.setVolume(volume.clamp(0, 1) * 100);
+  Future<void> setRate(double rate) => player.setRate(rate);
+
+  Future<void> seekRelative(Duration offset) {
+    final target = (position.inMilliseconds + offset.inMilliseconds).clamp(
+      0,
+      duration.inMilliseconds,
+    );
+    return seek(Duration(milliseconds: target));
+  }
 
   void _changed() {
     if (!_closed) notifyListeners();
