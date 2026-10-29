@@ -18,6 +18,16 @@ flutter_rust_bridge_codegen generate
 
 A `flutter build` for a platform supported by your Flutter toolchain should generally work afterwards. The bridge component as a build product should be automatically configured for Android, iOS, Linux, macOS, and Windows. Web is untested.
 
+### Linux media playback
+
+Video and audio playback use media_kit. Linux builds need the libmpv and libepoxy development packages in addition to Flutter's GTK dependencies. On Debian/Ubuntu:
+
+```bash
+sudo apt install libmpv-dev libepoxy-dev
+```
+
+The installed application also needs the corresponding shared libraries at runtime; Linux distribution packages must declare them as dependencies or bundle them.
+
 ### macOS/iOS Specific notes
 
 If you are building on a macOS 27 host:

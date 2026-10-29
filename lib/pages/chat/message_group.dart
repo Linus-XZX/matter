@@ -627,6 +627,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 filename: message.filename ?? message.content,
                 caption: message.caption,
                 fileSize: message.fileSize,
+                mimeType: message.mimeType,
                 mediaSourceJson: message.mediaSourceJson,
                 imageUrl: message.imageUrl,
                 isMe: isMe,
