@@ -12,6 +12,7 @@ import 'app.dart';
 import 'features/app_update/app_update_service.dart';
 import 'features/app_update/update_dialog.dart';
 import 'features/auth/session_expiry_listener.dart';
+import 'features/audio/audio_playback_provider.dart';
 import 'features/push/push_runtime.dart';
 import 'features/push/push_notification_listener.dart';
 import 'pages/login/login_page.dart';
@@ -394,7 +395,7 @@ class _AppRootState extends ConsumerState<_AppRoot>
               clearActiveSessionState(ref, markSessionReady: true);
               _navigatorKey.currentState?.popUntil((route) => route.isFirst);
             },
-            child: child!,
+            child: AudioPlaybackRoot(child: child!),
           ),
         ),
       ),
