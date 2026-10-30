@@ -30,6 +30,7 @@ import '../../widgets/sheets.dart';
 import '../login/login_page.dart';
 import 'encryption_page.dart';
 import 'blur_settings_page.dart';
+import 'code_block_settings_page.dart';
 import 'log_viewer_page.dart';
 import 'material_color_settings_page.dart';
 import 'notification_settings_page.dart';
@@ -803,6 +804,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 .setShortImageBlurredBackdropEnabled(value),
                           ),
                         ],
+                        _SettingItem(
+                          icon: Icons.code_rounded,
+                          title: '代码块显示设置',
+                          subtitle: '高亮主题 · 背景透明度 · 实时预览',
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const CodeBlockSettingsPage(),
+                            ),
+                          ),
+                        ),
                         _buildChatVisualSwitch(
                           icon: Icons.account_circle_rounded,
                           title: '消息头像吸附',
