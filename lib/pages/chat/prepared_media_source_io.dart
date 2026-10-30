@@ -11,8 +11,14 @@ import 'media_preparation.dart';
 class PreparedMediaSource {
   final Media media;
   final Future<void> Function() cleanup;
+  // Progressive media becomes a local file only after download/verification.
+  final Future<String?> Function()? waveformFile;
 
-  const PreparedMediaSource({required this.media, required this.cleanup});
+  const PreparedMediaSource({
+    required this.media,
+    required this.cleanup,
+    this.waveformFile,
+  });
 }
 
 Future<void> cleanupStaleMediaSources() async {

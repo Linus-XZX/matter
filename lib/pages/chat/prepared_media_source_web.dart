@@ -12,8 +12,13 @@ import 'attachment_media_utils.dart';
 class PreparedMediaSource {
   final Media media;
   final Future<void> Function() cleanup;
+  final Future<String?> Function()? waveformFile;
 
-  const PreparedMediaSource({required this.media, required this.cleanup});
+  const PreparedMediaSource({
+    required this.media,
+    required this.cleanup,
+    this.waveformFile,
+  });
 }
 
 Future<void> cleanupStaleMediaSources() async {}
