@@ -1324,6 +1324,7 @@ bool chatMessageContentEquals(rust.ChatMessage a, rust.ChatMessage b) {
           a.filename == b.filename &&
           a.fileSize == b.fileSize &&
           a.mimeType == b.mimeType &&
+          a.durationMs == b.durationMs &&
           a.geoUri == b.geoUri &&
           _pollContentEquals(a.poll, b.poll) &&
           a.inReplyTo == b.inReplyTo &&
@@ -1751,6 +1752,7 @@ Future<void> retryFailedLocalMessage(
       mediaSourceJson: message.mediaSourceJson,
       imageWidth: message.imageWidth,
       imageHeight: message.imageHeight,
+      durationMs: message.durationMs,
       inReplyTo: message.inReplyTo,
       isEdited: message.isEdited,
       editHistory: message.editHistory,
@@ -1937,6 +1939,7 @@ LocalOutgoingMessage copyLocalOutgoingMessageWithId(
       filename: message.filename,
       fileSize: message.fileSize,
       mimeType: message.mimeType,
+      durationMs: message.durationMs,
       inReplyTo: message.inReplyTo,
       isEdited: message.isEdited,
       editHistory: message.editHistory,

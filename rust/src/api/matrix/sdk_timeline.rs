@@ -1147,6 +1147,7 @@ fn timeline_item_to_message(
                         filename: None,
                         file_size: None,
                         mime_type: content.info.mimetype.clone(),
+                        duration_ms: None,
                         geo_uri: None,
                         poll: None,
                         in_reply_to,
@@ -1195,6 +1196,7 @@ fn timeline_item_to_message(
             filename: None,
             file_size: None,
             mime_type: None,
+            duration_ms: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1226,6 +1228,7 @@ fn timeline_item_to_message(
             filename: None,
             file_size: None,
             mime_type: None,
+            duration_ms: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -1402,6 +1405,8 @@ fn message_to_chat_message(
             result.media_source_json = serde_json::to_string(&video.source).ok();
             result.image_width = image_width;
             result.image_height = image_height;
+            result.duration_ms =
+                media_duration_ms(video.info.as_deref().and_then(|info| info.duration));
             result
         }
         RumaMessageType::File(file) => {
@@ -1465,6 +1470,8 @@ fn message_to_chat_message(
                 .and_then(|info| uint_to_i32(info.size));
             result.image_url = image_url;
             result.media_source_json = serde_json::to_string(&audio.source).ok();
+            result.duration_ms =
+                media_duration_ms(audio.info.as_deref().and_then(|info| info.duration));
             result
         }
         RumaMessageType::Location(location) => {
@@ -1500,6 +1507,12 @@ fn message_to_chat_message(
         }
     }
     Some(result)
+}
+
+fn media_duration_ms(duration: Option<std::time::Duration>) -> Option<i32> {
+    duration
+        .and_then(|duration| i32::try_from(duration.as_millis()).ok())
+        .filter(|value| *value > 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1538,6 +1551,7 @@ fn base_message(
         filename: None,
         file_size: None,
         mime_type: None,
+        duration_ms: None,
         geo_uri: None,
         poll: None,
         in_reply_to,
@@ -1841,6 +1855,7 @@ mod tests {
             filename: None,
             file_size: None,
             mime_type: None,
+            duration_ms: None,
             geo_uri: None,
             poll: None,
             in_reply_to: None,
@@ -2076,6 +2091,26 @@ mod tests {
         assert_eq!(
             newest_receipt_position([unthreaded.as_ref(), main.as_ref()], &positions),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn media_duration_uses_positive_milliseconds_and_rejects_overflow() {
+        use matrix_sdk::ruma::events::room::message::{AudioInfo, VideoInfo};
+        let audio: AudioInfo =
+            serde_json::from_value(serde_json::json!({"duration": 65432})).unwrap();
+        let video: VideoInfo =
+            serde_json::from_value(serde_json::json!({"duration": 123456})).unwrap();
+        assert_eq!(super::media_duration_ms(audio.duration), Some(65432));
+        assert_eq!(super::media_duration_ms(video.duration), Some(123456));
+        assert_eq!(super::media_duration_ms(None), None);
+        assert_eq!(
+            super::media_duration_ms(Some(std::time::Duration::ZERO)),
+            None
+        );
+        assert_eq!(
+            super::media_duration_ms(Some(std::time::Duration::from_millis(i32::MAX as u64 + 1))),
+            None
         );
     }
 

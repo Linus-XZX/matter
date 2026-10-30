@@ -20,6 +20,7 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
   final String filename;
   final int? videoWidth;
   final int? videoHeight;
+  final int? durationMs;
   final bool isMe;
   final Object heroTag;
   final Widget metadata;
@@ -32,6 +33,7 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
     required this.filename,
     this.videoWidth,
     this.videoHeight,
+    this.durationMs,
     required this.isMe,
     required this.heroTag,
     required this.metadata,
@@ -71,6 +73,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     if (oldWidget.videoUrl != widget.videoUrl ||
         oldWidget.mediaSourceJson != widget.mediaSourceJson) {
       _initialize();
+    } else if (oldWidget.durationMs != widget.durationMs) {
+      _controller?.setDurationMetadata(widget.durationMs);
     }
   }
 
@@ -132,7 +136,10 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       final videoController = VideoController(controller.player);
       await videoController.platform.future;
       await controller.setVolume(0);
-      await controller.open(preparedSource.media);
+      await controller.open(
+        preparedSource.media,
+        durationMs: widget.durationMs,
+      );
       if (!mounted || initializationId != _initializationId) {
         await _disposeVideoSource(controller, preparedSource);
         return;

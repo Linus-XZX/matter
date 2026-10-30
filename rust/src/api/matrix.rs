@@ -4202,6 +4202,8 @@ pub struct ChatMessage {
     pub file_size: Option<i32>,
     /// MIME type declared by the media event.
     pub mime_type: Option<String>,
+    /// Declared audio/video duration in milliseconds; absent when unknown.
+    pub duration_ms: Option<i32>,
     /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
     pub geo_uri: Option<String>,
     /// Poll data when `msg_type == Poll`.
@@ -8484,6 +8486,7 @@ fn unable_to_decrypt_message(
         filename: None,
         file_size: None,
         mime_type: None,
+        duration_ms: None,
         geo_uri: None,
         poll: None,
         in_reply_to: None,
