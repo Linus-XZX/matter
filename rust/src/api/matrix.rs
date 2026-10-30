@@ -3238,7 +3238,7 @@ mod account_store_cleanup_tests {
     }
 }
 
-struct ClientLease {
+pub(super) struct ClientLease {
     client: Client,
     lifecycle: LifecycleProtection,
 }
@@ -3260,7 +3260,7 @@ impl ClientLease {
 /// Return the currently active client, or the pending one if no account is
 /// active yet. The lease keeps account removal/replacement from dropping its
 /// SQLite store while any API call still holds the Client or a derived Room.
-async fn get_client() -> Option<ClientLease> {
+pub(super) async fn get_client() -> Option<ClientLease> {
     let lifecycle = SYNC_LIFECYCLE.read().await;
     let active = ACTIVE_USER.read().await;
     let client = if let Some(user_id) = active.as_ref() {
@@ -4202,6 +4202,8 @@ pub struct ChatMessage {
     pub file_size: Option<i32>,
     /// MIME type declared by the media event.
     pub mime_type: Option<String>,
+    /// Declared audio/video duration in milliseconds; absent when unknown.
+    pub duration_ms: Option<i32>,
     /// RFC 5870 geo URI for location messages (e.g. `geo:lat,lng`).
     pub geo_uri: Option<String>,
     /// Poll data when `msg_type == Poll`.
@@ -7604,12 +7606,12 @@ pub async fn mxc_to_http_full(mxc_url: String) -> Option<String> {
 /// Download media content as raw bytes using the Matrix SDK's HTTP client.
 /// This is more reliable than constructing URLs and loading from Flutter.
 #[derive(Clone, Debug)]
-struct MediaClientIdentity {
+pub(super) struct MediaClientIdentity {
     user_id: String,
     instance_id: u64,
 }
 
-async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, String> {
+pub(super) async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, String> {
     let user_id = client
         .user_id()
         .ok_or_else(|| api_err("media", "No active user".to_string()))?
@@ -7626,7 +7628,9 @@ async fn media_client_identity(client: &Client) -> Result<MediaClientIdentity, S
     })
 }
 
-async fn reacquire_media_client(identity: &MediaClientIdentity) -> Result<ClientLease, String> {
+pub(super) async fn reacquire_media_client(
+    identity: &MediaClientIdentity,
+) -> Result<ClientLease, String> {
     let client = get_client().await.ok_or_else(|| {
         api_err(
             "media",
@@ -7753,7 +7757,7 @@ fn append_media_chunk(content: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Resu
     Ok(())
 }
 
-fn media_download_url(
+pub(super) fn media_download_url(
     client: &Client,
     source: &matrix_sdk::ruma::events::room::MediaSource,
 ) -> Result<url::Url, String> {
@@ -8482,6 +8486,7 @@ fn unable_to_decrypt_message(
         filename: None,
         file_size: None,
         mime_type: None,
+        duration_ms: None,
         geo_uri: None,
         poll: None,
         in_reply_to: None,

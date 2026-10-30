@@ -390,6 +390,7 @@ rust.ChatMessage _acceptedEditedMessage(
   filename: original.filename,
   fileSize: original.fileSize,
   mimeType: original.mimeType,
+  durationMs: original.durationMs,
   geoUri: original.geoUri,
   poll: original.poll,
   inReplyTo: original.inReplyTo,

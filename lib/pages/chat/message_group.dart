@@ -563,6 +563,7 @@ class MessageGroupWidget extends ConsumerWidget {
                 filename: message.content,
                 videoWidth: message.imageWidth,
                 videoHeight: message.imageHeight,
+                durationMs: message.durationMs,
                 isMe: isMe,
                 heroTag: 'video-preview:$visualMessageId',
                 metadata: metadata,
@@ -624,9 +625,13 @@ class MessageGroupWidget extends ConsumerWidget {
                   (message.mediaSourceJson != null || message.imageUrl != null)
             ? FileMessageBubble(
                 key: ValueKey('file-bubble:${message.id}'),
+                roomId: roomId,
+                messageId: message.id,
                 filename: message.filename ?? message.content,
                 caption: message.caption,
                 fileSize: message.fileSize,
+                mimeType: message.mimeType,
+                durationMs: message.durationMs,
                 mediaSourceJson: message.mediaSourceJson,
                 imageUrl: message.imageUrl,
                 isMe: isMe,
