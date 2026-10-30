@@ -3,17 +3,19 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../providers/auth_provider.dart';
-import 'media_preparation.dart';
-import 'chat_media_source.dart';
-import 'media_playback.dart';
-import 'prepared_media_source.dart';
+import '../../features/audio/audio_playback_provider.dart';
+import '../../features/audio/audio_player_panel.dart';
+import '../../features/audio/audio_waveform.dart';
 
-/// Audio attachments load only when played; their file download stays available.
-class AudioAttachmentPlayer extends ConsumerStatefulWidget {
+/// A view onto the app-owned audio session. Removing a bubble no longer stops
+/// playback; the mini player, queue and system notification keep controlling it.
+class AudioAttachmentPlayer extends ConsumerWidget {
   final String? url;
   final String? mediaSourceJson;
   final String filename;
+  final String? roomId;
+  final String? messageId;
+  final int? durationMs;
   final Color foreground;
 
   const AudioAttachmentPlayer({
@@ -21,210 +23,126 @@ class AudioAttachmentPlayer extends ConsumerStatefulWidget {
     required this.url,
     required this.mediaSourceJson,
     required this.filename,
+    this.roomId,
+    this.messageId,
+    this.durationMs,
     required this.foreground,
   });
 
   @override
-  ConsumerState<AudioAttachmentPlayer> createState() =>
-      _AudioAttachmentPlayerState();
-}
-
-class _AudioAttachmentPlayerState extends ConsumerState<AudioAttachmentPlayer>
-    with WidgetsBindingObserver {
-  MediaPlayback? _playback;
-  PreparedMediaSource? _source;
-  bool _loading = false;
-  bool _failed = false;
-  int _generation = 0;
-  MediaPreparation? _preparation;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    ref.listenManual(
-      currentUserProvider.select((user) => (user?.id, user?.homeserver)),
-      (previous, next) {
-        _reset();
-        if (mounted) setState(() {});
+  Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(audioPlaybackSessionProvider);
+    return ListenableBuilder(
+      listenable: session,
+      builder: (context, child) {
+        final item = session.findTrack(
+          filename,
+          url,
+          mediaSourceJson,
+          roomId: roomId,
+          messageId: messageId,
+        );
+        final active = item != null && item.id == session.current?.id;
+        final duration = active ? session.duration.inMilliseconds : 0;
+        final position = active
+            ? session.position.inMilliseconds.clamp(0, duration)
+            : 0;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                if (active)
+                  AudioPlayButton(session: session, color: foreground)
+                else
+                  IconButton(
+                    tooltip: '播放音频',
+                    color: foreground,
+                    onPressed: () => session.toggleAttachment(
+                      filename,
+                      url,
+                      mediaSourceJson,
+                      roomId: roomId,
+                      messageId: messageId,
+                      durationMs: durationMs,
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded),
+                  ),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AudioWaveform(
+                        samples: item == null
+                            ? null
+                            : session.waveformFor(item.id),
+                        progress: duration > 0 ? position / duration : 0,
+                        color: foreground,
+                        onSeek: active && duration > 0 && session.error == null
+                            ? (fraction) => session.seek(
+                                Duration(
+                                  milliseconds: (fraction * duration).round(),
+                                ),
+                              )
+                            : null,
+                      ),
+                      Text(
+                        active
+                            ? '${audioTime(session.position)} / ${audioTime(session.duration, unknownWhenZero: true)}'
+                            : audioTime(
+                                Duration(milliseconds: durationMs ?? 0),
+                                unknownWhenZero: true,
+                              ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall
+                            ?.copyWith(color: foreground),
+                      ),
+                    ],
+                  ),
+                ),
+                if (active)
+                  AudioSpeedButton(session: session, color: foreground),
+                PopupMenuButton<String>(
+                  tooltip: '音频附件更多',
+                  icon: Icon(Icons.more_horiz_rounded, color: foreground),
+                  onSelected: (action) {
+                    if (action == 'queue') {
+                      session.enqueueAttachment(
+                        filename,
+                        url,
+                        mediaSourceJson,
+                        roomId: roomId,
+                        messageId: messageId,
+                        durationMs: durationMs,
+                      );
+                      ScaffoldMessenger.maybeOf(
+                        context,
+                      )?.showSnackBar(const SnackBar(content: Text('已加入音频队列')));
+                    } else {
+                      unawaited(showAudioPlayerPanel(context, session));
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(value: 'queue', child: Text('加入队列')),
+                    if (session.tracks.isNotEmpty)
+                      const PopupMenuItem(
+                        value: 'player',
+                        child: Text('打开播放器'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+            if (active && session.error != null)
+              Text(
+                session.error!,
+                style: Theme.of(context).textTheme.labelSmall
+                    ?.copyWith(color: foreground),
+              ),
+          ],
+        );
       },
     );
-    ref.listenManual(sessionReadyProvider, (previous, next) {
-      if (previous == true && !next) {
-        _reset();
-        if (mounted) setState(() {});
-      }
-    });
   }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      unawaited(_playback?.pause());
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant AudioAttachmentPlayer oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url ||
-        oldWidget.mediaSourceJson != widget.mediaSourceJson) {
-      _reset();
-    }
-  }
-
-  void _reset() {
-    _generation++;
-    _preparation?.cancel();
-    _preparation = null;
-    unawaited(_release(_playback, _source));
-    _playback = null;
-    _source = null;
-    _loading = false;
-    _failed = false;
-  }
-
-  Future<void> _togglePlayback() async {
-    if (_loading) return;
-    final playback = _playback;
-    if (playback != null && playback.error == null) {
-      await (playback.isPlaying ? playback.pause() : playback.play());
-      return;
-    }
-    _reset();
-    final generation = _generation;
-    final preparation = _preparation = MediaPreparation();
-    setState(() => _loading = true);
-    MediaPlayback? next;
-    PreparedMediaSource? source;
-    try {
-      source = await prepareChatMediaSource(
-        ref: ref,
-        url: widget.url,
-        mediaSourceJson: widget.mediaSourceJson,
-        filename: widget.filename,
-        preparation: preparation,
-      );
-      if (!mounted || generation != _generation) {
-        await source.cleanup();
-        return;
-      }
-      next = MediaPlayback();
-      await next.open(source.media);
-      if (!mounted || generation != _generation) {
-        await _release(next, source);
-        return;
-      }
-      setState(() {
-        _playback = next;
-        _source = source;
-        _loading = false;
-      });
-      final lifecycle = WidgetsBinding.instance.lifecycleState;
-      if (lifecycle != AppLifecycleState.paused &&
-          lifecycle != AppLifecycleState.detached) {
-        await next.play();
-      }
-    } catch (_) {
-      await _release(next, source);
-      if (mounted && generation == _generation) {
-        setState(() {
-          _playback = null;
-          _source = null;
-          _loading = false;
-          _failed = true;
-        });
-      }
-    }
-  }
-
-  Future<void> _release(
-    MediaPlayback? playback,
-    PreparedMediaSource? source,
-  ) async {
-    try {
-      await playback?.close();
-    } finally {
-      await source?.cleanup();
-    }
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _reset();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _playback ?? const AlwaysStoppedAnimation(0),
-    builder: (context, child) {
-      final playback = _playback;
-      final duration = playback?.duration.inMilliseconds ?? 0;
-      final position = (playback?.position.inMilliseconds ?? 0).clamp(
-        0,
-        duration,
-      );
-      final failed = _failed || playback?.error != null;
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              else
-                IconButton(
-                  tooltip: failed
-                      ? '重试播放'
-                      : playback?.isPlaying == true
-                      ? '暂停音频'
-                      : '播放音频',
-                  onPressed: _togglePlayback,
-                  color: widget.foreground,
-                  icon: Icon(
-                    playback?.isPlaying == true
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                  ),
-                ),
-              Expanded(
-                child: Slider(
-                  value: position.toDouble(),
-                  max: duration > 0 ? duration.toDouble() : 1,
-                  onChanged: duration > 0 && !failed
-                      ? (value) => playback?.seek(
-                          Duration(milliseconds: value.round()),
-                        )
-                      : null,
-                ),
-              ),
-              Text(
-                '${_time(playback?.position ?? Duration.zero)} / ${_time(playback?.duration ?? Duration.zero)}',
-                style: Theme.of(context).textTheme.labelSmall
-                    ?.copyWith(color: widget.foreground),
-              ),
-            ],
-          ),
-          if (failed)
-            Text(
-              '无法播放此音频',
-              style: Theme.of(context).textTheme.labelSmall
-                  ?.copyWith(color: widget.foreground),
-            ),
-        ],
-      );
-    },
-  );
 }
-
-String _time(Duration value) =>
-    '${value.inMinutes}:${value.inSeconds.remainder(60).toString().padLeft(2, '0')}';

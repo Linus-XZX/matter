@@ -62,6 +62,9 @@ class FileMessageBubble extends StatefulWidget {
   final String? caption;
   final int? fileSize;
   final String? mimeType;
+  final int? durationMs;
+  final String? roomId;
+  final String? messageId;
 
   /// Serialized Matrix MediaSource ([rust.ChatMessage.mediaSourceJson]);
   /// preferred because it also works for encrypted media.
@@ -77,6 +80,9 @@ class FileMessageBubble extends StatefulWidget {
     this.caption,
     this.fileSize,
     this.mimeType,
+    this.durationMs,
+    this.roomId,
+    this.messageId,
     this.mediaSourceJson,
     this.imageUrl,
     required this.isMe,
@@ -278,6 +284,9 @@ class _FileMessageBubbleState extends State<FileMessageBubble> {
                             url: widget.imageUrl,
                             mediaSourceJson: widget.mediaSourceJson,
                             filename: _safeFilename,
+                            durationMs: widget.durationMs,
+                            roomId: widget.roomId,
+                            messageId: widget.messageId,
                             foreground: foreground,
                           ),
                         if (caption != null && caption.isNotEmpty) ...[

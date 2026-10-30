@@ -20,7 +20,22 @@ import 'package:matter/src/rust/api/matrix.dart' as rust;
 import 'package:matter/src/rust/frb_generated.dart';
 import 'package:matter/widgets/neu_surface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:media_kit/media_kit.dart' as media;
+import 'package:matter/features/audio/audio_playback_session.dart';
+import 'package:matter/features/audio/audio_track.dart';
+import 'package:matter/features/audio/audio_playback_provider.dart';
+import 'package:matter/pages/chat/media_playback.dart';
+import 'package:matter/pages/chat/prepared_media_source.dart';
+
+import 'support/video_test_player.dart';
 import 'helpers/neu_test_theme.dart';
+
+class _AudioJumpPlayer extends VideoTestPlayer {
+  @override
+  Future<void> open(media.Playable playable, {bool play = true}) async {
+    state = state.copyWith(playing: false, position: Duration.zero);
+  }
+}
 
 class _FakeRustApi implements RustLibApi {
   final syncEvents = StreamController<rust.SyncEvent>.broadcast();
@@ -37,6 +52,7 @@ class _FakeRustApi implements RustLibApi {
   List<rust.ChatMessage> messagesBefore = const [];
   Object? messagesBeforeError;
   int getMessagesAroundCalls = 0;
+  final messagesAroundRooms = <String>[];
   List<rust.ChatMessage> messagesAround = const [];
   final pendingMessagesAround = <String, Completer<List<rust.ChatMessage>>>{};
   Completer<String>? pendingSend;
@@ -177,6 +193,7 @@ class _FakeRustApi implements RustLibApi {
     required int limit,
   }) async {
     getMessagesAroundCalls++;
+    messagesAroundRooms.add(roomId);
     final pending = pendingMessagesAround[eventId];
     if (pending != null) return pending.future;
     return messagesAround;
@@ -296,6 +313,7 @@ void main() {
     rustApi.messagesBefore = const [];
     rustApi.messagesBeforeError = null;
     rustApi.getMessagesAroundCalls = 0;
+    rustApi.messagesAroundRooms.clear();
     rustApi.messagesAround = const [];
     rustApi.pendingMessagesAround.clear();
     rustApi.pendingSend = null;
@@ -314,6 +332,106 @@ void main() {
     rustApi.roomUnsubscribeBarrier = null;
     SharedPreferences.setMockInitialValues({});
   });
+
+  for (final crossRoom in [false, true]) {
+    for (final material in [false, true]) {
+      testWidgets(
+        'audio header below pins locates source crossRoom=$crossRoom material=$material',
+        (tester) async {
+          const roomId = '!audio-view:example.org';
+          final sourceRoom = crossRoom ? '!audio-source:example.org' : roomId;
+          const userId = '@alice:example.org';
+          final target = _message(r'$audio-source-target', timestamp: '1');
+          final latest = _message(r'$audio-latest', timestamp: '100');
+          rustApi.messagesAround = [target];
+          rustApi.pinnedMessages = [_message(r'$audio-pin')];
+          final session = (await tester.runAsync(() async {
+            final value =
+                AudioPlaybackSession(
+                  createPlayer: () => MediaPlayback(
+                    player: media.Player(platformPlayer: _AudioJumpPlayer()),
+                  ),
+                  load: (_, account, preparation) async => PreparedMediaSource(
+                    media: media.Media('file:///audio.ogg'),
+                    cleanup: () async {},
+                  ),
+                  waveformLoader: (_, preparation) async => const [],
+                )..setAccount(
+                  const AudioAccount(userId, 'https://example.org', null),
+                );
+            await value.playTrack(
+              AudioTrack(
+                id: 'audio-source',
+                filename: 'source.ogg',
+                url: null,
+                mediaSourceJson: null,
+                roomId: sourceRoom,
+                messageId: target.id,
+              ),
+            );
+            return value;
+          }))!;
+          addTearDown(session.close);
+          final container = ProviderContainer(
+            overrides: [
+              audioPlaybackSessionProvider.overrideWithValue(session),
+              ignoredUserIdsProvider.overrideWith(
+                (ref) async => const <String>{},
+              ),
+              roomMembersProvider(roomId).overrideWith((ref) async => const []),
+              if (crossRoom)
+                roomMembersProvider(sourceRoom)
+                    .overrideWith((ref) async => const []),
+            ],
+          );
+          addTearDown(container.dispose);
+          container.read(activeUserIdProvider.notifier).value = userId;
+          for (final id in {roomId, sourceRoom}) {
+            container.read(messageCacheOwnerProvider(id).notifier).value =
+                userId;
+            container.read(messageCachePrimedProvider(id).notifier).value =
+                true;
+          }
+          container.read(messageCacheProvider(roomId).notifier).value = [
+            latest,
+          ];
+          await tester.pumpWidget(
+            UncontrolledProviderScope(
+              container: container,
+              child: MaterialApp(
+                theme: neuTestTheme(material: material),
+                navigatorObservers: [chatRouteObserver],
+                home: const ChatDetailPage(roomId: roomId, roomName: 'Room'),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final audioBar = find.byKey(const ValueKey('audio-message-bar'));
+          final pins = find.byKey(const ValueKey('pinned-messages-stack'));
+          expect(audioBar, findsOneWidget);
+          expect(pins, findsOneWidget);
+          expect(
+            tester.getTopLeft(audioBar).dy,
+            greaterThanOrEqualTo(tester.getBottomLeft(pins).dy - 0.5),
+          );
+          expect(
+            tester.getBottomLeft(audioBar).dy,
+            lessThan(tester.getSize(find.byType(Scaffold).first).height / 2),
+          );
+          await tester.tap(find.byTooltip('回到音频消息'));
+          await tester.pumpAndSettle();
+          expect(rustApi.messagesAroundRooms, contains(sourceRoom));
+          expect(
+            find.byKey(const ValueKey(r'text-bubble:$audio-source-target')),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+      );
+    }
+  }
 
   for (final memberName in ['小明', '  小明  ', '   ', null]) {
     testWidgets('typing indicator resolves room nickname ($memberName)', (
@@ -2719,10 +2837,8 @@ void main() {
     container.read(messageCachePrimedProvider(roomId).notifier).value = true;
     container
         .read(
-          localOutgoingMessagesProvider((
-            roomId: roomId,
-            userId: 'anonymous',
-          )).notifier,
+          localOutgoingMessagesProvider((roomId: roomId, userId: 'anonymous'))
+              .notifier,
         )
         .value = [
       LocalOutgoingMessage(

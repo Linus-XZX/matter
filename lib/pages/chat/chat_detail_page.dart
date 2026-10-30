@@ -8,6 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
 import '../../features/push/push_runtime.dart';
+import '../../features/audio/audio_playback_provider.dart';
+import '../../features/audio/audio_message_bar.dart';
+import '../../features/audio/audio_player_panel.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/connection_provider.dart';
@@ -1121,6 +1124,29 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
     }
   }
 
+  Future<void> _openAudioSource() async {
+    final track = ref.read(audioPlaybackSessionProvider).current;
+    if (track?.roomId == null || track?.messageId == null) return;
+    if (track!.roomId == widget.roomId) {
+      await _jumpToMessage(track.messageId!);
+      return;
+    }
+    final rooms =
+        ref.read(allChatRoomsProvider).asData?.value ?? const <ChatRoom>[];
+    final room = rooms.where((room) => room.id == track.roomId).firstOrNull;
+    await Navigator.of(context, rootNavigator: true).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChatDetailPage(
+          roomId: track.roomId!,
+          roomName: room?.name ?? '音频消息',
+          avatarUrl: room?.avatarUrl,
+          isDm: room?.roomType == 'dm',
+          initialMessageId: track.messageId,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openPinnedMessages() async {
     final messageId = await Navigator.of(context).push<String>(
       MaterialPageRoute(
@@ -2031,6 +2057,9 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
         ? math.max(pickerBaseHeight, _expandedPickerHeight)
         : pickerBaseHeight;
     final mediaQuery = MediaQuery.of(context);
+    final audioVisible = ref.watch(audioPlayerVisibleProvider);
+    final audioHeight = audioVisible ? audioMessageBarHeight : 0.0;
+    final audioSession = ref.read(audioPlaybackSessionProvider);
     final colors = context.neu;
     final visualSettings = ref.watch(chatVisualSettingsProvider);
     // The floating header hangs below the status bar; the pinned stack and
@@ -2051,6 +2080,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
           mediaQuery.padding.top -
           mediaQuery.padding.bottom -
           _headerChromeHeight -
+          audioHeight -
           inputChromeHeight -
           8,
     );
@@ -2291,7 +2321,11 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                                     // The timeline runs under the floating
                                     // header and the pinned stack; keep the
                                     // oldest end clear of both layers.
-                                    top: headerInset + pinnedStackHeight + 4,
+                                    top:
+                                        headerInset +
+                                        pinnedStackHeight +
+                                        audioHeight +
+                                        4,
                                   ),
                                 ),
                               ],
@@ -2357,6 +2391,18 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   },
                 ),
               ),
+              if (audioVisible)
+                Positioned(
+                  left: context.isMaterial ? 0 : 12,
+                  right: context.isMaterial ? 0 : 12,
+                  top: headerInset + pinnedStackHeight,
+                  child: AudioMessageBar(
+                    session: audioSession,
+                    onSourceTap: () => unawaited(_openAudioSource()),
+                    onQueueTap: () =>
+                        unawaited(showAudioPlayerPanel(context, audioSession)),
+                  ),
+                ),
               // Telegram-style floating date that tracks the day at the top edge
               // of the viewport while scrolling, then fades out.
               if (_hasTimelineGroups)
@@ -2365,7 +2411,7 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage>
                   scrollViewportKey: _scrollViewportKey,
                   boundaries: _floatingDateBoundariesCache,
                   separatorKeys: _floatingDateSeparatorKeysCache,
-                  topInset: headerInset + pinnedStackHeight,
+                  topInset: headerInset + pinnedStackHeight + audioHeight,
                 ),
               AnimatedPositioned(
                 right: 16,

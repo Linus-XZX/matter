@@ -65,6 +65,7 @@ void main() {
 
   Widget host(Widget child) => ProviderScope(
     overrides: [
+      sessionReadyProvider.overrideWith(() => MutableState(true)),
       currentUserProvider.overrideWith(
         () => MutableState(
           const CurrentUser(
@@ -112,6 +113,11 @@ void main() {
     expect(api.requests, hasLength(1));
     api.requests.single.fail();
     await waitForCleanup(tester, api.requests.single);
+    // Cache cleanup and UI error publication finish on separate async turns.
+    await pumpUntil(
+      tester,
+      () async => find.text('无法播放此音频').evaluate().isNotEmpty,
+    );
     expect(find.text('无法播放此音频'), findsOneWidget);
     await tester.tap(find.byTooltip('重试播放'));
     await tester.pump();
@@ -119,6 +125,11 @@ void main() {
     expect(api.requests, hasLength(2));
     api.requests.last.fail();
     await waitForCleanup(tester, api.requests.last);
+    await pumpUntil(
+      tester,
+      () async => find.text('无法播放此音频').evaluate().isNotEmpty,
+    );
+    expect(find.text('无法播放此音频'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

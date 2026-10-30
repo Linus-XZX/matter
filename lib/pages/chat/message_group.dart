@@ -624,6 +624,8 @@ class MessageGroupWidget extends ConsumerWidget {
                   (message.mediaSourceJson != null || message.imageUrl != null)
             ? FileMessageBubble(
                 key: ValueKey('file-bubble:${message.id}'),
+                roomId: roomId,
+                messageId: message.id,
                 filename: message.filename ?? message.content,
                 caption: message.caption,
                 fileSize: message.fileSize,
