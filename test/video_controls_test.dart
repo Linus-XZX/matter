@@ -79,6 +79,21 @@ void main() {
   }
 
   testWidgets(
+    'video controls prefer message duration and label a missing total as unknown',
+    (tester) async {
+      playback.setDurationMetadata(65000);
+      await mount(tester);
+      expect(find.text('1:00 / 1:05'), findsOneWidget);
+      expect(playback.duration, const Duration(seconds: 65));
+      player.state = player.state.copyWith(duration: Duration.zero);
+      playback.setDurationMetadata(null);
+      await tester.pump();
+      expect(find.text('1:00 / --:--'), findsOneWidget);
+      await unmount(tester);
+    },
+  );
+
+  testWidgets(
     'chosen long-press speed restores the saved ordinary speed on release',
     (tester) async {
       SharedPreferences.setMockInitialValues({

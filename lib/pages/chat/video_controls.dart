@@ -365,7 +365,7 @@ class _VideoControlsState extends State<VideoControls>
                     _holding
                         ? '${_speed(_preferences.heldSpeed)}× 临时倍速 · 松手恢复'
                         : _seekPreview != null
-                        ? '${_time(_seekPreview!)} / ${_time(_playback.duration)}'
+                        ? '${_time(_seekPreview!)} / ${_time(_playback.duration, unknownWhenZero: true)}'
                         : _feedback!,
                   ),
                 ),
@@ -487,7 +487,7 @@ class _VideoControlsState extends State<VideoControls>
                 child: FittedBox(
                   fit: BoxFit.scaleDown,
                   child: Text(
-                    '${_time(_playback.position)} / ${_time(_playback.duration)}',
+                    '${_time(_playback.position)} / ${_time(_playback.duration, unknownWhenZero: true)}',
                     maxLines: 1,
                     style: const TextStyle(
                       color: Colors.white,
@@ -639,7 +639,8 @@ class _VideoControlsState extends State<VideoControls>
 String _speed(double value) =>
     value.toString().replaceFirst(RegExp(r'\.0$'), '');
 
-String _time(Duration value) {
+String _time(Duration value, {bool unknownWhenZero = false}) {
+  if (unknownWhenZero && value <= Duration.zero) return '--:--';
   final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
   if (value.inHours == 0) return '${value.inMinutes}:$seconds';
   final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');

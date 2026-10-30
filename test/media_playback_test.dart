@@ -43,6 +43,11 @@ class _Player extends PlatformPlayer {
     positionController.add(duration);
   }
 
+  void complete(Duration duration) {
+    state = state.copyWith(duration: duration, completed: true);
+    completedController.add(true);
+  }
+
   void emitDimensionsAndError() {
     state = state.copyWith(width: 1080, height: 1920);
     widthController.add(1080);
@@ -91,6 +96,68 @@ void main() {
       expect(platform.calls, ['seek:0', 'play', 'pause', 'seek:12']);
     },
   );
+
+  test(
+    'progressive decoder estimates are not exposed as total duration',
+    () async {
+      await playback.open(Media('http://127.0.0.1:1234/audio'));
+      platform.state = platform.state.copyWith(
+        duration: const Duration(seconds: 3),
+      );
+      expect(playback.duration, Duration.zero);
+      platform.state = platform.state.copyWith(
+        duration: const Duration(seconds: 8),
+      );
+      expect(playback.duration, Duration.zero);
+    },
+  );
+
+  test('metadata total stays stable and bounds seeking before decoder duration is known', () async {
+    await playback.open(
+      Media('http://127.0.0.1:1234/audio'),
+      durationMs: 60000,
+    );
+    for (final seconds in [0, 3, 8, 65]) {
+      platform.state = platform.state.copyWith(
+        duration: Duration(seconds: seconds),
+      );
+      expect(playback.duration, const Duration(minutes: 1));
+    }
+    await playback.seekRelative(const Duration(seconds: 90));
+    expect(platform.calls.last, 'seek:60');
+    playback.setDurationMetadata(45000);
+    expect(playback.duration, const Duration(seconds: 45));
+  });
+
+  test(
+    'completed local decode is a fallback when metadata is missing or invalid',
+    () async {
+      for (final value in [null, 0, -1, 0x80000000]) {
+        await playback.open(Media('file:///audio.ogg'), durationMs: value);
+        platform.state = platform.state.copyWith(
+          duration: const Duration(seconds: 25),
+        );
+        expect(playback.duration, const Duration(seconds: 25));
+      }
+    },
+  );
+
+  test('progressive totals are confirmed at completion and survive replay but not another source', () async {
+    await playback.open(Media('http://127.0.0.1:1234/audio'));
+    platform.complete(const Duration(seconds: 30));
+    await Future<void>.delayed(Duration.zero);
+    expect(playback.duration, const Duration(seconds: 30));
+    await playback.play();
+    expect(playback.duration, const Duration(seconds: 30));
+    await playback.open(Media('http://127.0.0.1:1234/another'));
+    expect(playback.duration, Duration.zero);
+  });
+
+  test('seeking an unknown total does not jump back to zero', () async {
+    await playback.open(Media('http://127.0.0.1:1234/audio'));
+    await playback.seekRelative(const Duration(seconds: 10));
+    expect(platform.calls, isEmpty);
+  });
 
   test('concurrent close calls both wait for native teardown', () async {
     final barrier = platform.disposeBarrier = Completer<void>();
